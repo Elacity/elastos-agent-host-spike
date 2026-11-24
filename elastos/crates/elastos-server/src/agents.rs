@@ -545,10 +545,100 @@ fn lock_for_write(data_dir: &Path) -> anyhow::Result<WriteLock> {
         crate::auth_state_files::ensure_regular_auth_parent(data_dir, parent)?;
     }
     let file = crate::auth_state_files::open_regular_lock_file(&path, "agent records")?;
-    Ok(WriteLock {
+    let lock = WriteLock {
         _file: FileLock::exclusive(file).context("failed to lock agent records")?,
         _process: process,
-    })
+    };
+    // The file lock is held. The sign-in lock is taken later, inside this lock.
+    #[cfg(test)]
+    pause_lock_order(data_dir, "agent");
+    Ok(lock)
+}
+
+#[cfg(test)]
+struct LockOrderPause {
+    home: PathBuf,
+    stage: &'static str,
+    go: bool,
+}
+
+#[cfg(test)]
+static LOCK_ORDER: Mutex<Option<LockOrderPause>> = Mutex::new(None);
+#[cfg(test)]
+static LOCK_ORDER_CV: std::sync::Condvar = std::sync::Condvar::new();
+
+#[cfg(test)]
+fn arm_lock_order(data_dir: &Path) {
+    *LOCK_ORDER
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(LockOrderPause {
+        home: data_dir.to_path_buf(),
+        stage: "",
+        go: false,
+    });
+}
+
+#[cfg(test)]
+fn clear_lock_order() {
+    *LOCK_ORDER
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+    LOCK_ORDER_CV.notify_all();
+}
+
+#[cfg(test)]
+fn release_lock_order() {
+    let mut guard = LOCK_ORDER
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(pause) = guard.as_mut() {
+        pause.go = true;
+    }
+    LOCK_ORDER_CV.notify_all();
+}
+
+/// Stops a writer that holds `stage` until the test releases it. A wait ends
+/// after five seconds so a failed test cannot hold the suite.
+#[cfg(test)]
+fn pause_lock_order(data_dir: &Path, stage: &'static str) {
+    let mut guard = LOCK_ORDER
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let Some(pause) = guard.as_mut() else {
+        return;
+    };
+    if pause.home != data_dir {
+        return;
+    }
+    pause.stage = stage;
+    pause.go = false;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        if guard.as_ref().is_none_or(|pause| pause.go) {
+            return;
+        }
+        let now = std::time::Instant::now();
+        if now >= deadline {
+            return;
+        }
+        let (next, wait) = LOCK_ORDER_CV
+            .wait_timeout(guard, deadline - now)
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        guard = next;
+        if wait.timed_out() {
+            return;
+        }
+    }
+}
+
+#[cfg(test)]
+fn lock_order_stage() -> &'static str {
+    LOCK_ORDER
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .as_ref()
+        .map(|pause| pause.stage)
+        .unwrap_or("")
 }
 
 /// Every change to the agent file is one of these.
@@ -1783,6 +1873,8 @@ pub(crate) fn without_agent_roots(
     data_dir: &Path,
     state: &crate::auth::AuthState,
 ) -> Option<crate::auth::AuthState> {
+    #[cfg(test)]
+    pause_lock_order(data_dir, "sign-in");
     if !build_allows_for_home(data_dir) {
         return None;
     }

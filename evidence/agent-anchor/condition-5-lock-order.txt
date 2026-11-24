@@ -1,0 +1,19 @@
+   Compiling elastos-server v2.0.1 (/Users/sash/code/wt-agent-anchor/elastos/crates/elastos-server)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 4m 12s
+     Running unittests src/lib.rs (/Users/sash/code/wt-agent-anchor/target-build/debug/deps/elastos_server-71f954b274f1d8ae)
+
+running 1 test
+
+thread 'agents::tests::agent_lock_then_sign_in_lock' (85790620) panicked at crates/elastos-server/src/agents/tests.rs:3116:5:
+agent lock is held at the agent step
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test agents::tests::agent_lock_then_sign_in_lock ... FAILED
+
+failures:
+
+failures:
+    agents::tests::agent_lock_then_sign_in_lock
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 4519 filtered out; finished in 0.37s
+
+error: test failed, to rerun pass `-p elastos-server --lib`

@@ -3091,6 +3091,90 @@ fn a_load_of_the_agent_file_is_measured() {
     assert!(per.as_millis() < 500, "one load took {per:?}");
 }
 
+/// Agent lock then sign-in lock. The agent file lock is held while
+/// `auth-state.json.lock` is free, and it is still held when that lock is held.
+#[test]
+fn agent_lock_then_sign_in_lock() {
+    let home = Home::new();
+    let agent_lock = home
+        .agent_file()
+        .with_file_name(format!("{AGENT_RECORDS_FILE}.lock"));
+    let auth_lock = crate::auth::auth_state_path(home.path())
+        .unwrap()
+        .with_file_name("auth-state.json.lock");
+    arm_lock_order(home.path());
+    struct Clear;
+    impl Drop for Clear {
+        fn drop(&mut self) {
+            clear_lock_order();
+        }
+    }
+    let _clear = Clear;
+    let writer = std::thread::spawn(move || enable(&home));
+    wait_lock_stage("agent");
+    let (agent_busy, auth_busy) = flock_busy(&agent_lock, &auth_lock);
+    assert!(agent_busy, "agent lock is held at the agent step");
+    assert!(
+        !auth_busy,
+        "sign-in lock is busy at the agent step: {agent_busy} {auth_busy}"
+    );
+    release_lock_order();
+    wait_lock_stage("sign-in");
+    let (agent_busy, auth_busy) = flock_busy(&agent_lock, &auth_lock);
+    assert!(agent_busy, "agent lock is held at the sign-in step");
+    assert!(auth_busy, "sign-in lock is held at the sign-in step");
+    release_lock_order();
+    writer.join().unwrap();
+}
+
+fn wait_lock_stage(stage: &str) {
+    let started = std::time::Instant::now();
+    while lock_order_stage() != stage {
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(10),
+            "the writer did not reach the {stage} lock"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+}
+
+fn flock_busy(agent: &Path, auth: &Path) -> (bool, bool) {
+    let output = std::process::Command::new("python3")
+        .arg("-c")
+        .arg(
+            r#"
+import fcntl, os, sys
+def busy(path):
+    try:
+        fd = os.open(path, os.O_RDWR)
+    except FileNotFoundError:
+        return 0
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        return 1
+    else:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        return 0
+    finally:
+        os.close(fd)
+print(busy(sys.argv[1]), busy(sys.argv[2]))
+"#,
+        )
+        .arg(agent)
+        .arg(auth)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let text = String::from_utf8(output.stdout).unwrap();
+    let mut words = text.split_whitespace();
+    (words.next().unwrap() == "1", words.next().unwrap() == "1")
+}
+
 /// With the feature off the owner's load carries no agent and no agent's
 /// protection, though a valid enabled agent file sits beside it.
 #[cfg(not(feature = "prototype-agents"))]
