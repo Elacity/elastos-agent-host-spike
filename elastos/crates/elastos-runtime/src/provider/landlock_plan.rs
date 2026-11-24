@@ -64,7 +64,7 @@ fn loader_paths(provider: RuntimeProviderId, arch: LoaderArch) -> Vec<&'static s
     paths
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct PathRule(pub &'static str, pub PathBuf, pub u64);
 #[derive(Debug, PartialEq, Eq)]
 pub(super) struct Plan {
@@ -72,8 +72,12 @@ pub(super) struct Plan {
     pub handled: u64,
     pub rules: Vec<PathRule>,
     /// Device and inode of the storage directory opened before launch.
+    /// A helper with no file root leaves these zero. Its directory identities
+    /// are `root_dev` and `root_ino`, in rule order.
     pub storage_dev: u64,
     pub storage_ino: u64,
+    pub root_dev: Vec<u64>,
+    pub root_ino: Vec<u64>,
 }
 
 /// The storage directory opened before launch, with that directory's identity.
@@ -171,6 +175,8 @@ fn build_for_arch(
         rules,
         storage_dev: bindings.storage_dev,
         storage_ino: bindings.storage_ino,
+        root_dev: Vec::new(),
+        root_ino: Vec::new(),
     })
 }
 
@@ -182,53 +188,49 @@ pub(super) struct AllowRoot {
     pub ino: u64,
 }
 
-/// Landlock rules for a helper allow-list. There is no single storage root.
-/// `root_dev` and `root_ino` are the identity of each allow-list root, in rule order.
-pub(super) struct PathAllowPlan {
-    pub abi: u32,
-    pub handled: u64,
-    pub rules: Vec<PathRule>,
-    pub root_dev: Vec<u64>,
-    pub root_ino: Vec<u64>,
-}
-
 pub(super) fn build_path_allow_plan(
     provider: RuntimeProviderId,
+    admitted: &AdmittedRights,
     roots: &[AllowRoot],
     executable: &Path,
     abi: u32,
-) -> Result<PathAllowPlan, String> {
+) -> Result<Plan, String> {
     let abi = require_abi(Ok(abi))?;
-    if roots.is_empty() {
+    let storage = admitted.admits("storage");
+    if storage && roots.is_empty() {
         return Err("provider start is refused: the path allow-list has no file roots".to_string());
     }
     let mut rules = Vec::with_capacity(roots.len() + 4);
     let mut root_dev = Vec::with_capacity(roots.len());
     let mut root_ino = Vec::with_capacity(roots.len());
-    for root in roots {
-        if !root.path.is_absolute() || root.name == "STORAGE_ROOT" || root.name == "STORAGE_PARENT"
-        {
-            return Err(format!(
-                "provider start is refused: {} cannot be a Landlock allow-list root",
-                root.name
-            ));
+    if storage {
+        for root in roots {
+            if !root.path.is_absolute() {
+                return Err(format!(
+                    "provider start is refused: {} is not an absolute Landlock root",
+                    root.name
+                ));
+            }
+            rules.push(PathRule(root.name, root.path.clone(), STORAGE));
+            root_dev.push(root.dev);
+            root_ino.push(root.ino);
         }
-        rules.push(PathRule(root.name, root.path.clone(), STORAGE));
-        root_dev.push(root.dev);
-        root_ino.push(root.ino);
     }
-    if !executable.is_absolute() {
-        return Err(
-            "provider start is refused: the provider executable path is not absolute".to_string(),
-        );
-    }
-    rules.push(PathRule(
-        "PROVIDER_EXECUTABLE",
-        executable.to_path_buf(),
-        BINARY,
-    ));
-    for path in loader_paths(provider, LoaderArch::host()) {
-        rules.push(PathRule("LANDLOCK_LOADER_PATHS", path.into(), BINARY));
+    if admitted.admits("bound-executable") {
+        if !executable.is_absolute() {
+            return Err(
+                "provider start is refused: the provider executable path is not absolute"
+                    .to_string(),
+            );
+        }
+        rules.push(PathRule(
+            "PROVIDER_EXECUTABLE",
+            executable.to_path_buf(),
+            BINARY,
+        ));
+        for path in loader_paths(provider, LoaderArch::host()) {
+            rules.push(PathRule("LANDLOCK_LOADER_PATHS", path.into(), BINARY));
+        }
     }
     if matches!(provider, RuntimeProviderId::Chain) {
         for path in CHAIN_RESOLVER_FILES {
@@ -239,10 +241,14 @@ pub(super) fn build_path_allow_plan(
             }
         }
     }
-    Ok(PathAllowPlan {
+    let storage_dev = root_dev.first().copied().unwrap_or(0);
+    let storage_ino = root_ino.first().copied().unwrap_or(0);
+    Ok(Plan {
         abi,
         handled: HANDLED,
         rules,
+        storage_dev,
+        storage_ino,
         root_dev,
         root_ino,
     })
@@ -487,8 +493,14 @@ mod tests {
             dev: 1,
             ino: 2,
         };
-        let plan =
-            build_path_allow_plan(Chain, &[root], Path::new("/bin/chain-provider"), 5).unwrap();
+        let plan = build_path_allow_plan(
+            Chain,
+            &super::super::rights::admit_runtime_grant(Chain),
+            &[root],
+            Path::new("/bin/chain-provider"),
+            5,
+        )
+        .unwrap();
         assert_eq!(plan.rules[0].0, "chain-provider");
         let files: Vec<_> = plan
             .rules
@@ -511,9 +523,14 @@ mod tests {
             dev: 1,
             ino: 2,
         };
-        let local_plan =
-            build_path_allow_plan(Localhost, &[local], Path::new("/bin/localhost-provider"), 5)
-                .unwrap();
+        let local_plan = build_path_allow_plan(
+            Localhost,
+            &super::super::rights::admit_runtime_grant(Localhost),
+            &[local],
+            Path::new("/bin/localhost-provider"),
+            5,
+        )
+        .unwrap();
         assert!(local_plan
             .rules
             .iter()

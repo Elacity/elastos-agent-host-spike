@@ -563,8 +563,21 @@ async fn spawn_allow_listed_provider(
             ));
         }
     }
-    let confined =
-        provider::ProviderBridge::spawn_path_allow(component_key, binary, data_dir, config).await?;
+    let authority = binaries::AdmittedProvider::admit(data_dir, component_key)
+        .map_err(|err| provider::bridge::BridgeError::Refused(err.to_string()))?
+        .ok_or_else(|| {
+            provider::bridge::BridgeError::Refused(format!(
+                "provider start is refused: {component_key} has no admitted authority"
+            ))
+        })?;
+    let confined = provider::ProviderBridge::spawn_path_allow(
+        component_key,
+        authority.authority(),
+        binary,
+        data_dir,
+        config,
+    )
+    .await?;
     Ok(Arc::clone(confined.bridge()))
 }
 
@@ -885,8 +898,12 @@ pub(crate) async fn register_chain_provider_plane(
     let generic_config = chain_provider_bridge_config_without_protected_network(&runtime_issuer);
     // Admit against the signed release of the Home this chain plane serves.
     // The chain process starts inside its own path allow-list.
+    let authority = binaries::AdmittedProvider::admit(data_dir, "chain-provider")
+        .map_err(|err| anyhow::anyhow!("failed to admit chain-provider: {err}"))?
+        .ok_or_else(|| anyhow::anyhow!("failed to admit chain-provider: no signed authority"))?;
     let confined = provider::ProviderBridge::spawn_path_allow(
         "chain-provider",
+        authority.authority(),
         &checked_native_provider_with_data_dir(data_dir, binary_path),
         data_dir,
         generic_config,
@@ -1178,6 +1195,8 @@ async fn setup_server_infrastructure_impl(
             base_path: data_dir.to_string_lossy().to_string(),
             allowed_paths: file_backed_prefixes(),
             read_only: false,
+            // Home hands this helper the raw device key at init. The fence
+            // blocks the key file. Slice L is the follow-up that stops the hand-off.
             encryption_key: device_key_hex.clone(),
             ..Default::default()
         };

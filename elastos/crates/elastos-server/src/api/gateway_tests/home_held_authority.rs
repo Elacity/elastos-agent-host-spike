@@ -86,11 +86,6 @@ const OPEN_ROWS: &[(&str, &str, &str)] = &[
     ),
     (
         "elastos-server/src/server_infra.rs",
-        "register_chain_provider_plane",
-        "load_or_create_device_key",
-    ),
-    (
-        "elastos-server/src/server_infra.rs",
         "setup_server_infrastructure_impl",
         "encryption_key: device_key_hex",
     ),
@@ -1381,10 +1376,10 @@ fn rows() -> Vec<HeldRow> {
         "load_or_create_device_key",
         1,
         mark(
-            "open",
+            "home-own",
             "device private key",
-            "chain provider",
-            "Linux proof pending the CTO's run. A counted run uses the chain binary just prepare-providers built into target/provider-fence-tests and panics if that binary is missing or the Landlock ABI is refused.",
+            "Home",
+            "Home derives the chain issuer from the device key and passes the issuer. The chain process does not receive the key, and identity/ is outside the chain allow-list.",
         ),
     ),
     row(
@@ -2039,8 +2034,8 @@ fn open_rows_are_an_explicit_list() {
     assert_eq!(from_rows, listed, "open rows drifted from OPEN_ROWS");
 }
 
-/// Localhost, object, and chain start through the path allow-list. The chain
-/// census row stays open until the Linux seccomp and Landlock proof.
+/// Localhost, object, and chain start through the path allow-list. Home derives
+/// the chain issuer itself. The localhost device-key hand-off stays open.
 #[test]
 fn localhost_object_and_chain_start_on_the_path_allow_list() {
     let raw = sources()
@@ -2099,13 +2094,13 @@ fn localhost_object_and_chain_start_on_the_path_allow_list() {
         if (row.function, row.mechanism)
             == ("register_chain_provider_plane", "load_or_create_device_key")
         {
-            assert_eq!(row.status, "open");
+            assert_eq!(row.status, "home-own");
+            assert_eq!(row.behalf, "Home");
             assert!(
-                row.reason.starts_with("Linux proof pending the CTO's run"),
+                row.reason.contains("does not receive the key"),
                 "{}",
                 row.reason
             );
-            assert!(row.reason.contains("panics if that binary is missing"));
         }
         if (row.function, row.mechanism)
             == (

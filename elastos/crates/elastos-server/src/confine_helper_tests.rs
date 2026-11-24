@@ -101,6 +101,16 @@ async fn localhost_and_object_providers_work_inside_their_fences() {
     use sha2::{Digest, Sha256};
     use std::os::unix::fs::PermissionsExt;
 
+    fn helper_authority() -> elastos_common::ProviderAuthority {
+        serde_json::from_value(serde_json::json!({
+            "reason": "runtime grant",
+            "capabilities": [],
+            "audit_events": [],
+            "rights": []
+        }))
+        .expect("full grant authority")
+    }
+
     fn pinned(path: &Path, data_dir: &Path) -> elastos_runtime::provider::CheckedExecutable {
         let digest = hex::encode(Sha256::digest(std::fs::read(path).unwrap()));
         elastos_runtime::provider::CheckedExecutable::pinned(path, &format!("sha256:{digest}"))
@@ -141,6 +151,7 @@ async fn localhost_and_object_providers_work_inside_their_fences() {
     let checked = pinned(&binary, &data);
     let confined = elastos_runtime::provider::ProviderBridge::spawn_path_allow(
         "localhost-provider",
+        &helper_authority(),
         &checked,
         &data,
         elastos_runtime::provider::BridgeProviderConfig {
@@ -235,6 +246,7 @@ async fn localhost_and_object_providers_work_inside_their_fences() {
     let object_checked = pinned(&object_bin, &object_data);
     let object = elastos_runtime::provider::ProviderBridge::spawn_path_allow(
         "object-provider",
+        &helper_authority(),
         &object_checked,
         &object_data,
         elastos_runtime::provider::BridgeProviderConfig {

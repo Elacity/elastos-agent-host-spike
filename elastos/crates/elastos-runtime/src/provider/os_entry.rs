@@ -89,9 +89,6 @@ pub(super) fn start_provider(
     checked: CheckedDirectory<'_>,
     stdio: ChildStdio,
 ) -> Result<Launched, String> {
-    // Did, wallet, and model have no helper allow-list. The lookup returns
-    // before it opens a directory. A key that renders a plan is refused.
-    refuse_single_root_on_helper_allow_list(provider, checked.path, executable.path())?;
     let admitted = super::rights::check_rights_against_runtime_templates(
         provider,
         authority,
@@ -100,183 +97,145 @@ pub(super) fn start_provider(
     dispatch(provider, &admitted, executable, checked, stdio)
 }
 
-/// Seatbelt text and Landlock plan for localhost, object, or chain.
-///
-/// Each provider gets its own file roots. The data directory contains
-/// `identity/device.key`, so that directory stays out of the allow-list.
-/// `spawn_confined` admits did, wallet, and model. `start_provider` calls
-/// this to refuse those ids when they also have an allow-list. The call
-/// does not install the plan.
-pub(crate) fn render_helper_confinement(
+/// The signed-authority gate for localhost, object, and chain. Both OS arms
+/// start from this result. Linux does not admit a second grant.
+pub(crate) fn admit_path_allow(
     component_key: &str,
-    data_dir: &Path,
-    executable: &Path,
-    landlock_abi: u32,
-) -> Result<super::path_allow::HelperConfinement, String> {
-    super::path_allow::render(component_key, data_dir, executable, landlock_abi)
-}
-
-fn refuse_single_root_on_helper_allow_list(
-    provider: RuntimeProviderId,
-    data_dir: &Path,
-    executable: &Path,
-) -> Result<(), String> {
-    let component_key = match provider {
-        RuntimeProviderId::Did => "did-provider",
-        RuntimeProviderId::Wallet => "wallet-provider",
-        RuntimeProviderId::Model => "model-provider",
-        RuntimeProviderId::Localhost => "localhost-provider",
-        RuntimeProviderId::Object => "object-provider",
-        RuntimeProviderId::Chain => "chain-provider",
-    };
-    let absent = format!(
-        "provider start is refused: component key \"{component_key}\" has no path allow-list"
-    );
-    match render_helper_confinement(component_key, data_dir, executable, 0) {
-        Err(error) if error == absent => Ok(()),
-        Ok(confinement) => {
-            let rules = confinement
-                .landlock
-                .iter()
-                .map(|rule| format!("{} {} {:#x}", rule.name, rule.path.display(), rule.mask))
-                .collect::<Vec<_>>()
-                .join(", ");
-            Err(format!(
-                "provider start is refused: a single-root provider has a path allow-list (abi {}, handled {:#x}, seatbelt {} bytes, {rules})",
-                confinement.landlock_abi,
-                confinement.landlock_handled,
-                confinement.seatbelt.len(),
-            ))
-        }
-        Err(error) => Err(error),
-    }
+    authority: &ProviderAuthority,
+) -> Result<(RuntimeProviderId, AdmittedRights), String> {
+    let provider = RuntimeProviderId::path_allow(component_key).ok_or_else(|| {
+        format!(
+            "provider start is refused: component key \"{component_key}\" has no path allow-list"
+        )
+    })?;
+    let admitted = super::rights::check_rights_against_runtime_templates(
+        provider,
+        authority,
+        rights_table::RIGHTS,
+    )?;
+    require_grant(&admitted)?;
+    Ok((provider, admitted))
 }
 
 /// Start localhost, object, or chain under that provider's path allow-list.
 ///
 /// The data directory is not a storage root. `identity/device.key` stays
-/// outside the Seatbelt parameters and the Landlock rules.
+/// outside the Seatbelt parameters and the Landlock rules. Admission is the
+/// same gate `start_provider` uses, and it runs before either OS arm.
 pub(crate) fn start_path_allow(
     component_key: &str,
+    authority: &ProviderAuthority,
     executable: &super::CheckedExecutable,
     data_dir: &Path,
     stdio: ChildStdio,
 ) -> Result<Launched, String> {
-    if super::rights_table::RuntimeProviderId::path_allow(component_key).is_none() {
-        return Err(format!(
-            "provider start is refused: component key \"{component_key}\" has no path allow-list"
-        ));
-    }
-    start_path_allow_os(component_key, executable, data_dir, stdio)
+    let (provider, admitted) = admit_path_allow(component_key, authority)?;
+    start_path_allow_os(provider, &admitted, executable, data_dir, stdio)
 }
 
-#[cfg(all(
-    not(elastos_unsupported_os_check),
-    target_os = "linux",
-    any(target_arch = "x86_64", target_arch = "aarch64")
-))]
 fn start_path_allow_os(
-    component_key: &str,
+    provider: RuntimeProviderId,
+    admitted: &AdmittedRights,
     executable: &super::CheckedExecutable,
     data_dir: &Path,
     stdio: ChildStdio,
 ) -> Result<Launched, String> {
-    let provider = super::rights_table::RuntimeProviderId::path_allow(component_key)
-        .ok_or_else(|| {
-            format!(
-                "provider start is refused: component key \"{component_key}\" has no path allow-list"
-            )
+    #[cfg(all(
+        not(elastos_unsupported_os_check),
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))]
+    {
+        let abi = super::landlock_plan::kernel_abi()?;
+        let (_confinement, plan) = super::path_allow::render_with_plan(
+            provider,
+            admitted,
+            data_dir,
+            executable.path(),
+            abi,
+        )?;
+        let prepared = preexec_installer::prepare_path_allow(provider, admitted, plan)?;
+        let data = data_dir
+            .to_str()
+            .ok_or("provider start is refused: the data directory path is not Unicode")?;
+        let env = std::ffi::CString::new(format!("ELASTOS_DATA_DIR={data}")).map_err(|_| {
+            "provider start is refused: the data directory path contains NUL".to_string()
         })?;
-    let abi = super::landlock_plan::kernel_abi()?;
-    let (_confinement, plan) =
-        super::path_allow::render_with_plan(component_key, data_dir, executable.path(), abi)?;
-    let prepared = preexec_installer::prepare_path_allow(provider, plan)?;
-    let data = data_dir
-        .to_str()
-        .ok_or("provider start is refused: the data directory path is not Unicode")?;
-    let env = std::ffi::CString::new(format!("ELASTOS_DATA_DIR={data}")).map_err(|_| {
-        "provider start is refused: the data directory path contains NUL".to_string()
-    })?;
-    let pid = failure_record::start_prepared(
-        &prepared,
-        executable,
-        Some(stdio.stdin),
-        Some(stdio.stdout),
-        Some(&env),
-    )
-    .map_err(|error| match error {
-        failure_record::LaunchError::BeforeFork(reason) => reason,
-        failure_record::LaunchError::ChildFailed { reason, .. } => reason,
-    })?;
-    Ok(Launched {
-        pid,
-        to_child: stdio.to_child,
-        from_child: stdio.from_child,
-    })
-}
-
-#[cfg(all(not(elastos_unsupported_os_check), target_os = "macos"))]
-fn start_path_allow_os(
-    component_key: &str,
-    executable: &super::CheckedExecutable,
-    data_dir: &Path,
-    stdio: ChildStdio,
-) -> Result<Launched, String> {
-    let confinement = super::path_allow::render(component_key, data_dir, executable.path(), 5)?;
-    let prepared = executable.verify_at_spawn()?;
-    let binary = std::fs::canonicalize(prepared.exec_path()).map_err(|error| {
-        format!("provider start is refused: cannot resolve provider executable: {error}")
-    })?;
-    let mut defines = Vec::new();
-    for rule in &confinement.landlock {
-        if matches!(
-            rule.name,
-            "PROVIDER_EXECUTABLE" | "LANDLOCK_LOADER_PATHS" | "READ_ONLY_FILE"
-        ) {
-            continue;
-        }
-        defines.push((rule.name.to_string(), rule.path.clone()));
-    }
-    for (index, path) in confinement.metadata.iter().enumerate() {
-        defines.push((format!("META_{index}"), path.clone()));
-    }
-    defines.push(("PROVIDER_EXECUTABLE".to_string(), binary.clone()));
-    let bound: Vec<(&str, &Path)> = defines
-        .iter()
-        .map(|(name, path)| (name.as_str(), path.as_path()))
-        .collect();
-    let mut command = macos_sandbox_command(
-        Path::new("/usr/bin/sandbox-exec"),
-        &confinement.seatbelt,
-        &binary,
-        &bound,
-        Some(data_dir),
-    )?;
-    // localhost stats the working directory before it reads init. That directory
-    // is the data directory, which has a metadata grant. The parent's directory
-    // does not.
-    command.current_dir(data_dir);
-    macos_launch(command, stdio, prepared)
-}
-
-#[cfg(any(
-    elastos_unsupported_os_check,
-    not(any(
-        target_os = "macos",
-        all(
-            target_os = "linux",
-            any(target_arch = "x86_64", target_arch = "aarch64")
+        let pid = failure_record::start_prepared(
+            &prepared,
+            executable,
+            Some(stdio.stdin),
+            Some(stdio.stdout),
+            Some(&env),
         )
-    ))
-))]
-fn start_path_allow_os(
-    component_key: &str,
-    executable: &super::CheckedExecutable,
-    data_dir: &Path,
-    stdio: ChildStdio,
-) -> Result<Launched, String> {
-    let _ = (component_key, executable, data_dir, stdio);
-    Err(UNSUPPORTED_OS.to_string())
+        .map_err(|error| match error {
+            failure_record::LaunchError::BeforeFork(reason) => reason,
+            failure_record::LaunchError::ChildFailed { reason, .. } => reason,
+        })?;
+        Ok(Launched {
+            pid,
+            to_child: stdio.to_child,
+            from_child: stdio.from_child,
+        })
+    }
+    #[cfg(all(not(elastos_unsupported_os_check), target_os = "macos"))]
+    {
+        let (confinement, _plan) = super::path_allow::render_with_plan(
+            provider,
+            admitted,
+            data_dir,
+            executable.path(),
+            5,
+        )?;
+        let prepared = executable.verify_at_spawn()?;
+        let binary = std::fs::canonicalize(prepared.exec_path()).map_err(|error| {
+            format!("provider start is refused: cannot resolve provider executable: {error}")
+        })?;
+        let mut defines = Vec::new();
+        for rule in &confinement.landlock {
+            if matches!(
+                rule.0,
+                "PROVIDER_EXECUTABLE" | "LANDLOCK_LOADER_PATHS" | "READ_ONLY_FILE"
+            ) {
+                continue;
+            }
+            defines.push((rule.0.to_string(), rule.1.clone()));
+        }
+        for (index, path) in confinement.metadata.iter().enumerate() {
+            defines.push((format!("META_{index}"), path.clone()));
+        }
+        defines.push(("PROVIDER_EXECUTABLE".to_string(), binary.clone()));
+        let bound: Vec<(&str, &Path)> = defines
+            .iter()
+            .map(|(name, path)| (name.as_str(), path.as_path()))
+            .collect();
+        let mut command = macos_sandbox_command(
+            Path::new("/usr/bin/sandbox-exec"),
+            &confinement.seatbelt,
+            &binary,
+            &bound,
+            Some(data_dir),
+        )?;
+        // localhost stats the working directory before it reads init. That directory
+        // is the data directory, which has a metadata grant. The parent's directory
+        // does not.
+        command.current_dir(data_dir);
+        macos_launch(command, stdio, prepared)
+    }
+    #[cfg(any(
+        elastos_unsupported_os_check,
+        not(any(
+            target_os = "macos",
+            all(
+                target_os = "linux",
+                any(target_arch = "x86_64", target_arch = "aarch64")
+            )
+        ))
+    ))]
+    {
+        let _ = (provider, admitted, executable, data_dir, stdio);
+        Err(UNSUPPORTED_OS.to_string())
+    }
 }
 
 fn require_grant(admitted: &AdmittedRights) -> Result<(), String> {
@@ -884,20 +843,180 @@ mod tests {
             .to_string()
     }
 
+    fn full_grant() -> ProviderAuthority {
+        serde_json::from_value(serde_json::json!({
+            "reason": "runtime grant",
+            "capabilities": [],
+            "audit_events": [],
+            "rights": []
+        }))
+        .expect("full grant authority")
+    }
+
     #[test]
     fn single_root_providers_stay_off_the_helper_allow_list() {
-        // These paths must stay unread. A single-root id returns before render
-        // opens a directory, including when the path is missing.
-        let missing = Path::new("/no/such/elastos-helper-root");
-        let binary = Path::new("/no/such/elastos-helper-binary");
-        for provider in [
-            RuntimeProviderId::Did,
-            RuntimeProviderId::Wallet,
-            RuntimeProviderId::Model,
-        ] {
-            refuse_single_root_on_helper_allow_list(provider, missing, binary)
-                .unwrap_or_else(|err| panic!("{provider:?} touched the helper allow-list: {err}"));
+        for key in ["did-provider", "wallet-provider", "model-provider"] {
+            assert!(
+                RuntimeProviderId::path_allow(key).is_none(),
+                "{key} has no path allow-list"
+            );
+            assert!(RuntimeProviderId::from_component_key(key).is_some());
         }
+        for key in ["localhost-provider", "object-provider", "chain-provider"] {
+            assert!(RuntimeProviderId::from_component_key(key).is_none());
+            assert!(RuntimeProviderId::path_allow(key).is_some());
+        }
+        let production = production_source();
+        let start = production
+            .split_once("pub(super) fn start_provider(")
+            .expect("start_provider")
+            .1
+            .split_once("pub(crate) fn admit_path_allow(")
+            .expect("admit_path_allow")
+            .0;
+        assert!(!start.contains("render_with_plan"));
+        assert!(start.contains("check_rights_against_runtime_templates"));
+    }
+
+    #[test]
+    fn signed_authority_is_refused_before_either_operating_system_starts() {
+        let authority: ProviderAuthority = serde_json::from_value(serde_json::json!({
+            "reason": "runtime grant",
+            "capabilities": [],
+            "audit_events": [],
+            "rights": [{
+                "id": "storage",
+                "rules": ["(allow file-read* file-write* (subpath \"/\"))"]
+            }]
+        }))
+        .expect("bad storage right");
+        let missing = Path::new("/no/such/elastos-helper-root");
+        let error = start_path_allow(
+            "localhost-provider",
+            &authority,
+            &super::super::CheckedExecutable::for_test(missing),
+            missing,
+            stdio(),
+        )
+        .expect_err("a signed right that is not the template is refused");
+        assert!(
+            error
+                .contains("provider right \"storage\" rule text differs from the Runtime template"),
+            "{error}"
+        );
+        assert!(!error.contains("no confinement"));
+        assert!(!error.contains("Landlock"));
+        assert!(!error.contains("sandbox-exec"));
+        let production = production_source();
+        assert_eq!(
+            production
+                .matches("check_rights_against_runtime_templates")
+                .count(),
+            2,
+            "start_provider and admit_path_allow are the only gates"
+        );
+        let installer = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src/provider/preexec_installer.rs"
+        ))
+        .unwrap();
+        let installer = installer.split("#[cfg(test)]").next().unwrap();
+        assert!(
+            !installer.contains("runtime_grant"),
+            "Linux has no second admission door"
+        );
+    }
+
+    #[test]
+    fn a_signed_right_narrows_the_helper_file_and_exec_grant() {
+        fn authority_with(id: &str) -> ProviderAuthority {
+            let row = rights_table::RIGHTS
+                .iter()
+                .find(|row| row.id == id)
+                .unwrap_or_else(|| panic!("missing {id}"));
+            serde_json::from_value(serde_json::json!({
+                "reason": "runtime grant",
+                "capabilities": [],
+                "audit_events": [],
+                "rights": [{ "id": id, "rules": row.rules }]
+            }))
+            .expect("signed right")
+        }
+        let executable = Path::new("/opt/elastos/localhost-provider");
+        let storage = super::super::rights::check_rights_against_runtime_templates(
+            RuntimeProviderId::Localhost,
+            &authority_with("storage"),
+            rights_table::RIGHTS,
+        )
+        .unwrap();
+        let exec = super::super::rights::check_rights_against_runtime_templates(
+            RuntimeProviderId::Localhost,
+            &authority_with("bound-executable"),
+            rights_table::RIGHTS,
+        )
+        .unwrap();
+        let held = tempfile::tempdir().unwrap();
+        for name in elastos_common::localhost::FILE_BACKED_ROOTS {
+            std::fs::create_dir(held.path().join(name)).unwrap();
+        }
+        let (storage_only, storage_plan) = super::super::path_allow::render_with_plan(
+            RuntimeProviderId::Localhost,
+            &storage,
+            held.path(),
+            executable,
+            5,
+        )
+        .unwrap();
+        assert!(storage_only.seatbelt.contains("subpath"));
+        assert!(!storage_only.seatbelt.contains("process-exec"));
+        assert!(!storage_plan.root_dev.is_empty());
+        assert!(!storage_plan
+            .rules
+            .iter()
+            .any(|rule| rule.0 == "PROVIDER_EXECUTABLE"));
+        let (exec_only, exec_plan) = super::super::path_allow::render_with_plan(
+            RuntimeProviderId::Localhost,
+            &exec,
+            Path::new("/data"),
+            executable,
+            5,
+        )
+        .unwrap();
+        assert!(!exec_only.seatbelt.contains("subpath"));
+        assert!(exec_only.seatbelt.contains("process-exec"));
+        assert!(exec_plan.root_dev.is_empty());
+        assert!(exec_plan
+            .rules
+            .iter()
+            .any(|rule| rule.0 == "PROVIDER_EXECUTABLE"));
+        let names = super::super::seccomp_list::linux_seccomp_list(
+            RuntimeProviderId::Localhost,
+            &storage,
+            super::super::seccomp_list::AuditArch::X86_64,
+        );
+        assert!(names.contains(&"mkdir"));
+        assert!(!names.contains(&"execve"));
+        let names = super::super::seccomp_list::linux_seccomp_list(
+            RuntimeProviderId::Localhost,
+            &exec,
+            super::super::seccomp_list::AuditArch::X86_64,
+        );
+        assert!(names.contains(&"execve"));
+        assert!(!names.contains(&"mkdir"));
+    }
+
+    #[test]
+    fn chain_https_leg_says_not_proven_when_there_is_no_egress() {
+        let source = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src/provider/os_entry.rs"
+        ))
+        .unwrap();
+        let needle = ["if code == \"", "upstream_unreachable\""].concat();
+        let at = source.find(&needle).expect("https branch");
+        let arm = source[at..].split("} else {").next().unwrap();
+        assert!(arm.contains("not proven"), "{arm}");
+        assert!(!arm.contains("assert"), "{arm}");
     }
 
     #[test]
@@ -1044,8 +1163,16 @@ mod tests {
             .filter(|c| !c.is_whitespace())
             .collect();
         assert!(prepare_body.contains("landlock_plan::build(provider,admitted,"));
-        assert!(prepare_body.contains("seccomp_program::program(provider,admitted,"));
+        assert!(prepare_body.contains("assemble(provider,admitted,"));
         assert!(!prepare_body.contains("for_provider"));
+        let production_installer: String = installer
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap()
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect();
+        assert!(production_installer.contains("seccomp_program::program(provider,admitted,"));
     }
 
     #[test]
@@ -1247,6 +1374,7 @@ mod tests {
             let (pipes, child_in, child_out) = probe_stdio();
             let started = start_path_allow(
                 key,
+                &full_grant(),
                 &super::super::CheckedExecutable::for_test(&binary),
                 &data,
                 pipes,
@@ -1449,6 +1577,7 @@ mod tests {
             let (pipes, child_in, child_out) = probe_stdio();
             let started = start_path_allow(
                 "chain-provider",
+                &full_grant(),
                 &super::super::CheckedExecutable::for_test(bin),
                 data,
                 pipes,
@@ -1573,7 +1702,7 @@ mod tests {
         let code = https_block["code"].as_str().unwrap_or("");
         let https_message = https_block["message"].as_str().unwrap_or("");
         if code == "upstream_unreachable" {
-            eprintln!("chain HTTPS leg has no egress: {https_message}");
+            eprintln!("chain HTTPS leg is not proven: no egress ({https_message})");
         } else {
             assert!(
                 code == "upstream_invalid_json"
