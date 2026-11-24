@@ -56,6 +56,8 @@ mod start_census_tests;
 // outside this crate: the capsule kit's host tests call them (kit item A2) so
 // there is one owner and no copy to drift.
 pub use component::{validate_component_imports, ALLOWED_BUS_IMPORTS};
+// The shell reads the one presented frame through this name. The read mints nothing.
+pub use component::read_v2_frame_for_home;
 pub mod content;
 pub mod crypto;
 pub mod documents;
