@@ -63,6 +63,10 @@ impl Owner {
         ) && pid_is_alive(self.pid)
     }
 
+    pub(crate) fn names_another_live_process(&self) -> bool {
+        self.pid != std::process::id() && self.active()
+    }
+
     pub(crate) fn configure(&self, command: &mut Command) -> anyhow::Result<()> {
         command.env(OWNER_ENV, serde_json::to_string(self)?);
         Ok(())

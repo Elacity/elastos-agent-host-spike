@@ -108,7 +108,6 @@ async fn start_gateway_server_with_shutdown(
         std::io::ErrorKind::Unsupported,
         "gateway child ownership and private local control are unsupported on Windows",
     ))?;
-    super::gateway_inspect_actions::settle_agent_plans_lost_before_start(&data_dir)?;
     crate::auth::verify_auth_audit_chain_ready(&data_dir)?;
     let listener = TcpListener::bind(addr).await?;
     let local_control_registry = provider_registry.clone();
@@ -133,6 +132,22 @@ async fn start_gateway_server_with_shutdown(
     let browser_lifecycle_reconciler =
         super::gateway_browser::start_browser_lifecycle_reconciler(state.clone())
             .map_err(anyhow::Error::msg)?;
+    // The reconciler registration is what proves this process is the in-process
+    // Home for the data dir: a second start on any port is refused there, and a
+    // failed bind already returned. Settle before a request can claim a plan.
+    // This function does not take the host lock, so a live owner in another
+    // process keeps its plans.
+    if another_live_gateway_owner(&data_dir) {
+        eprintln!(
+            "[gateway] another live gateway owns this data directory; left its plans unchanged"
+        );
+    } else if let Err(error) =
+        super::gateway_inspect_actions::settle_agent_plans_lost_before_start(&data_dir)
+    {
+        browser_lifecycle_reconciler.cancel();
+        let _ = browser_lifecycle_reconciler.join().await;
+        return Err(error);
+    }
     let home_url = format!("{gateway_api_url}/home/");
     let app = gateway_router_with_api_url(state, gateway_api_url);
     // Publish one complete coordinate identity after Home setup, before children
@@ -328,6 +343,29 @@ fn dedupe_urls(urls: Vec<String>) -> Vec<String> {
     deduped
 }
 
+/// A host lock or published gateway coordinates held by another live pid.
+/// The caller's own host lock stays held: a second flock in this process does
+/// not take it.
+fn another_live_gateway_owner(data_dir: &std::path::Path) -> bool {
+    #[cfg(not(unix))]
+    {
+        let _ = data_dir;
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        if crate::host_lock::active_host_process(data_dir)
+            .ok()
+            .flatten()
+            .is_some_and(|info| info.pid != std::process::id())
+        {
+            return true;
+        }
+        crate::runtime_control::gateway_children::Owner::read(data_dir)
+            .is_ok_and(|owner| owner.names_another_live_process())
+    }
+}
+
 fn shutdown_signal() -> anyhow::Result<impl std::future::Future<Output = ()> + Send + 'static> {
     #[cfg(unix)]
     {
@@ -361,6 +399,8 @@ mod trusted_gateway_tests {
     use tokio::sync::oneshot;
 
     static READY_URL: Mutex<Option<oneshot::Sender<String>>> = Mutex::new(None);
+    #[cfg(unix)]
+    static LIVE_OWNER_READY: Mutex<Option<oneshot::Sender<()>>> = Mutex::new(None);
 
     fn record_ready(url: &str) {
         let parsed = url::Url::parse(url).unwrap();
@@ -377,6 +417,17 @@ mod trusted_gateway_tests {
 
     fn unexpected_ready(_: &str) {
         panic!("failed gateway startup must not open Home");
+    }
+
+    #[cfg(unix)]
+    fn record_live_owner_ready(_: &str) {
+        LIVE_OWNER_READY
+            .lock()
+            .unwrap()
+            .take()
+            .expect("live owner ready sender")
+            .send(())
+            .unwrap();
     }
 
     fn unused_localhost_address() -> String {
@@ -816,6 +867,167 @@ mod trusted_gateway_tests {
         );
     }
 
+    /// Gateway A is the live Home. A plan written after it is up stays
+    /// `dispatching` when a second start on this data dir is refused.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_refused_second_gateway_keeps_a_dispatching_plan() {
+        let temp = tempfile::tempdir().unwrap();
+        let data = temp.path().to_path_buf();
+        let addr = unused_localhost_address();
+        let (stop_tx, stop_rx) = oneshot::channel();
+        let task_addr = addr.clone();
+        let task_data = data.clone();
+        let server = tokio::spawn(async move {
+            start_gateway_server_with_shutdown(
+                &task_addr,
+                Some(Arc::new(ProviderRegistry::new())),
+                GatewayCollaborationContext::default(),
+                task_data.join("cache"),
+                task_data,
+                None,
+                async {
+                    let _ = stop_rx.await;
+                },
+            )
+            .await
+        });
+        let coords = crate::runtime_control::gateway_runtime_coord_path(&data);
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+        while !coords.is_file() {
+            if server.is_finished() || tokio::time::Instant::now() >= deadline {
+                let _ = stop_tx.send(());
+                let joined = tokio::time::timeout(Duration::from_secs(5), server).await;
+                panic!("gateway A did not become the live Home: {joined:?}");
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        let owner = "person:owner";
+        let requester = "agent:v2:0123456789abcdef0123456789abcdef";
+        let capsule = "capsule:agent-host";
+        let session = "session:agent-1";
+        let plan = serde_json::json!({
+            "steps": [{ "scheme": "availability", "operation": "status", "request": {} }]
+        });
+        let created = super::super::submit_pending_agent_plan(
+            &data, owner, requester, capsule, session, &plan, 1,
+        )
+        .unwrap();
+        let id = created["request_id"].as_str().unwrap().to_string();
+        let path = data.join("inspect-actions").join(format!("{id}.json"));
+        let mut value: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        value["status"] = serde_json::json!("dispatching");
+        std::fs::write(&path, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
+
+        let duplicate = start_gateway_server_with_ready(
+            &unused_localhost_address(),
+            Some(Arc::new(ProviderRegistry::new())),
+            GatewayCollaborationContext::default(),
+            data.join("cache"),
+            data.clone(),
+            Some(unexpected_ready),
+        )
+        .await
+        .unwrap_err();
+        let stored: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        let status = stored["status"].as_str().unwrap().to_string();
+        let _ = stop_tx.send(());
+        let _ = tokio::time::timeout(Duration::from_secs(20), server).await;
+        assert!(
+            duplicate
+                .to_string()
+                .contains("already running for this data root"),
+            "{duplicate}"
+        );
+        assert_eq!(
+            status, "dispatching",
+            "a refused second start rewrote the live gateway's plan to {status}"
+        );
+    }
+
+    /// Coordinates that name another live pid are a live owner. This start does
+    /// not take the host lock, so it must not rewrite that owner's plan.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_live_owner_with_another_pid_keeps_a_dispatching_plan() {
+        let temp = tempfile::tempdir().unwrap();
+        let data = temp.path().to_path_buf();
+        let mut held = std::process::Command::new("sleep")
+            .arg("60")
+            .spawn()
+            .unwrap();
+        let pid = held.id();
+        let coords = crate::runtime_control::RuntimeCoords {
+            api_url: "http://127.0.0.1:9".to_string(),
+            attach_secret: "secret".to_string(),
+            pid,
+            runtime_kind: crate::runtime_control::RUNTIME_KIND_GATEWAY.to_string(),
+            binary_sha256: String::new(),
+            policy_sha256: String::new(),
+            dependency_sha256: String::new(),
+            generation: String::new(),
+            home_url: String::new(),
+        };
+        crate::runtime_control::write_runtime_coords(
+            &crate::runtime_control::gateway_runtime_coord_path(&data),
+            &coords,
+        )
+        .unwrap();
+        let owner = "person:owner";
+        let requester = "agent:v2:0123456789abcdef0123456789abcdef";
+        let capsule = "capsule:agent-host";
+        let session = "session:agent-1";
+        let plan = serde_json::json!({
+            "steps": [{ "scheme": "availability", "operation": "status", "request": {} }]
+        });
+        let created = super::super::submit_pending_agent_plan(
+            &data, owner, requester, capsule, session, &plan, 1,
+        )
+        .unwrap();
+        let id = created["request_id"].as_str().unwrap().to_string();
+        let path = data.join("inspect-actions").join(format!("{id}.json"));
+        let mut value: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        value["status"] = serde_json::json!("dispatching");
+        std::fs::write(&path, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
+
+        let (ready_tx, ready_rx) = oneshot::channel();
+        *LIVE_OWNER_READY.lock().unwrap() = Some(ready_tx);
+        let (stop_tx, stop_rx) = oneshot::channel();
+        let addr = unused_localhost_address();
+        let task_addr = addr.clone();
+        let task_data = data.clone();
+        let server = tokio::spawn(async move {
+            start_gateway_server_with_shutdown(
+                &task_addr,
+                None,
+                GatewayCollaborationContext::default(),
+                task_data.join("cache"),
+                task_data,
+                Some(record_live_owner_ready),
+                async {
+                    let _ = stop_rx.await;
+                },
+            )
+            .await
+        });
+        let ready = tokio::time::timeout(Duration::from_secs(20), ready_rx).await;
+        let stored: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        let status = stored["status"].as_str().unwrap().to_string();
+        let _ = stop_tx.send(());
+        let _ = tokio::time::timeout(Duration::from_secs(20), server).await;
+        let _ = held.kill();
+        let _ = held.wait();
+        assert!(ready.is_ok(), "gateway did not become ready: {ready:?}");
+        assert_eq!(
+            status, "dispatching",
+            "a start beside a live owner rewrote the plan to {status}"
+        );
+    }
+
     /// Approved and dispatching agent plans survive a crash. A gateway start
     /// must settle them to unknown. Today they stay as written, so the
     /// requester's result call has nothing to answer.
@@ -885,15 +1097,25 @@ mod trusted_gateway_tests {
             }
             tokio::time::sleep(Duration::from_millis(25)).await;
         }
-        let statuses: Vec<String> = ids
-            .iter()
-            .map(|id| {
-                let path = data.join("inspect-actions").join(format!("{id}.json"));
-                let value: serde_json::Value =
-                    serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-                value["status"].as_str().unwrap().to_string()
-            })
-            .collect();
+        let read_deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+        let statuses = loop {
+            let statuses: Vec<String> = ids
+                .iter()
+                .map(|id| {
+                    let path = data.join("inspect-actions").join(format!("{id}.json"));
+                    let value: serde_json::Value =
+                        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+                    value["status"].as_str().unwrap().to_string()
+                })
+                .collect();
+            if statuses == ["unknown", "unknown", "pending"]
+                || server.is_finished()
+                || tokio::time::Instant::now() >= read_deadline
+            {
+                break statuses;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        };
         let result = super::super::agent_plan_result_for_requester(
             &data, &ids[0], owner, requester, capsule, session,
         );
