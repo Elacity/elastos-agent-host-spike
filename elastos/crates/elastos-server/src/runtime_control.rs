@@ -542,7 +542,15 @@ impl AttachableRuntimeKind {
 /// and the caller can signal it, sets `ESRCH` when no such process exists, and
 /// sets `EPERM` when the process exists but the caller may not signal it (still
 /// alive from our perspective). Anything other than `ESRCH` means alive.
+///
+/// Pid 0 does not name one process. `kill(0, 0)` signals the caller's process
+/// group and returns success, so a coordinates file that names pid 0 would
+/// stay forever. A value that does not fit in a positive pid does not name
+/// one process either. Both are dead, and the file is removed.
 fn pid_is_alive(pid: u32) -> bool {
+    if pid == 0 {
+        return false;
+    }
     #[cfg(unix)]
     {
         let pid_i32: libc::pid_t = match pid.try_into() {
@@ -1800,6 +1808,36 @@ mod tests {
         let ready = managed_runtime_ready(&coords_path, env!("ELASTOS_VERSION")).await;
         assert!(ready.is_none());
     }
+
+    /// Pid 0 names this process group, not one process. A coordinates file
+    /// that names it is removed, for a non-loopback URL and for a loopback URL.
+    #[tokio::test]
+    async fn a_pid_that_names_no_process_is_not_a_live_owner() {
+        let dir = tempfile::tempdir().unwrap();
+        let bad = dir.path().join("bad-url.json");
+        std::fs::write(
+            &bad,
+            br#"{"api_url":"http://192.0.2.1:9","attach_secret":"dummy-fixture","pid":0}"#,
+        )
+        .unwrap();
+        let good = dir.path().join("good-url.json");
+        std::fs::write(
+            &good,
+            br#"{"api_url":"http://127.0.0.1:9","attach_secret":"dummy-fixture","pid":0}"#,
+        )
+        .unwrap();
+        assert!(read_runtime_coords(&bad).await.is_none());
+        assert!(read_runtime_coords(&good).await.is_none());
+        assert!(
+            !bad.try_exists().unwrap(),
+            "pid 0 with a bad URL was left in place"
+        );
+        assert!(
+            !good.try_exists().unwrap(),
+            "pid 0 with a loopback URL was left in place"
+        );
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn managed_runtime_ready_accepts_matching_health() {
