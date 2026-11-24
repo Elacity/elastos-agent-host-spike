@@ -136,10 +136,8 @@ thread_local! {
         const { std::cell::RefCell::new(None) };
 }
 
-/// The shell's read of the one frame a v2 guest presented. `caller` is the
-/// principal asking. Home gets nodes, grant ids, and resource names when that
-/// principal presented the frame. This read mints nothing and it is not a
-/// gateway path.
+/// The stored nodes of one resident when `caller` presented that frame.
+/// An image node still carries its grant id. The Home answer leaves that out.
 pub fn read_v2_frame_for_home(
     provider: &elastos_compute::providers::ComponentProvider,
     caller: Option<&str>,
@@ -148,28 +146,17 @@ pub fn read_v2_frame_for_home(
     provider.read_v2_frame(caller, id).map(|frame| frame.nodes)
 }
 
-static HOME_V2_GUESTS: std::sync::Mutex<
-    Option<std::sync::Weak<elastos_compute::providers::ComponentProvider>>,
-> = std::sync::Mutex::new(None);
+/// A legal stored frame fits under this. A larger answer is refused.
+pub const V2_FRAME_ANSWER_MAX: usize = 48 * 1024;
 
-pub fn register_home_v2_guests(
-    provider: &std::sync::Arc<elastos_compute::providers::ComponentProvider>,
-) {
-    if let Ok(mut slot) = HOME_V2_GUESTS.lock() {
-        *slot = Some(std::sync::Arc::downgrade(provider));
-    }
-}
-
-pub fn home_v2_frame_body(principal: &str, app: &str) -> serde_json::Value {
-    let provider = HOME_V2_GUESTS
-        .lock()
-        .ok()
-        .and_then(|slot| slot.as_ref().and_then(std::sync::Weak::upgrade));
-    let nodes = provider
-        .as_ref()
-        .and_then(|provider| read_v2_frame_for_home(provider, Some(principal), app));
+/// JSON nodes for one principal's resident. No grant id and no image bytes.
+pub fn v2_frame_answer(
+    provider: &elastos_compute::providers::ComponentProvider,
+    principal: &str,
+    app: &str,
+) -> std::result::Result<Vec<u8>, &'static str> {
+    let nodes = read_v2_frame_for_home(provider, Some(principal), app).unwrap_or_default();
     let nodes: Vec<serde_json::Value> = nodes
-        .unwrap_or_default()
         .into_iter()
         .map(|node| match node {
             elastos_compute::providers::bus2_ui::FrameNode::Text(text) => {
@@ -180,7 +167,12 @@ pub fn home_v2_frame_body(principal: &str, app: &str) -> serde_json::Value {
             }
         })
         .collect();
-    serde_json::json!({ "nodes": nodes })
+    let bytes = serde_json::to_vec(&serde_json::json!({ "nodes": nodes }))
+        .map_err(|_| "frame answer is malformed")?;
+    if bytes.len() > V2_FRAME_ANSWER_MAX {
+        return Err("frame answer is over the bound");
+    }
+    Ok(bytes)
 }
 
 /// The public v1 component admission check for capsule kit host tests (kit

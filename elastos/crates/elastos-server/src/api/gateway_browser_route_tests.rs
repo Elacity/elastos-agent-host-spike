@@ -9886,6 +9886,7 @@ async fn test_browser_operator_admission_separate_session_quota_replay_and_hando
         State(crate::api::handlers::attach::AttachState {
             session_registry: sessions.clone(),
             secret: "private-test-attach".into(),
+            shells: crate::api::handlers::attach::AttachShells::default(),
         }),
         Json(crate::api::handlers::attach::AttachRequest {
             secret: "private-test-attach".into(),

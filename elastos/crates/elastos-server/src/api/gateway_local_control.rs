@@ -137,6 +137,7 @@ fn gateway_local_control_router(
         .with_state(handlers::attach::AttachState {
             session_registry: session_registry.clone(),
             secret: attach_secret,
+            shells: handlers::attach::AttachShells::default(),
         });
     let peer = Router::new()
         .route("/api/provider/peer/get_ticket", post(peer_get_ticket))

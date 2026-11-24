@@ -76,8 +76,11 @@ async fn home_test_get_json_without_origin(
     (status, payload)
 }
 
+#[cfg(unix)]
 #[tokio::test]
-async fn home_frame_is_only_the_presenting_session() {
+async fn home_frame_comes_from_the_managed_runtime() {
+    use elastos_compute::ComputeProvider;
+
     let dir = tempfile::tempdir().unwrap();
     let owner = passkey_authority(dir.path());
     let other = passkey_authority_with_name_role_credential(
@@ -86,8 +89,12 @@ async fn home_frame_is_only_the_presenting_session() {
         crate::auth::RuntimePrincipalRole::Admin,
         "other-home-frame",
     );
+    let guest = passkey_authority_with_name_role(
+        dir.path(),
+        Some("guest"),
+        crate::auth::RuntimePrincipalRole::Guest,
+    );
     let provider = Arc::new(elastos_compute::providers::ComponentProvider::new());
-    crate::component::register_home_v2_guests(&provider);
     provider.testing_store_v2_frame(
         "app-frame",
         Some(owner.principal_id.as_str()),
@@ -101,30 +108,68 @@ async fn home_frame_is_only_the_presenting_session() {
             },
         ],
     );
+    let storage = elastos_storage::providers::LocalFSProvider::new(dir.path().join("storage"));
+    let runtime = Arc::new(crate::runtime::Runtime::with_providers_and_component(
+        Arc::new(storage.await.unwrap()),
+        Vec::new(),
+        Some(provider.clone()),
+    ));
+    let secret = "frame-attach";
+    let (api_url, runtime_task) = spawn_frame_runtime(runtime, secret).await;
+    write_frame_coords(dir.path(), &api_url, secret);
     let app = gateway_router(test_state(dir.path()));
-    let (status, body) = frame_body(&app, &owner.home_token).await;
+
+    let (status, body) = frame_body(&app, &owner.home_token, "app=app-frame").await;
     assert_eq!(status, StatusCode::OK, "{body}");
     let owner_frame: serde_json::Value = serde_json::from_str(&body).unwrap();
     assert_eq!(owner_frame["nodes"][0]["text"], "<script>alert(1)</script>");
     assert_eq!(owner_frame["nodes"][1]["resource"], "localhost://photo");
     assert!(owner_frame.get("grant").is_none());
 
-    let (other_status, other_body) = frame_body(&app, &other.home_token).await;
+    let (other_status, other_body) = frame_body(&app, &other.home_token, "app=app-frame").await;
     assert_eq!(other_status, StatusCode::OK, "{other_body}");
-    let other_frame: serde_json::Value = serde_json::from_str(&other_body).unwrap();
     assert_eq!(
-        other_frame["nodes"].as_array().map(Vec::len),
+        serde_json::from_str::<serde_json::Value>(&other_body).unwrap()["nodes"]
+            .as_array()
+            .map(Vec::len),
         Some(0),
         "another person's session gets nothing"
     );
 
+    let (ignored_status, ignored) = frame_body(
+        &app,
+        &owner.home_token,
+        &format!("app=app-frame&principal={}", other.principal_id),
+    )
+    .await;
+    assert_eq!(ignored_status, StatusCode::OK, "{ignored}");
+    assert!(
+        ignored.contains("<script>alert(1)</script>"),
+        "a query principal is ignored, got {ignored}"
+    );
+
+    let (guest_status, guest_body) = frame_body(&app, &guest.home_token, "app=app-frame").await;
+    assert_eq!(guest_status, StatusCode::FORBIDDEN, "{guest_body}");
+    assert!(
+        guest_body.contains("guest session"),
+        "a guest token can't read the route, got {guest_body}"
+    );
+
+    let refusal = runtime_frame_refusal(&api_url, secret).await;
+    assert!(refusal.contains("no session"), "{refusal}");
+    assert!(refusal.contains("guest session"), "{refusal}");
+    assert!(refusal.contains("Home app session"), "{refusal}");
+
     let _ = provider
         .deliver_grant_revoked(&elastos_common::CapsuleId::new("app-frame"), "grant-frame")
         .await;
-    let (_, revoked) = frame_body(&app, &owner.home_token).await;
-    assert!(
-        !revoked.contains("localhost://photo"),
-        "a revoked image is gone"
+    let (_, revoked) = frame_body(&app, &owner.home_token, "app=app-frame").await;
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&revoked).unwrap()["nodes"]
+            .as_array()
+            .map(Vec::len),
+        Some(0),
+        "revoke clears the panel, got {revoked}"
     );
 
     provider.testing_store_v2_frame(
@@ -142,30 +187,193 @@ async fn home_frame_is_only_the_presenting_session() {
         .unwrap(),
     )
     .unwrap();
-    let handle = elastos_compute::CapsuleHandle {
-        id: elastos_common::CapsuleId::new("app-frame"),
-        manifest,
-        args: Vec::new(),
-    };
-    elastos_compute::ComputeProvider::stop(provider.as_ref(), &handle)
-        .await
-        .unwrap();
-    let (stopped_status, stopped) = frame_body(&app, &owner.home_token).await;
-    assert_eq!(stopped_status, StatusCode::OK, "{stopped}");
-    let stopped_frame: serde_json::Value = serde_json::from_str(&stopped).unwrap();
+    ComputeProvider::stop(
+        provider.as_ref(),
+        &elastos_compute::CapsuleHandle {
+            id: elastos_common::CapsuleId::new("app-frame"),
+            manifest,
+            args: Vec::new(),
+        },
+    )
+    .await
+    .unwrap();
+    let (_, stopped) = frame_body(&app, &owner.home_token, "app=app-frame").await;
     assert_eq!(
-        stopped_frame["nodes"].as_array().map(Vec::len),
+        serde_json::from_str::<serde_json::Value>(&stopped).unwrap()["nodes"]
+            .as_array()
+            .map(Vec::len),
         Some(0),
-        "a stopped app gets nothing"
+        "stop clears the panel, got {stopped}"
+    );
+
+    provider.testing_store_v2_frame(
+        "app-frame",
+        Some(owner.principal_id.as_str()),
+        vec![elastos_compute::providers::bus2_ui::FrameNode::Text(
+            "x".repeat(crate::component::V2_FRAME_ANSWER_MAX),
+        )],
+    );
+    let (_, huge) = frame_body(&app, &owner.home_token, "app=app-frame").await;
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&huge).unwrap()["nodes"]
+            .as_array()
+            .map(Vec::len),
+        Some(0),
+        "an answer over the bound stays empty, got {} bytes",
+        huge.len()
+    );
+
+    let bad_url = spawn_bad_frame_runtime().await;
+    write_frame_coords(dir.path(), &bad_url, "bad-attach");
+    let (_, malformed) = frame_body(&app, &owner.home_token, "app=app-frame").await;
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&malformed).unwrap()["nodes"]
+            .as_array()
+            .map(Vec::len),
+        Some(0),
+        "a malformed answer stays empty, got {malformed}"
+    );
+
+    runtime_task.abort();
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    write_frame_coords(dir.path(), &api_url, secret);
+    let (_, down) = frame_body(&app, &owner.home_token, "app=app-frame").await;
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&down).unwrap()["nodes"]
+            .as_array()
+            .map(Vec::len),
+        Some(0),
+        "a runtime that is down clears the panel, got {down}"
     );
 }
 
-async fn frame_body(app: &axum::Router, token: &str) -> (StatusCode, String) {
+#[cfg(unix)]
+fn write_frame_coords(dir: &std::path::Path, api_url: &str, secret: &str) {
+    let coords = json!({
+        "api_url": api_url,
+        "attach_secret": secret,
+        "pid": std::process::id(),
+        "runtime_kind": crate::runtime_control::RUNTIME_KIND_OPERATOR,
+        "binary_sha256": "",
+        "policy_sha256": "",
+    });
+    std::fs::write(
+        crate::runtime_control::home_runtime_coord_path(dir),
+        serde_json::to_vec_pretty(&coords).unwrap(),
+    )
+    .unwrap();
+}
+
+#[cfg(unix)]
+async fn spawn_frame_runtime(
+    runtime: Arc<crate::runtime::Runtime>,
+    secret: &str,
+) -> (String, tokio::task::JoinHandle<()>) {
+    let shells = crate::api::handlers::attach::AttachShells::default();
+    let sessions = Arc::new(elastos_runtime::session::SessionRegistry::new(Arc::new(
+        elastos_runtime::primitives::audit::AuditLog::new(),
+    )));
+    let attach = Router::new()
+        .route(
+            "/api/auth/attach",
+            post(crate::api::handlers::attach::attach),
+        )
+        .with_state(crate::api::handlers::attach::AttachState {
+            session_registry: sessions.clone(),
+            secret: secret.to_string(),
+            shells: shells.clone(),
+        });
+    let app = Router::new()
+        .route("/api/health", get(crate::api::routes::health))
+        .merge(attach)
+        .merge(
+            Router::new()
+                .route(
+                    "/api/residents/frame",
+                    get(crate::api::routes::resident_frame),
+                )
+                .layer(Extension(runtime))
+                .layer(Extension(sessions))
+                .layer(Extension(shells)),
+        );
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let api_url = format!("http://{}", listener.local_addr().unwrap());
+    let task = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    (api_url, task)
+}
+
+#[cfg(unix)]
+async fn spawn_bad_frame_runtime() -> String {
+    let app = Router::new()
+        .route("/api/health", get(|| async { "ok" }))
+        .route(
+            "/api/auth/attach",
+            post(|| async { Json(json!({ "token": "shell-token" })) }),
+        )
+        .route("/api/residents/frame", get(|| async { "{" }));
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let api_url = format!("http://{}", listener.local_addr().unwrap());
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    api_url
+}
+
+#[cfg(unix)]
+async fn runtime_frame_refusal(api_url: &str, secret: &str) -> String {
+    let client = reqwest::Client::new();
+    let url = format!("{api_url}/api/residents/frame?app=app-frame&principal=person");
+    let nobody = client.get(&url).send().await.unwrap();
+    let nobody_body = nobody.text().await.unwrap();
+    let guest = client
+        .post(format!("{api_url}/api/auth/attach"))
+        .json(&json!({ "secret": secret, "scope": "client" }))
+        .send()
+        .await
+        .unwrap()
+        .json::<serde_json::Value>()
+        .await
+        .unwrap();
+    let guest_body = client
+        .get(&url)
+        .header(
+            AUTHORIZATION,
+            format!("Bearer {}", guest["token"].as_str().unwrap()),
+        )
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    let home_app = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(
+        serde_json::to_vec(&json!({
+            "payload": { "schema": "elastos.home.launch-token/v4" },
+            "signature": "not-a-shell",
+            "signer_did": "did:key:z"
+        }))
+        .unwrap(),
+    );
+    let home_body = client
+        .get(&url)
+        .header(AUTHORIZATION, format!("Bearer {home_app}"))
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    format!("{nobody_body}\n{guest_body}\n{home_body}")
+}
+
+async fn frame_body(app: &axum::Router, token: &str, query: &str) -> (StatusCode, String) {
     let response = app
         .clone()
         .oneshot(
             test_browser_request("localhost:61180", "http://localhost:61180")
-                .uri("/api/apps/home/frame?app=app-frame")
+                .uri(format!("/api/apps/home/frame?{query}"))
                 .header("x-elastos-home-token", token)
                 .body(Body::empty())
                 .unwrap(),

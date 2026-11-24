@@ -9,12 +9,35 @@ use std::sync::Arc;
 use axum::{extract::State, http::StatusCode, response::IntoResponse, Json};
 use elastos_runtime::session::{SessionRegistry, SessionType};
 
+/// Shell tokens minted by attach with the secret. A shell created another way
+/// is not in this set.
+#[derive(Clone, Default)]
+pub struct AttachShells {
+    tokens: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
+}
+
+impl AttachShells {
+    pub fn note(&self, token: &str) {
+        if let Ok(mut tokens) = self.tokens.lock() {
+            tokens.insert(token.to_string());
+        }
+    }
+
+    pub fn holds(&self, token: &str) -> bool {
+        self.tokens
+            .lock()
+            .map(|tokens| tokens.contains(token))
+            .unwrap_or(false)
+    }
+}
+
 /// Shared state for the attach endpoint.
 #[derive(Clone)]
 pub struct AttachState {
     pub session_registry: Arc<SessionRegistry>,
     /// The expected secret (from runtime-coords.json).
     pub secret: String,
+    pub shells: AttachShells,
 }
 
 #[derive(serde::Deserialize)]
@@ -62,6 +85,9 @@ pub async fn attach(
         .session_registry
         .create_session(session_type, None)
         .await;
+    if session.is_shell() {
+        state.shells.note(&session.token);
+    }
 
     (
         StatusCode::OK,
@@ -84,6 +110,7 @@ mod tests {
         let state = AttachState {
             session_registry: Arc::new(SessionRegistry::new(Arc::new(AuditLog::new()))),
             secret: secret.to_string(),
+            shells: AttachShells::default(),
         };
         Router::new()
             .route("/api/auth/attach", post(attach))
@@ -163,6 +190,7 @@ mod tests {
         let attach_state = AttachState {
             session_registry: registry.clone(),
             secret: "the-secret".to_string(),
+            shells: AttachShells::default(),
         };
         let attach_routes = Router::new()
             .route("/api/auth/attach", post(attach))

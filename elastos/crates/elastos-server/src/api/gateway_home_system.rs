@@ -1430,15 +1430,103 @@ pub(super) async fn home_v2_frame(
         Ok(context) => context,
         Err(err) => return home_error_response(err),
     };
-    let app = query.app.unwrap_or_default();
-    if app.is_empty() || app.len() > 128 {
-        return Json(serde_json::json!({ "nodes": [] })).into_response();
+    if home_frame_guest(&state.data_dir, &context) {
+        return (StatusCode::FORBIDDEN, "guest session").into_response();
     }
-    Json(crate::component::home_v2_frame_body(
-        context.principal_id(),
-        &app,
-    ))
-    .into_response()
+    let app = query.app.unwrap_or_default();
+    let nodes = if app.is_empty() || app.len() > 128 {
+        Vec::new()
+    } else {
+        managed_frame_nodes(&state.data_dir, context.principal_id(), &app).await
+    };
+    Json(serde_json::json!({ "nodes": nodes })).into_response()
+}
+
+fn home_frame_guest(data_dir: &std::path::Path, context: &HomeLaunchTokenContext) -> bool {
+    context
+        .proof_binding_id()
+        .and_then(|id| crate::auth::load_principal_for_proof_binding(data_dir, id).ok())
+        .is_some_and(|principal| principal.role == crate::auth::RuntimePrincipalRole::Guest)
+}
+
+/// The managed Runtime's stored nodes for this session's principal. A down
+/// Runtime, a stopped app, or a bad answer is an empty panel.
+async fn managed_frame_nodes(
+    data_dir: &std::path::Path,
+    principal: &str,
+    app: &str,
+) -> Vec<serde_json::Value> {
+    let Some(coords) = load_live_runtime_coords(data_dir).await else {
+        return Vec::new();
+    };
+    let Ok(client) = reqwest::Client::builder()
+        .timeout(Duration::from_secs(2))
+        .build()
+    else {
+        return Vec::new();
+    };
+    let Ok(shell) = home_attach_shell(&client, &coords.api_url, &coords.attach_secret).await else {
+        return Vec::new();
+    };
+    let Ok(response) = client
+        .get(format!(
+            "{}/api/residents/frame",
+            coords.api_url.trim_end_matches('/')
+        ))
+        .header(AUTHORIZATION, format!("Bearer {shell}"))
+        .query(&[("app", app), ("principal", principal)])
+        .send()
+        .await
+    else {
+        return Vec::new();
+    };
+    if !response.status().is_success() {
+        return Vec::new();
+    }
+    let Ok(bytes) = response.bytes().await else {
+        return Vec::new();
+    };
+    accepted_frame_nodes(&bytes)
+}
+
+fn accepted_frame_nodes(bytes: &[u8]) -> Vec<serde_json::Value> {
+    if bytes.len() > crate::component::V2_FRAME_ANSWER_MAX {
+        return Vec::new();
+    }
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(bytes) else {
+        return Vec::new();
+    };
+    let Some(object) = value.as_object() else {
+        return Vec::new();
+    };
+    if object.len() != 1 {
+        return Vec::new();
+    }
+    let Some(nodes) = object.get("nodes").and_then(|node| node.as_array()) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for node in nodes {
+        let Some(node) = node.as_object() else {
+            return Vec::new();
+        };
+        let clean = match node.get("kind").and_then(|kind| kind.as_str()) {
+            Some("text") if node.len() == 2 => node
+                .get("text")
+                .and_then(|text| text.as_str())
+                .map(|text| serde_json::json!({ "kind": "text", "text": text })),
+            Some("image") if node.len() == 2 => node
+                .get("resource")
+                .and_then(|resource| resource.as_str())
+                .map(|resource| serde_json::json!({ "kind": "image", "resource": resource })),
+            _ => None,
+        };
+        let Some(clean) = clean else {
+            return Vec::new();
+        };
+        out.push(clean);
+    }
+    out
 }
 
 #[cfg(unix)]
