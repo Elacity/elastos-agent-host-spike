@@ -47,15 +47,9 @@ type V2BusError = v2::elastos::bus::types::BusError;
 type V2Result<T> = std::result::Result<T, V2BusError>;
 
 const COMPONENT_FUEL: u64 = 100_000_000;
-// The resident v2 run uses epoch ticks as its execution backstop. Keep fuel
-// above that window even for cheap instructions; v1 keeps its original fuel.
-// Each slice yields the executor. Wasmtime 48 refills the reserve, not the
-// count already running, so the next slice takes the new fuel.
-const V2_FUEL: u64 = 1_000_000_000_000;
+/// Yield the executor this often so one busy guest does not hold the thread.
+/// The token bucket, not this slice, is the fuel bound.
 const V2_FUEL_SLICE: u64 = 10_000_000;
-/// One slice of the execution bound. Fuel under a slice adds up, including
-/// a wake of a few dozen. The bound is this many slices times the tick budget.
-const V2_TICK_FUEL: u64 = 100_000;
 const COMPONENT_MEMORY_SIZE: usize = 128 * 1024 * 1024;
 /// The largest component file the Runtime reads or compiles. The largest
 /// component in this repository is under 1 MiB.
@@ -78,6 +72,12 @@ const COMPONENT_RUN_DEADLINE: Duration = Duration::from_secs(10);
 const V2_STOP_GRACE: Duration = Duration::from_millis(200);
 #[cfg(test)]
 const V2_STOP_GRACE: Duration = Duration::from_millis(20);
+/// Every blocking bridge call and the invoke trailer. The guest thread waits
+/// this long, then the call is named a timeout. A stop joins within this too.
+#[cfg(not(test))]
+const V2_HOST_DEADLINE: Duration = Duration::from_secs(2);
+#[cfg(test)]
+const V2_HOST_DEADLINE: Duration = Duration::from_secs(2);
 #[cfg(not(test))]
 const V2_EPOCH_TICKS: u64 = 1_000;
 #[cfg(test)]
@@ -224,8 +224,12 @@ struct ComponentState {
     /// Set by the epoch callback when it interrupts *because* of a stop
     /// request, so a trap is named `stopped` only when the stop caused it.
     ended_by_stop: bool,
-    /// Set when spent fuel under one slice adds up to the tick budget.
-    execution_bound: bool,
+    /// The v2 activation's cancel flag. v1 leaves this unset.
+    cancel_requested: Arc<AtomicBool>,
+    /// The v2 token bucket. v1 has none.
+    fuel_bucket: Option<Arc<Mutex<super::fuel_bucket::FuelBucket>>>,
+    /// v2's own limiter. v1 keeps [`ComponentState::limits`].
+    guest_memory: super::fuel_bucket::GuestMemory,
     grants: Arc<Mutex<crate::providers::bus2_ui::GrantBook>>,
     /// The one presented frame, keyed by capsule id, with the principal who
     /// presented it. A second present replaces it.
@@ -326,23 +330,40 @@ impl ComponentProvider {
         );
     }
 
-    /// Delivers `grant-revoked` on the guest's event stream. The next present
-    /// of that grant is denied. This uses the stream the guest is already reading.
-    /// A host frame whose image names the grant is dropped here, before the guest reads.
+    /// Revokes `grant` in the guest's book and drops a frame that names it,
+    /// then tells the guest. The book changes here, not when the guest polls.
+    /// Lock order is the book, then the frames.
     pub async fn deliver_grant_revoked(&self, id: &CapsuleId, grant: &str) -> Result<()> {
-        drop_frame_naming(&self.frames, &id.0, grant);
-        let sender = self
-            .instances
-            .read()
-            .await
-            .get(id)
-            .and_then(|instance| instance.events.clone())
-            .ok_or_else(|| ElastosError::CapsuleNotFound(id.0.clone()))?;
-        sender
-            .send(v2::elastos::bus::types::Event::GrantRevoked(
-                grant.to_string(),
-            ))
-            .map_err(|_| ElastosError::Compute("the guest is not reading events".into()))?;
+        let found = {
+            let instances = self.instances.read().await;
+            instances
+                .get(id)
+                .map(|instance| (instance.grants.clone(), instance.events.clone()))
+        };
+        let Some((book, sender)) = found else {
+            // A stored frame can outlive the guest. Drop it even when the
+            // book is already gone. There is no book to lock.
+            drop_frame_naming(&self.frames, &id.0, grant);
+            tracing::warn!(capsule_id = %id, "grant revoke delivery had no guest");
+            return Err(ElastosError::CapsuleNotFound(id.0.clone()));
+        };
+        {
+            let mut book = book.lock().expect("grant book");
+            book.revoke(grant);
+            drop_frame_naming(&self.frames, &id.0, grant);
+        }
+        let Some(sender) = sender else {
+            tracing::warn!(capsule_id = %id, "grant revoke delivery had no event stream");
+            return Ok(());
+        };
+        if let Err(error) = sender.send(v2::elastos::bus::types::Event::GrantRevoked(
+            grant.to_string(),
+        )) {
+            tracing::warn!(%error, capsule_id = %id, "grant revoke delivery");
+            return Err(ElastosError::Compute(
+                "the guest is not reading events".into(),
+            ));
+        }
         Ok(())
     }
 
@@ -372,11 +393,41 @@ impl ComponentProvider {
     /// and component it took out of the entry; its own removal then finds no
     /// entry to take.
     pub async fn forget_instance(&self, capsule_id: &CapsuleId) {
-        if let Some(instance) = self.instances.write().await.remove(capsule_id) {
+        let (task, worker, cancel) = {
+            let mut instances = self.instances.write().await;
+            let Some(instance) = instances.get_mut(capsule_id) else {
+                drop(instances);
+                self.frames.lock().expect("frames").remove(&capsule_id.0);
+                self.clear_bridge_principal(capsule_id).await;
+                return;
+            };
             instance.grants.lock().expect("grant book").clear();
-        }
+            instance.stop_requested.store(true, Ordering::Release);
+            drop(instance.events.take());
+            let task = instance.task.take();
+            let worker = instance.worker.take();
+            let cancel = instance.cancel_requested.clone();
+            if task.is_none() && worker.is_none() {
+                instances.remove(capsule_id);
+            } else {
+                instance.status = CapsuleStatus::Stopping;
+            }
+            (task, worker, cancel)
+        };
         self.frames.lock().expect("frames").remove(&capsule_id.0);
         self.clear_bridge_principal(capsule_id).await;
+        if task.is_none() && worker.is_none() {
+            return;
+        }
+        let id = capsule_id.clone();
+        let joined = tokio::task::spawn_blocking(move || join_v2(task, worker, cancel))
+            .await
+            .unwrap_or(false);
+        if joined {
+            self.instances.write().await.remove(&id);
+        } else {
+            tracing::error!(capsule_id = %id, "forget left a guest thread running");
+        }
     }
 
     /// Sets the fuel a v2 resident starts with. A caller does this before start.
@@ -585,7 +636,7 @@ impl ComponentProvider {
                 sealed,
                 stop_requested: Arc::new(AtomicBool::new(false)),
                 fuel: COMPONENT_FUEL,
-                v2_fuel: V2_FUEL,
+                v2_fuel: super::fuel_bucket::V2_BUCKET_CAPACITY,
                 run_deadline: COMPONENT_RUN_DEADLINE,
                 events: None,
                 cancel_requested: Arc::new(AtomicBool::new(false)),
@@ -627,13 +678,7 @@ impl ComponentProvider {
         let endings = self.endings.clone();
         let frames = self.frames.clone();
         let mut entries = self.instances.write().await;
-        let running = entries
-            .values()
-            .filter(|item| {
-                item.status == CapsuleStatus::Running
-                    && item.manifest.bus_contract.as_deref() == Some(ELASTOS_BUS_V2_CONTRACT)
-            })
-            .count();
+        let running = entries.values().filter(|item| v2_slot(item)).count();
         if running >= V2_RESIDENT_CAP {
             return Err(ElastosError::Compute(format!(
                 "v2 resident cap {V2_RESIDENT_CAP}"
@@ -653,6 +698,8 @@ impl ComponentProvider {
             grants: instance.grants.clone(),
             frames,
             reads,
+            stop_requested: instance.stop_requested.clone(),
+            cancel_requested: instance.cancel_requested.clone(),
             ..ComponentState::new(hostcall, handle.id.0.clone(), principal_id)
         };
         let (engine, component) = (instance.engine.clone(), instance.component.clone());
@@ -673,10 +720,6 @@ impl ComponentProvider {
         let panic_now = self.panic_next_v2.swap(false, Ordering::AcqRel);
         #[cfg(not(test))]
         let panic_now = false;
-        instance.status = CapsuleStatus::Running;
-        instance.events = Some(sender);
-        drop(entries);
-
         let (abort_tx, abort_rx) = tokio::sync::oneshot::channel();
         #[cfg(test)]
         let threads_live = self.threads_live.clone();
@@ -729,6 +772,7 @@ impl ComponentProvider {
         let worker = match spawned_worker {
             Ok(worker) => worker,
             Err(err) => {
+                drop(entries);
                 if let Some(instance) = self.instances.write().await.remove(&handle.id) {
                     instance.grants.lock().expect("grant book").clear();
                 }
@@ -736,6 +780,20 @@ impl ComponentProvider {
                 return Err(ElastosError::Compute(format!("v2 guest thread: {err}")));
             }
         };
+        {
+            let Some(instance) = entries.get_mut(&handle.id) else {
+                drop(entries);
+                drop(sender);
+                let _ = worker.join();
+                return Err(ElastosError::Compute(
+                    "v2 guest was removed before its thread was stored".into(),
+                ));
+            };
+            instance.status = CapsuleStatus::Running;
+            instance.events = Some(sender);
+            instance.worker = Some(worker);
+        }
+        drop(entries);
 
         let id_for_end = handle.id.clone();
         let frames_for_end = self.frames.clone();
@@ -771,10 +829,8 @@ impl ComponentProvider {
             let mut entries = self.instances.write().await;
             if let Some(instance) = entries.get_mut(&handle.id) {
                 instance.task = Some(abort);
-                instance.worker = Some(worker);
             } else {
                 abort.abort();
-                let _ = worker.join();
             }
         }
         match ready_rx.await {
@@ -984,58 +1040,43 @@ impl ComponentProvider {
     async fn run_v2(
         engine: Engine,
         component: Component,
-        state: ComponentState,
+        mut state: ComponentState,
         receiver: mpsc::UnboundedReceiver<v2::elastos::bus::types::Event>,
         control: V2RunControl,
         ready: tokio::sync::oneshot::Sender<Result<()>>,
     ) -> Result<&'static str> {
+        let bucket = Arc::new(Mutex::new(super::fuel_bucket::FuelBucket::full(
+            control.fuel,
+            Instant::now(),
+        )));
+        state.fuel_bucket = Some(bucket.clone());
         let grants = state.grants.clone();
         let frames = state.frames.clone();
         let capsule_id = state.capsule_id.clone();
         let mut store = Store::new(&engine, state);
-        store.limiter(|state| &mut state.limits);
-        // Yield each slice. The tick refills the reserve the next slice reads.
-        let fuel = control.fuel;
+        store.limiter(|state| &mut state.guest_memory);
         store
             .fuel_async_yield_interval(Some(control.fuel_slice))
             .map_err(|err| run_error("v2 fuel slice", err))?;
         store
-            .set_fuel(fuel)
+            .set_fuel(control.fuel)
             .map_err(|err| run_error("v2 fuel", err))?;
-        // `set_fuel` does not always stick in this callback: the counter keeps
-        // falling, and the fall is the fuel just spent. A counter that sits
-        // or rises has taken the refill, so the distance from the full tank
-        // is the spend. Two equal burns then count, and a few dozen still add.
-        // The sum ends the run at `max_ticks` slices. One slice or more is a tick.
+        // Epochs are only the wall-clock backstop. A guest parked in a host
+        // wait does not spend a tick. Fuel is the bucket, settled at waits.
         store.set_epoch_deadline(1);
         let deadline_ticks = Arc::new(AtomicU64::new(0));
-        let nibbled = Arc::new(AtomicU64::new(0));
-        let last_remaining = Arc::new(AtomicU64::new(fuel));
         let cancel_requested = control.cancel_requested.clone();
         let max_ticks = control.max_ticks;
-        let nibble_limit = max_ticks.saturating_mul(V2_TICK_FUEL);
-        store.epoch_deadline_callback(move |mut context| {
+        store.epoch_deadline_callback(move |context| {
             if cancel_requested.load(Ordering::Acquire) {
                 return Ok(UpdateDeadline::Interrupt);
             }
-            let remaining = context.get_fuel()?;
-            let previous = last_remaining.swap(remaining, Ordering::AcqRel);
-            context.set_fuel(fuel)?;
-            let fell = previous.saturating_sub(remaining);
-            let spent = if fell > 0 {
-                fell
-            } else {
-                fuel.saturating_sub(remaining)
-            };
-            if spent > 0 && spent < V2_TICK_FUEL {
-                let sum = nibbled.fetch_add(spent, Ordering::AcqRel) + spent;
-                if sum >= nibble_limit {
-                    context.data_mut().execution_bound = true;
-                    return Ok(UpdateDeadline::Interrupt);
-                }
-                return Ok(UpdateDeadline::Continue(1));
-            }
-            if spent < V2_TICK_FUEL {
+            let parked = context
+                .data()
+                .fuel_bucket
+                .as_ref()
+                .is_some_and(|bucket| bucket.lock().expect("fuel").open);
+            if parked {
                 return Ok(UpdateDeadline::Continue(1));
             }
             Ok(
@@ -1065,6 +1106,7 @@ impl ComponentProvider {
                 grants,
                 frames,
                 capsule_id,
+                bucket,
                 #[cfg(test)]
                 control.pending_read.clone(),
             ),
@@ -1079,9 +1121,8 @@ impl ComponentProvider {
                     .await
             })
             .await;
-        let execution_bound = store.data().execution_bound;
         ran.map_err(|err| {
-            if execution_bound {
+            if out_of_fuel(&err) {
                 ElastosError::Compute(format!(
                     "V2 lifecycle run failed: (ending: {ENDING_EXECUTION_BOUND})"
                 ))
@@ -1104,6 +1145,7 @@ struct V2EventFeed(
     Arc<Mutex<crate::providers::bus2_ui::GrantBook>>,
     Arc<Mutex<HashMap<String, StoredFrame>>>,
     String,
+    Arc<Mutex<super::fuel_bucket::FuelBucket>>,
     #[cfg(test)] Arc<AtomicBool>,
 );
 
@@ -1114,21 +1156,36 @@ impl<D> StreamProducer<D> for V2EventFeed {
     fn poll_produce<'a>(
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
-        _store: StoreContextMut<'a, D>,
+        mut store: StoreContextMut<'a, D>,
         mut destination: Destination<'a, Self::Item, Self::Buffer>,
         finish: bool,
     ) -> Poll<wasmtime::Result<StreamResult>> {
+        // One read per suspension. A spurious wake leaves the loan alone.
+        // The wait itself ends when stop drops the sender, or when stop
+        // aborts the task after [`V2_STOP_GRACE`].
+        let _opened = charge_bucket(&self.4, &mut store);
         match self.0.poll_recv(cx) {
             Poll::Ready(Some(event)) => {
+                release_bucket(&self.4);
+                // Epochs that passed while the guest was parked are not ticks.
+                store.set_epoch_deadline(1);
                 note_delivered_event(&self.1, &self.2, &self.3, &event);
                 destination.set_buffer(Some(event));
                 Poll::Ready(Ok(StreamResult::Completed))
             }
-            Poll::Ready(None) => Poll::Ready(Ok(StreamResult::Dropped)),
-            Poll::Pending if finish => Poll::Ready(Ok(StreamResult::Cancelled)),
+            Poll::Ready(None) => {
+                release_bucket(&self.4);
+                store.set_epoch_deadline(1);
+                Poll::Ready(Ok(StreamResult::Dropped))
+            }
+            Poll::Pending if finish => {
+                release_bucket(&self.4);
+                store.set_epoch_deadline(1);
+                Poll::Ready(Ok(StreamResult::Cancelled))
+            }
             Poll::Pending => {
                 #[cfg(test)]
-                self.4.store(true, Ordering::Release);
+                self.5.store(true, Ordering::Release);
                 Poll::Pending
             }
         }
@@ -1154,6 +1211,147 @@ fn run_ending(stage: &str, err: wasmtime::Error, stopped: bool) -> String {
 
 fn run_error(stage: &str, err: wasmtime::Error) -> ElastosError {
     ElastosError::Compute(run_ending(stage, err, false))
+}
+
+fn out_of_fuel(err: &wasmtime::Error) -> bool {
+    err.chain()
+        .any(|link| matches!(link.downcast_ref::<Trap>(), Some(Trap::OutOfFuel)))
+}
+
+/// Sleeps the grace, then aborts and joins. `true` means the worker has ended.
+fn join_v2(
+    task: Option<tokio::task::AbortHandle>,
+    worker: Option<std::thread::JoinHandle<()>>,
+    cancel: Arc<AtomicBool>,
+) -> bool {
+    std::thread::sleep(V2_STOP_GRACE);
+    if let Some(task) = task {
+        if !task.is_finished() {
+            cancel.store(true, Ordering::Release);
+            task.abort();
+        }
+    }
+    let Some(worker) = worker else {
+        return true;
+    };
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    let started = std::thread::Builder::new()
+        .name("component-v2-join".into())
+        .spawn(move || {
+            let _ = worker.join();
+            let _ = done_tx.send(());
+        });
+    started.is_ok() && done_rx.recv_timeout(V2_HOST_DEADLINE).is_ok()
+}
+
+/// Charges the loan once. A bucket that is already parked is left unread.
+fn charge_bucket(
+    bucket: &Mutex<super::fuel_bucket::FuelBucket>,
+    store: &mut impl wasmtime::AsContextMut,
+) -> bool {
+    let mut bucket = bucket.lock().expect("fuel");
+    if bucket.open {
+        return false;
+    }
+    let remaining = store.as_context().get_fuel().unwrap_or(0);
+    let lend = bucket.settle(remaining, Instant::now()).unwrap_or(0);
+    drop(bucket);
+    let _ = store.as_context_mut().set_fuel(lend);
+    true
+}
+
+fn release_bucket(bucket: &Mutex<super::fuel_bucket::FuelBucket>) {
+    bucket.lock().expect("fuel").resume();
+}
+
+fn charge_access(access: &mut impl wasmtime::AsContextMut<Data = ComponentState>) -> bool {
+    let Some(bucket) = access.as_context().data().fuel_bucket.clone() else {
+        return false;
+    };
+    charge_bucket(&bucket, access)
+}
+
+fn release_access(access: &mut impl wasmtime::AsContextMut<Data = ComponentState>) {
+    if let Some(bucket) = access.as_context().data().fuel_bucket.clone() {
+        release_bucket(&bucket);
+    }
+    // The host call's wall time is not guest execution.
+    access.as_context_mut().set_epoch_deadline(1);
+}
+
+/// Runs the bridge on another thread. The guest waits at most `deadline`.
+fn bounded_hostcall(
+    hostcall: &BridgeHostcall,
+    line: &str,
+    capsule_id: &str,
+    principal: Option<&str>,
+    deadline: Duration,
+) -> std::result::Result<String, String> {
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    let hostcall = hostcall.clone();
+    let line = line.to_string();
+    let capsule_id = capsule_id.to_string();
+    let principal = principal.map(str::to_string);
+    let started = Instant::now();
+    std::thread::Builder::new()
+        .name("component-bridge".into())
+        .spawn(move || {
+            let result = if started.elapsed() > deadline {
+                Err("deadline".into())
+            } else {
+                hostcall(&line, &capsule_id, principal.as_deref())
+            };
+            let _ = done_tx.send(result);
+        })
+        .map_err(|err| err.to_string())?;
+    match done_rx.recv_timeout(deadline) {
+        Ok(result) => result,
+        Err(_) => Err("deadline".into()),
+    }
+}
+
+/// A v2 guest that is running, stopping, or still has a worker that has not
+/// joined. A stop/start loop cannot pass the cap by leaving the thread up.
+fn v2_slot(item: &ComponentActivation) -> bool {
+    item.manifest.bus_contract.as_deref() == Some(ELASTOS_BUS_V2_CONTRACT)
+        && (matches!(
+            item.status,
+            CapsuleStatus::Running | CapsuleStatus::Stopping
+        ) || item.worker.is_some()
+            || item.task.is_some())
+}
+
+impl Drop for ComponentProvider {
+    fn drop(&mut self) {
+        let Ok(mut instances) = self.instances.try_write() else {
+            tracing::error!("instance lock busy; a guest thread may still be running");
+            return;
+        };
+        let mut workers = Vec::new();
+        for (id, instance) in instances.iter_mut() {
+            instance.cancel_requested.store(true, Ordering::Release);
+            if let Some(task) = instance.task.take() {
+                task.abort();
+            }
+            if let Some(worker) = instance.worker.take() {
+                instance.status = CapsuleStatus::Stopping;
+                workers.push((id.clone(), worker));
+            }
+        }
+        drop(instances);
+        for (id, worker) in workers {
+            let (done_tx, done_rx) = std::sync::mpsc::channel();
+            let started = std::thread::Builder::new()
+                .name("component-v2-drop".into())
+                .spawn(move || {
+                    let _ = worker.join();
+                    let _ = done_tx.send(());
+                });
+            if started.is_err() || done_rx.recv_timeout(V2_HOST_DEADLINE).is_err() {
+                tracing::error!(capsule_id = %id, "drop left a guest thread running");
+            }
+        }
+    }
 }
 
 impl Default for ComponentProvider {
@@ -1212,46 +1410,41 @@ impl ComputeProvider for ComponentProvider {
             instance.stop_requested.store(true, Ordering::Release);
             return Ok(());
         }
-        // Dropping the sole sender closes the v2 events stream. The guest
-        // receives no separate stop event.
-        let mut task = None;
-        let mut cancel = None;
-        let mut worker = None;
-        if let Some(instance) = instances.get_mut(&handle.id) {
+        let id = handle.id.clone();
+        let (task, worker, cancel) =
             if instance.manifest.bus_contract.as_deref() == Some(ELASTOS_BUS_V2_CONTRACT) {
+                let instance = instances.get_mut(&id).expect("v2 entry");
                 instance.stop_requested.store(true, Ordering::Release);
                 instance.grants.lock().expect("grant book").clear();
-                task = instance.task.take();
-                cancel = Some(instance.cancel_requested.clone());
-                worker = instance.worker.take();
-            }
+                drop(instance.events.take());
+                let task = instance.task.take();
+                let worker = instance.worker.take();
+                let cancel = instance.cancel_requested.clone();
+                if task.is_some() || worker.is_some() {
+                    instance.status = CapsuleStatus::Stopping;
+                }
+                (task, worker, cancel)
+            } else {
+                (None, None, Arc::new(AtomicBool::new(false)))
+            };
+        self.frames.lock().expect("frames").remove(&id.0);
+        if task.is_none() && worker.is_none() {
+            instances.remove(&id);
+            return Ok(());
         }
-        self.frames.lock().expect("frames").remove(&handle.id.0);
-        instances.remove(&handle.id);
         drop(instances);
-        if task.is_some() || worker.is_some() {
-            let (done_tx, done_rx) = std::sync::mpsc::channel();
-            let cancel_requested = cancel.unwrap_or_else(|| Arc::new(AtomicBool::new(false)));
-            std::thread::Builder::new()
-                .name("component-v2-stop".into())
-                .spawn(move || {
-                    std::thread::sleep(V2_STOP_GRACE);
-                    if let Some(task) = task {
-                        if !task.is_finished() {
-                            cancel_requested.store(true, Ordering::Release);
-                            task.abort();
-                        }
-                    }
-                    if let Some(worker) = worker {
-                        let _ = worker.join();
-                    }
-                    let _ = done_tx.send(());
-                })
-                .map_err(|err| ElastosError::Compute(format!("v2 stop thread: {err}")))?;
-            let bound = V2_STOP_GRACE + Duration::from_millis(500);
-            let _ = tokio::task::spawn_blocking(move || done_rx.recv_timeout(bound)).await;
+        let joined = tokio::task::spawn_blocking(move || join_v2(task, worker, cancel))
+            .await
+            .map_err(|err| ElastosError::Compute(format!("v2 stop join: {err}")))?;
+        if joined {
+            self.instances.write().await.remove(&id);
+            Ok(())
+        } else {
+            tracing::error!(capsule_id = %id, "stop left a guest thread running");
+            Err(ElastosError::Compute(format!(
+                "guest {id} is still running"
+            )))
         }
-        Ok(())
     }
 
     async fn status(&self, handle: &CapsuleHandle) -> Result<CapsuleStatus> {
@@ -1377,8 +1570,10 @@ impl ComponentState {
             run_started: Instant::now(),
             in_bus: Duration::ZERO,
             stop_requested: Arc::new(AtomicBool::new(false)),
+            cancel_requested: Arc::new(AtomicBool::new(false)),
             ended_by_stop: false,
-            execution_bound: false,
+            fuel_bucket: None,
+            guest_memory: super::fuel_bucket::GuestMemory::default(),
             grants: Arc::new(Mutex::new(crate::providers::bus2_ui::GrantBook::default())),
             frames: Arc::new(Mutex::new(HashMap::new())),
             reads: super::bus2_stream::ReadBudget::new(),
@@ -1414,7 +1609,13 @@ impl ComponentState {
         let line = guest_bus::bridge_envelope_json(1, request)
             .map_err(|err| bus_error("internal", err.to_string()))?;
         let asked = Instant::now();
-        let raw = hostcall(&line, &self.capsule_id, self.principal_id.as_deref());
+        let raw = bounded_hostcall(
+            &hostcall,
+            &line,
+            &self.capsule_id,
+            self.principal_id.as_deref(),
+            V2_HOST_DEADLINE,
+        );
         self.in_bus += asked.elapsed();
         let raw = raw.map_err(|err| bus_error("internal", err))?;
         let envelope: ResponseEnvelope =
@@ -1452,6 +1653,9 @@ impl ComponentState {
             .ok_or_else(|| {
                 V2BusError::Denied("resource invoke requires a capability grant".into())
             })?;
+        if self.grants.lock().expect("grant book").blocks_read(&grant) {
+            return Err(V2BusError::Denied("the grant is closed".into()));
+        }
         let mut hold = super::bus2_stream::ReadHold::try_reserve(&self.reads, cap)
             .ok_or_else(|| V2BusError::Unavailable("the host read cap is already in use".into()))?;
         let resource = request.resource.clone();
@@ -1463,7 +1667,6 @@ impl ComponentState {
             )));
         }
         hold.shrink(bytes.len());
-        hold.arm();
         self.grants
             .lock()
             .expect("grant book")
@@ -1657,12 +1860,50 @@ impl v2::elastos::bus::identity::Host for ComponentState {
 
 impl v2::elastos::bus::clock::Host for ComponentState {
     fn now_ms(&mut self) -> u64 {
-        0
+        self.fuel_bucket
+            .as_ref()
+            .map(|bucket| bucket.lock().expect("fuel").now_ms())
+            .unwrap_or(0)
     }
 }
 
 impl v2::elastos::bus::clock::HostWithStore<ComponentState> for HasSelf<ComponentState> {
-    async fn sleep_until_ms(_: &wasmtime::component::Accessor<ComponentState, Self>, _: u64) {}
+    async fn sleep_until_ms(
+        accessor: &wasmtime::component::Accessor<ComponentState, Self>,
+        deadline_ms: u64,
+    ) {
+        let (wait, cancel, stop) = accessor.with(|mut access| {
+            let _opened = charge_access(&mut access);
+            let left = {
+                let state = access.get();
+                state
+                    .run_deadline
+                    .saturating_sub(state.run_started.elapsed().saturating_sub(state.in_bus))
+            };
+            let wait = access
+                .get()
+                .fuel_bucket
+                .clone()
+                .map(|bucket| bucket.lock().expect("fuel").sleep_for(deadline_ms, left))
+                .unwrap_or(Duration::ZERO);
+            let state = access.get();
+            (
+                wait,
+                state.cancel_requested.clone(),
+                state.stop_requested.clone(),
+            )
+        });
+        let mut left = wait;
+        while !left.is_zero() {
+            if cancel.load(Ordering::Acquire) || stop.load(Ordering::Acquire) {
+                break;
+            }
+            let slice = DEADLINE_TICK.min(left);
+            tokio::time::sleep(slice).await;
+            left = left.saturating_sub(slice);
+        }
+        accessor.with(|mut access| release_access(&mut access));
+    }
 }
 
 impl v2::elastos::bus::random::Host for ComponentState {
@@ -1690,14 +1931,19 @@ impl v2::elastos::bus::capabilities::HostWithStore<ComponentState> for HasSelf<C
     ) -> std::result::Result<v2::elastos::bus::types::Grant, v2::elastos::bus::types::BusError>
     {
         let decided = accessor.with(|mut access| {
-            elastos::bus::capabilities::Host::request(
+            let opened = charge_access(&mut access);
+            let result = elastos::bus::capabilities::Host::request(
                 access.get(),
                 elastos::bus::types::CapabilityRequest {
                     resource,
                     actions,
                     reason,
                 },
-            )
+            );
+            if opened {
+                release_access(&mut access);
+            }
+            result
         });
         match decided {
             Ok(grant) => Ok(v2::elastos::bus::types::Grant {
@@ -1730,7 +1976,14 @@ impl v2::elastos::bus::providers::HostWithStore<ComponentState> for HasSelf<Comp
             let _ = accessor.with(|mut access| body.close(&mut access));
         }
         let super::bus2_stream::PreparedRead { bytes, audit, hold } =
-            accessor.with(|mut access| access.get().windowed_read(&request, had_body))?;
+            accessor.with(|mut access| {
+                let opened = charge_access(&mut access);
+                let result = access.get().windowed_read(&request, had_body);
+                if opened {
+                    release_access(&mut access);
+                }
+                result
+            })?;
         let (tx, rx) = tokio::sync::oneshot::channel();
         accessor
             .with(|mut access| {
@@ -1739,9 +1992,11 @@ impl v2::elastos::bus::providers::HostWithStore<ComponentState> for HasSelf<Comp
                     super::bus2_stream::WindowRead::new(bytes, tx, hold),
                 )?;
                 let trailer = wasmtime::component::FutureReader::new(&mut access, async move {
-                    let ended = rx
-                        .await
-                        .unwrap_or_else(|_| Err("the provider ended without a result".into()));
+                    let ended = match tokio::time::timeout(V2_HOST_DEADLINE, rx).await {
+                        Ok(Ok(value)) => value,
+                        Ok(Err(_)) => Err("the provider ended without a result".into()),
+                        Err(_) => Err("deadline".into()),
+                    };
                     Ok::<_, wasmtime::Error>(ended.map_err(V2BusError::Invalid))
                 })?;
                 Ok::<_, wasmtime::Error>((
@@ -2178,122 +2433,207 @@ mod tests {
         provider.stop(&third).await.unwrap();
     }
 
-    /// Each event does a little work, under one tick. The total still ends the guest.
+    /// A stop keeps the slot until the worker joins, so a third start is refused
+    /// while the first guest is still inside its host wait.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn v2_nibbles_end_at_the_execution_bound() {
+    async fn v2_a_stopping_guest_still_occupies_the_cap() {
+        let provider = Arc::new(ComponentProvider::new());
+        let bytes = wat::parse_str(include_str!(
+            "../../../../tests/fixtures/components/v2-resident.wat"
+        ))
+        .unwrap();
+        let first = load_v2_fixture(&provider, bytes.clone()).await;
+        let second = load_v2_fixture(&provider, bytes.clone()).await;
+        let third = load_v2_fixture(&provider, bytes).await;
+        provider.start(&first).await.unwrap();
+        provider.start(&second).await.unwrap();
+        let stopping = {
+            let provider = provider.clone();
+            let first = first.clone();
+            tokio::spawn(async move { provider.stop(&first).await.unwrap() })
+        };
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if provider.status(&first).await.unwrap() == CapsuleStatus::Stopping {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("stop says stopping while the worker has not joined");
+        let err = provider.start(&third).await.unwrap_err().to_string();
+        assert!(err.contains("v2 resident cap"), "{err}");
+        stopping.await.unwrap();
+        provider.start(&third).await.unwrap();
+        provider.stop(&second).await.unwrap();
+        provider.stop(&third).await.unwrap();
+    }
+
+    /// Revoke, revoke-all, and activation end change the book before any poll.
+    #[tokio::test]
+    async fn v2_revoke_denies_present_and_read_before_the_guest_polls() {
         let provider = ComponentProvider::new();
-        let bytes = v2_variant(&[
-            (
-                "(func (export \"callback\") (param $event i32) (param $handle i32) (param $result i32) (result i32)\n      local.get $event i32.const 2 i32.eq",
-                "(func (export \"callback\") (param $event i32) (param $handle i32) (param $result i32) (result i32)\n      (local $i i32)\n      (loop $burn local.get $i i32.const 1 i32.add local.tee $i i32.const 8000 i32.lt_u br_if $burn)\n      local.get $event i32.const 2 i32.eq",
-            ),
-            (
-                "i32.const 0 i32.const 0 i32.const 0 i32.const 0 call $done\n        i32.const 0 return",
-                "call $next return",
-            ),
-        ]);
+        let bytes = wat::parse_str(include_str!(
+            "../../../../tests/fixtures/components/v2-resident.wat"
+        ))
+        .unwrap();
         let handle = load_v2_fixture(&provider, bytes).await;
-        provider
+        let book = provider
             .instances
-            .write()
+            .read()
             .await
-            .get_mut(&handle.id)
+            .get(&handle.id)
             .unwrap()
-            .test_max_ticks = 2;
-        provider.start(&handle).await.unwrap();
-        v2_pending_read(&provider, &handle).await;
-        for _ in 0..16 {
-            provider
-                .deliver_grant_revoked(&handle.id, "nibble")
-                .await
-                .unwrap();
-            tokio::time::sleep(Duration::from_millis(15)).await;
-            if provider.endings.read().await.contains_key(&handle.id) {
-                break;
-            }
-        }
-        let ending = tokio::time::timeout(Duration::from_secs(2), v2_ending(&provider, &handle))
+            .grants
+            .clone();
+        book.lock().unwrap().hold("g1", "file", "read");
+        book.lock().unwrap().hold("g2", "file", "read");
+        provider.frames.lock().unwrap().insert(
+            handle.id.0.clone(),
+            StoredFrame {
+                principal: None,
+                frame: crate::providers::bus2_ui::Frame {
+                    nodes: vec![crate::providers::bus2_ui::FrameNode::Image {
+                        grant: "g1".into(),
+                        resource: "file".into(),
+                    }],
+                },
+            },
+        );
+        provider
+            .deliver_grant_revoked(&handle.id, "g1")
             .await
-            .expect("nibbles must reach the execution bound");
+            .unwrap();
+        provider
+            .deliver_grant_revoked(&handle.id, "g2")
+            .await
+            .unwrap();
+        assert!(book.lock().unwrap().blocks_read("g1"));
+        assert!(book.lock().unwrap().blocks_read("g2"));
+        assert!(provider.frames.lock().unwrap().get(&handle.id.0).is_none());
+        let called = Arc::new(AtomicBool::new(false));
+        let seen = called.clone();
+        let mut state = ComponentState::new(
+            Some(Arc::new(move |_, _, _| {
+                seen.store(true, Ordering::Release);
+                Ok(String::new())
+            })),
+            handle.id.0.clone(),
+            None,
+        );
+        state.grants = book.clone();
+        let media = crate::providers::bus2_ui::UI_MEDIA_TYPE;
+        let present = crate::providers::bus2_ui::present_frame(
+            media,
+            br#"{"frame":[{"image":{"grant":"g1"}}]}"#,
+            &book.lock().unwrap(),
+        );
+        assert!(present.is_err(), "{present:?}");
+        let mut request = read_request(8);
+        request.grant = Some("g1".into());
+        let read = state.windowed_read(&request, false);
+        assert!(read.is_err(), "{read:?}");
         assert!(
-            ending.contains(ENDING_EXECUTION_BOUND),
-            "work under one tick still ends the guest, got {ending}"
+            !called.load(Ordering::Acquire),
+            "a closed grant must not reach the bridge"
         );
-        assert!(provider.threads_live.load(Ordering::Acquire) == 0);
+        book.lock().unwrap().clear();
+        assert!(book.lock().unwrap().blocks_read("later"));
+        let present = crate::providers::bus2_ui::present_frame(
+            media,
+            br#"{"frame":[{"text":"still"}]}"#,
+            &book.lock().unwrap(),
+        );
+        assert!(
+            present.is_err(),
+            "activation end closes present, got {present:?}"
+        );
     }
 
-    fn burn_resident(loop_wat: &str) -> Vec<u8> {
-        let head = format!(
-            "(func (export \"callback\") (param $event i32) (param $handle i32) (param $result i32) (result i32)\n      {loop_wat}\n      local.get $event i32.const 2 i32.eq"
-        );
-        v2_variant(&[
-            (
-                "(func (export \"callback\") (param $event i32) (param $handle i32) (param $result i32) (result i32)\n      local.get $event i32.const 2 i32.eq",
-                head.as_str(),
-            ),
-            (
-                "i32.const 0 i32.const 0 i32.const 0 i32.const 0 call $done\n        i32.const 0 return",
-                "call $next return",
-            ),
-        ])
-    }
-
-    /// One epoch's fuel is observed on a later wake. `max_ticks` is 1, so the
-    /// stated total is one slice. The guest must still be up after the first
-    /// wake and must end `execution-bound` once the burns add up.
-    async fn pump_burns(loop_wat: &str, events: usize) -> (bool, Option<String>) {
+    /// The shipped busy loop. Prints the burn rate and checks B and R against it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn v2_bucket_matches_two_seconds_of_the_shipped_busy_loop() {
+        const SAMPLE: u64 = 50_000_000;
         let provider = ComponentProvider::new();
-        let handle = load_v2_fixture(&provider, burn_resident(loop_wat)).await;
-        provider
-            .instances
-            .write()
-            .await
-            .get_mut(&handle.id)
-            .unwrap()
-            .test_max_ticks = 1;
-        provider.start(&handle).await.unwrap();
-        v2_pending_read(&provider, &handle).await;
-        let mut alive_after_first = false;
-        let mut ending = None;
-        for n in 1..=events {
-            let _ = provider.deliver_grant_revoked(&handle.id, "burn").await;
-            tokio::time::sleep(Duration::from_millis(12)).await;
-            if let Some(text) = provider.endings.read().await.get(&handle.id).cloned() {
-                ending = Some(text);
-                break;
-            }
-            if n == 1 {
-                alive_after_first = true;
-            }
+        let bytes = v2_variant(&[(
+            "call $new global.set $set\n      call $next)",
+            "call $new global.set $set\n      (loop $spin br $spin) i32.const 0)",
+        )]);
+        let handle = load_v2_fixture(&provider, bytes).await;
+        {
+            let mut entries = provider.instances.write().await;
+            let instance = entries.get_mut(&handle.id).unwrap();
+            instance.v2_fuel = SAMPLE;
+            instance.test_max_ticks = 1_000_000;
         }
-        (alive_after_first, ending)
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn v2_the_same_burn_each_epoch_ends_at_the_execution_bound() {
-        let (alive, ending) =
-            pump_burns("i32.const 0 i32.const 0 i32.const 600 memory.fill", 220).await;
-        let ending = ending.expect("the same burn every epoch must reach the stated total");
-        assert!(alive, "one epoch is under the stated total, got {ending}");
+        let started = Instant::now();
+        provider.start(&handle).await.unwrap();
+        let ending = tokio::time::timeout(Duration::from_secs(60), v2_ending(&provider, &handle))
+            .await
+            .expect("the busy loop ends")
+            .to_string();
+        let elapsed = started.elapsed().as_secs_f64();
         assert!(
             ending.contains(ENDING_EXECUTION_BOUND),
-            "equal burns end execution-bound at the stated total, got {ending}"
+            "{ending} after {elapsed:.3}s"
+        );
+        let rate = SAMPLE as f64 / elapsed;
+        let seconds = crate::providers::fuel_bucket::V2_BUCKET_CAPACITY as f64 / rate;
+        let refill = crate::providers::fuel_bucket::V2_BUCKET_REFILL_PER_SEC;
+        eprintln!("calibration fuel_per_second={rate:.0} bucket_seconds={seconds:.3} refill_per_second={refill}");
+        assert!(
+            (1.5..3.0).contains(&seconds),
+            "B should be about two seconds of this burn, got {seconds:.3}s at {rate:.0}/s"
+        );
+        assert!(
+            refill > 10_000,
+            "R must sit above a resident's per-wake burn"
+        );
+        assert!(
+            (refill as f64) < rate / 4.0,
+            "R must sit below a full burn ({rate:.0}/s)"
         );
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn v2_alternating_burns_end_at_the_execution_bound() {
-        let (alive, ending) = pump_burns(
-            "i32.const 900 i32.load i32.eqz if i32.const 900 i32.const 1 i32.store i32.const 0 i32.const 0 i32.const 400 memory.fill else i32.const 900 i32.const 0 i32.store i32.const 0 i32.const 0 i32.const 700 memory.fill end",
-            260,
+    #[test]
+    fn v2_four_memories_share_one_total() {
+        let engine = quiet_v2_engine();
+        let wasm = wat::parse_str(
+            r#"(module
+                (memory 1) (memory 1) (memory 1) (memory 1)
+                (func (export "grow") (param i32) (result i32)
+                    (memory.grow (local.get 0))))"#,
         )
-        .await;
-        let ending = ending.expect("alternating burns must reach the stated total");
-        assert!(alive, "one epoch is under the stated total, got {ending}");
-        assert!(
-            ending.contains(ENDING_EXECUTION_BOUND),
-            "alternating burns end execution-bound at the stated total, got {ending}"
+        .expect("four memories");
+        let module = wasmtime::Module::new(&engine, &wasm).expect("four memories");
+        let mut store = Store::new(
+            &engine,
+            crate::providers::fuel_bucket::GuestMemory::default(),
         );
+        store.limiter(|memory| memory);
+        store.set_epoch_deadline(1_000_000);
+        store.set_fuel(1_000_000).unwrap();
+        let instance = wasmtime::Instance::new(&mut store, &module, &[]).unwrap();
+        let grow = instance
+            .get_typed_func::<i32, i32>(&mut store, "grow")
+            .unwrap();
+        let grew = grow.call(&mut store, 2048).unwrap();
+        assert_eq!(
+            grew, -1,
+            "four memories cannot grow past the one guest total"
+        );
+    }
+
+    #[test]
+    fn a_bridge_call_ends_at_its_deadline() {
+        let slow: BridgeHostcall = Arc::new(|_, _, _| {
+            std::thread::sleep(Duration::from_secs(2));
+            Ok(String::new())
+        });
+        let err = bounded_hostcall(&slow, "", "capsule", None, Duration::from_millis(40))
+            .expect_err("the guest must unblock");
+        assert!(err.contains("deadline"), "{err}");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2325,7 +2665,8 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(15)).await;
             assert!(
                 !provider.endings.read().await.contains_key(&handle.id),
-                "an idle resident ended during the many epochs"
+                "an idle resident ended during the many epochs: {:?}",
+                provider.endings.read().await.get(&handle.id)
             );
         }
         provider.stop(&handle).await.unwrap();
@@ -2431,15 +2772,16 @@ mod tests {
         let provider = ComponentProvider::new();
         let bytes = v2_variant(&[(
             "call $new global.set $set\n      call $next)",
-            "call $new global.set $set\n      (loop $spin i32.const 0 i32.const 0 i32.const 65536 memory.fill br $spin) i32.const 0)",
+            "call $new global.set $set\n      (loop $spin br $spin) i32.const 0)",
         )]);
         let handle = load_v2_fixture(&provider, bytes).await;
         provider.start(&handle).await.unwrap();
+        let ending = tokio::time::timeout(Duration::from_secs(1), v2_ending(&provider, &handle))
+            .await
+            .expect("spin must reach its execution budget");
         assert!(
-            tokio::time::timeout(Duration::from_secs(1), v2_ending(&provider, &handle))
-                .await
-                .expect("spin must reach its execution budget")
-                .contains(ENDING_EPOCH_DEADLINE)
+            ending.contains(ENDING_EPOCH_DEADLINE),
+            "spin ending was {ending}"
         );
         assert!(provider.instances.read().await.is_empty());
     }
@@ -2511,7 +2853,7 @@ mod tests {
                 let ending = drive_v2_guest(
                     &engine_busy,
                     busy,
-                    V2_FUEL,
+                    crate::providers::fuel_bucket::V2_BUCKET_CAPACITY,
                     V2_FUEL_SLICE,
                     BUSY_TICKS,
                     false,
@@ -2526,7 +2868,7 @@ mod tests {
                 let ending = drive_v2_guest(
                     &engine_short,
                     short,
-                    V2_FUEL,
+                    crate::providers::fuel_bucket::V2_BUCKET_CAPACITY,
                     V2_FUEL_SLICE,
                     BUSY_TICKS * 4,
                     true,
@@ -2986,40 +3328,34 @@ mod tests {
         drop(held);
     }
 
-    /// A guest that keeps the capped read and never pulls a chunk must not
-    /// hold the cap past the host's bound. The next guest then reads.
+    /// Eight slow fetches stay counted. Time does not free a live fetch.
+    /// A ninth is refused. Dropping one lets the next reserve.
     #[test]
-    fn v2_a_guest_that_never_drains_frees_the_read_cap() {
+    fn eight_slow_fetches_stay_inside_the_read_cap() {
         let host = crate::providers::bus2_stream::HOST_MAX_READ_BYTES;
+        let each = host / 8;
         let calls = Arc::new(Mutex::new(Vec::new()));
         let reads = crate::providers::bus2_stream::ReadBudget::new();
-        let mut first = state_on(&reads, vec![3u8; host], calls.clone());
-        let prepared = first
-            .windowed_read(&read_request(host as u64), false)
-            .expect("the first guest takes the cap");
-        std::thread::sleep(
-            crate::providers::bus2_stream::READ_HOLD_LIMIT + std::time::Duration::from_millis(50),
-        );
-        let mut second = state_on(&reads, vec![5u8; host], calls.clone());
-        let again = second
-            .windowed_read(&read_request(host as u64), false)
-            .expect("a guest that never drains loses the cap");
-        assert_eq!(again.bytes, vec![5u8; host]);
-        drop(prepared);
-        let mut third = state_on(&reads, vec![9u8; host], calls.clone());
-        let err = third
-            .windowed_read(&read_request(host as u64), false)
-            .expect_err("the second guest still holds the cap");
-        assert!(
-            matches!(err, V2BusError::Unavailable(_)),
-            "dropping the reaped hold must leave the live read, got {err:?}"
-        );
-        drop(again);
-        let mut fourth = state_on(&reads, vec![6u8; 4], calls);
-        let after = fourth
-            .windowed_read(&read_request(4), false)
-            .expect("dropping the live read frees the cap");
-        assert_eq!(after.bytes, vec![6, 6, 6, 6]);
+        let mut held = Vec::new();
+        for _ in 0..8 {
+            let mut guest = state_on(&reads, vec![7u8; each], calls.clone());
+            held.push(
+                guest
+                    .windowed_read(&read_request(each as u64), false)
+                    .expect("one eighth of the cap"),
+            );
+        }
+        std::thread::sleep(Duration::from_millis(80));
+        let mut ninth = state_on(&reads, vec![7u8; each], calls.clone());
+        let err = ninth
+            .windowed_read(&read_request(each as u64), false)
+            .expect_err("the ninth fetch is past the cap");
+        assert!(matches!(err, V2BusError::Unavailable(_)), "{err:?}");
+        drop(held.pop());
+        let mut again = state_on(&reads, vec![7u8; each], calls);
+        again
+            .windowed_read(&read_request(each as u64), false)
+            .expect("dropping one live fetch frees its bytes");
     }
 
     /// The bridge reports that the object changed. The read must end as an

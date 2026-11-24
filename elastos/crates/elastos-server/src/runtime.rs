@@ -6591,7 +6591,7 @@ pub(crate) mod tests {
         let ended = wait_v2_status(&runtime, handle.id.as_str(), false).await;
         assert_eq!(ended.status, CAPSULE_FAILED);
         let cause = ended.cause.unwrap();
-        assert!(cause.contains("fuel-exhausted"), "{cause}");
+        assert!(cause.contains("execution-bound"), "{cause}");
         assert_v2_home_cleared(&runtime, &component, &handle).await;
     }
 

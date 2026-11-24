@@ -3,6 +3,7 @@
 mod bus2_stream;
 pub mod bus2_ui;
 mod component;
+mod fuel_bucket;
 
 use std::sync::Arc;
 

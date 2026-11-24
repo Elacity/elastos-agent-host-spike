@@ -318,6 +318,7 @@ pub fn check_document(media_type: &str, document: &[u8]) -> Result<Vec<Node>, St
 /// ask for a new grant.
 /// Revoked ids kept so a later present can still say the grant was revoked.
 const MAX_REVOKED_GRANTS: usize = 32;
+const MAX_HELD_GRANTS: usize = 32;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct GrantBook {
@@ -325,6 +326,8 @@ pub struct GrantBook {
     revoked: Vec<String>,
     /// Ids pushed out of `revoked`. An id that was never revoked is not here.
     dropped: Vec<String>,
+    /// Set by [`GrantBook::clear`]. A later read or present stays denied.
+    closed: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -341,6 +344,9 @@ impl GrantBook {
         if self.grants.iter().any(|grant| grant.id == id) {
             return;
         }
+        if self.grants.len() == MAX_HELD_GRANTS {
+            self.grants.remove(0);
+        }
         self.grants.push(HeldGrant {
             id: id.to_string(),
             resource: resource.to_string(),
@@ -349,10 +355,16 @@ impl GrantBook {
     }
 
     pub fn revoke(&mut self, id: &str) {
-        let Some(pos) = self.grants.iter().position(|grant| grant.id == id) else {
+        let held = self.grants.iter().position(|grant| grant.id == id);
+        if held.is_none()
+            && (self.revoked.iter().any(|kept| kept == id)
+                || self.dropped.iter().any(|kept| kept == id))
+        {
             return;
-        };
-        self.grants.remove(pos);
+        }
+        if let Some(pos) = held {
+            self.grants.remove(pos);
+        }
         if self.revoked.iter().any(|kept| kept == id) {
             return;
         }
@@ -372,6 +384,14 @@ impl GrantBook {
         self.grants.clear();
         self.revoked.clear();
         self.dropped.clear();
+        self.closed = true;
+    }
+
+    /// A revoked, forgotten, or closed grant cannot back a read.
+    pub fn blocks_read(&self, id: &str) -> bool {
+        self.closed
+            || self.revoked.iter().any(|kept| kept == id)
+            || self.dropped.iter().any(|kept| kept == id)
     }
 
     pub fn is_empty(&self) -> bool {
@@ -409,6 +429,9 @@ pub fn present_frame(
     document: &[u8],
     book: &GrantBook,
 ) -> Result<Frame, PresentError> {
+    if book.closed {
+        return Err(PresentError::Denied("the grant book is closed".into()));
+    }
     let nodes = check_document(media, document).map_err(PresentError::Invalid)?;
     let mut out = Vec::with_capacity(nodes.len());
     for node in nodes {

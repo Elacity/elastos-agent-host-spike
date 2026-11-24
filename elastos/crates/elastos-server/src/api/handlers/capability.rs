@@ -48,7 +48,9 @@ pub(crate) async fn tell_v2_grant_revoked(
         return;
     };
     let id = elastos_common::CapsuleId::new(session_id);
-    let _ = guests.deliver_grant_revoked(&id, &encoded).await;
+    if let Err(error) = guests.deliver_grant_revoked(&id, &encoded).await {
+        tracing::warn!(%error, session_id, "grant revoke delivery");
+    }
 }
 
 // === Request Capability ===
