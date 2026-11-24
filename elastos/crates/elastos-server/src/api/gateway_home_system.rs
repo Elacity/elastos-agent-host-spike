@@ -33,7 +33,6 @@ pub(crate) const HOME_SERVICES_REQUESTS_TOPIC: &str = "__elastos_internal/servic
 const HOME_MODEL_CATALOG_TTL_SECS: u64 = 120;
 const HOME_MODEL_CATALOG_MAX_OFFERS: usize = 16;
 const HOME_MODEL_CATALOG_RESPONSE_COOLDOWN_SECS: u64 = 5;
-const HOME_SERVICES_REMOTE_EXIT_TICKET_MAX_BYTES: usize = 8192;
 const HOME_BROWSER_EXIT_LOCAL_OFFER_ID: &str = "local:provider:browser-exit";
 const HOME_BROWSER_EXIT_PEER_SERVICE_URI: &str = "elastos://peer/browser-exit";
 const HOME_REMOTE_EXIT_SERVICE_KIND: &str = "remote_exit";
