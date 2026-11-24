@@ -3944,6 +3944,30 @@ mod tests {
         }
     }
 
+    /// The same ETXTBSY retry as `spawn_test_bridge`, for a test that must keep
+    /// its own `CheckedExecutable` (a sibling, or a later refusal check).
+    #[cfg(unix)]
+    async fn spawn_checked_test_bridge(
+        checked: &CheckedExecutable,
+    ) -> Result<ProviderBridge, BridgeError> {
+        let mut attempts = 0u32;
+        loop {
+            match ProviderBridge::spawn(checked, ProviderConfig::default()).await {
+                Err(BridgeError::Spawn(error))
+                    if error.kind() == std::io::ErrorKind::ExecutableFileBusy =>
+                {
+                    attempts += 1;
+                    if attempts >= 40 {
+                        return Err(BridgeError::Spawn(error));
+                    }
+                    // Blocking on purpose, as in spawn_test_bridge_with_timeouts.
+                    std::thread::sleep(std::time::Duration::from_millis(25));
+                }
+                result => return result,
+            }
+        }
+    }
+
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     #[tokio::test]
     async fn checked_provider_starts_and_refuses_changed_bytes_and_symlink() {
@@ -3955,9 +3979,7 @@ mod tests {
             0,
         );
         let checked = CheckedExecutable::for_test(&binary);
-        let bridge = ProviderBridge::spawn(&checked, ProviderConfig::default())
-            .await
-            .unwrap();
+        let bridge = spawn_checked_test_bridge(&checked).await.unwrap();
         assert!(pid_file.exists(), "the checked provider starts");
         bridge.shutdown().await.unwrap();
 
@@ -4057,9 +4079,7 @@ mod tests {
         std::fs::write(&binary, script).unwrap();
         std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o700)).unwrap();
         let checked = CheckedExecutable::for_test(&binary).with_sibling("cloudflared");
-        let bridge = ProviderBridge::spawn(&checked, ProviderConfig::default())
-            .await
-            .unwrap();
+        let bridge = spawn_checked_test_bridge(&checked).await.unwrap();
         let response = bridge
             .request(ProviderRequest::Exists {
                 path: "self".into(),

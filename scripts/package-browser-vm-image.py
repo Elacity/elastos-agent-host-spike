@@ -5,6 +5,7 @@ The release publisher supplies the artifact path and merges the emitted external
 component row into its signed components manifest. This script does not publish.
 """
 import argparse
+import base64
 import gzip
 import hashlib
 import io
@@ -125,7 +126,12 @@ def package(image, platform, archive, manifest_output, release_path):
         component = {"install_path": "browser-vm/image-set", "description": "Verified Browser local Engine image dependency",
                      "platforms": {platform: {"install_path": "browser-vm/image-set", "extract_path": "browser-vm-image",
                                               "strategy": "browser-vm-image", "release_path": release_path,
-                                              "checksum": checksum, "size": size}}}
+                                              "checksum": checksum, "size": size,
+                                              "vm_image": {"path": "rootfs.ext4", "size": receipt["size"],
+                                                           "sha256": receipt["sha256"],
+                                                           "cid": "b" + base64.b32encode(bytes.fromhex("01551220" + receipt["sha256"])).decode().lower().rstrip("="),
+                                                           "kernel": {"path": "vmlinux", "size": receipt["kernel"]["size"], "sha256": receipt["kernel"]["sha256"]},
+                                                           "initrd": {"path": "initrd", "size": receipt["initrd"]["size"], "sha256": receipt["initrd"]["sha256"]}}}}}
         overlay = {"external": {"browser-vm-image": component}, "profiles": {}}
         metadata_bytes = (json.dumps(overlay, sort_keys=True, indent=2) + "\n").encode()
         # Release outputs are immutable. An identical rerun succeeds without

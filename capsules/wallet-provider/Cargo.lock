@@ -1538,6 +1538,7 @@ dependencies = [
  "base64",
  "bitcoin",
  "elastos-auth",
+ "elastos-identity",
  "elastos-protected-content-contracts",
  "elastos-wallet-contract",
  "hex",

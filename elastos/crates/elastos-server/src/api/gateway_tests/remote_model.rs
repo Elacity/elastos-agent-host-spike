@@ -1343,8 +1343,9 @@ async fn a_recorded_request_retries_through_a_full_index_without_a_new_slot() {
 mod consumer_path {
     use super::*;
     use crate::api::gateway::gateway_model_remote::{
-        remote_offer_id, remote_run_route, route_run_operation, ConsumerModelGrant,
-        RemoteRouteError, REMOTE_RUN_INDEX_MAX,
+        append_remote_offers, offers_list_without_local_provider, remote_offer_id,
+        remote_run_route, route_run_operation, ConsumerModelGrant, RemoteRouteError,
+        REMOTE_RUN_INDEX_MAX,
     };
 
     #[cfg(unix)]
@@ -1688,6 +1689,200 @@ mod consumer_path {
         assert_eq!(fx.create_count().await, creates_before);
         fx.shutdown().await;
     }
+
+    #[cfg(unix)]
+    #[cfg(test)]
+    #[tokio::test]
+    async fn model_invoke_by_did_succeeds_through_gossip_without_a_ticket() {
+        let fx = TwoRuntimes::start().await;
+        assert!(!fx.seed.path().join("operator-control.json").exists());
+        assert!(!fx.owner.path().join("operator-control.json").exists());
+        join_model_neighbours(&fx).await;
+        let owner_id = fx.owner_service.endpoint().unwrap().id();
+        let mut learned = false;
+        for _ in 0..40 {
+            if gossip_lookup_has_peer(&fx.seed_node.endpoint, owner_id).await {
+                learned = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        }
+        assert!(learned, "gossip address lookup did not learn the provider");
+        assert!(
+            fx.seed_node
+                .memory_lookup
+                .remove_endpoint_info(owner_id)
+                .is_some(),
+            "the bootstrap ticket must leave the address book before the dial"
+        );
+        assert!(
+            gossip_lookup_has_peer(&fx.seed_node.endpoint, owner_id).await,
+            "gossip address lookup lost the provider when the ticket was removed"
+        );
+        let grant = grant_by_did(&fx);
+        assert!(grant.connect_ticket.is_empty());
+        let mut response = offers_list_without_local_provider();
+        append_remote_offers(
+            &fx.seed_registry,
+            &[grant],
+            &seed_context(),
+            "assistant",
+            &mut response,
+        )
+        .await;
+        let service = &response["data"]["remote_services"][0];
+        assert_eq!(service["status"], "reachable", "{response}");
+        assert!(service["offers"].as_u64().unwrap() >= 1, "{response}");
+        assert!(
+            !response.to_string().contains("connect_ticket"),
+            "{response}"
+        );
+        fx.shutdown().await;
+    }
+
+    #[cfg(unix)]
+    #[cfg(test)]
+    #[tokio::test]
+    async fn unreachable_provider_is_named_service_provider_unreachable() {
+        let fx = TwoRuntimes::start().await;
+        let missing = iroh::SecretKey::from_bytes(&[0xE5; 32]).public();
+        let grant = ConsumerModelGrant::from_record(&json!({
+            "schema": crate::api::gateway::gateway_model_service::MODEL_GRANT_SCHEMA,
+            "offer_ids": ["qwen-local"],
+            "offer_revision": format!("sha256:{}", "a".repeat(64)),
+            "grant_id": fx.grant_id,
+            "peer_did": missing.to_string(),
+            "service_display_name": "Missing",
+            "expires_at": now_ts() + 3600,
+        }))
+        .expect("grant record");
+        assert!(grant.connect_ticket.is_empty());
+        let mut response = offers_list_without_local_provider();
+        append_remote_offers(
+            &fx.seed_registry,
+            &[grant],
+            &seed_context(),
+            "assistant",
+            &mut response,
+        )
+        .await;
+        assert_eq!(
+            response["data"]["remote_services"][0]["status"],
+            crate::carrier::SERVICE_PROVIDER_UNREACHABLE,
+            "{response}"
+        );
+        fx.shutdown().await;
+    }
+
+    #[cfg(unix)]
+    #[cfg(test)]
+    fn grant_by_did(fx: &TwoRuntimes) -> ConsumerModelGrant {
+        ConsumerModelGrant::from_record(&json!({
+            "schema": crate::api::gateway::gateway_model_service::MODEL_GRANT_SCHEMA,
+            "offer_ids": ["qwen-local"],
+            "offer_revision": format!("sha256:{}", "a".repeat(64)),
+            "grant_id": fx.grant_id,
+            "peer_did": fx.owner_service.endpoint().unwrap().id().to_string(),
+            "service_display_name": "Mac model",
+            "expires_at": now_ts() + 3600,
+        }))
+        .expect("grant record")
+    }
+
+    #[cfg(unix)]
+    #[cfg(test)]
+    async fn join_model_neighbours(fx: &TwoRuntimes) {
+        let topic = "__test/model-did-gossip";
+        let owner = crate::carrier::CarrierGossipProvider::new(fx.owner_service.gossip_state());
+        let seed = crate::carrier::CarrierGossipProvider::new(fx.seed_node.gossip_state.clone());
+        let joined = owner
+            .send_raw(&json!({"op":"gossip_join","topic":topic,"mode":"direct"}))
+            .await
+            .unwrap();
+        assert_eq!(joined["status"], "ok", "{joined}");
+        let ticket = owner.send_raw(&json!({"op":"get_ticket"})).await.unwrap()["data"]["ticket"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let remembered = seed
+            .send_raw(&json!({"op":"remember_peer","ticket":ticket}))
+            .await
+            .unwrap();
+        assert_eq!(remembered["status"], "ok", "{remembered}");
+        let peers = &remembered["data"]["added"];
+        let joined = seed
+            .send_raw(&json!({"op":"gossip_join","topic":topic,"mode":"direct"}))
+            .await
+            .unwrap();
+        assert_eq!(joined["status"], "ok", "{joined}");
+        let joined = seed
+            .send_raw(&json!({"op":"gossip_join_peers","topic":topic,"peers":peers}))
+            .await
+            .unwrap();
+        assert_eq!(joined["status"], "ok", "{joined}");
+        let marker = format!("model did gossip {}", now_ts());
+        for _ in 0..40 {
+            seed.send_raw(&json!({
+                "op": "gossip_send",
+                "topic": topic,
+                "message": marker,
+                "sender": "seed",
+                "sender_id": fx.seed_did,
+            }))
+            .await
+            .unwrap();
+            let recv = owner
+                .send_raw(&json!({
+                    "op": "gossip_recv",
+                    "topic": topic,
+                    "consumer_id": "model-did",
+                    "limit": 20,
+                }))
+                .await
+                .unwrap();
+            let seen = recv["data"]["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|message| message["content"].as_str() == Some(marker.as_str()));
+            if seen {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        }
+        panic!("gossip neighbours did not form");
+    }
+
+    #[cfg(unix)]
+    #[cfg(test)]
+    async fn gossip_lookup_has_peer(endpoint: &iroh::Endpoint, peer: iroh::EndpointId) -> bool {
+        use futures_lite::StreamExt as _;
+        let Ok(lookup) = endpoint.address_lookup() else {
+            return false;
+        };
+        let mut stream = std::pin::pin!(lookup.resolve(peer));
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(400);
+        loop {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                return false;
+            }
+            match tokio::time::timeout(remaining, stream.next()).await {
+                Ok(Some(Ok(Ok(item)))) if item.provenance() == "gossip" => {
+                    if item
+                        .to_endpoint_addr()
+                        .addrs
+                        .iter()
+                        .any(|addr| matches!(addr, iroh::TransportAddr::Ip(_)))
+                    {
+                        return true;
+                    }
+                }
+                Ok(Some(_)) => continue,
+                _ => return false,
+            }
+        }
+    }
 }
 
 // Denial authority: the sweep follows only a denial this principal made and
@@ -1920,17 +2115,14 @@ mod denial_authority {
         let (_parent_key, parent_did) =
             elastos_identity::load_or_create_did(parent.path()).unwrap();
         let parent_context = local_home_launch_token_context(parent.path()).unwrap();
-        let token = issue_home_launch_token_with_context(
-            parent.path(),
-            SERVICES_CAPSULE_ID,
-            &parent_context,
-        )
-        .unwrap();
+        let token =
+            issue_home_launch_token_with_context(parent.path(), HOME_CAPSULE_ID, &parent_context)
+                .unwrap();
         let verified =
             crate::api::gateway::gateway_home_token::require_home_launch_token_value_from_expected_did_for_test(
                 fx.owner.path(),
                 &token,
-                &[SERVICES_CAPSULE_ID],
+                &[HOME_CAPSULE_ID],
                 parent_did.clone(),
                 fx.owner.path(),
             )
@@ -1943,10 +2135,7 @@ mod denial_authority {
             "localhost://Users/{}",
             hex::encode(&Sha256::digest(principal.as_bytes())[..12])
         );
-        assert_eq!(
-            verified.launch_context.executable_actor,
-            SERVICES_CAPSULE_ID
-        );
+        assert_eq!(verified.launch_context.executable_actor, HOME_CAPSULE_ID);
         assert_eq!(context.principal_id(), principal);
         assert_eq!(context.proof_binding_id(), None);
         assert_eq!(context.root().localhost_root(), expected_root);

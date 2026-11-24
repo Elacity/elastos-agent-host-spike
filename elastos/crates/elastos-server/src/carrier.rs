@@ -825,6 +825,16 @@ impl CarrierRuntimeService {
         self.node.as_ref().map(|node| node.endpoint.clone())
     }
 
+    #[cfg(unix)]
+    #[cfg(test)]
+    pub(crate) fn gossip_state(&self) -> Arc<Mutex<GossipState>> {
+        self.node
+            .as_ref()
+            .expect("carrier node")
+            .gossip_state
+            .clone()
+    }
+
     pub(crate) async fn configure_browser_exit_network(
         &self,
         network: crate::collaboration_network::VerifiedCollaborationNetworkProfile,
@@ -9323,6 +9333,17 @@ impl ProviderCarrierInvoker for CarrierProviderInvoker {
     }
 }
 
+/// App-facing name when a service peer cannot be dialed.
+pub(crate) const SERVICE_PROVIDER_UNREACHABLE: &str = "service_provider_unreachable";
+
+/// Dial budget strictly inside `remaining`. A peer that never answers then
+/// fails before an outer deadline of the same length, so the caller can return
+/// [`SERVICE_PROVIDER_UNREACHABLE`] instead of that deadline's text.
+fn connect_budget_inside(remaining: Duration) -> Duration {
+    const MARGIN: Duration = Duration::from_millis(200);
+    remaining.saturating_sub(MARGIN)
+}
+
 pub async fn open_browser_carrier_stream(
     _request: &BrowserCarrierStreamRequest,
 ) -> Result<BrowserCarrierStream> {
@@ -9345,37 +9366,51 @@ pub async fn open_browser_carrier_stream_on_endpoint(
                 .filter(|key| key.to_string() == peer)
         })
         .context("Browser Exit provider identity is invalid")?;
-    let endpoints = decode_ticket_endpoints(&request.connect_ticket)
-        .into_iter()
-        .filter(|address| address.id == peer_key)
-        .collect::<Vec<_>>();
-    anyhow::ensure!(
-        !endpoints.is_empty(),
-        "Browser Exit ticket does not match provider identity"
-    );
-    tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), async {
-        for address in endpoints {
-            let Ok(client) =
-                CarrierClient::connect_known_endpoint(endpoint, address, timeout_ms.div_ceil(1000))
-                    .await
-            else {
-                continue;
-            };
-            // Once a stream request is sent, its outcome may be uncertain. Do not replay on another route.
-            let (send, recv) = client
-                .open_browser_exit_stream(request)
-                .await
-                .map_err(|_| anyhow::anyhow!("Runtime Exit did not admit the stream"))?;
-            return Ok(BrowserCarrierStream {
-                send,
-                recv,
-                _client: client,
-            });
+    let endpoints = if request.connect_ticket.is_empty() {
+        vec![iroh::EndpointAddr::from(peer_key)]
+    } else {
+        let endpoints = decode_ticket_endpoints(&request.connect_ticket)
+            .into_iter()
+            .filter(|address| address.id == peer_key)
+            .collect::<Vec<_>>();
+        anyhow::ensure!(
+            !endpoints.is_empty(),
+            "Browser Exit ticket does not match provider identity"
+        );
+        endpoints
+    };
+    // The dial finishes inside the request deadline. A peer that never answers
+    // is `service_provider_unreachable`. "Browser Carrier stream deadline" is
+    // only a peer that connected and then stalled while the stream opened.
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
+    for address in endpoints {
+        let budget =
+            connect_budget_inside(deadline.saturating_duration_since(tokio::time::Instant::now()));
+        if budget.is_zero() {
+            break;
         }
-        anyhow::bail!("Runtime Exit provider is unavailable")
-    })
-    .await
-    .context("Browser Carrier stream deadline")?
+        let Ok(client) = CarrierClient::connect_known_endpoint_for(endpoint, address, budget).await
+        else {
+            continue;
+        };
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            anyhow::bail!("Browser Carrier stream deadline");
+        }
+        // Once a stream request is sent, its outcome may be uncertain. Do not replay on another route.
+        match tokio::time::timeout(remaining, client.open_browser_exit_stream(request)).await {
+            Ok(Ok((send, recv))) => {
+                return Ok(BrowserCarrierStream {
+                    send,
+                    recv,
+                    _client: client,
+                });
+            }
+            Ok(Err(_)) => anyhow::bail!("Runtime Exit did not admit the stream"),
+            Err(_) => anyhow::bail!("Browser Carrier stream deadline"),
+        }
+    }
+    anyhow::bail!("{SERVICE_PROVIDER_UNREACHABLE}: Runtime Exit provider is unavailable")
 }
 
 fn carrier_route_timeout_secs(route: &ProviderCarrierRoute) -> u64 {
@@ -9602,14 +9637,19 @@ impl CarrierClient {
         addr: iroh::EndpointAddr,
         timeout_secs: u64,
     ) -> Result<Self> {
+        Self::connect_known_endpoint_for(endpoint, addr, Duration::from_secs(timeout_secs)).await
+    }
+
+    pub(crate) async fn connect_known_endpoint_for(
+        endpoint: &Endpoint,
+        addr: iroh::EndpointAddr,
+        timeout: Duration,
+    ) -> Result<Self> {
         let peer = addr.id;
-        let conn = tokio::time::timeout(
-            Duration::from_secs(timeout_secs),
-            endpoint.connect(addr, CARRIER_ALPN),
-        )
-        .await
-        .map_err(|_| anyhow::anyhow!("connect timed out"))?
-        .context("connect failed")?;
+        let conn = tokio::time::timeout(timeout, endpoint.connect(addr, CARRIER_ALPN))
+            .await
+            .map_err(|_| anyhow::anyhow!("connect timed out"))?
+            .context("connect failed")?;
         if conn.remote_id() != peer {
             anyhow::bail!("resolved Carrier endpoint identity does not match the requested peer");
         }
@@ -17102,6 +17142,55 @@ pub(crate) mod tests {
         );
         shutdown_test_carrier_node(local_node).await;
         shutdown_test_carrier_node(remote_node).await;
+    }
+
+    #[tokio::test]
+    async fn unreachable_exit_peer_is_named_not_the_stream_deadline() {
+        // Empty ticket, one address that swallows UDP. The dial must finish
+        // as service_provider_unreachable, not "Browser Carrier stream deadline".
+        let dir = tempfile::tempdir().unwrap();
+        let (key, did) = elastos_identity::derive_did(&[0xD1; 32]);
+        let node =
+            start_isolated_carrier_node_with_registry(&key, &did, dir.path().to_path_buf(), None)
+                .await
+                .unwrap();
+        let blackhole = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let silent = iroh::SecretKey::from_bytes(&[0xD2; 32]).public();
+        node.memory_lookup.add_endpoint_info(
+            iroh::EndpointAddr::from(silent)
+                .with_addrs([iroh::TransportAddr::Ip(blackhole.local_addr().unwrap())]),
+        );
+        let endpoint = node.endpoint.clone();
+        let request = BrowserCarrierStreamRequest {
+            connect_ticket: String::new(),
+            peer_did: Some(silent.to_string()),
+            carrier_service: "elastos://exit/open_stream".into(),
+            grant_id: "grant-silent".into(),
+            stream_id: "stream-silent".into(),
+            target: "tls://example.com:443".into(),
+            principal_id: Some("person:local:alice".into()),
+            reason: None,
+            timeout_ms: Some(1_500),
+        };
+        let dial = tokio::spawn(async move {
+            open_browser_carrier_stream_on_endpoint(&endpoint, &request).await
+        });
+        let mut packet = [0u8; 64];
+        tokio::time::timeout(Duration::from_secs(3), blackhole.recv(&mut packet))
+            .await
+            .expect("silent Exit peer received no dial")
+            .unwrap();
+        let err = match dial.await.unwrap() {
+            Ok(_) => panic!("silent Exit peer opened a stream"),
+            Err(err) => err,
+        };
+        let shown = format!("{err:#}");
+        assert!(shown.contains(SERVICE_PROVIDER_UNREACHABLE), "{shown}");
+        assert!(
+            !shown.contains("Browser Carrier stream deadline"),
+            "{shown}"
+        );
+        shutdown_test_carrier_node(node).await;
     }
 
     #[tokio::test]

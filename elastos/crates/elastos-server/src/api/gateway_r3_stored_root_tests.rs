@@ -58,11 +58,18 @@ pub(in crate::api) fn verified_parent_device_context(
     let (_, child_did) = elastos_identity::load_or_create_did(child_data_dir).unwrap();
     let parent = tempfile::tempdir().unwrap();
     let (_, parent_did) = elastos_identity::load_or_create_did(parent.path()).unwrap();
+    // A proofless device token verifies only for Home's own shell. These rows
+    // record the parent device root, which does not depend on the named app.
+    let shell = if app == HOME_CAPSULE_ID || app == HOME_CLI_SHELL_ID {
+        app
+    } else {
+        HOME_CAPSULE_ID
+    };
     let parent_context =
         super::gateway_home_token::local_home_launch_token_context(parent.path()).unwrap();
     let token = super::gateway_home_token::issue_home_launch_token_with_context(
         parent.path(),
-        app,
+        shell,
         &parent_context,
     )
     .unwrap();
@@ -70,7 +77,7 @@ pub(in crate::api) fn verified_parent_device_context(
         super::gateway_home_token::require_home_launch_token_value_from_expected_did_for_test(
             child_data_dir,
             &token,
-            &[app],
+            &[shell],
             parent_did.clone(),
             parent.path(),
         )
