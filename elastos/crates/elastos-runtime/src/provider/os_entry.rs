@@ -160,7 +160,7 @@ fn dispatch(
     // Re-check the signed digest now and start the verified copy, never the
     // caller's pathname.
     let prepared = executable.verify_at_spawn()?;
-    macos_start(prepared, checked, stdio, profile)
+    macos_start(prepared, checked, stdio, profile, &[])
 }
 
 #[cfg(all(not(elastos_unsupported_os_check), target_os = "macos"))]
@@ -169,6 +169,7 @@ fn macos_start(
     checked: CheckedDirectory<'_>,
     stdio: ChildStdio,
     profile: String,
+    extra: &[(&str, &Path)],
 ) -> Result<Launched, String> {
     use std::os::fd::{AsRawFd, FromRawFd};
     use std::os::unix::ffi::OsStrExt;
@@ -238,6 +239,7 @@ fn macos_start(
         &binary,
         parent,
         &storage,
+        extra,
     )?;
     let mut limit = std::mem::MaybeUninit::<libc::rlimit>::uninit();
     if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, limit.as_mut_ptr()) } != 0 {
@@ -324,6 +326,7 @@ fn macos_command(
     binary: &Path,
     parent: &Path,
     storage: &Path,
+    extra: &[(&str, &Path)],
 ) -> Result<std::process::Command, String> {
     use std::os::unix::ffi::OsStrExt;
 
@@ -336,6 +339,13 @@ fn macos_command(
         ("PROVIDER_EXECUTABLE", binary),
     ] {
         command.arg("-D").arg(format!("{name}={}", path.display()));
+    }
+    for (name, path) in extra {
+        let value = path
+            .to_str()
+            .filter(|value| !value.contains(['=', '\n']))
+            .ok_or("provider start is refused: a model binding path is not a Seatbelt parameter")?;
+        command.arg("-D").arg(format!("{name}={value}"));
     }
     command.arg(binary);
     let arg_max = unsafe { libc::sysconf(libc::_SC_ARG_MAX) };
@@ -358,6 +368,88 @@ fn macos_command(
         );
     }
     Ok(command)
+}
+
+#[cfg(all(not(elastos_unsupported_os_check), target_os = "macos"))]
+pub(super) struct ModelLaunch<'a> {
+    pub engine: &'a Path,
+    pub model: &'a Path,
+    pub bundle: &'a Path,
+    pub brokers: &'a [std::path::PathBuf],
+    pub engines: &'a [std::path::PathBuf],
+}
+
+#[cfg(all(not(elastos_unsupported_os_check), target_os = "macos"))]
+pub(super) fn admitted_model_profile(admitted: &AdmittedRights) -> String {
+    super::macos_profile::render_macos_profile(RuntimeProviderId::Model, admitted)
+}
+
+#[cfg(all(not(elastos_unsupported_os_check), target_os = "macos"))]
+fn model_file(path: &Path, file: bool) -> Result<std::path::PathBuf, String> {
+    let canon = std::fs::canonicalize(path).map_err(|_| "model path".to_string())?;
+    if canon != path || file != canon.is_file() {
+        return Err("model path".into());
+    }
+    Ok(canon)
+}
+
+#[cfg(all(not(elastos_unsupported_os_check), target_os = "macos"))]
+#[rustfmt::skip]
+fn model_bindings(launch: &ModelLaunch<'_>) -> Result<Vec<(String, std::path::PathBuf)>, String> {
+    if launch.brokers.len() != 64 || launch.engines.len() != 64 {
+        return Err("model sockets".into());
+    }
+    let engine = model_file(launch.engine, true)?;
+    let model = model_file(launch.model, true)?;
+    let bundle = model_file(launch.bundle, false)?;
+    if !engine.starts_with(&bundle) {
+        return Err("model engine".into());
+    }
+    let mut ancestors: Vec<_> = model.ancestors().skip(1).map(Path::to_path_buf).collect();
+    let root = std::path::PathBuf::from("/");
+    if ancestors.len() > 19 || ancestors.last() != Some(&root) {
+        return Err("model ancestors".into());
+    }
+    ancestors.resize(19, root);
+    let mut bindings = vec![("MODEL".into(), model), ("ENGINE".into(), engine), ("ENGINE_BUNDLE".into(), bundle)];
+    for (index, ancestor) in ancestors.into_iter().enumerate() {
+        bindings.push((format!("MODEL_ANCESTOR_{index}"), ancestor));
+    }
+    for (prefix, paths) in [("BROKER_SOCKET", launch.brokers), ("ENGINE_SOCKET", launch.engines)] {
+        for (index, path) in paths.iter().enumerate() {
+            let parent = path.parent().ok_or("model socket")?;
+            if std::fs::canonicalize(parent).ok().as_deref() != Some(parent) {
+                return Err("model socket".into());
+            }
+            bindings.push((format!("{prefix}_{index}"), path.clone()));
+        }
+    }
+    Ok(bindings)
+}
+
+#[cfg(all(not(elastos_unsupported_os_check), target_os = "macos"))]
+#[rustfmt::skip]
+pub(super) fn model_rights_command(
+    authority: &ProviderAuthority, binary: &Path, storage: &Path, parent: &Path, launch: &ModelLaunch<'_>,
+) -> Result<std::process::Command, String> {
+    let admitted = super::rights::check_rights_against_runtime_templates(
+        RuntimeProviderId::Model, authority, rights_table::RIGHTS,
+    )?;
+    require_grant(&admitted)?;
+    let profile = admitted_model_profile(&admitted);
+    let head = "(version 1)\n(deny default)\n(deny network*)\n";
+    if !profile.starts_with(head) || profile.contains("(allow default)") {
+        return Err("provider start is refused: the model profile is not the rendered rights profile".into());
+    }
+    let owned = model_bindings(launch).map_err(|item| format!("provider start is refused: {item}"))?;
+    let extra: Vec<(&str, &Path)> = owned.iter().map(|(n, p)| (n.as_str(), p.as_path())).collect();
+    let mut bound = std::collections::BTreeSet::from(["STORAGE_ROOT", "STORAGE_PARENT", "PROVIDER_EXECUTABLE"]);
+    let missing = extra.iter().any(|(name, _)| !bound.insert(*name))
+        || profile.split("(param \"").skip(1).any(|tail| !bound.contains(tail.split('"').next().unwrap_or("")));
+    if missing {
+        return Err("provider start is refused: a model profile parameter has no Runtime binding".into());
+    }
+    macos_command(Path::new("/usr/bin/sandbox-exec"), &profile, binary, parent, storage, &extra)
 }
 
 /// The unsupported-OS arm. Real `dispatch` on an unsupported target calls this
@@ -514,6 +606,7 @@ mod tests {
             binary,
             parent,
             storage,
+            &[],
         )
         .unwrap();
         assert!(
@@ -578,6 +671,7 @@ mod tests {
             binary,
             parent,
             storage,
+            &[],
         )
         .unwrap();
         let args: Vec<_> = command
@@ -598,6 +692,7 @@ mod tests {
                 binary,
                 parent,
                 storage,
+                &[],
             )
             .unwrap_err(),
             "provider start is refused: sandbox-exec arguments exceed argument limit"
@@ -610,6 +705,7 @@ mod tests {
                 binary,
                 parent,
                 Path::new(&long_storage),
+                &[],
             )
             .unwrap_err(),
             "provider start is refused: sandbox-exec arguments exceed argument limit"
@@ -633,6 +729,7 @@ mod tests {
             Path::new("/private/fixture/bin/did-provider"),
             Path::new("/private/fixture/data"),
             Path::new("/private/fixture/data/did"),
+            &[],
         )
         .unwrap()
         .output()
@@ -932,5 +1029,123 @@ mod tests {
             "provider start is refused: the reopened storage root is not the checked directory"
         );
         assert!(!marker.exists(), "the provider binary never runs");
+    }
+
+    #[cfg(all(target_os = "macos", not(elastos_unsupported_os_check)))]
+    fn rule_lines(profile: &str) -> Vec<&str> {
+        profile
+            .lines()
+            .map(str::trim)
+            .filter(|line| line.starts_with('('))
+            .collect()
+    }
+
+    #[cfg(all(target_os = "macos", not(elastos_unsupported_os_check)))]
+    #[test]
+    fn model_start_rights_part_is_the_rendered_profile() {
+        let admitted = super::super::rights::admit_committed(RuntimeProviderId::Model);
+        let profile = admitted_model_profile(&admitted);
+        let rendered =
+            super::super::macos_profile::render_macos_profile(RuntimeProviderId::Model, &admitted);
+        assert_eq!(profile, rendered, "the model start uses the rendered grant");
+        assert!(profile.starts_with("(version 1)\n(deny default)\n(deny network*)\n"));
+        assert!(
+            !profile.contains("(allow default)"),
+            "the hand-written model policy is not the start profile"
+        );
+        let oracle = include_str!("../../../../../capsules/model-provider/confine.sb");
+        assert_eq!(
+            rule_lines(&profile),
+            rule_lines(oracle),
+            "the rendered model profile is the committed oracle"
+        );
+    }
+
+    #[cfg(all(target_os = "macos", not(elastos_unsupported_os_check)))]
+    #[test]
+    fn removing_one_model_right_drops_its_rule_from_the_start_profile() {
+        let full = admitted_model_profile(&super::super::rights::admit_committed(
+            RuntimeProviderId::Model,
+        ));
+        let mut authority = committed_authority("model");
+        let before = authority.rights.len();
+        authority.rights.retain(|right| right.id != "model-gpu");
+        assert_eq!(authority.rights.len(), before - 1);
+        let admitted = super::super::rights::check_rights_against_runtime_templates(
+            RuntimeProviderId::Model,
+            &authority,
+            rights_table::RIGHTS,
+        )
+        .unwrap();
+        let narrow = admitted_model_profile(&admitted);
+        assert_ne!(narrow, full);
+        assert!(full.contains("com.apple.MTLCompilerService"));
+        assert!(!narrow.contains("com.apple.MTLCompilerService"));
+        assert!(narrow.starts_with("(version 1)\n(deny default)\n(deny network*)\n"));
+    }
+
+    #[cfg(all(target_os = "macos", not(elastos_unsupported_os_check)))]
+    #[test]
+    fn model_start_binds_every_rendered_parameter() {
+        let temp = tempfile::tempdir().unwrap();
+        let bundle = temp.path().canonicalize().unwrap().join("bundle");
+        std::fs::create_dir(&bundle).unwrap();
+        let engine = bundle.join("llama-server");
+        let model = temp.path().canonicalize().unwrap().join("model.gguf");
+        std::fs::write(&engine, b"engine").unwrap();
+        std::fs::write(&model, b"gguf").unwrap();
+        let ipc = temp.path().canonicalize().unwrap().join("ipc");
+        std::fs::create_dir(&ipc).unwrap();
+        let brokers: Vec<_> = (0..64)
+            .map(|index| ipc.join(format!("{index}.sock")))
+            .collect();
+        let engines: Vec<_> = (0..64)
+            .map(|index| ipc.join(format!("{index}.engine.sock")))
+            .collect();
+        let launch = ModelLaunch {
+            engine: &engine,
+            model: &model,
+            bundle: &bundle,
+            brokers: &brokers,
+            engines: &engines,
+        };
+        let owned = model_bindings(&launch).unwrap();
+        let extra: Vec<_> = owned
+            .iter()
+            .map(|(name, path)| (name.as_str(), path.as_path()))
+            .collect();
+        let admitted = super::super::rights::admit_committed(RuntimeProviderId::Model);
+        let profile = admitted_model_profile(&admitted);
+        let command = macos_command(
+            Path::new("/usr/bin/sandbox-exec"),
+            &profile,
+            Path::new("/private/fixture/bin/model-provider"),
+            Path::new("/private/fixture/data"),
+            Path::new("/private/fixture/data/model"),
+            &extra,
+        )
+        .unwrap();
+        let args: Vec<_> = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(args[0], "-p");
+        assert_eq!(args[1], profile);
+        let bound: std::collections::BTreeSet<_> = args
+            .windows(2)
+            .filter(|pair| pair[0] == "-D")
+            .map(|pair| pair[1].split_once('=').unwrap().0.to_string())
+            .collect();
+        let named: std::collections::BTreeSet<_> = profile
+            .split("(param \"")
+            .skip(1)
+            .map(|tail| tail.split('"').next().unwrap().to_string())
+            .collect();
+        assert_eq!(bound, named);
+        assert!(bound.contains("ENGINE"));
+        assert!(bound.contains("MODEL"));
+        assert!(bound.contains("BROKER_SOCKET_0"));
+        assert!(bound.contains("ENGINE_SOCKET_63"));
+        assert!(!args.iter().any(|arg| arg.contains("(allow default)")));
     }
 }

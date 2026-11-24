@@ -1706,6 +1706,12 @@ impl ProviderBridge {
                 "provider start is refused: component key \"{component_key}\" is not one of did-provider, wallet-provider, model-provider"
             )));
         };
+        #[cfg(all(target_os = "macos", not(elastos_unsupported_os_check)))]
+        if matches!(provider, super::rights_table::RuntimeProviderId::Model) {
+            return Err(refused(
+                "provider start is refused: the macOS model provider starts from its admitted rights",
+            ));
+        }
         let created_root = create_storage_root(storage_root)?;
         let info = stat_fd(created_root.directory.as_raw_fd()).map_err(BridgeError::Io)?;
         let checked = super::os_entry::CheckedDirectory {
@@ -1984,6 +1990,96 @@ impl ProviderBridge {
         bridge._local_provider_pid = provider_pid;
         bridge._local_provider_birth = provider_birth;
         Ok((bridge, sockets, vacant_sockets, config, hosted_listener))
+    }
+
+    /// macOS model start from the admitted rights. The server keeps the hand-written policy until M3.
+    #[cfg(all(target_os = "macos", not(elastos_unsupported_os_check)))]
+    #[rustfmt::skip]
+    pub async fn spawn_confined_model_from_rights(
+        authority: &ProviderAuthority,
+        binary_path: &CheckedExecutable,
+        mut config: ProviderConfig,
+        engine: &Path,
+        model_file: &Path,
+        bundle: &Path,
+    ) -> Result<(Confined, BTreeMap<String, String>, Vec<String>, ProviderConfig), BridgeError> {
+        let journal = model_journal_for_sandbox(&config)?;
+        let parent = journal.parent().ok_or_else(|| {
+            BridgeError::InitFailed("model journal parent unavailable".into())
+        })?;
+        let offers = config.extra.get("offers").and_then(|value| value.as_array()).ok_or_else(|| {
+            BridgeError::InitFailed("model offers unavailable".into())
+        })?;
+        let local_ids = offers.iter().filter(|offer| {
+            offer.pointer("/adapter/kind").and_then(|value| value.as_str()) == Some("local_llama_cpp_text")
+        }).map(|offer| {
+            offer.get("id").and_then(|value| value.as_str()).ok_or_else(|| {
+                BridgeError::InitFailed("local offer id unavailable".into())
+            })
+        }).collect::<Result<Vec<_>, _>>()?;
+        if local_ids.len() > MAX_LOCAL_MODEL_SLOTS {
+            return Err(BridgeError::InitFailed("too many local model offers".into()));
+        }
+        let ipc_dir = tempfile::Builder::new().prefix("em-").tempdir().map_err(BridgeError::Spawn)?;
+        let ipc_path = std::fs::canonicalize(ipc_dir.path()).map_err(BridgeError::Spawn)?;
+        let provider_pid = Arc::new(AtomicU32::new(0));
+        let provider_birth = Arc::new(AtomicU64::new(0));
+        let mut sockets = BTreeMap::new();
+        let mut vacant = Vec::new();
+        let mut brokers = BrokerTasks::default();
+        let mut broker_paths = Vec::new();
+        let mut engine_paths = Vec::new();
+        for index in 0..MAX_LOCAL_MODEL_SLOTS {
+            let broker = ipc_path.join(format!("{index}.sock"));
+            let engine_socket = ipc_path.join(format!("{index}.engine.sock"));
+            let broker_text = broker.to_str().filter(|text| {
+                text.len() < 104 && text.bytes().all(|byte| {
+                    byte.is_ascii_alphanumeric() || matches!(byte, b'/' | b'.' | b'_' | b'-')
+                })
+            }).ok_or_else(|| BridgeError::InitFailed("invalid local socket path".into()))?.to_string();
+            if engine_socket.as_os_str().len() >= 104 {
+                return Err(BridgeError::InitFailed("engine socket path too long".into()));
+            }
+            if let Some(id) = local_ids.get(index) {
+                if sockets.insert((*id).to_string(), broker_text.clone()).is_some() {
+                    return Err(BridgeError::InitFailed("duplicate local offer id".into()));
+                }
+            } else {
+                vacant.push(broker_text.clone());
+            }
+            brokers.0.push(super::local_model_broker::start(
+                &broker_text, engine_socket.clone(), provider_pid.clone(), provider_birth.clone(),
+            ).map_err(BridgeError::Spawn)?);
+            broker_paths.push(broker);
+            engine_paths.push(engine_socket);
+        }
+        let prepared = binary_path.verify_at_spawn().map_err(BridgeError::Refused)?;
+        let launch = super::os_entry::ModelLaunch {
+            engine, model: model_file, bundle, brokers: &broker_paths, engines: &engine_paths,
+        };
+        let command = super::os_entry::model_rights_command(
+            authority, prepared.exec_path(), &journal, parent, &launch,
+        ).map_err(BridgeError::Refused)?;
+        config.extra["runtime_local_sockets"] = serde_json::json!(sockets);
+        let returned = config.clone();
+        let mut bridge = Self::spawn_command(
+            prepared, Command::from(command), config, INIT_TIMEOUT, SHUTDOWN_TIMEOUT,
+            std::process::Stdio::inherit(), false,
+        ).await?;
+        let pid = bridge.child.lock().await.as_ref().and_then(|child| child.id()).ok_or_else(|| {
+            BridgeError::InitFailed("model provider pid unavailable".into())
+        })?;
+        let Some(birth) = super::local_model_broker::process_birth(pid) else {
+            let _ = bridge.shutdown().await;
+            return Err(BridgeError::InitFailed("model provider identity unavailable".into()));
+        };
+        provider_pid.store(pid, Ordering::Release);
+        provider_birth.store(birth, Ordering::Release);
+        *bridge._local_ipc_dir.lock().await = Some(ipc_dir);
+        *bridge._local_brokers.lock().await = brokers;
+        bridge._local_provider_pid = provider_pid;
+        bridge._local_provider_birth = provider_birth;
+        Ok((Confined { bridge: Arc::new(bridge) }, sockets, vacant, returned))
     }
 
     /// Start a Linux model provider with private local Unix routes and a
@@ -6203,6 +6299,97 @@ int main(void) {
             "the confined start has no unconfined fallback"
         );
         assert!(body.contains("super::os_entry::start_provider("));
+    }
+
+    #[cfg(all(target_os = "macos", not(elastos_unsupported_os_check)))]
+    #[tokio::test]
+    async fn macos_model_rights_start_answers_init_under_the_rendered_profile() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let base = temp.path().canonicalize().unwrap();
+        let binary = write_confined_stdio_provider(&base, false);
+        let bundle = base.join("bundle");
+        std::fs::create_dir(&bundle).unwrap();
+        let engine = bundle.join("llama-server");
+        let model = base.join("model.gguf");
+        std::fs::write(&engine, b"engine").unwrap();
+        std::fs::write(&model, b"gguf").unwrap();
+        let journal = base.join("providers/model-provider/journal");
+        let mut config = ProviderConfig {
+            base_path: base.to_string_lossy().into_owned(),
+            ..ProviderConfig::default()
+        };
+        config.extra = serde_json::json!({
+            "journal_dir": journal,
+            "offers": [],
+        });
+        let (confined, sockets, vacant, returned) =
+            ProviderBridge::spawn_confined_model_from_rights(
+                &committed_authority("model"),
+                &CheckedExecutable::for_test(&binary),
+                config,
+                &engine,
+                &model,
+                &bundle,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("model rights start: {error}"));
+        assert!(sockets.is_empty());
+        assert_eq!(vacant.len(), 64);
+        assert!(returned.extra["runtime_local_sockets"].is_object());
+        confined.bridge().shutdown().await.unwrap();
+    }
+
+    #[cfg(all(target_os = "macos", not(elastos_unsupported_os_check)))]
+    #[tokio::test]
+    async fn macos_plain_confined_start_refuses_the_model_provider() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("root");
+        let error = ProviderBridge::spawn_confined(
+            "model-provider",
+            &committed_authority("model"),
+            &CheckedExecutable::for_test(&temp.path().join("never-runs")),
+            &root,
+            ProviderConfig::default(),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "provider start is refused: the macOS model provider starts from its admitted rights"
+        );
+        assert!(!root.exists(), "a refused model start creates no root");
+    }
+
+    #[cfg(all(target_os = "macos", not(elastos_unsupported_os_check)))]
+    #[test]
+    fn model_rights_start_does_not_keep_the_hand_written_policy() {
+        let source = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src/provider/bridge.rs"
+        ))
+        .unwrap();
+        let start = source
+            .find("pub async fn spawn_confined_model_from_rights(")
+            .unwrap();
+        let end = source[start..]
+            .find("pub async fn spawn_confined_model_linux(")
+            .map(|at| at + start)
+            .unwrap();
+        let body = &source[start..end];
+        assert!(body.contains("model_rights_command("));
+        assert!(
+            !body.contains("model_file_policy"),
+            "the rights start must not keep the hand-written policy"
+        );
+        let entry = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src/provider/os_entry.rs"
+        ))
+        .unwrap();
+        let profile_at = entry.find("fn admitted_model_profile(").unwrap();
+        let profile = &entry[profile_at..profile_at + 240];
+        assert!(profile.contains("render_macos_profile(RuntimeProviderId::Model, admitted)"));
     }
 
     #[cfg(target_os = "macos")]
