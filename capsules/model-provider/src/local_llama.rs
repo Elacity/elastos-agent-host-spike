@@ -836,10 +836,48 @@ fn remove_stale_engine_socket(_path: &str) -> Result<(), LocalLlamaFault> {
 #[cfg(unix)]
 fn random_alias() -> Result<String, LocalLlamaFault> {
     let mut bytes = [0u8; 16];
-    std::fs::File::open("/dev/urandom")
-        .and_then(|mut source| source.read_exact(&mut bytes))
-        .map_err(|_| LocalLlamaFault::Failed)?;
+    fill_random(&mut bytes).map_err(|_| LocalLlamaFault::Failed)?;
     Ok(bytes.iter().map(|byte| format!("{byte:02x}")).collect())
+}
+
+/// Kernel randomness. Linux uses `getrandom(2)`. macOS uses `getentropy`.
+/// The alias does not open a device node, so the confinement grants none.
+#[cfg(target_os = "linux")]
+fn fill_random(bytes: &mut [u8]) -> std::io::Result<()> {
+    let mut filled = 0;
+    while filled < bytes.len() {
+        let wrote = unsafe {
+            libc::getrandom(
+                bytes[filled..].as_mut_ptr().cast(),
+                bytes.len() - filled,
+                0,
+            )
+        };
+        if wrote < 0 {
+            let error = std::io::Error::last_os_error();
+            if error.kind() == std::io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(error);
+        }
+        filled += wrote as usize;
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn fill_random(bytes: &mut [u8]) -> std::io::Result<()> {
+    let mut filled = 0;
+    while filled < bytes.len() {
+        // getentropy accepts at most 256 bytes. The alias asks for 16.
+        let chunk = (bytes.len() - filled).min(256);
+        let answer = unsafe { libc::getentropy(bytes[filled..].as_mut_ptr().cast(), chunk) };
+        if answer != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        filled += chunk;
+    }
+    Ok(())
 }
 
 #[cfg(not(unix))]
@@ -1285,6 +1323,30 @@ mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::thread;
     use std::time::Instant as StdInstant;
+
+    #[cfg(unix)]
+    #[test]
+    fn local_alias_is_32_hex_from_getrandom() {
+        let alias = random_alias().expect("alias");
+        assert_eq!(alias.len(), 32, "{alias}");
+        assert!(alias.bytes().all(|byte| byte.is_ascii_hexdigit()));
+        let source = include_str!("local_llama.rs");
+        let start = source
+            .find("#[cfg(unix)]\nfn random_alias()")
+            .expect("function");
+        let end = source[start..]
+            .find("#[cfg(not(unix))]\nfn random_alias()")
+            .expect("other function");
+        let body = &source[start..start + end];
+        assert!(
+            !body.contains("/dev/urandom"),
+            "the alias must not open a device"
+        );
+        assert!(
+            body.contains("libc::getrandom") && body.contains("libc::getentropy"),
+            "the alias must use the kernel random call"
+        );
+    }
 
     fn fixture(
         mode: &str,
