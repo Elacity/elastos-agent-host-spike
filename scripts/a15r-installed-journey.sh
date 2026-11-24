@@ -2,12 +2,23 @@
 # Owner route: POST /api/apps/system/agents/launch.
 # The gateway owns the Home. POST /api/apps/home/runtime/ensure starts the
 # managed runtime. This runner does not start `elastos serve` beside it.
+# `--only u3-create` stops after create. It does not start a guest.
 set -u
+ONLY=""
+if [[ "${1:-}" == "--only" ]]; then
+  if [[ $# -lt 3 || "$2" != "u3-create" ]]; then
+    echo "usage: $0 [--only u3-create] <output-folder>" >&2
+    exit 2
+  fi
+  ONLY="$2"
+  shift 2
+fi
 OUT="${1:-}"
 if [[ -z "$OUT" || "$OUT" == "-h" || "$OUT" == "--help" ]]; then
-  echo "usage: $0 <output-folder>" >&2
+  echo "usage: $0 [--only u3-create] <output-folder>" >&2
   exit 2
 fi
+export A15R_ONLY="$ONLY"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-/Users/sash/code/target-a15r}"
 export CARGO_BUILD_BUILD_DIR="${CARGO_BUILD_BUILD_DIR:-/Users/sash/code/target-a15r-build}"
@@ -47,6 +58,7 @@ fail() {
     A15R_OUT="$OUT" \
       A15R_SOURCE_COMMIT="$(git -C "$ROOT" rev-parse HEAD)" \
       A15R_SOURCE_TREE="$(git -C "$ROOT" rev-parse 'HEAD^{tree}')" \
+      A15R_ONLY="$ONLY" \
       FAILED="$name" REASON="$*" \
       node "$ROOT/scripts/a15r-installed-journey.mjs" --shell-fail || true
   fi
@@ -154,6 +166,9 @@ if [[ ! -d "$OUT/tool/node_modules/playwright" ]]; then
   fi
 fi
 export PLAYWRIGHT_BROWSERS_PATH="$OUT/tool/browsers"
+if [[ -n "$ONLY" ]]; then
+  echo "mode: $ONLY"
+fi
 
 node "$ROOT/scripts/a15r-installed-journey.mjs"
 STATUS=$?

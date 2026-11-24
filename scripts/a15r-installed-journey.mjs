@@ -2,7 +2,7 @@
 // POST /api/apps/system/agents/launch after enable, create, activate,
 // and passkey step-up operation agent.start.
 
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
@@ -35,6 +35,17 @@ const names = [
   "one_result_and_receipt", "signed_start_audit", "signed_completion_audit",
   "card_removed", "replay_zero", "restart_zero",
 ];
+
+// Create only. The full journey's names stay the list above.
+export const U3_NAMES = [
+  "release_signed", "signing_key_deleted", "installed_identity_recorded",
+  "gateway_started", "owner_passkey_created", "u3_agents_enabled",
+  "u3_owner_field_refused", "u3_agent_created", "u3_non_owner_refused",
+  "u3_unknown_id_refused", "u3_guest_refused", "u3_no_session_refused",
+  "u3_agents_disabled_refused", "u3_agent_activated", "u3_no_guest_no_mint",
+  "u3_restart_same_record", "u3_create_audit",
+];
+const chosenId = "agent:v2:" + "ab".repeat(16);
 
 const marks = new Map();
 const started = Date.now();
@@ -463,14 +474,204 @@ export function createdAgentOwnedBy(row, ownerId) {
   return row.owner === ownerId && row.owner !== row.id;
 }
 
-export function shellFailStatuses(failed) {
+export function shellFailStatuses(failed, rowNames = names) {
   const established = ["release_signed", "signing_key_deleted"];
-  const cut = names.indexOf(failed);
-  return names.map((name, index) => {
+  const cut = rowNames.indexOf(failed);
+  return rowNames.map((name, index) => {
     if (name === failed) return "fail";
     if (cut > 0 && index < cut && established.includes(name)) return "pass";
     return "not reached";
   });
+}
+
+const AUDIT_EVENT_DOMAIN = "elastos.audit.event.v1";
+const AUDIT_CHAIN_DOMAIN = "elastos.audit.chain-link.v1";
+const AUDIT_CHAIN_SCHEMA = "elastos.audit.chain-link/v1";
+const AUDIT_CHAIN_STATE_SCHEMA = "elastos.audit.chain-state/v1";
+const AUDIT_CHAIN_STATE_DOMAIN = "elastos.audit.chain-state.v1";
+const AUDIT_CHAIN_GENESIS = "sha256:genesis";
+const BASE58 = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+
+export function base58Decode(text) {
+  if (typeof text !== "string" || text.length === 0) return null;
+  let zeros = 0;
+  for (const char of text) {
+    if (char !== "1") break;
+    zeros += 1;
+  }
+  let value = 0n;
+  for (const char of text) {
+    const index = BASE58.indexOf(char);
+    if (index < 0) return null;
+    value = value * 58n + BigInt(index);
+  }
+  let hex = value.toString(16);
+  if (hex.length % 2) hex = `0${hex}`;
+  return Buffer.concat([Buffer.alloc(zeros), Buffer.from(hex || "00", "hex")]);
+}
+
+export function didKeyEd25519(did) {
+  if (typeof did !== "string" || did.length !== 56 || !did.startsWith("did:key:z6Mk")) return null;
+  const decoded = base58Decode(did.slice("did:key:z".length));
+  if (!decoded || decoded.length !== 34 || decoded[0] !== 0xed || decoded[1] !== 0x01) return null;
+  return decoded.subarray(2);
+}
+
+function jsonBytes(value) {
+  return Buffer.from(JSON.stringify(value));
+}
+
+export function auditEventBytes(event, omitSignature) {
+  const fields = [
+    ["schema", event.schema],
+    ["event_id", event.event_id],
+    ["event_type", event.event_type],
+    ["principal_id", event.principal_id ?? null],
+    ["proof_binding_id", event.proof_binding_id ?? null],
+    ["session_id", event.session_id ?? null],
+    ["challenge_id", event.challenge_id ?? null],
+    ["capsule_id", event.capsule_id ?? null],
+    ["result", event.result],
+    ["reason", event.reason],
+    ["occurred_at", event.occurred_at],
+  ];
+  if (event.signer_did != null) fields.push(["signer_did", event.signer_did]);
+  if (!omitSignature && event.signature != null) fields.push(["signature", event.signature]);
+  const body = fields.map(([key, value]) => `${JSON.stringify(key)}:${JSON.stringify(value)}`).join(",");
+  return Buffer.from(`{${body}}`);
+}
+
+export function auditChainHash(sequence, eventId, previousHash, eventHash) {
+  const bytes = jsonBytes({
+    event_hash: eventHash,
+    event_id: eventId,
+    previous_hash: previousHash,
+    schema: AUDIT_CHAIN_SCHEMA,
+    sequence,
+  });
+  return `sha256:${crypto.createHash("sha256").update(bytes).digest("hex")}`;
+}
+
+function auditChainPayload(sequence, eventId, previousHash, eventHash, chainHash) {
+  return jsonBytes({
+    chain_hash: chainHash,
+    event_hash: eventHash,
+    event_id: eventId,
+    previous_hash: previousHash,
+    schema: AUDIT_CHAIN_SCHEMA,
+    sequence,
+  });
+}
+
+function auditStatePayload(activatedAt, headSequence, headHash) {
+  return jsonBytes({
+    activated_at: activatedAt,
+    head_hash: headHash,
+    head_sequence: headSequence,
+    schema: AUDIT_CHAIN_STATE_SCHEMA,
+  });
+}
+
+function verifyDomainSignature(did, domain, payload, signatureHex) {
+  const raw = didKeyEd25519(did);
+  if (!raw || typeof signatureHex !== "string" || !/^[0-9a-f]{128}$/.test(signatureHex)) return false;
+  const key = crypto.createPublicKey({
+    key: { kty: "OKP", crv: "Ed25519", x: Buffer.from(raw).toString("base64url") },
+    format: "jwk",
+  });
+  const digest = crypto.createHash("sha256")
+    .update(Buffer.from(domain, "utf8"))
+    .update(Buffer.from([0]))
+    .update(payload)
+    .digest();
+  return crypto.verify(null, digest, key, Buffer.from(signatureHex, "hex"));
+}
+
+export function verifyInstalledAudit(state, runtimeDid) {
+  const events = Array.isArray(state?.audit) ? state.audit : [];
+  const links = Array.isArray(state?.audit_chain) ? state.audit_chain : [];
+  if (!didKeyEd25519(runtimeDid)) return { ok: false, reason: "runtime did", creates: [] };
+  if (events.length === 0 || events.length !== links.length) {
+    return { ok: false, reason: "chain length", creates: [] };
+  }
+  const head = state.audit_chain_state;
+  const last = links[links.length - 1];
+  if (!head || head.schema !== AUDIT_CHAIN_STATE_SCHEMA || head.signer_did !== runtimeDid) {
+    return { ok: false, reason: "chain state", creates: [] };
+  }
+  if (head.head_sequence !== last.sequence || head.head_hash !== last.chain_hash) {
+    return { ok: false, reason: "chain head", creates: [] };
+  }
+  if (!verifyDomainSignature(
+    runtimeDid,
+    AUDIT_CHAIN_STATE_DOMAIN,
+    auditStatePayload(head.activated_at, head.head_sequence, head.head_hash),
+    head.signature,
+  )) {
+    return { ok: false, reason: "chain state signature", creates: [] };
+  }
+  const creates = [];
+  let previous = null;
+  for (let index = 0; index < events.length; index += 1) {
+    const event = events[index];
+    const link = links[index];
+    if (link.schema !== AUDIT_CHAIN_SCHEMA || link.event_id !== event.event_id) {
+      return { ok: false, reason: "binding", event_type: event.event_type, creates };
+    }
+    if (event.signer_did !== runtimeDid || link.signer_did !== runtimeDid) {
+      return { ok: false, reason: "signer", event_type: event.event_type, creates };
+    }
+    if (previous) {
+      if (link.sequence !== previous.sequence + 1 || link.previous_hash !== previous.chain_hash) {
+        return { ok: false, reason: "sequence", event_type: event.event_type, creates };
+      }
+    } else if (link.sequence !== 1 || link.previous_hash !== AUDIT_CHAIN_GENESIS) {
+      return { ok: false, reason: "genesis", event_type: event.event_type, creates };
+    }
+    const eventHash = `sha256:${crypto.createHash("sha256").update(auditEventBytes(event, false)).digest("hex")}`;
+    const chainHash = auditChainHash(link.sequence, link.event_id, link.previous_hash, eventHash);
+    if (link.event_hash !== eventHash || link.chain_hash !== chainHash) {
+      return { ok: false, reason: "hash", event_type: event.event_type, creates };
+    }
+    const eventOk = verifyDomainSignature(runtimeDid, AUDIT_EVENT_DOMAIN, auditEventBytes(event, true), event.signature);
+    const linkOk = verifyDomainSignature(
+      runtimeDid,
+      AUDIT_CHAIN_DOMAIN,
+      auditChainPayload(link.sequence, link.event_id, link.previous_hash, eventHash, chainHash),
+      link.signature,
+    );
+    if (!eventOk || !linkOk) {
+      return { ok: false, reason: "signature", event_type: event.event_type, creates };
+    }
+    if (event.event_type === "agent.record.create" && event.result === "ok") creates.push(event.principal_id);
+    previous = link;
+  }
+  return { ok: true, reason: "", creates };
+}
+
+export function storedOwnerIsCreatingOwner(storedOwner, productOwner) {
+  return typeof storedOwner === "string"
+    && storedOwner.startsWith("person:local:")
+    && storedOwner === productOwner;
+}
+
+export function refusalIncludes(status, text, wanted, needle) {
+  return status === wanted && String(text).includes(needle);
+}
+
+export function createReplacesMint(agentsSource, routeSource) {
+  const struct = String(agentsSource).match(/struct CreateRequest \{([\s\S]*?)\n\}/);
+  const body = struct ? struct[1] : "";
+  const fields = [...body.matchAll(/pub\(crate\)\s+([A-Za-z0-9_]+)\s*:/g)].map((match) => match[1]);
+  const route = String(routeSource).includes('"/api/apps/system/agents/create"');
+  const fresh = /fresh_agent_id\s*\(/.test(String(agentsSource));
+  const mints = /mint_agent_record\s*\(/.test(String(agentsSource));
+  return {
+    ok: fields.join(",") === "display_name,agent_host,request_id" && route && fresh && !mints,
+    fields,
+    route: route ? "POST /api/apps/system/agents/create" : "",
+    id_source: fresh ? "auth::fresh_agent_id" : "",
+  };
 }
 
 function storedOwnerRoot(principalId) {
@@ -741,6 +942,7 @@ async function startServe() {
 }
 
 function writeReceipt() {
+  if (process.env.A15R_ONLY === "u3-create") return writeU3Receipt();
   const assertions = names.map((name) => marks.get(name) || { name, status: "not reached", detail: "" });
   const install = fs.existsSync(path.join(out, "install.json"))
     ? readJson(path.join(out, "install.json"))
@@ -1182,7 +1384,450 @@ async function main() {
   }
 }
 
+function loadInstall() {
+  const file = path.join(out, "install.json");
+  return fs.existsSync(file) ? readJson(file) : {};
+}
+
+function binarySha256s(install) {
+  const binaries = {};
+  for (const key of [
+    "runtime_sha256", "provider_sha256", "did_sha256", "shell_sha256", "wasm_sha256",
+    "components_sha256", "release_sha256", "release_head_sha256", "sources_sha256",
+  ]) binaries[key] = install?.[key] || "";
+  return binaries;
+}
+
+function writeU3Receipt() {
+  const assertions = U3_NAMES.map((name) => marks.get(name) || { name, status: "not reached", detail: "" });
+  const receipt = {
+    mode: "u3-create",
+    route: "POST /api/apps/system/agents/create",
+    non_owner: "guest session",
+    source_commit: process.env.A15R_SOURCE_COMMIT || "",
+    source_tree: process.env.A15R_SOURCE_TREE || "",
+    binaries: binarySha256s(loadInstall()),
+    timings_ms: { ...timings, total: Date.now() - started },
+    assertions,
+    screenshots: screenshots.map((item) => ({
+      name: item.name,
+      status: item.status,
+      path: item.path || "",
+    })),
+    stopped,
+  };
+  fs.writeFileSync(path.join(out, "receipt.json"), JSON.stringify(receipt, null, 2) + "\n");
+  return assertions.some((item) => item.status !== "pass") ? 1 : 0;
+}
+
+function agentRecordsPath() {
+  return path.join(data, "ElastOS/System/Auth/agent-records.json");
+}
+
+function authStatePath() {
+  return path.join(data, "ElastOS/System/Auth/auth-state.json");
+}
+
+function storedAgentRecords() {
+  if (!fs.existsSync(agentRecordsPath())) return [];
+  const body = readJson(agentRecordsPath());
+  return (body.agents || []).map((agent) => ({
+    id: String(agent.record?.principal_id || ""),
+    owner: String(agent.record?.owner || ""),
+  }));
+}
+
+function storedHumans() {
+  if (!fs.existsSync(authStatePath())) return [];
+  const body = readJson(authStatePath());
+  return (body.principals || []).filter((row) => row.kind !== "agent").map((row) => ({
+    id: String(row.principal_id || ""),
+    role: String(row.role || ""),
+  }));
+}
+
+async function productCaller(token) {
+  const summary = await call("GET", "/api/apps/system/summary", token);
+  const id = summary.json?.authority?.principal_id;
+  return {
+    status: summary.status,
+    id: typeof id === "string" ? id : "",
+    role: String(summary.json?.access?.role || ""),
+  };
+}
+
+function runtimeIdentityDid() {
+  const env = { ...process.env, HOME: home, ELASTOS_QUIET_RUNTIME_NOTICES: "1" };
+  delete env.XDG_DATA_HOME;
+  delete env.XDG_CONFIG_HOME;
+  delete env.XDG_STATE_HOME;
+  delete env.XDG_CACHE_HOME;
+  const result = spawnSync(serveBin, ["identity", "show"], { env, encoding: "utf8" });
+  if (result.status !== 0) return "";
+  const line = String(result.stdout || "").split("\n").find((item) => item.includes("did:key:"));
+  const matched = line && line.match(/did:key:z6Mk[1-9A-HJ-NP-Za-km-z]+/);
+  const did = matched ? matched[0] : "";
+  return didKeyEd25519(did) ? did : "";
+}
+
+function guestProcesses() {
+  const coords = ["home-runtime-coords.json", "agent-runtime-coords.json"].filter((name) => (
+    fs.existsSync(path.join(data, name))
+  ));
+  let others = 0;
+  try {
+    const listed = spawnSync("ps", ["-ax", "-o", "pid=,command="], { encoding: "utf8" });
+    const gatewayPid = fs.existsSync(pidFile) ? fs.readFileSync(pidFile, "utf8").trim() : "";
+    for (const line of String(listed.stdout || "").split("\n")) {
+      if (!line.includes(String(serveBin))) continue;
+      const pid = line.trim().split(/\s+/)[0];
+      if (pid && pid !== gatewayPid) others += 1;
+    }
+  } catch { /* coords are the product's record of a running runtime */ }
+  return { coords, other_gateway_processes: others };
+}
+
+async function startGatewayOnly() {
+  const log = fs.openSync(logPath, "a");
+  const env = { ...process.env, HOME: home, ELASTOS_QUIET_RUNTIME_NOTICES: "1" };
+  delete env.XDG_DATA_HOME;
+  delete env.XDG_CONFIG_HOME;
+  delete env.XDG_STATE_HOME;
+  delete env.XDG_CACHE_HOME;
+  const child = spawn(serveBin, ["gateway", "--addr", gatewayAddr], {
+    cwd: home,
+    env,
+    detached: true,
+    stdio: ["ignore", log, log],
+  });
+  child.unref();
+  fs.writeFileSync(pidFile, String(child.pid));
+  const deadline = Date.now() + 90000;
+  while (Date.now() < deadline) {
+    try {
+      const response = await fetch(`${pageOrigin}/healthz`);
+      const body = await response.text();
+      if (gatewayHealthOk(response.status, body)) return;
+    } catch { /* gateway still starting */ }
+    await sleep(500);
+  }
+  throw new Error("restarted gateway did not accept healthz");
+}
+
+async function runU3Create() {
+  const install = readJson(path.join(out, "install.json"));
+  const keyGone = !fs.existsSync(path.join(data, ".a15r-publisher.key"));
+  if (install.signer_did && install.release_sha256 && install.key_deleted && keyGone) {
+    pass("release_signed", "signed release");
+  } else halt("release_signed", "install.json is missing a signed release");
+  if (install.key_deleted && keyGone) pass("signing_key_deleted");
+  else halt("signing_key_deleted", "disposable key is still present");
+  if (install.runtime_sha256 && install.wasm_sha256 && install.components_sha256 && install.bundle_cid) {
+    pass("installed_identity_recorded", {
+      runtime_sha256: install.runtime_sha256,
+      wasm_sha256: install.wasm_sha256,
+      components_sha256: install.components_sha256,
+    });
+  } else halt("installed_identity_recorded", "install identity is incomplete");
+
+  let gatewayProbe;
+  try {
+    const response = await fetch(`${pageOrigin}/healthz`);
+    gatewayProbe = { status: response.status, body: await response.text() };
+  } catch (error) {
+    halt("gateway_started", String(error.message || error));
+  }
+  if (!gatewayHealthOk(gatewayProbe.status, gatewayProbe.body)) {
+    halt("gateway_started", { status: gatewayProbe.status, body: String(gatewayProbe.body).slice(0, 200) });
+  }
+  pass("gateway_started", { status: gatewayProbe.status });
+
+  const playwright = loadPlaywright();
+  if (!playwright) {
+    screenshots.push({ name: "unlock", status: "skipped", detail: "playwright is not installed" });
+    halt("owner_passkey_created", "playwright is not installed");
+  }
+  browser = await playwright.chromium.launch({ headless: true });
+  const adminContext = await browser.newContext({ viewport: { width: 1280, height: 800 } });
+  adminPage = await adminContext.newPage();
+  await addAuthenticator(adminContext, adminPage);
+  await adminPage.goto(pageOrigin + "/home/", { waitUntil: "domcontentloaded", timeout: 30000 });
+  await shot(adminPage, "unlock");
+  let enrolled;
+  try {
+    enrolled = await enroll(adminPage, "Owner", false);
+  } catch (error) {
+    const bodyText = await adminPage.locator("body").innerText().catch(() => "");
+    halt("owner_passkey_created", `${error.message || error} page: ${bodyText.slice(0, 240)}`);
+  }
+  if (!enrolled.home_token) halt("owner_passkey_created", "register complete had no home token");
+  state.homeToken = enrolled.home_token;
+  pass("owner_passkey_created", "registered");
+  await shot(adminPage, "owner-home");
+  timings.owner_ms = Date.now() - started;
+
+  const system = await launchApp(state.homeToken, "system");
+  if (!system.token) halt("u3_agents_enabled", clip(system.reply.text));
+  state.systemToken = system.token;
+  const enabled = await call("POST", "/api/apps/system/agents/enable", state.systemToken, {});
+  if (enabled.status !== 200 || enabled.json?.enabled !== true) {
+    halt("u3_agents_enabled", { status: enabled.status, body: enabled.text.slice(0, 300) });
+  }
+  pass("u3_agents_enabled");
+
+  const beforeSpoof = storedAgentRecords();
+  const spoof = await call("POST", "/api/apps/system/agents/create", state.systemToken, {
+    display_name: "Spoof", agent_host: "agent-host", request_id: "u3-spoof", owner: "person:spoof",
+  });
+  if (!refusalIncludes(spoof.status, spoof.text, 409, "agent request is invalid")
+    || JSON.stringify(storedAgentRecords()) !== JSON.stringify(beforeSpoof)) {
+    halt("u3_owner_field_refused", { status: spoof.status, body: spoof.text.slice(0, 300) });
+  }
+  pass("u3_owner_field_refused", spoof.text.slice(0, 180));
+
+  const created = await call("POST", "/api/apps/system/agents/create", state.systemToken, {
+    display_name: "Helper", agent_host: "agent-host", request_id: "u3-create",
+  });
+  const createdId = String(created.json?.agent_id || "");
+  const caller = await productCaller(state.systemToken);
+  const admins = storedHumans().filter((person) => person.role === "admin");
+  const stored = storedAgentRecords().find((row) => row.id === createdId);
+  const ownerFromFile = admins.length === 1 ? admins[0].id : "";
+  if (
+    created.status !== 200
+    || created.json?.active !== false
+    || created.json?.session_id !== undefined
+    || !/^agent:v2:[0-9a-f]{32}$/.test(createdId)
+    || storedAgentRecords().length !== 1
+    || !storedOwnerIsCreatingOwner(stored?.owner, caller.id)
+    || stored.owner !== ownerFromFile
+    || caller.id !== ownerFromFile
+  ) {
+    halt("u3_agent_created", {
+      status: created.status,
+      active: created.json?.active,
+      stored_owner_matches_summary: stored?.owner === caller.id,
+      stored_owner_matches_auth_file: stored?.owner === ownerFromFile,
+      admins: admins.length,
+    });
+  }
+  pass("u3_agent_created", {
+    agent: createdId,
+    owner_matches_product: true,
+    read_from: "agent-records.json and system summary authority.principal_id",
+  });
+
+  const guestRegistration = await call(
+    "POST", "/api/apps/system/access/guest-registration", state.systemToken, { enabled: true },
+  );
+  if (guestRegistration.status !== 200) {
+    halt("u3_non_owner_refused", "guest registration was not enabled: " + guestRegistration.text.slice(0, 240));
+  }
+  const guestContext = await browser.newContext({ viewport: { width: 1280, height: 800 } });
+  const guestPage = await guestContext.newPage();
+  await addAuthenticator(guestContext, guestPage);
+  let guest;
+  try {
+    guest = await enroll(guestPage, "Guest", true);
+    await shot(guestPage, "guest");
+  } catch (error) {
+    halt("u3_non_owner_refused", String(error.message || error));
+  }
+  await guestContext.close();
+  if (!guest.home_token) halt("u3_non_owner_refused", "guest passkey completed without a home token");
+  state.guestToken = guest.home_token;
+  const guestSystem = await launchApp(state.guestToken, "system");
+  state.guestSystemToken = guestSystem.token;
+  const guestPeople = storedHumans().filter((person) => person.role === "guest");
+  const ownerStill = storedAgentRecords().find((row) => row.id === createdId);
+  const beforeNonOwner = JSON.stringify(storedAgentRecords());
+  const nonOwnerCreate = await call(
+    "POST",
+    "/api/apps/system/agents/create",
+    state.guestSystemToken || state.guestToken,
+    { display_name: "Other", agent_host: "agent-host", request_id: "u3-non-owner" },
+  );
+  const nonOwnerRefused = refusalIncludes(nonOwnerCreate.status, nonOwnerCreate.text, 403, adminRequired)
+    && guestPeople.length === 1
+    && guestPeople[0].id !== ownerFromFile
+    && ownerStill?.owner === ownerFromFile
+    && JSON.stringify(storedAgentRecords()) === beforeNonOwner;
+  if (!nonOwnerRefused) {
+    halt("u3_non_owner_refused", {
+      person: "guest session",
+      status: nonOwnerCreate.status,
+      body: nonOwnerCreate.text.slice(0, 240),
+      guests: guestPeople.length,
+      distinct: guestPeople[0]?.id !== ownerFromFile,
+      launch: guestSystem.reply.status,
+    });
+  }
+  pass("u3_non_owner_refused", { person: "guest session", status: nonOwnerCreate.status });
+
+  const beforeUnknown = JSON.stringify(storedAgentRecords());
+  const unknownActivate = await call("POST", "/api/apps/system/agents/activate", state.systemToken, {
+    agent_id: unknownId, active: true,
+  });
+  if (!refusalIncludes(unknownActivate.status, unknownActivate.text, 409, noSuchAgent)
+    || JSON.stringify(storedAgentRecords()) !== beforeUnknown) {
+    halt("u3_unknown_id_refused", {
+      status: unknownActivate.status,
+      body: unknownActivate.text.slice(0, 240),
+    });
+  }
+  pass("u3_unknown_id_refused", noSuchAgent);
+
+  const beforeGuest = JSON.stringify(storedAgentRecords());
+  const guestCreate = await call(
+    "POST",
+    "/api/apps/system/agents/create",
+    state.guestSystemToken || state.guestToken,
+    { display_name: "Guest Agent", agent_host: "agent-host", request_id: "u3-guest" },
+  );
+  if (!refusalIncludes(guestCreate.status, guestCreate.text, 403, adminRequired)
+    || JSON.stringify(storedAgentRecords()) !== beforeGuest) {
+    halt("u3_guest_refused", {
+      status: guestCreate.status,
+      body: guestCreate.text.slice(0, 240),
+      launch: guestSystem.reply.status,
+    });
+  }
+  pass("u3_guest_refused", { status: guestCreate.status, body: guestCreate.text.slice(0, 180) });
+
+  const beforeSession = JSON.stringify(storedAgentRecords());
+  const noSession = await call("POST", "/api/apps/system/agents/create", "", {
+    display_name: "No Session", agent_host: "agent-host", request_id: "u3-no-session",
+  });
+  if (!refusalIncludes(noSession.status, noSession.text, 403, "missing home launch token")
+    || JSON.stringify(storedAgentRecords()) !== beforeSession) {
+    halt("u3_no_session_refused", { status: noSession.status, body: noSession.text.slice(0, 240) });
+  }
+  pass("u3_no_session_refused", { status: noSession.status });
+
+  const identities = JSON.stringify(storedAgentRecords());
+  const disabled = await call("POST", "/api/apps/system/agents/disable", state.systemToken, {});
+  const whileOff = await call("POST", "/api/apps/system/agents/create", state.systemToken, {
+    display_name: "While Off", agent_host: "agent-host", request_id: "u3-while-off",
+  });
+  if (disabled.status !== 200 || disabled.json?.enabled !== false
+    || !refusalIncludes(whileOff.status, whileOff.text, 409, "agents are not turned on for this Home")
+    || JSON.stringify(storedAgentRecords()) !== identities) {
+    halt("u3_agents_disabled_refused", {
+      disable: disabled.status,
+      status: whileOff.status,
+      body: whileOff.text.slice(0, 240),
+    });
+  }
+  pass("u3_agents_disabled_refused", { status: whileOff.status });
+
+  const enabledAgain = await call("POST", "/api/apps/system/agents/enable", state.systemToken, {});
+  if (enabledAgain.status !== 200 || enabledAgain.json?.enabled !== true) {
+    halt("u3_agent_activated", { status: enabledAgain.status, body: enabledAgain.text.slice(0, 240) });
+  }
+  const activated = await call("POST", "/api/apps/system/agents/activate", state.systemToken, {
+    agent_id: createdId, active: true,
+  });
+  if (activated.status !== 200 || activated.json?.active !== true || activated.json?.session_id !== undefined) {
+    halt("u3_agent_activated", { status: activated.status, body: activated.text.slice(0, 300) });
+  }
+  pass("u3_agent_activated", createdId);
+
+  const beforeMint = JSON.stringify(storedAgentRecords());
+  const minted = await call("POST", "/api/apps/system/agents/create", state.systemToken, {
+    display_name: "Chosen", agent_host: "agent-host", request_id: "u3-chosen-id", agent_id: chosenId,
+  });
+  const processes = guestProcesses();
+  const replacement = createReplacesMint(
+    fs.readFileSync(path.join(root, "elastos/crates/elastos-server/src/agents.rs"), "utf8"),
+    fs.readFileSync(path.join(root, "elastos/crates/elastos-server/src/api/gateway.rs"), "utf8"),
+  );
+  const noMint = refusalIncludes(minted.status, minted.text, 409, "agent request is invalid")
+    && JSON.stringify(storedAgentRecords()) === beforeMint
+    && !storedAgentRecords().some((row) => row.id === chosenId)
+    && created.json?.session_id === undefined
+    && activated.json?.session_id === undefined
+    && processes.coords.length === 0
+    && processes.other_gateway_processes === 0
+    && replacement.ok;
+  if (!noMint) {
+    halt("u3_no_guest_no_mint", {
+      status: minted.status,
+      body: minted.text.slice(0, 180),
+      coords: processes.coords,
+      other_gateway_processes: processes.other_gateway_processes,
+      route: replacement.route,
+      fields: replacement.fields,
+      id_source: replacement.id_source,
+    });
+  }
+  pass("u3_no_guest_no_mint", {
+    route: replacement.route,
+    fields: replacement.fields,
+    id_source: replacement.id_source,
+    coords: [],
+    sessions: 0,
+  });
+
+  const beforeBytes = fs.readFileSync(agentRecordsPath());
+  const beforeCaller = await productCaller(state.systemToken);
+  try {
+    await stopServe();
+    await startGatewayOnly();
+  } catch (error) {
+    halt("u3_restart_same_record", String(error.message || error));
+  }
+  const afterBytes = fs.readFileSync(agentRecordsPath());
+  const afterCaller = await productCaller(state.systemToken);
+  const afterStored = storedAgentRecords().find((row) => row.id === createdId);
+  if (!beforeBytes.equals(afterBytes)
+    || !storedOwnerIsCreatingOwner(afterStored?.owner, afterCaller.id)
+    || afterCaller.id !== beforeCaller.id) {
+    halt("u3_restart_same_record", {
+      bytes_match: beforeBytes.equals(afterBytes),
+      summary_status: afterCaller.status,
+      owner_matches: afterStored?.owner === afterCaller.id,
+    });
+  }
+  pass("u3_restart_same_record", { bytes_match: true, owner_matches_product: true });
+
+  const did = runtimeIdentityDid();
+  const verified = verifyInstalledAudit(readJson(authStatePath()), did);
+  const oneCreate = verified.ok && verified.creates.length === 1 && verified.creates[0] === createdId;
+  if (!oneCreate) {
+    halt("u3_create_audit", {
+      reason: verified.reason,
+      event_type: verified.event_type || "",
+      count: verified.creates.length,
+    });
+  }
+  pass("u3_create_audit", { count: 1, verified: true, subject_is_created_agent: true });
+}
+
 function shellFailReceipt() {
+  if (process.env.A15R_ONLY === "u3-create") {
+    const failed = process.env.FAILED || "";
+    const reason = process.env.REASON || "";
+    const statuses = shellFailStatuses(failed, U3_NAMES);
+    const assertions = U3_NAMES.map((name, index) => ({
+      name,
+      status: statuses[index],
+      detail: name === failed ? clip(reason) : "",
+    }));
+    const receipt = {
+      mode: "u3-create",
+      route: "POST /api/apps/system/agents/create",
+      non_owner: "guest session",
+      source_commit: process.env.A15R_SOURCE_COMMIT || "",
+      source_tree: process.env.A15R_SOURCE_TREE || "",
+      binaries: binarySha256s(loadInstall()),
+      timings_ms: {},
+      assertions,
+      screenshots: [],
+      stopped: clip(reason),
+    };
+    fs.writeFileSync(path.join(out, "receipt.json"), JSON.stringify(receipt, null, 2) + "\n");
+    return;
+  }
   const failed = process.env.FAILED || "";
   const reason = process.env.REASON || "";
   const statuses = shellFailStatuses(failed);
@@ -1221,7 +1866,8 @@ if (invokedDirectly()) {
     shellFailReceipt();
     process.exit(1);
   }
-  main().catch((error) => {
+  const job = process.env.A15R_ONLY === "u3-create" ? runU3Create : main;
+  job().catch((error) => {
     stopped = clip(error && (error.detail || error.stack || error.message) || error);
   }).finally(async () => {
     if (browser) await browser.close().catch(() => {});
