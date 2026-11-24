@@ -2245,4 +2245,7 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
     }
+
+    #[path = "engine_spike.rs"]
+    mod engine_spike;
 }
