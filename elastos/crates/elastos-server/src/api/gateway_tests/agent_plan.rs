@@ -64,6 +64,9 @@ impl Provider for AgentPlanProvider {
                 "private provider diagnostic".to_string(),
             ));
         }
+        if request["provider_result_error"] == true {
+            return Ok(json!({"status": "error"}));
+        }
         Ok(json!({"status": "ok", "data": {"observed": request}}))
     }
 }
@@ -160,7 +163,7 @@ fn submit_with_bounds(
             audit.clone(),
             Arc::new(elastos_runtime::primitives::metrics::MetricsManager::new()),
         ));
-        let ctx = crate::resource_bridge::BridgeContext {
+        let mut ctx = crate::resource_bridge::BridgeContext {
             provider_registry: registry,
             capability_manager: manager,
             pending_store: Arc::new(
@@ -191,7 +194,13 @@ fn submit_with_bounds(
             model_token_ceiling: Some(16),
             model_budget: None,
             stop: None,
+            plan_book: None,
         };
+        crate::runtime::Runtime::bind_detached_plan_for_test(
+            &mut ctx,
+            "capsule:agent-host",
+            requester,
+        );
         crate::resource_bridge::retain_agent_plan_dispatch_authority(
             record["request_id"].as_str().unwrap(),
             owner,
@@ -1943,6 +1952,7 @@ async fn plan_inflight_row(
         model_token_ceiling: Some(16),
         model_budget: None,
         stop: None,
+        plan_book: Some(runtime.plan_book()),
     };
     crate::resource_bridge::retain_agent_plan_dispatch_authority(
         &id,
@@ -2002,7 +2012,7 @@ async fn plan_inflight_row(
                 }
             }
             PlanRowEnd::Completed => {
-                crate::runtime::Runtime::note_plan_instance_ended(&session);
+                runtime.note_plan_instance_ended(&session);
                 runtime.end_planted_session_for_test(&session).await;
                 if point == PlanDispatchPoint::AfterToken {
                     crate::api::handlers::settle::settle_and_revoke(
@@ -2085,18 +2095,598 @@ async fn plan_inflight_row(
     let code = record["result"]["code"].as_str().unwrap_or("");
     let expected = match (point, end) {
         (PlanDispatchPoint::AfterToken, PlanRowEnd::Stop | PlanRowEnd::Completed) => {
-            assert!(
-                crate::resource_bridge::own_root_token_revoked_for_test(&id).await,
-                "{point:?} {end:?} left the one-use token usable"
-            );
+            assert_plan_grant_closed(&id, &store).await;
             "capability_denied"
         }
         // Turning agents off removes the principal, so the second invoke
         // resolution refuses before the standing check. Retire leaves the
-        // principal and is caught as agent_inactive.
-        (PlanDispatchPoint::AfterToken, PlanRowEnd::AgentsOff) => "invalid_resource_invoke",
+        // principal and is caught as agent_inactive. Both refusals are after
+        // the one-use token was registered, so the token is revoked and the
+        // pending grant is gone.
+        (PlanDispatchPoint::AfterToken, PlanRowEnd::AgentsOff) => {
+            assert_plan_grant_closed(&id, &store).await;
+            "invalid_resource_invoke"
+        }
+        (PlanDispatchPoint::AfterToken, PlanRowEnd::Retire) => {
+            assert_plan_grant_closed(&id, &store).await;
+            "agent_inactive"
+        }
         (_, PlanRowEnd::Retire | PlanRowEnd::AgentsOff) => "agent_inactive",
         _ => "instance ended",
     };
     assert_eq!(code, expected, "{point:?} {end:?} {record}");
+}
+
+async fn assert_plan_grant_closed(
+    request_id: &str,
+    store: &elastos_runtime::capability::pending::PendingRequestStore,
+) {
+    assert!(
+        crate::resource_bridge::own_root_token_revoked_for_test(request_id).await,
+        "{request_id} left the one-use token usable"
+    );
+    let open = store.list_requests().await;
+    assert!(
+        open.iter().all(|request| !matches!(
+            request.status,
+            elastos_runtime::capability::pending::RequestStatus::Pending
+        )),
+        "{request_id} left a pending approval"
+    );
+}
+
+async fn bare_runtime(dir: &std::path::Path) -> Arc<crate::runtime::Runtime> {
+    let storage = dir.join("cap-storage");
+    std::fs::create_dir_all(&storage).unwrap();
+    Arc::new(crate::runtime::Runtime::new(
+        Arc::new(
+            elastos_storage::providers::LocalFSProvider::new(storage)
+                .await
+                .unwrap(),
+        ),
+        Arc::new(IdleCompute),
+    ))
+}
+
+struct PlantedEffect {
+    dir: tempfile::TempDir,
+    state: GatewayState,
+    runtime: Arc<crate::runtime::Runtime>,
+    owner: String,
+    agent: String,
+    session: String,
+    id: String,
+    store: Arc<elastos_runtime::capability::pending::PendingRequestStore>,
+    path: std::path::PathBuf,
+    before: Vec<u8>,
+}
+
+async fn plant_approved(
+    n: u64,
+    grant: bool,
+    plan: impl FnOnce(&str, &str) -> serde_json::Value,
+) -> PlantedEffect {
+    let dir = tempfile::tempdir().unwrap();
+    let (state, _) = agent_plan_dispatch_state(dir.path()).await;
+    let owner = passkey_authority(dir.path());
+    let agent = crate::agents::tests::plant_for_dispatch(
+        dir.path(),
+        &owner.principal_id,
+        &owner.principal_id,
+    );
+    let root = crate::auth::principal_stored_localhost_root(Some(dir.path()), &agent).unwrap();
+    let target = format!("{root}/Documents/plan.md");
+    let path = elastos_common::localhost::rooted_localhost_fs_path(dir.path(), &target).unwrap();
+    crate::auth::write_principal_root_object(dir.path(), &agent, &root, &target, &path, b"before")
+        .unwrap();
+    let before = std::fs::read(&path).unwrap();
+    let runtime = bare_runtime(dir.path()).await;
+    let session = format!("session-effect-{n}");
+    runtime
+        .register_capsule(crate::runtime::RunningCapsuleInfo {
+            id: session.clone(),
+            name: "planted".to_string(),
+            status: crate::runtime::CAPSULE_RUNNING.to_string(),
+            capsule_type: elastos_common::CapsuleType::Wasm,
+            handle: None,
+            session_id: session.clone(),
+            principal: Some(agent.clone()),
+            cause: None,
+            ended_at: None,
+        })
+        .await;
+    runtime
+        .insert_agent_session_for_test(crate::runtime::AgentSessionRecord {
+            agent_id: agent.clone(),
+            owner: owner.principal_id.clone(),
+            host_cid: "cid".to_string(),
+            launch_id: format!("launch:{session}"),
+            session_id: session.clone(),
+        })
+        .await;
+    runtime.bind_plan_instance(&session, &agent);
+    let audit = Arc::new(elastos_runtime::primitives::audit::AuditLog::new());
+    let manager = Arc::new(elastos_runtime::capability::CapabilityManager::new(
+        Arc::new(elastos_runtime::capability::CapabilityStore::new()),
+        audit.clone(),
+        Arc::new(elastos_runtime::primitives::metrics::MetricsManager::new()),
+    ));
+    let store = Arc::new(elastos_runtime::capability::pending::PendingRequestStore::new(audit));
+    runtime
+        .set_provider_registry(
+            state.provider_registry.clone().unwrap(),
+            manager.clone(),
+            store.clone(),
+            dir.path().to_path_buf(),
+        )
+        .await;
+    let created = crate::api::gateway::submit_pending_agent_plan(
+        dir.path(),
+        &owner.principal_id,
+        &agent,
+        &session,
+        &session,
+        &plan(&root, &target),
+        800 + n,
+    )
+    .unwrap();
+    let id = created["request_id"].as_str().unwrap().to_string();
+    let ctx = crate::resource_bridge::BridgeContext {
+        provider_registry: state.provider_registry.clone().unwrap(),
+        capability_manager: manager,
+        pending_store: store.clone(),
+        capsule_id: session.clone(),
+        session_id: session.clone(),
+        principal_id: Some(agent.clone()),
+        manifest_capabilities: [
+            "elastos://availability/*",
+            "elastos://inspect/*",
+            "localhost://UsersAI/*",
+            "localhost://Users/*",
+        ]
+        .into_iter()
+        .map(|resource| elastos_common::AuthorityBound {
+            resource: resource.to_string(),
+            actions: None,
+        })
+        .collect(),
+        data_dir: Some(dir.path().to_path_buf()),
+        launch: None,
+        model_token_ceiling: Some(16),
+        model_budget: None,
+        stop: None,
+        plan_book: Some(runtime.plan_book()),
+    };
+    crate::resource_bridge::retain_agent_plan_dispatch_authority(
+        &id,
+        &owner.principal_id,
+        &ctx,
+        &created["request"],
+    )
+    .unwrap();
+    if grant {
+        crate::resource_bridge::grant_agent_plan_capability_for_test(&id, &created["request"])
+            .await;
+    }
+    set_approved(dir.path(), &id);
+    PlantedEffect {
+        dir,
+        state,
+        runtime,
+        owner: owner.principal_id,
+        agent,
+        session,
+        id,
+        store,
+        path,
+        before,
+    }
+}
+
+async fn dispatch_planted(plant: &PlantedEffect) -> anyhow::Result<String> {
+    super::gateway_inspect_actions::dispatch_approved_agent_plan(
+        &plant.state,
+        &dispatch_context(&plant.owner),
+        &plant.id,
+    )
+    .await
+}
+
+/// The check and the mark are one hold of the plan lock. Closing in that hold
+/// refuses the effect. An effect that entered first stays marked after the end.
+#[cfg(unix)]
+#[tokio::test]
+async fn the_end_and_the_effect_share_one_lock() {
+    let dir = tempfile::tempdir().unwrap();
+    let runtime = bare_runtime(dir.path()).await;
+    let session = "session-seam";
+    let agent = "agent-seam";
+    runtime.bind_plan_instance(session, agent);
+    let book = runtime.plan_book();
+    crate::runtime::arm_plan_decision_hook(session, {
+        let session = session.to_string();
+        move |book| book.close_for_test(&session)
+    });
+    assert!(
+        crate::runtime::Runtime::try_enter_plan_effect(&book, session, agent).is_err(),
+        "the end inside the same hold let the effect in"
+    );
+    assert!(!runtime.plan_effect_inflight(session));
+    crate::runtime::disarm_plan_decision_hook(session);
+
+    runtime.bind_plan_instance(session, agent);
+    let guard = crate::runtime::Runtime::try_enter_plan_effect(&book, session, agent)
+        .expect("an open instance enters");
+    runtime.note_plan_instance_ended(session);
+    assert!(
+        runtime.plan_effect_inflight(session),
+        "the end cleared an effect that had already entered"
+    );
+    assert_eq!(
+        runtime.inflight_plan_sessions(agent),
+        vec![session.to_string()]
+    );
+    guard.release();
+    assert!(!runtime.plan_effect_inflight(session));
+    assert!(crate::runtime::Runtime::try_enter_plan_effect(&book, session, agent).is_err());
+}
+
+/// Two effects of one session are two marks. The first to finish leaves the second.
+#[cfg(unix)]
+#[tokio::test]
+async fn two_effects_of_one_session_are_counted_apart() {
+    let dir = tempfile::tempdir().unwrap();
+    let runtime = bare_runtime(dir.path()).await;
+    let session = "session-two";
+    let agent = "agent-two";
+    runtime.bind_plan_instance(session, agent);
+    let book = runtime.plan_book();
+    let first = crate::runtime::Runtime::try_enter_plan_effect(&book, session, agent).unwrap();
+    let second = crate::runtime::Runtime::try_enter_plan_effect(&book, session, agent).unwrap();
+    assert!(runtime.plan_effect_inflight(session));
+    first.release();
+    assert!(
+        runtime.plan_effect_inflight(session),
+        "the first effect to finish cleared the second"
+    );
+    second.release();
+    assert!(!runtime.plan_effect_inflight(session));
+}
+
+/// One Runtime's end does not close another Runtime's session of the same id.
+#[cfg(unix)]
+#[tokio::test]
+async fn one_runtime_does_not_end_another_runtimes_plan() {
+    let dir = tempfile::tempdir().unwrap();
+    let left = bare_runtime(dir.path()).await;
+    let right = bare_runtime(&dir.path().join("other")).await;
+    let session = "session-shared";
+    let agent = "agent-shared";
+    left.bind_plan_instance(session, agent);
+    right.bind_plan_instance(session, agent);
+    left.note_plan_instance_ended(session);
+    let left_book = left.plan_book();
+    let right_book = right.plan_book();
+    assert!(crate::runtime::Runtime::try_enter_plan_effect(&left_book, session, agent).is_err());
+    let guard = crate::runtime::Runtime::try_enter_plan_effect(&right_book, session, agent)
+        .expect("the other Runtime's session is still open");
+    assert!(right.plan_effect_inflight(session));
+    assert!(!left.plan_effect_inflight(session));
+    guard.release();
+}
+
+async fn dispatch_without_an_open_instance(bound_then_gone: bool) {
+    let dir = tempfile::tempdir().unwrap();
+    let (state, _) = agent_plan_dispatch_state(dir.path()).await;
+    let owner = "person:closed";
+    let agent = "agent:closed";
+    let session = if bound_then_gone {
+        "capsule:gone"
+    } else {
+        "capsule:unbound"
+    };
+    let created = crate::api::gateway::submit_pending_agent_plan(
+        dir.path(),
+        owner,
+        agent,
+        session,
+        session,
+        &read_plan(),
+        70,
+    )
+    .unwrap();
+    let id = created["request_id"].as_str().unwrap();
+    let audit = Arc::new(elastos_runtime::primitives::audit::AuditLog::new());
+    let manager = Arc::new(elastos_runtime::capability::CapabilityManager::new(
+        Arc::new(elastos_runtime::capability::CapabilityStore::new()),
+        audit.clone(),
+        Arc::new(elastos_runtime::primitives::metrics::MetricsManager::new()),
+    ));
+    let mut ctx = crate::resource_bridge::BridgeContext {
+        provider_registry: state.provider_registry.clone().unwrap(),
+        capability_manager: manager,
+        pending_store: Arc::new(
+            elastos_runtime::capability::pending::PendingRequestStore::new(audit),
+        ),
+        capsule_id: session.to_string(),
+        session_id: session.to_string(),
+        principal_id: Some(agent.to_string()),
+        manifest_capabilities: Vec::new(),
+        data_dir: Some(dir.path().to_path_buf()),
+        launch: None,
+        model_token_ceiling: None,
+        model_budget: None,
+        stop: None,
+        plan_book: None,
+    };
+    if bound_then_gone {
+        crate::runtime::Runtime::bind_detached_plan_for_test(&mut ctx, session, agent);
+        ctx.plan_book
+            .as_ref()
+            .unwrap()
+            .lock()
+            .unwrap()
+            .close_for_test(session);
+    }
+    crate::resource_bridge::retain_agent_plan_dispatch_authority(
+        id,
+        owner,
+        &ctx,
+        &created["request"],
+    )
+    .unwrap();
+    set_approved(dir.path(), id);
+    super::gateway_inspect_actions::dispatch_approved_agent_plan(
+        &state,
+        &dispatch_context(owner),
+        id,
+    )
+    .await
+    .unwrap();
+    let record = read_record(dir.path(), id);
+    assert_eq!(record["status"], "refused", "{record}");
+    assert_eq!(record["result"]["code"], "instance ended", "{record}");
+}
+
+/// A dispatch for an instance that was never bound, or was bound and then
+/// removed, is refused. There is no open default.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_dispatch_for_an_unbound_or_gone_instance_is_refused() {
+    dispatch_without_an_open_instance(false).await;
+    dispatch_without_an_open_instance(true).await;
+}
+
+/// Delete, which is how a running capsule is cancelled, does not say stopped
+/// while that session's effect is in flight.
+#[cfg(unix)]
+#[tokio::test]
+async fn stop_capsule_says_stopping_while_an_effect_is_in_flight() {
+    let dir = tempfile::tempdir().unwrap();
+    let runtime = bare_runtime(dir.path()).await;
+    let session = "session-cancel";
+    let agent = "agent-cancel";
+    runtime.bind_plan_instance(session, agent);
+    runtime
+        .register_capsule(crate::runtime::RunningCapsuleInfo {
+            id: session.to_string(),
+            name: "planted".to_string(),
+            status: crate::runtime::CAPSULE_RUNNING.to_string(),
+            capsule_type: elastos_common::CapsuleType::Wasm,
+            handle: None,
+            session_id: session.to_string(),
+            principal: Some(agent.to_string()),
+            cause: None,
+            ended_at: None,
+        })
+        .await;
+    let book = runtime.plan_book();
+    let guard = crate::runtime::Runtime::try_enter_plan_effect(&book, session, agent).unwrap();
+    let response = crate::api::routes::stop_capsule(
+        axum::Extension(runtime.clone()),
+        axum::extract::Path(session.to_string()),
+        axum::body::Bytes::new(),
+    )
+    .await;
+    let status = response.status();
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(status, StatusCode::ACCEPTED, "{body}");
+    assert_eq!(body["status"], "stopping", "{body}");
+    assert_ne!(body["status"], "stopped", "{body}");
+    assert!(
+        crate::runtime::Runtime::try_enter_plan_effect(&book, session, agent).is_err(),
+        "Stop answered without closing the instance"
+    );
+    assert!(runtime.plan_effect_inflight(session));
+    guard.release();
+    assert!(!runtime.plan_effect_inflight(session));
+    assert!(crate::runtime::Runtime::try_enter_plan_effect(&book, session, agent).is_err());
+}
+
+/// A nested submit is an effect. Closing the instance in the admit hold writes
+/// no second plan and raises no approval card.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_nested_submit_after_the_end_writes_no_plan() {
+    let plant = plant_approved(1, true, |_, _| {
+        json!({"steps": [{"scheme": "inspect", "operation": "submit_agent_plan", "request": {
+            "steps": [{"scheme": "availability", "operation": "status", "request": {}}]
+        }}]})
+    })
+    .await;
+    crate::runtime::arm_plan_decision_hook(&plant.session, {
+        let session = plant.session.clone();
+        move |book| book.close_for_test(&session)
+    });
+    dispatch_planted(&plant).await.unwrap();
+    crate::runtime::disarm_plan_decision_hook(&plant.session);
+    let record = read_record(plant.dir.path(), &plant.id);
+    assert_eq!(record["status"], "refused", "{record}");
+    assert_eq!(record["result"]["code"], "instance ended", "{record}");
+    let files: Vec<_> = std::fs::read_dir(plant.dir.path().join("inspect-actions"))
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect();
+    assert_eq!(
+        files,
+        vec![std::ffi::OsString::from(format!("{}.json", plant.id))],
+        "a nested submit wrote a plan after the end: {files:?}"
+    );
+}
+
+/// A refusal after the one-use token is registered revokes it and leaves no
+/// pending grant.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_refusal_after_the_token_is_registered_revokes_it() {
+    let plant = plant_approved(2, false, |_, target| {
+        json!({"steps": [{"scheme": "localhost", "operation": "write", "request": {
+            "path": target, "content": [112, 108, 97, 110]
+        }}]})
+    })
+    .await;
+    crate::runtime::arm_plan_decision_hook(&plant.session, {
+        let session = plant.session.clone();
+        move |book| book.close_for_test(&session)
+    });
+    dispatch_planted(&plant).await.unwrap();
+    crate::runtime::disarm_plan_decision_hook(&plant.session);
+    let record = read_record(plant.dir.path(), &plant.id);
+    assert_eq!(record["status"], "refused", "{record}");
+    assert_eq!(record["result"]["code"], "instance ended", "{record}");
+    assert_eq!(std::fs::read(&plant.path).unwrap(), plant.before);
+    assert_plan_grant_closed(&plant.id, &plant.store).await;
+}
+
+/// The dropped dispatch future does not clear the mark. Stop keeps saying
+/// stopping, and the record says unknown, until the process ends.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_timed_out_effect_stays_unresolved() {
+    let plant = plant_approved(3, false, |_, target| {
+        json!({"steps": [{"scheme": "localhost", "operation": "write", "request": {
+            "path": target, "content": [112, 108, 97, 110]
+        }}]})
+    })
+    .await;
+    super::gateway_inspect_actions::set_plan_dispatch_wait_for_test(
+        &plant.id,
+        std::time::Duration::from_secs(8),
+    );
+    let pause = crate::resource_bridge::arm_plan_dispatch_hold(
+        &plant.id,
+        crate::resource_bridge::PlanDispatchPoint::InEffect,
+    );
+    let state = plant.state.clone();
+    let owner = plant.owner.clone();
+    let id = plant.id.clone();
+    let task = tokio::spawn(async move {
+        super::gateway_inspect_actions::dispatch_approved_agent_plan(
+            &state,
+            &dispatch_context(&owner),
+            &id,
+        )
+        .await
+    });
+    let reached =
+        tokio::time::timeout(std::time::Duration::from_secs(15), pause.entered.notified()).await;
+    assert!(reached.is_ok(), "the effect did not reach its hold");
+    let finished = tokio::time::timeout(std::time::Duration::from_secs(20), task)
+        .await
+        .expect("the short wait did not settle the dispatch");
+    super::gateway_inspect_actions::clear_plan_dispatch_wait_for_test(&plant.id);
+    finished.unwrap().unwrap();
+    let record = read_record(plant.dir.path(), &plant.id);
+    assert_eq!(record["status"], "unknown", "{record}");
+    assert_eq!(record["result"]["code"], "provider_timeout", "{record}");
+    assert_eq!(std::fs::read(&plant.path).unwrap(), plant.before);
+    assert_plan_grant_closed(&plant.id, &plant.store).await;
+    assert!(
+        plant.runtime.plan_effect_inflight(&plant.session),
+        "the timeout cleared the mark while the outcome is unknown"
+    );
+    let (status, body) = stop_plan_agent(plant.runtime.clone(), &plant.agent).await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{body}");
+    assert!(body["stopped"]
+        .as_array()
+        .is_some_and(|rows| rows.is_empty()));
+    assert_eq!(body["stopping"][0]["status"], "stopping", "{body}");
+    assert!(body.get("already").is_none(), "{body}");
+}
+
+/// A panic after the mark still writes a terminal status, and the mark stays.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_panic_in_dispatch_records_unknown() {
+    let plant = plant_approved(4, false, |_, target| {
+        json!({"steps": [{"scheme": "localhost", "operation": "write", "request": {
+            "path": target, "content": [112, 108, 97, 110]
+        }}]})
+    })
+    .await;
+    crate::resource_bridge::arm_plan_dispatch_panic(&plant.id);
+    dispatch_planted(&plant)
+        .await
+        .expect("a panicked dispatch still settles");
+    let record = read_record(plant.dir.path(), &plant.id);
+    assert_eq!(record["status"], "unknown", "{record}");
+    assert_eq!(record["result"]["code"], "dispatch_panic", "{record}");
+    assert_eq!(std::fs::read(&plant.path).unwrap(), plant.before);
+    assert_plan_grant_closed(&plant.id, &plant.store).await;
+    assert!(
+        plant.runtime.plan_effect_inflight(&plant.session),
+        "the panic cleared the mark"
+    );
+}
+
+/// An effect already in flight when the instance ends is recorded as it
+/// finished: here the provider's result is an error, so the record is failed.
+#[cfg(unix)]
+#[tokio::test]
+async fn an_effect_in_flight_at_the_end_is_recorded_failed() {
+    let plant = plant_approved(5, true, |_, _| {
+        json!({"steps": [{"scheme": "availability", "operation": "status", "request": {
+            "provider_result_error": true
+        }}]})
+    })
+    .await;
+    let pause = crate::resource_bridge::arm_plan_dispatch_hold(
+        &plant.id,
+        crate::resource_bridge::PlanDispatchPoint::InEffect,
+    );
+    let state = plant.state.clone();
+    let owner = plant.owner.clone();
+    let id = plant.id.clone();
+    let task = tokio::spawn(async move {
+        super::gateway_inspect_actions::dispatch_approved_agent_plan(
+            &state,
+            &dispatch_context(&owner),
+            &id,
+        )
+        .await
+    });
+    let reached =
+        tokio::time::timeout(std::time::Duration::from_secs(15), pause.entered.notified()).await;
+    assert!(reached.is_ok(), "the effect did not reach its hold");
+    assert!(plant.runtime.plan_effect_inflight(&plant.session));
+    plant.runtime.note_plan_instance_ended(&plant.session);
+    assert!(
+        plant.runtime.plan_effect_inflight(&plant.session),
+        "the end cleared the effect that was already in flight"
+    );
+    pause.release.notify_one();
+    let finished = tokio::time::timeout(std::time::Duration::from_secs(15), task)
+        .await
+        .expect("the failed effect did not settle");
+    finished.unwrap().unwrap();
+    let record = read_record(plant.dir.path(), &plant.id);
+    assert_eq!(record["status"], "failed", "{record}");
+    assert_eq!(
+        record["result"]["code"], "provider_result_error",
+        "{record}"
+    );
+    assert!(!plant.runtime.plan_effect_inflight(&plant.session));
 }

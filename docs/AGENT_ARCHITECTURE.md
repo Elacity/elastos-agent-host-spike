@@ -384,9 +384,9 @@ on `the_wrap_key_binds_each_input` names the same tests.
 ### Instance access to agent storage
 
 Each running instance gets fresh, limited access to its agent's storage, and
-that access ends when the instance stops. A plan step whose dispatch had
-already begun when the end was recorded may finish after it. A plan step
-still pending at the end is refused.
+that access ends when the instance stops. A step whose dispatch hasn't reached
+its effect is refused; an effect already begun is tracked, and Stop says
+stopping until it ends.
 
 This document does not freeze the exact path layout below `Users/...` or
 `UsersAI/...`. Those paths require their own versioned object contract before

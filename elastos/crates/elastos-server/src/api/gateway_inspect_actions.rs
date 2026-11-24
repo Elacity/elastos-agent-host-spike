@@ -470,9 +470,12 @@ pub(super) async fn dispatch_approved_agent_plan(
         )?;
         return Err(err);
     }
+    let record_if_lost = record.clone();
+    let data_dir_if_lost = data_dir.clone();
+    let request_id = record.request_id.clone();
     let task = tokio::spawn(async move {
         let response = tokio::time::timeout(
-            std::time::Duration::from_secs(120),
+            plan_dispatch_wait(&request_id),
             crate::resource_bridge::dispatch_agent_plan_step(
                 &record.request_id,
                 &record.principal_id,
@@ -505,15 +508,71 @@ pub(super) async fn dispatch_approved_agent_plan(
                 "refused",
                 serde_json::json!({"status": "refused", "code": response["code"].as_str().unwrap_or("authority_refused")}),
             ),
-            Err(_) => (
-                "unknown",
-                serde_json::json!({"status": "unknown", "code": "provider_timeout"}),
-            ),
+            Err(_) => {
+                // The dispatch future is gone. Its effect mark stays. The
+                // one-use grant does not.
+                crate::resource_bridge::revoke_abandoned_plan_grant(&request_id).await;
+                (
+                    "unknown",
+                    serde_json::json!({"status": "unknown", "code": "provider_timeout"}),
+                )
+            }
         };
         settle_agent_plan_dispatch(&data_dir, record, status, result)
     });
-    task.await
-        .map_err(|err| anyhow::anyhow!("agent plan settlement task failed: {err}"))?
+    match task.await {
+        Ok(settled) => settled,
+        Err(err) => {
+            crate::resource_bridge::revoke_abandoned_plan_grant(&record_if_lost.request_id).await;
+            let code = if err.is_cancelled() {
+                "dispatch_cancelled"
+            } else {
+                "dispatch_panic"
+            };
+            settle_agent_plan_dispatch(
+                &data_dir_if_lost,
+                record_if_lost,
+                "unknown",
+                serde_json::json!({"status": "unknown", "code": code}),
+            )
+        }
+    }
+}
+
+fn plan_dispatch_wait(request_id: &str) -> std::time::Duration {
+    #[cfg(test)]
+    if let Some((id, wait)) = PLAN_DISPATCH_WAIT
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+        .as_ref()
+    {
+        if id == request_id {
+            return *wait;
+        }
+    }
+    let _ = request_id;
+    std::time::Duration::from_secs(120)
+}
+
+#[cfg(test)]
+static PLAN_DISPATCH_WAIT: std::sync::Mutex<Option<(String, std::time::Duration)>> =
+    std::sync::Mutex::new(None);
+
+#[cfg(test)]
+pub(crate) fn set_plan_dispatch_wait_for_test(request_id: &str, wait: std::time::Duration) {
+    *PLAN_DISPATCH_WAIT
+        .lock()
+        .unwrap_or_else(|err| err.into_inner()) = Some((request_id.to_string(), wait));
+}
+
+#[cfg(test)]
+pub(crate) fn clear_plan_dispatch_wait_for_test(request_id: &str) {
+    let mut wait = PLAN_DISPATCH_WAIT
+        .lock()
+        .unwrap_or_else(|err| err.into_inner());
+    if wait.as_ref().is_some_and(|(id, _)| id == request_id) {
+        wait.take();
+    }
 }
 
 fn settle_agent_plan_dispatch(

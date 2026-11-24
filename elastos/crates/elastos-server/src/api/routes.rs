@@ -417,14 +417,22 @@ pub async fn stop_capsule(
         .unwrap_or_else(|| "user".to_string());
     match runtime.stop_capsule_with_reason(&id, &reason).await {
         Ok(Some(info)) => {
-            let status = match info.ended_at {
-                Some(_) => StatusCode::OK,
-                None => StatusCode::ACCEPTED,
+            // An effect already begun keeps this answer at stopping. The row's
+            // own end is not said while that effect can still land.
+            let effect_open = runtime.plan_effect_inflight(&id);
+            let status = if effect_open || info.ended_at.is_none() {
+                StatusCode::ACCEPTED
+            } else {
+                StatusCode::OK
             };
             let answer = CapsuleInfoResponse {
                 id: info.id,
                 name: info.name,
-                status: info.status,
+                status: if effect_open {
+                    "stopping".to_string()
+                } else {
+                    info.status
+                },
                 session_id: info.session_id,
                 cause: info.cause,
             };
@@ -504,19 +512,25 @@ pub async fn stop_agent_session(
     stop_collected_agent_rows(&runtime, &agent_id).await
 }
 
-/// `stopping` (202) while a plan write that already reached its effect can
-/// still land. `stopped` is not said for that session.
-fn plan_write_still_open(agent_id: &str) -> Option<axum::response::Response> {
-    let session_id = crate::runtime::Runtime::inflight_plan_session(agent_id)?;
+/// `stopping` (202) while a plan effect of this agent can still land.
+/// `stopped` is not said for that session.
+fn plan_write_still_open(runtime: &Runtime, agent_id: &str) -> Option<axum::response::Response> {
+    let sessions = runtime.inflight_plan_sessions(agent_id);
+    if sessions.is_empty() {
+        return None;
+    }
     Some(
         (
             StatusCode::ACCEPTED,
             Json(StopAgentResponse {
                 stopped: Vec::new(),
-                stopping: vec![StoppedAgentBody {
-                    session_id,
-                    status: "stopping".to_string(),
-                }],
+                stopping: sessions
+                    .into_iter()
+                    .map(|session_id| StoppedAgentBody {
+                        session_id,
+                        status: "stopping".to_string(),
+                    })
+                    .collect(),
                 already: None,
             }),
         )
@@ -528,7 +542,7 @@ fn plan_write_still_open(agent_id: &str) -> Option<axum::response::Response> {
 async fn stop_collected_agent_rows(runtime: &Runtime, agent_id: &str) -> axum::response::Response {
     let ids = runtime.live_sessions_for_agent(agent_id).await;
     if ids.is_empty() {
-        if let Some(response) = plan_write_still_open(agent_id) {
+        if let Some(response) = plan_write_still_open(runtime, agent_id) {
             return response;
         }
         return (
@@ -557,7 +571,7 @@ async fn stop_collected_agent_rows(runtime: &Runtime, agent_id: &str) -> axum::r
         }
     }
     if ready.is_empty() {
-        if let Some(response) = plan_write_still_open(agent_id) {
+        if let Some(response) = plan_write_still_open(runtime, agent_id) {
             return response;
         }
         if let Some(reason) = refusal {
@@ -601,7 +615,7 @@ async fn stop_collected_agent_rows(runtime: &Runtime, agent_id: &str) -> axum::r
                     .into_response();
             }
         };
-        if info.ended_at.is_none() || crate::runtime::Runtime::plan_effect_inflight(&id) {
+        if info.ended_at.is_none() || runtime.plan_effect_inflight(&id) {
             stopping.push(StoppedAgentBody {
                 session_id: info.session_id,
                 status: "stopping".to_string(),
@@ -4402,6 +4416,7 @@ pub(crate) mod tests {
             model_token_ceiling: tables.model_token_ceiling,
             model_budget: None,
             stop: tables.stop,
+            plan_book: None,
         };
         let answer = crate::resource_bridge::handle_component_resource_request(&line, ctx)
             .await
@@ -5557,6 +5572,7 @@ pub(crate) mod tests {
             model_token_ceiling: None,
             model_budget: None,
             stop: None,
+            plan_book: None,
         };
         let request = serde_json::json!({"path": foreign, "content": "x"});
         let refused = crate::resource_bridge::protected_principal_root_resource_response_for_test(

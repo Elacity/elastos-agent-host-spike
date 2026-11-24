@@ -254,6 +254,10 @@ pub struct Runtime {
     /// Lock order: `agent_launches`, then this mutex. It is held for a few
     /// instructions and never across an await. Drop takes only this mutex.
     stop_marks: Arc<StdMutex<AgentStopMarks>>,
+    /// This Runtime's plan instances and the effects that have reached their
+    /// work. Another Runtime has another book, so one end cannot see the
+    /// other's session.
+    plan_book: Arc<StdMutex<PlanBook>>,
     /// Reference to the component provider for ABI-specific launch.
     component_provider: Option<Arc<ComponentProvider>>,
     /// Per-launch manifest capability ceilings for capsule bridge requests.
@@ -305,48 +309,167 @@ struct AgentStopMarks {
     next: u64,
 }
 
-/// A live instance a plan step may still act for, plus a write that has
-/// passed its checks and not yet finished.
+/// One Runtime's plan instances, and each effect that has reached its work.
 ///
 /// Lock order: this mutex is never taken while `agent_launches` or
 /// `stop_marks` is held, and it is never held across an await. Start and
-/// Stop take `agent_launches`, then `stop_marks`.
-struct PlanEffects {
+/// Stop take `agent_launches`, then `stop_marks`. The end and `try_enter`
+/// take only this mutex: the check and the mark are one hold of it.
+pub(crate) struct PlanBook {
     instances: HashMap<String, PlanInstance>,
-    /// Session id to the agent whose write has reached the effect.
-    inflight: HashMap<String, String>,
+    /// Effect id to the session it is working for. Two effects of one session
+    /// are two entries, so the first to finish does not clear the second.
+    inflight: HashMap<u64, PlanFlight>,
+    next: u64,
 }
 
 struct PlanInstance {
     agent_id: String,
-    marks: Arc<StdMutex<AgentStopMarks>>,
-    launches: Arc<tokio::sync::Mutex<AgentLaunchState>>,
-    capsules: Arc<RwLock<HashMap<String, RunningCapsuleInfo>>>,
-    ended: bool,
+    /// The end has taken this lock. A new effect refuses.
+    stopping: bool,
+}
+
+struct PlanFlight {
+    session_id: String,
+    agent_id: String,
 }
 
 pub(crate) struct PlanEffectGuard {
-    session_id: String,
+    book: Option<Arc<StdMutex<PlanBook>>>,
+    id: u64,
+    /// The outcome is known. `Drop` then removes this effect and no other.
+    /// A drop before that leaves the mark: the outcome is still unknown.
+    release: bool,
+}
+
+impl PlanEffectGuard {
+    pub(crate) fn idle() -> Self {
+        Self {
+            book: None,
+            id: 0,
+            release: true,
+        }
+    }
+
+    /// The effect returned. The mark comes off this effect only.
+    pub(crate) fn release(mut self) {
+        self.release = true;
+    }
 }
 
 impl Drop for PlanEffectGuard {
     fn drop(&mut self) {
-        plan_effects().inflight.remove(&self.session_id);
+        let Some(book) = &self.book else {
+            return;
+        };
+        if !self.release {
+            return;
+        }
+        let mut book = plan_book(book);
+        let Some(flight) = book.inflight.remove(&self.id) else {
+            return;
+        };
+        reap(&mut book, &flight.session_id);
     }
 }
 
-static PLAN_EFFECTS: std::sync::OnceLock<StdMutex<PlanEffects>> = std::sync::OnceLock::new();
+fn new_plan_book() -> Arc<StdMutex<PlanBook>> {
+    Arc::new(StdMutex::new(PlanBook {
+        instances: HashMap::new(),
+        inflight: HashMap::new(),
+        next: 1,
+    }))
+}
 
-fn plan_effects() -> std::sync::MutexGuard<'static, PlanEffects> {
-    PLAN_EFFECTS
-        .get_or_init(|| {
-            StdMutex::new(PlanEffects {
-                instances: HashMap::new(),
-                inflight: HashMap::new(),
-            })
-        })
+fn plan_book(book: &StdMutex<PlanBook>) -> std::sync::MutexGuard<'_, PlanBook> {
+    book.lock().unwrap_or_else(|err| err.into_inner())
+}
+
+fn instance_open(book: &PlanBook, session_id: &str, agent_id: &str) -> bool {
+    book.instances
+        .get(session_id)
+        .is_some_and(|inst| !inst.stopping && inst.agent_id == agent_id)
+}
+
+fn reap(book: &mut PlanBook, session_id: &str) {
+    if book
+        .inflight
+        .values()
+        .any(|flight| flight.session_id == session_id)
+    {
+        return;
+    }
+    if book
+        .instances
+        .get(session_id)
+        .is_some_and(|inst| inst.stopping)
+    {
+        book.instances.remove(session_id);
+    }
+}
+
+impl PlanBook {
+    fn mark_stopping(&mut self, session_id: &str) {
+        if let Some(inst) = self.instances.get_mut(session_id) {
+            inst.stopping = true;
+        }
+        reap(self, session_id);
+    }
+
+    fn mark_agent_stopping(&mut self, agent_id: &str) {
+        let sessions: Vec<String> = self
+            .instances
+            .iter()
+            .filter(|(_, inst)| inst.agent_id == agent_id)
+            .map(|(session, _)| session.clone())
+            .collect();
+        for session in sessions {
+            self.mark_stopping(&session);
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn close_for_test(&mut self, session_id: &str) {
+        self.mark_stopping(session_id);
+    }
+}
+
+#[cfg(test)]
+type PlanDecisionHook = Box<dyn Fn(&mut PlanBook) + Send>;
+
+#[cfg(test)]
+static PLAN_DECISION_HOOK: std::sync::LazyLock<StdMutex<HashMap<String, PlanDecisionHook>>> =
+    std::sync::LazyLock::new(|| StdMutex::new(HashMap::new()));
+
+/// Runs under the plan lock, before the check-and-mark, and only for this
+/// session, so a test can close the instance in the same hold. Each session
+/// keeps its own hook: one test cannot replace another's. The two-step plant
+/// drops the lock here.
+#[cfg(test)]
+pub(crate) fn arm_plan_decision_hook(
+    session_id: &str,
+    hook: impl Fn(&mut PlanBook) + Send + 'static,
+) {
+    PLAN_DECISION_HOOK
         .lock()
         .unwrap_or_else(|err| err.into_inner())
+        .insert(session_id.to_string(), Box::new(hook));
+}
+
+#[cfg(test)]
+pub(crate) fn disarm_plan_decision_hook(session_id: &str) {
+    PLAN_DECISION_HOOK
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+        .remove(session_id);
+}
+
+#[cfg(test)]
+fn take_plan_decision_hook(session_id: &str) -> Option<PlanDecisionHook> {
+    PLAN_DECISION_HOOK
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+        .remove(session_id)
 }
 
 impl AgentStopMarks {
@@ -569,6 +692,7 @@ struct ActivationContextHeld {
     /// Start records for agent sessions. The one end reads the tuple onto
     /// its stop audit, then removes the record once `ended_at` is visible.
     agent_sessions: Arc<tokio::sync::Mutex<AgentLaunchState>>,
+    plan_book: Arc<StdMutex<PlanBook>>,
     /// How long the ended entry stays before the sweeper removes it:
     /// [`ENDED_CAPSULE_RETENTION`], which only a unit row shortens.
     retention: std::time::Duration,
@@ -612,6 +736,7 @@ impl ActivationContextHeld {
             stop,
             authority,
             agent_sessions: runtime.agent_launches.clone(),
+            plan_book: Arc::clone(&runtime.plan_book),
             armed: true,
             owed: OwedEnd::Task,
             settled: None,
@@ -665,7 +790,7 @@ impl ActivationContextHeld {
     /// here, so it happens at its 60 s even if nothing lists or registers
     /// again and every tokio runtime has shut down.
     async fn end_instance(mut self, status: &str, cause: &str) {
-        Runtime::note_plan_instance_ended(&self.id.0);
+        plan_book(&self.plan_book).mark_stopping(&self.id.0);
         let (status, cause) = match self.settled.clone() {
             Some(settled) => settled,
             None => {
@@ -783,6 +908,7 @@ impl ActivationContextHeld {
             stop: self.stop.clone(),
             authority: self.authority.clone(),
             agent_sessions: self.agent_sessions.clone(),
+            plan_book: Arc::clone(&self.plan_book),
             armed: true,
             owed: self.owed,
             settled: self.settled.take(),
@@ -975,6 +1101,7 @@ impl Runtime {
             running_capsules: Arc::new(RwLock::new(HashMap::new())),
             agent_launches: Arc::new(tokio::sync::Mutex::new(AgentLaunchState::default())),
             stop_marks: Arc::new(StdMutex::new(AgentStopMarks::default())),
+            plan_book: new_plan_book(),
             component_provider: None,
             bridge_manifest_capabilities: Arc::new(StdRwLock::new(HashMap::new())),
             bridge_model_token_ceilings: Arc::new(StdRwLock::new(HashMap::new())),
@@ -1003,6 +1130,7 @@ impl Runtime {
             running_capsules: Arc::new(RwLock::new(HashMap::new())),
             agent_launches: Arc::new(tokio::sync::Mutex::new(AgentLaunchState::default())),
             stop_marks: Arc::new(StdMutex::new(AgentStopMarks::default())),
+            plan_book: new_plan_book(),
             component_provider,
             bridge_manifest_capabilities: Arc::new(StdRwLock::new(HashMap::new())),
             bridge_model_token_ceilings: Arc::new(StdRwLock::new(HashMap::new())),
@@ -1050,6 +1178,7 @@ impl Runtime {
             let host_model_offer_bounds = self.model_offer_bounds.clone();
             let host_activation_stops = self.activation_stops.clone();
             let host_launch_contents = self.launch_contents.clone();
+            let host_plan_book = Arc::clone(&self.plan_book);
             let host_handle = tokio::runtime::Handle::current();
             component.set_bus_hostcall(Arc::new(move |line, capsule_id, principal_id| {
                 let manifest_capabilities = host_manifest_capabilities
@@ -1105,6 +1234,7 @@ impl Runtime {
                     model_token_ceiling,
                     model_budget,
                     stop,
+                    plan_book: Some(host_plan_book.clone()),
                 };
                 let response = host_handle
                     .block_on(crate::resource_bridge::handle_component_resource_request(
@@ -1429,87 +1559,108 @@ impl Runtime {
         Ok(started)
     }
 
-    /// Remember this running instance so a plan step can see the same stop
-    /// marks and the same ended row Start and Stop use.
+    #[cfg(test)]
+    pub(crate) fn plan_book(&self) -> Arc<StdMutex<PlanBook>> {
+        Arc::clone(&self.plan_book)
+    }
+
+    /// Remember this running instance. An instance that was never bound, or
+    /// that was removed after it ended with nothing in flight, is refused.
     pub(crate) fn bind_plan_instance(&self, session_id: &str, agent_id: &str) {
-        plan_effects().instances.insert(
+        plan_book(&self.plan_book).instances.insert(
             session_id.to_string(),
             PlanInstance {
                 agent_id: agent_id.to_string(),
-                marks: Arc::clone(&self.stop_marks),
-                launches: Arc::clone(&self.agent_launches),
-                capsules: Arc::clone(&self.running_capsules),
-                ended: false,
+                stopping: false,
             },
         );
     }
 
-    /// The instance's access has ended. Called at the start of the one end,
-    /// before its grants are revoked and before `ended_at` is written.
-    pub(crate) fn note_plan_instance_ended(session_id: &str) {
-        if let Some(instance) = plan_effects().instances.get_mut(session_id) {
-            instance.ended = true;
-        }
+    /// The end takes the plan lock first and marks the instance stopping.
+    /// An effect either already holds its mark, or `try_enter` refuses.
+    #[cfg(test)]
+    pub(crate) fn note_plan_instance_ended(&self, session_id: &str) {
+        plan_book(&self.plan_book).mark_stopping(session_id);
     }
 
-    /// Whether a plan step for this session may still start. No bound instance
-    /// is not an ended one: a dispatch with no Runtime row keeps its other
-    /// checks. A bound instance is open only while it has not ended and Stop
-    /// has neither a token nor `stop_requested` for its agent.
-    pub(crate) async fn plan_instance_open(session_id: &str, agent_id: &str) -> bool {
-        let bound = {
-            let book = plan_effects();
-            match book.instances.get(session_id) {
-                None => return true,
-                Some(instance) if instance.ended || instance.agent_id != agent_id => return false,
-                Some(instance) => (
-                    Arc::clone(&instance.marks),
-                    Arc::clone(&instance.launches),
-                    Arc::clone(&instance.capsules),
-                ),
-            }
-        };
-        let (marks, launches, capsules) = bound;
-        let stopping = {
-            let mut state = launches.lock().await;
-            Self::refuse_start_for_stop(&marks, &capsules, &mut state, agent_id)
-        };
-        if stopping
-            || plan_effects()
-                .instances
-                .get(session_id)
-                .is_some_and(|it| it.ended)
-        {
-            return false;
-        }
-        let open = capsules
-            .read()
-            .await
-            .get(session_id)
-            .is_some_and(|info| info.ended_at.is_none());
-        open
+    pub(crate) fn plan_instance_is_open(
+        book: &Arc<StdMutex<PlanBook>>,
+        session_id: &str,
+        agent_id: &str,
+    ) -> bool {
+        instance_open(&plan_book(book), session_id, agent_id)
     }
 
-    /// A plan write has reached the effect. Stop must not say `stopped` while
-    /// this guard is alive: the write can still land.
-    pub(crate) fn enter_plan_effect(session_id: &str, agent_id: &str) -> PlanEffectGuard {
-        plan_effects()
+    /// Check and mark under one hold of the plan lock. Refuses when the
+    /// instance is unbound, gone, or already stopping.
+    pub(crate) fn try_enter_plan_effect(
+        book: &Arc<StdMutex<PlanBook>>,
+        session_id: &str,
+        agent_id: &str,
+    ) -> std::result::Result<PlanEffectGuard, ()> {
+        let mut locked = plan_book(book);
+        #[cfg(test)]
+        if let Some(hook) = take_plan_decision_hook(session_id) {
+            hook(&mut locked);
+        }
+        if !instance_open(&locked, session_id, agent_id) {
+            return Err(());
+        }
+        let id = locked.next;
+        locked.next = locked.next.wrapping_add(1);
+        locked.inflight.insert(
+            id,
+            PlanFlight {
+                session_id: session_id.to_string(),
+                agent_id: agent_id.to_string(),
+            },
+        );
+        drop(locked);
+        Ok(PlanEffectGuard {
+            book: Some(Arc::clone(book)),
+            id,
+            release: false,
+        })
+    }
+
+    pub(crate) fn plan_effect_inflight(&self, session_id: &str) -> bool {
+        plan_book(&self.plan_book)
             .inflight
-            .insert(session_id.to_string(), agent_id.to_string());
-        PlanEffectGuard {
-            session_id: session_id.to_string(),
-        }
+            .values()
+            .any(|flight| flight.session_id == session_id)
     }
 
-    pub(crate) fn plan_effect_inflight(session_id: &str) -> bool {
-        plan_effects().inflight.contains_key(session_id)
-    }
-
-    pub(crate) fn inflight_plan_session(agent_id: &str) -> Option<String> {
-        plan_effects()
+    pub(crate) fn inflight_plan_sessions(&self, agent_id: &str) -> Vec<String> {
+        let mut sessions: Vec<String> = plan_book(&self.plan_book)
             .inflight
-            .iter()
-            .find_map(|(session, agent)| (agent == agent_id).then(|| session.clone()))
+            .values()
+            .filter(|flight| flight.agent_id == agent_id)
+            .map(|flight| flight.session_id.clone())
+            .collect();
+        sessions.sort();
+        sessions.dedup();
+        sessions
+    }
+
+    /// A dispatch test that has no running row still has to bind one. The
+    /// book is the one on the bridge context, not a second product path.
+    #[cfg(test)]
+    pub(crate) fn bind_detached_plan_for_test(
+        ctx: &mut crate::resource_bridge::BridgeContext,
+        session_id: &str,
+        agent_id: &str,
+    ) {
+        if ctx.plan_book.is_none() {
+            ctx.plan_book = Some(new_plan_book());
+        }
+        let book = ctx.plan_book.as_ref().expect("the test book was just set");
+        plan_book(book).instances.insert(
+            session_id.to_string(),
+            PlanInstance {
+                agent_id: agent_id.to_string(),
+                stopping: false,
+            },
+        );
     }
 
     /// Live session ids whose principal is `agent_id`. The capsule name is
@@ -1550,6 +1701,7 @@ impl Runtime {
                 .insert(token);
             token
         };
+        plan_book(&self.plan_book).mark_agent_stopping(agent_id);
         AgentStopGuard {
             marks: Arc::clone(&self.stop_marks),
             agent_id: agent_id.to_string(),
@@ -3165,6 +3317,10 @@ impl Runtime {
                 .unwrap_or_else(|err| err.into_inner());
             (info, stops.get(id).cloned())
         };
+        // The end takes the plan lock before this Stop can answer. A new
+        // effect then refuses. One already marked stays, and the route says
+        // stopping while it can still land.
+        plan_book(&self.plan_book).mark_stopping(id);
         if info.ended_at.is_some() {
             return Ok(Some(info));
         }
@@ -6146,6 +6302,7 @@ pub(crate) mod tests {
             model_token_ceiling: None,
             model_budget: None,
             stop: None,
+            plan_book: None,
         };
         let line = serde_json::json!({
             "id": 99,
