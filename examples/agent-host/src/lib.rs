@@ -4044,6 +4044,7 @@ fn submit_document_plan(
     submit_document_plan_with_grant(bus, plan).map(|(result, _grant)| result)
 }
 
+#[cfg(any(test, target_arch = "wasm32"))]
 fn submit_document_plan_with_grant(
     bus: &mut impl ResourceBus,
     plan: &serde_json::Value,
@@ -4092,9 +4093,12 @@ fn submit_document_plan_with_grant(
 
 /// How many times the guest repeats the parked status read. Each park is 30s
 /// on the host and spends no guest fuel. Ten parks cover the plan's 300s life.
+#[cfg(any(test, target_arch = "wasm32"))]
 const PLAN_DECISION_PARKS: usize = 10;
+#[cfg(any(test, target_arch = "wasm32"))]
 const PLAN_UNSETTLED: &[u8] = b"agent plan has no settled result";
 
+#[cfg(any(test, target_arch = "wasm32"))]
 fn plan_reply_is_unsettled(reply: &[u8]) -> bool {
     reply
         .windows(PLAN_UNSETTLED.len())
@@ -4103,6 +4107,7 @@ fn plan_reply_is_unsettled(reply: &[u8]) -> bool {
 
 /// Read the plan again until the owner decides, the instance ends, or the
 /// plan's own life runs out. Only the unsettled sentence is another read.
+#[cfg(any(test, target_arch = "wasm32"))]
 fn wait_for_plan_decision(
     bus: &mut impl ResourceBus,
     grant: &str,
@@ -4132,6 +4137,7 @@ fn wait_for_plan_decision(
     Err("the plan decision expired")
 }
 
+#[cfg(any(test, target_arch = "wasm32"))]
 fn submit_document_plan_and_wait(
     bus: &mut impl ResourceBus,
     plan: &serde_json::Value,
