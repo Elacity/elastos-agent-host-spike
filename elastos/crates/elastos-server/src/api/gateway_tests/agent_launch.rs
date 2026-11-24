@@ -492,6 +492,7 @@ async fn serve_runtime(data: &std::path::Path) -> RuntimeHost {
         attach_secret: Some(secret.clone()),
         host_helpers: Vec::new(),
         agents_only: false,
+        listener: None,
     })
     .unwrap()
     .layer(axum::middleware::from_fn_with_state(

@@ -281,7 +281,6 @@ async fn listen(
             anyhow::bail!("agent runtime bind is not loopback");
         }
         let addr = format!("127.0.0.1:{}", address.port());
-        drop(listener);
         let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
         let config = ServerConfig {
             runtime: runtime.clone(),
@@ -303,6 +302,7 @@ async fn listen(
             attach_secret: Some(attach_secret.clone()),
             host_helpers: Vec::new(),
             agents_only: true,
+            listener: Some(listener),
         };
         let mut running = spawn_agent_server(config, data_dir.clone());
         let ready = tokio::time::timeout(Duration::from_secs(5), async {

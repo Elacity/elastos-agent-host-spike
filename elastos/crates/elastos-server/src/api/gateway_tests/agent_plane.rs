@@ -434,6 +434,19 @@ fn managed_child_still_refuses_agents() {
 }
 
 #[test]
+fn the_agent_runtime_keeps_the_listener_it_bound() {
+    let source = include_str!("../agent_plane.rs");
+    assert!(
+        !source.contains("drop(listener)"),
+        "the agent runtime drops the socket it bound"
+    );
+    assert!(
+        source.contains("listener: Some(listener)"),
+        "the agent runtime does not hand its socket to the server"
+    );
+}
+
+#[test]
 fn agent_runtime_does_not_grant_by_policy_or_start_a_shell() {
     let source = include_str!("../agent_plane.rs");
     for absent in [
