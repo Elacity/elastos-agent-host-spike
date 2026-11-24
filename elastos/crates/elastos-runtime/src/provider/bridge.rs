@@ -7155,4 +7155,10 @@ int main(void) {
         assert!(!marker.exists(), "the provider binary never runs");
         assert!(!root.exists(), "a refused start leaves no root");
     }
+
+    #[cfg(all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))]
+    mod linux_model_journey;
 }
