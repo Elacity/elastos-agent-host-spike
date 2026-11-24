@@ -391,21 +391,54 @@ fn spawn_agent_server(config: ServerConfig, data_dir: PathBuf) -> RunningServer 
 
 #[cfg(unix)]
 fn write_coords(path: &Path, api_url: &str, attach_secret: &str) -> anyhow::Result<()> {
-    use std::os::unix::fs::{MetadataExt, PermissionsExt};
-    crate::runtime_control::write_runtime_coords(
-        path,
-        &crate::runtime_control::RuntimeCoords {
-            api_url: api_url.to_string(),
-            attach_secret: attach_secret.to_string(),
-            pid: std::process::id(),
-            runtime_kind: KIND.to_string(),
-            binary_sha256: String::new(),
-            policy_sha256: String::new(),
-            dependency_sha256: String::new(),
-            generation: String::new(),
-            home_url: String::new(),
-        },
-    )?;
+    use std::io::Write;
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
+
+    let parent = path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("agent coordinates path has no parent"))?;
+    let parent_meta = std::fs::symlink_metadata(parent)?;
+    anyhow::ensure!(
+        parent_meta.is_dir() && !parent_meta.file_type().is_symlink(),
+        "agent coordinates parent must be a real directory"
+    );
+    let mut nonce = [0u8; 16];
+    getrandom::getrandom(&mut nonce)
+        .map_err(|error| anyhow::anyhow!("OS randomness unavailable: {error}"))?;
+    let file_name = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .ok_or_else(|| anyhow::anyhow!("agent coordinates filename is invalid"))?;
+    let temporary = parent.join(format!(".{file_name}.{}.tmp", hex::encode(nonce)));
+    let data = serde_json::to_vec_pretty(&crate::runtime_control::RuntimeCoords {
+        api_url: api_url.to_string(),
+        attach_secret: attach_secret.to_string(),
+        pid: std::process::id(),
+        runtime_kind: KIND.to_string(),
+        binary_sha256: String::new(),
+        policy_sha256: String::new(),
+        dependency_sha256: String::new(),
+        generation: String::new(),
+        home_url: String::new(),
+    })?;
+    let write_result = (|| -> anyhow::Result<()> {
+        let mut options = std::fs::OpenOptions::new();
+        options
+            .create_new(true)
+            .write(true)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW);
+        let mut file = options.open(&temporary)?;
+        file.write_all(&data)?;
+        file.sync_all()?;
+        std::fs::rename(&temporary, path)?;
+        std::fs::File::open(parent)?.sync_all()?;
+        Ok(())
+    })();
+    if write_result.is_err() {
+        let _ = std::fs::remove_file(&temporary);
+    }
+    write_result?;
     let meta = std::fs::symlink_metadata(path)?;
     let owner_only = !meta.file_type().is_symlink()
         && meta.permissions().mode() & 0o777 == 0o600
@@ -419,11 +452,8 @@ fn write_coords(path: &Path, api_url: &str, attach_secret: &str) -> anyhow::Resu
 
 #[cfg(unix)]
 async fn read_live(path: PathBuf) -> Option<crate::runtime_control::RuntimeCoords> {
-    if !owner_only_file(&path) {
-        return None;
-    }
     let coords: crate::runtime_control::RuntimeCoords =
-        serde_json::from_slice(&std::fs::read(&path).ok()?).ok()?;
+        serde_json::from_slice(&read_owner_only(&path)?).ok()?;
     if coords.runtime_kind != KIND
         || coords.pid != std::process::id()
         || !coords.api_url.starts_with("http://127.0.0.1:")
@@ -435,15 +465,27 @@ async fn read_live(path: PathBuf) -> Option<crate::runtime_control::RuntimeCoord
 }
 
 #[cfg(unix)]
-fn owner_only_file(path: &Path) -> bool {
-    use std::os::unix::fs::{MetadataExt, PermissionsExt};
-    let Ok(meta) = std::fs::symlink_metadata(path) else {
-        return false;
-    };
-    meta.is_file()
-        && !meta.file_type().is_symlink()
-        && meta.permissions().mode() & 0o777 == 0o600
-        && meta.uid() == unsafe { libc::getuid() }
+fn read_owner_only(path: &Path) -> Option<Vec<u8>> {
+    use std::io::Read;
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true).custom_flags(libc::O_NOFOLLOW);
+    let file = options.open(path).ok()?;
+    let meta = file.metadata().ok()?;
+    if !meta.is_file()
+        || meta.file_type().is_symlink()
+        || meta.mode() & 0o777 != 0o600
+        || meta.uid() != unsafe { libc::getuid() }
+    {
+        return None;
+    }
+    let mut data = Vec::new();
+    file.take(64 * 1024 + 1).read_to_end(&mut data).ok()?;
+    if data.len() > 64 * 1024 {
+        return None;
+    }
+    Some(data)
 }
 
 #[cfg(unix)]

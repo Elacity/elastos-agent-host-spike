@@ -434,6 +434,33 @@ fn managed_child_still_refuses_agents() {
 }
 
 #[test]
+fn agent_coordinates_are_created_owner_only_and_not_followed() {
+    let source = include_str!("../agent_plane.rs");
+    let write = source
+        .split_once("fn write_coords(")
+        .expect("write")
+        .1
+        .split_once("\nasync fn read_live(")
+        .expect("read")
+        .0;
+    assert!(write.contains(".create_new(true)"), "{write}");
+    assert!(write.contains(".mode(0o600)"), "{write}");
+    assert!(write.contains("libc::O_NOFOLLOW"), "{write}");
+    assert!(write.contains("std::fs::rename"), "{write}");
+    assert!(!write.contains("set_permissions"), "{write}");
+    assert!(!write.contains("write_runtime_coords"), "{write}");
+    let read = source
+        .split_once("fn read_owner_only(")
+        .expect("read")
+        .1
+        .split_once("\nasync fn health(")
+        .expect("health")
+        .0;
+    assert!(read.contains("libc::O_NOFOLLOW"), "{read}");
+    assert!(!read.contains("std::fs::read"), "{read}");
+}
+
+#[test]
 fn the_agent_runtime_keeps_the_listener_it_bound() {
     let source = include_str!("../agent_plane.rs");
     assert!(
