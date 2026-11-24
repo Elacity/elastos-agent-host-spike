@@ -6,12 +6,19 @@
 //!
 //! AF_UNIX `connect` is `LANDLOCK_ACCESS_FS_WRITE_FILE` on the socket inode
 //! that already exists. `LANDLOCK_ACCESS_NET_CONNECT_TCP` is TCP only and does
-//! not mediate this socket. Creating a socket node needs `MAKE_SOCK` on the
-//! parent directory. That is not an exact file, so it is not granted. The
-//! engine's own listen socket does not exist when the ruleset is built.
+//! not mediate this socket. llama-server b10516 binds `--host` itself, so a
+//! listen descriptor passed by the Runtime would be unused. The Runtime creates
+//! one directory per offer before the child runs and grants `MAKE_SOCK` and
+//! `REMOVE_FILE` on that directory only. The engine binds
+//! `{index}.listen/engine.sock` there. The broker runs outside the ruleset and
+//! connects to that same path. The listen inode is not granted `WRITE_FILE`,
+//! so a confined process cannot connect to it. One shared ruleset still lists
+//! every admitted offer's directory.
 //!
 //! A library gets `READ_FILE` only. `EXECUTE` stays on the admitted engine.
-//! `/dev/null`, `/dev/urandom`, and `/proc` entries are not in this list.
+//! The engine listen socket is created in its own directory. That directory
+//! gets `MAKE_SOCK|REMOVE_FILE` and nothing else, so the broker socket beside
+//! it cannot be replaced. `/dev/null`, `/dev/urandom`, and `/proc` are absent.
 
 use std::cell::RefCell;
 use std::collections::BTreeSet;
@@ -29,6 +36,12 @@ pub const READ_FILE: u64 = 1 << 2;
 pub const WRITE_FILE: u64 = 1 << 1;
 /// `LANDLOCK_ACCESS_FS_EXECUTE | LANDLOCK_ACCESS_FS_READ_FILE`.
 pub const BINARY: u64 = (1 << 0) | READ_FILE;
+/// `MAKE_SOCK` on a directory. The engine binds its listen socket here.
+pub const MAKE_SOCK: u64 = 1 << 9;
+/// `REMOVE_FILE` on that same directory, so a stale listen socket can be unlinked.
+pub const REMOVE_FILE: u64 = 1 << 5;
+/// The engine listen directory. No read, no write, no create of other kinds.
+pub const LISTEN_DIR: u64 = MAKE_SOCK | REMOVE_FILE;
 
 pub const MAX_LOCAL_OFFERS: usize = 2;
 
@@ -38,6 +51,7 @@ pub struct LocalModelFiles {
     pub engines: Vec<PathBuf>,
     pub libraries: Vec<PathBuf>,
     pub sockets: Vec<PathBuf>,
+    pub listen_dirs: Vec<PathBuf>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -85,20 +99,81 @@ pub fn broker_socket_paths(base: &Path, count: usize) -> Vec<PathBuf> {
         .collect()
 }
 
+pub fn socket_directory(base: &Path) -> PathBuf {
+    base.join("providers/model-provider/sockets")
+}
+
+/// `{dir}/{index}.listen`, the only directory where offer `index` may bind.
+pub fn engine_listen_dir(base: &Path, index: usize) -> PathBuf {
+    socket_directory(base).join(format!("{index}.listen"))
+}
+
+/// The listen socket the pinned engine binds with `--host`. One inode, created
+/// by the engine inside the directory the Runtime made beforehand.
+pub fn engine_listen_socket(base: &Path, index: usize) -> PathBuf {
+    engine_listen_dir(base, index).join("engine.sock")
+}
+
+/// Create the per-offer listen directory. Mode 0700, not a symlink. The broker
+/// socket stays in the parent directory and is not created here.
+pub fn prepare_listen_dir(base: &Path, index: usize) -> std::io::Result<PathBuf> {
+    let dir = engine_listen_dir(base, index);
+    std::fs::create_dir_all(&dir)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))?;
+        let meta = std::fs::symlink_metadata(&dir)?;
+        if meta.file_type().is_symlink()
+            || !meta.is_dir()
+            || meta.uid() != unsafe { libc::geteuid() }
+            || meta.mode() & 0o077 != 0
+        {
+            return Err(std::io::Error::other("unsafe engine listen directory"));
+        }
+    }
+    Ok(engine_listen_socket(base, index))
+}
+
 /// `Some` when `form` is one of the four local-model rules. An empty list
 /// means the rule is admitted and no file was installed (a hosted start).
 pub fn grants_for(form: &str) -> Option<Vec<(&'static str, PathBuf, u64)>> {
-    let (label, mask, paths) = ADMITTED.with(|slot| {
+    ADMITTED.with(|slot| {
         let files = slot.borrow();
-        match form {
-            MODEL_RULE => Some(("MODEL", READ_FILE, files.models.clone())),
-            ENGINE_RULE => Some(("ENGINE", BINARY, files.engines.clone())),
-            LIBRARY_RULE => Some(("ENGINE_LIBRARY", READ_FILE, files.libraries.clone())),
-            SOCKET_RULE => Some(("ENGINE_SOCKET", WRITE_FILE, files.sockets.clone())),
-            _ => None,
-        }
-    })?;
-    Some(paths.into_iter().map(|path| (label, path, mask)).collect())
+        let grants = match form {
+            MODEL_RULE => files
+                .models
+                .iter()
+                .map(|path| ("MODEL", path.clone(), READ_FILE))
+                .collect(),
+            ENGINE_RULE => files
+                .engines
+                .iter()
+                .map(|path| ("ENGINE", path.clone(), BINARY))
+                .collect(),
+            LIBRARY_RULE => files
+                .libraries
+                .iter()
+                .map(|path| ("ENGINE_LIBRARY", path.clone(), READ_FILE))
+                .collect(),
+            SOCKET_RULE => {
+                let mut grants: Vec<_> = files
+                    .sockets
+                    .iter()
+                    .map(|path| ("ENGINE_SOCKET", path.clone(), WRITE_FILE))
+                    .collect();
+                grants.extend(
+                    files
+                        .listen_dirs
+                        .iter()
+                        .map(|path| ("ENGINE_LISTEN", path.clone(), LISTEN_DIR)),
+                );
+                grants
+            }
+            _ => return None,
+        };
+        Some(grants)
+    })
 }
 
 /// Admit at most two local offers. `selected` is the engine, weights, and
@@ -236,6 +311,7 @@ pub fn admit_offers(
             engines,
             libraries,
             sockets: Vec::new(),
+            listen_dirs: Vec::new(),
         },
         offer_ids,
         engine_2,

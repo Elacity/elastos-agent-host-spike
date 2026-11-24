@@ -463,10 +463,12 @@ impl LocalLlamaEngines {
             let prefix = broker
                 .strip_suffix(".sock")
                 .ok_or(LocalLlamaFault::Failed)?;
-            (
-                EngineTarget::Unix(format!("{prefix}.engine.sock")),
-                Some(broker.clone()),
-            )
+            let engine_path = if cfg!(target_os = "linux") {
+                format!("{prefix}.listen/engine.sock")
+            } else {
+                format!("{prefix}.engine.sock")
+            };
+            (EngineTarget::Unix(engine_path), Some(broker.clone()))
         };
         drop(sockets);
         if cancel.as_ref().is_some_and(|cancel| *cancel.borrow()) {

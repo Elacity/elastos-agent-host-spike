@@ -237,9 +237,9 @@ struct BoundBrokers {
     birth: Arc<AtomicU64>,
 }
 
-/// Bind one broker socket per admitted offer under the Runtime private directory.
-/// The engine listen socket is not created: it does not exist yet, and a directory
-/// grant would be wider than one file.
+/// Bind one broker socket per admitted offer and create that offer's listen
+/// directory. llama-server b10516 binds `--host` itself, so the Runtime passes
+/// no listen descriptor. The broker connects to `{index}.listen/engine.sock`.
 #[cfg(all(
     not(elastos_unsupported_os_check),
     target_os = "linux",
@@ -291,14 +291,11 @@ fn bind_broker_sockets(base: &Path, ids: &[String]) -> Result<BoundBrokers, Brid
             .to_str()
             .filter(|text| text.len() < 108)
             .ok_or_else(|| BridgeError::InitFailed("invalid local socket path".into()))?;
+        let engine_socket = elastos_common::model_landlock_files::prepare_listen_dir(base, index)
+            .map_err(BridgeError::Spawn)?;
         brokers.0.push(
-            super::local_model_broker::start(
-                text,
-                dir.join(format!("{index}.engine.sock")),
-                pid.clone(),
-                birth.clone(),
-            )
-            .map_err(BridgeError::Spawn)?,
+            super::local_model_broker::start(text, engine_socket, pid.clone(), birth.clone())
+                .map_err(BridgeError::Spawn)?,
         );
         sockets.insert(id.clone(), text.to_string());
     }
@@ -1927,6 +1924,9 @@ impl ProviderBridge {
             base,
             admitted.offer_ids.len(),
         );
+        files.listen_dirs = (0..admitted.offer_ids.len())
+            .map(|index| elastos_common::model_landlock_files::engine_listen_dir(base, index))
+            .collect();
         elastos_common::model_landlock_files::install(files.clone());
         let _clear = elastos_common::model_landlock_files::clear_on_drop();
         let bindings = super::landlock_plan::Bindings {

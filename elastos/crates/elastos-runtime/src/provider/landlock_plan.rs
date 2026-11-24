@@ -651,7 +651,7 @@ mod tests {
     #[test]
     fn local_model_files_grant_the_admitted_paths_only() {
         use elastos_common::model_landlock_files::{
-            install, LocalModelFiles, BINARY, READ_FILE, WRITE_FILE,
+            install, LocalModelFiles, BINARY, LISTEN_DIR, READ_FILE, WRITE_FILE,
         };
         let _clear = elastos_common::model_landlock_files::clear_on_drop();
         let model = PathBuf::from("/tmp/elastos-m5-model");
@@ -661,11 +661,13 @@ mod tests {
         let library = PathBuf::from("/tmp/elastos-m5-lib.so");
         let socket = PathBuf::from("/tmp/elastos-m5/0.sock");
         let device = PathBuf::from("/tmp/elastos-m5/device.key");
+        let listen = PathBuf::from("/tmp/elastos-m5/0.listen");
         install(LocalModelFiles {
             models: vec![model.clone()],
             engines: vec![engine.clone()],
             libraries: vec![library.clone()],
             sockets: vec![socket.clone()],
+            listen_dirs: vec![listen.clone()],
         });
         let admitted = super::super::rights::admit_committed(RuntimeProviderId::Model);
         let bindings = Bindings {
@@ -697,6 +699,9 @@ mod tests {
             "a library is not executable"
         );
         assert_eq!(mask(&socket), Some(WRITE_FILE));
+        assert_eq!(mask(&listen), Some(LISTEN_DIR));
+        assert_eq!(mask(&listen.join("engine.sock")), None);
+        assert_eq!(mask(listen.parent().unwrap()), None);
         for path in [&other, &not_engine, &device] {
             assert_eq!(mask(path), None, "{}", path.display());
         }
