@@ -33,4 +33,6 @@
 # provider/checked_executable.rs with the macOS private verified copies, and its Windows refusal
 # twin), merged 23 Nov 2026 without a budget change; CTO decision under the delegated size
 # authority, noted in #1802's description. Measured on main after the merge.
-13117
+# +5 for #1804 (P2-8 slice 4a: a capsule start requires the component closure; the gate in
+# capsule/manager.rs component_closure_required). Measured 23 Nov 2026 after merging main.
+13122

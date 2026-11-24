@@ -1414,12 +1414,12 @@ async fn fake_runtime_provider(
                 .skip(start)
                 .take(limit as usize)
                 .filter(|message| {
+                    let shown = message
+                        .get("sender_id")
+                        .and_then(|value| value.as_str())
+                        .unwrap_or("");
                     skip_sender_id.is_empty()
-                        || message
-                            .get("sender_id")
-                            .and_then(|value| value.as_str())
-                            .unwrap_or("")
-                            != skip_sender_id
+                        || !crate::carrier::same_home_identity(shown, skip_sender_id)
                 })
                 .collect::<Vec<_>>();
             let next_cursor = start + count;

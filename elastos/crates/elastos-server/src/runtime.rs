@@ -1484,15 +1484,16 @@ impl Runtime {
             Some(start) => (Some(start.cid), start.data_dir.clone()),
             None => (None, None),
         };
-        let admitted_bytes = if manifest.is_component_capsule() {
-            match walked {
-                Some(bytes) => Some(bytes),
-                None => match folder_start {
-                    Some(start) => Some(start.entrypoint),
-                    None => {
-                        Some(crate::component::read_admitted_entrypoint(path, &manifest).await?)
-                    }
-                },
+        // `dev_unsigned` marks the one case with no walk: a dev mode folder
+        // start. Its load is the dev-only one, not the checked one.
+        let (admitted_bytes, dev_unsigned) = if manifest.is_component_capsule() {
+            match (walked, folder_start) {
+                (Some(bytes), _) => (Some(bytes), false),
+                (None, Some(start)) => (Some(start.entrypoint), false),
+                (None, None) => (
+                    Some(crate::component::read_admitted_entrypoint(path, &manifest).await?),
+                    true,
+                ),
             }
         } else {
             if walked.is_some() {
@@ -1500,13 +1501,26 @@ impl Runtime {
                     crate::agent_admission::NOT_A_COMPONENT.to_string(),
                 ));
             }
-            None
+            (None, false)
         };
 
         // Verify signature if verifier is configured
         let signer = self
             .verify_capsule_signature(&manifest, path, admitted_bytes.as_deref())
             .await?;
+        // A folder manifest has no dependency CID field. Only the by-CID
+        // entry can verify a signed dependency closure; refuse loose members
+        // before the component provider receives any bytes.
+        if let Some(requirement) = manifest
+            .requires
+            .first()
+            .filter(|_| manifest.is_component_capsule())
+        {
+            return Err(ElastosError::InvalidManifest(format!(
+                "bundle_requirement_unpinned: {}",
+                requirement.name
+            )));
+        }
         if let Some(bytes) = &admitted_bytes {
             crate::component::validate_component_imports_for_manifest(bytes, &manifest)
                 .map_err(ElastosError::InvalidManifest)?;
@@ -1549,6 +1563,10 @@ impl Runtime {
         // provider's own `load(path)` reads the file itself and checks nothing,
         // so it is for capsules that are not components.
         let mut handle = match (admitted_bytes, &self.component_provider) {
+            (Some(bytes), Some(component)) if dev_unsigned => {
+                self.load_dev_unsigned_component(component, bytes, manifest)
+                    .await?
+            }
             (Some(bytes), Some(component)) => component.load_admitted(bytes, manifest).await?,
             (Some(_), None) => {
                 return Err(ElastosError::Compute(
@@ -1568,6 +1586,27 @@ impl Runtime {
         .await?;
 
         Ok((handle, signer))
+    }
+
+    /// The dev-only component load: no CID, no closure, maybe no signature.
+    /// It runs only while this Home admits unsigned capsules, which takes the
+    /// owner's `dev_mode = true` on a Home with no installed signed release.
+    async fn load_dev_unsigned_component(
+        &self,
+        component: &ComponentProvider,
+        bytes: Vec<u8>,
+        manifest: CapsuleManifest,
+    ) -> Result<CapsuleHandle> {
+        if !matches!(
+            *self.unsigned_capsules.read().await,
+            UnsignedCapsules::Allowed
+        ) {
+            return Err(ElastosError::InvalidManifest(format!(
+                "dev_unsigned_component_refused: '{}' starts unchecked only with dev_mode = true",
+                manifest.name
+            )));
+        }
+        component.load_admitted(bytes, manifest).await
     }
 
     /// The one walk a component folder start outside dev mode makes. In dev
@@ -3969,6 +4008,91 @@ pub(crate) mod tests {
         std::fs::write(dir.join("app.component.wasm"), &component).unwrap();
         component
     }
+
+    /// A folder start has no pin field, so its closure is the root alone:
+    /// a component that names a requirement is refused before any load, on
+    /// a non-dev Home whose install record holds the folder's CID and in dev
+    /// mode alike.
+    #[tokio::test]
+    async fn local_component_refuses_unpinned_requirement_before_load() {
+        for dev_mode in [false, true] {
+            local_requirement_refused(dev_mode).await;
+        }
+    }
+
+    async fn local_requirement_refused(dev_mode: bool) {
+        let (runtime, temp) = component_runtime().await;
+        let key = elastos_runtime::signature::SigningKey::from_bytes(&[92; 32]);
+        runtime
+            .configure_capsule_admission(
+                temp.path(),
+                &[hex::encode(key.verifying_key().to_bytes())],
+                dev_mode,
+            )
+            .await
+            .unwrap();
+        let folder = temp.path().join("local-requires");
+        let bytes = signed_component_folder(&folder, "local-requires", &key);
+        let mut manifest: CapsuleManifest =
+            serde_json::from_slice(&std::fs::read(folder.join("capsule.json")).unwrap()).unwrap();
+        manifest.requires.push(elastos_common::CapsuleRequirement {
+            name: "needed".to_string(),
+            kind: elastos_common::RequirementKind::Capsule,
+        });
+        elastos_runtime::signature::sign_capsule(&key, &mut manifest, &hash_content(&bytes))
+            .unwrap();
+        std::fs::write(
+            folder.join("capsule.json"),
+            serde_json::to_vec(&manifest).unwrap(),
+        )
+        .unwrap();
+        crate::setup::record_install_cid(temp.path(), &folder, &folder);
+        let error = runtime.run_local(&folder, Vec::new()).await.unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("bundle_requirement_unpinned: needed"),
+            "dev_mode {dev_mode}: {error}"
+        );
+        assert!(runtime.list_capsules().await.is_empty());
+    }
+
+    /// The dev-only component load refuses unless the owner turned dev mode
+    /// on: a Runtime never configured and a Home with `dev_mode = false`
+    /// both refuse it, so a normal start cannot reach unchecked bytes.
+    #[tokio::test]
+    async fn the_dev_component_load_needs_dev_mode() {
+        for dev_mode in [None, Some(false), Some(true)] {
+            let (runtime, temp) = component_runtime().await;
+            let key = elastos_runtime::signature::SigningKey::from_bytes(&[93; 32]);
+            if let Some(dev_mode) = dev_mode {
+                runtime
+                    .configure_capsule_admission(temp.path(), &[], dev_mode)
+                    .await
+                    .unwrap();
+            }
+            let folder = temp.path().join("dev-only");
+            let bytes = signed_component_folder(&folder, "dev-only", &key);
+            let manifest: CapsuleManifest =
+                serde_json::from_slice(&std::fs::read(folder.join("capsule.json")).unwrap())
+                    .unwrap();
+            let component = runtime.component_provider.clone().unwrap();
+            let loaded = runtime
+                .load_dev_unsigned_component(&component, bytes, manifest)
+                .await;
+            match dev_mode {
+                Some(true) => assert!(loaded.is_ok(), "{:?}", loaded.err()),
+                _ => assert!(
+                    loaded
+                        .unwrap_err()
+                        .to_string()
+                        .contains("dev_unsigned_component_refused"),
+                    "dev_mode {dev_mode:?}"
+                ),
+            }
+        }
+    }
+
     #[cfg(unix)]
     /// A component folder outside dev mode is walked once by the folder gate,
     /// and the bytes that walk read are the bytes that run. The test changes
