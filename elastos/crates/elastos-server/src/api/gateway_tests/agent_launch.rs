@@ -849,7 +849,34 @@ async fn started_by(world: &World, person: &Person, agent_id: &str) -> Value {
 }
 
 async fn started(world: &World, agent_id: &str) -> Value {
-    started_by(world, &world.admin, agent_id).await
+    let value = started_by(world, &world.admin, agent_id).await;
+    // The launch route registers the row and its session record before it
+    // answers. A Stop cannot miss a guest that is still live. Wait until that
+    // row is visible, and fail here with the reason when it is not, rather
+    // than letting a later Stop report 409.
+    for _ in 0..40 {
+        let rows = world.runtime.runtime.list_capsules().await;
+        if rows
+            .iter()
+            .any(|info| info.ended_at.is_none() && info.principal.as_deref() == Some(agent_id))
+        {
+            return value;
+        }
+        let ended: Vec<_> = rows
+            .iter()
+            .filter(|info| info.principal.as_deref() == Some(agent_id))
+            .map(|info| format!("{} cause={:?}", info.status, info.cause))
+            .collect();
+        if !ended.is_empty() {
+            panic!(
+                "Start answered for {agent_id} and that guest has already ended, so a Stop would 409. The row was registered before the answer; it is not missing. {ended:?} answer={value}"
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    panic!(
+        "Start answered for {agent_id} and no row was registered. The launch route registers the row before it answers, so a Stop would 409 for a guest the owner was told had started. answer={value}"
+    );
 }
 
 async fn runtime_stop(world: &World, body: Value) -> (StatusCode, String) {
