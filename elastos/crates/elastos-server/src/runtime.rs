@@ -2761,8 +2761,9 @@ pub(crate) mod tests {
     use super::*;
     use async_trait::async_trait;
     use elastos_common::{
-        elastos_bus_v1_wit_sha256, CapsuleId, CapsuleManifest, CapsuleRole, CapsuleStatus,
-        CapsuleType, Permissions, ResourceLimits, ELASTOS_BUS_V1_CONTRACT, SCHEMA_V1,
+        elastos_bus_v1_wit_sha256, elastos_bus_v2_wit_sha256, CapsuleId, CapsuleManifest,
+        CapsuleRole, CapsuleStatus, CapsuleType, Permissions, ResourceLimits,
+        ELASTOS_BUS_V1_CONTRACT, ELASTOS_BUS_V2_CONTRACT, SCHEMA_V1,
     };
     use elastos_compute::{CapsuleInfo, ComputeProvider};
     use elastos_runtime::capability::pending::GrantDuration;
@@ -6007,6 +6008,201 @@ pub(crate) mod tests {
             own.to_string()
         )));
     }
+
+    fn v2_home_bytes(kind: &str) -> Vec<u8> {
+        let source = include_str!("../../../tests/fixtures/components/v2-resident.wat");
+        let source = match kind {
+            "trap" => source.replacen(
+                "call $new global.set $set\n      call $next)",
+                "call $new global.set $set\n      unreachable)",
+                1,
+            ),
+            "spin" => source.replacen(
+                "call $new global.set $set\n      call $next)",
+                "call $new global.set $set\n      (loop $spin br $spin) i32.const 0)",
+                1,
+            ),
+            _ => source.to_string(),
+        };
+        wat::parse_str(source).expect("v2 home guest")
+    }
+
+    /// Loads a v2 guest, registers it, and lets the watcher start it. `fuel`
+    /// replaces the resident fuel before the guest runs.
+    async fn start_v2_home(
+        bytes: Vec<u8>,
+        name: &str,
+        fuel: Option<u64>,
+    ) -> (
+        Runtime,
+        Arc<ComponentProvider>,
+        CapsuleHandle,
+        tempfile::TempDir,
+    ) {
+        let temp = tempfile::tempdir().unwrap();
+        let storage = Arc::new(
+            LocalFSProvider::new(temp.path().to_path_buf())
+                .await
+                .unwrap(),
+        );
+        let component = Arc::new(ComponentProvider::new());
+        let runtime =
+            Runtime::with_providers_and_component(storage, Vec::new(), Some(component.clone()));
+        let mut manifest: CapsuleManifest =
+            serde_json::from_str(&component_manifest_json(name)).unwrap();
+        manifest.bus_contract = Some(ELASTOS_BUS_V2_CONTRACT.into());
+        manifest.wit_world_sha256 = Some(elastos_bus_v2_wit_sha256());
+        let handle = component.load_admitted(bytes, manifest).await.unwrap();
+        if let Some(fuel) = fuel {
+            component.set_v2_fuel(&handle.id, fuel).await.unwrap();
+        }
+        let id = handle.id.0.clone();
+        runtime
+            .hold_launch_context(&handle, Some("person:local:resident".into()), None)
+            .await;
+        component
+            .present_held_frame(
+                &id,
+                elastos_compute::providers::bus2_ui::UI_MEDIA_TYPE,
+                br#"{"frame":[{"text":"up"}]}"#,
+                &elastos_compute::providers::bus2_ui::GrantBook::default(),
+            )
+            .unwrap();
+        runtime
+            .register_capsule(RunningCapsuleInfo {
+                id: id.clone(),
+                name: name.to_string(),
+                status: CAPSULE_STARTING.to_string(),
+                capsule_type: handle.manifest.capsule_type.clone(),
+                handle: Some(handle.clone()),
+                session_id: id.clone(),
+                principal: Some("person:local:resident".into()),
+                cause: None,
+                ended_at: None,
+            })
+            .await;
+        let held = ActivationContextHeld::new(&runtime, &handle, component.clone());
+        runtime.watch_activation(handle.id.clone(), handle.clone(), component.clone(), held);
+        (runtime, component, handle, temp)
+    }
+
+    async fn wait_v2_status(runtime: &Runtime, id: &str, running: bool) -> RunningCapsuleInfo {
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if let Some(entry) = runtime.get_capsule(id).await {
+                    if running && entry.status == CAPSULE_RUNNING {
+                        return entry;
+                    }
+                    if entry.ended_at.is_some() {
+                        return entry;
+                    }
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("v2 resident did not reach its status: {id}"))
+    }
+
+    async fn assert_v2_home_cleared(
+        runtime: &Runtime,
+        component: &ComponentProvider,
+        handle: &CapsuleHandle,
+    ) {
+        assert!(
+            runtime
+                .context_left_for_test(handle.id.as_str())
+                .await
+                .is_empty(),
+            "tokens stay after the end"
+        );
+        assert!(!runtime.provider_entry_for_test(handle).await);
+        assert!(runtime.provider_principal_for_test(handle).await.is_none());
+        assert!(component.read_v2_frame(handle.id.as_str()).is_none());
+    }
+
+    /// A detached v2 guest stays up, answers stop, and the end clears its
+    /// tokens, frame, and events. The launch record names that stop.
+    #[tokio::test]
+    async fn a_v2_home_resident_stays_up_and_stops() {
+        let (runtime, component, handle, _temp) =
+            start_v2_home(v2_home_bytes("stay"), "stays", None).await;
+        let running = wait_v2_status(&runtime, handle.id.as_str(), true).await;
+        assert_eq!(running.status, CAPSULE_RUNNING);
+        assert_eq!(running.session_id, handle.id.0);
+        assert!(running.cause.is_none());
+        assert!(running.ended_at.is_none());
+        assert_eq!(
+            component.status(&handle).await.unwrap(),
+            CapsuleStatus::Running
+        );
+        assert!(component.read_v2_frame(handle.id.as_str()).is_some());
+        tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+        assert_eq!(
+            component.status(&handle).await.unwrap(),
+            CapsuleStatus::Running,
+            "the guest stays up"
+        );
+        let ended = runtime
+            .stop_capsule_by_id(handle.id.as_str())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(ended.status, CAPSULE_STOPPED);
+        assert_eq!(ended.cause.as_deref(), Some("stopped: user"));
+        assert!(ended.ended_at.is_some());
+        assert_eq!(ended.session_id, handle.id.0);
+        assert_v2_home_cleared(&runtime, &component, &handle).await;
+    }
+
+    /// A trap and a fuel end each finish the resident and clear the same state.
+    #[tokio::test]
+    async fn a_v2_home_resident_trap_and_fuel_end_clear_it() {
+        let (runtime, component, handle, _temp) =
+            start_v2_home(v2_home_bytes("trap"), "traps", None).await;
+        let ended = wait_v2_status(&runtime, handle.id.as_str(), false).await;
+        assert_eq!(ended.status, CAPSULE_FAILED);
+        let cause = ended.cause.unwrap();
+        assert!(cause.contains("unreachable"), "{cause}");
+        assert_eq!(ended.session_id, handle.id.0);
+        assert_v2_home_cleared(&runtime, &component, &handle).await;
+
+        let (runtime, component, handle, _temp) =
+            start_v2_home(v2_home_bytes("spin"), "fuel", Some(1_000)).await;
+        let ended = wait_v2_status(&runtime, handle.id.as_str(), false).await;
+        assert_eq!(ended.status, CAPSULE_FAILED);
+        let cause = ended.cause.unwrap();
+        assert!(cause.contains("fuel-exhausted"), "{cause}");
+        assert_v2_home_cleared(&runtime, &component, &handle).await;
+    }
+
+    /// Dropping the runtime that watches the guest is a server shutdown. The
+    /// owed end still runs, and it clears the same state.
+    #[test]
+    fn a_v2_home_resident_shutdown_ends_and_clears() {
+        let local = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let (runtime, component, handle, _temp) = local.block_on(async {
+            let started = start_v2_home(v2_home_bytes("stay"), "shutdown", None).await;
+            let running = wait_v2_status(&started.0, started.2.id.as_str(), true).await;
+            assert_eq!(running.status, CAPSULE_RUNNING);
+            started
+        });
+        drop(local);
+        let poll = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        poll.block_on(async {
+            let ended = wait_v2_status(&runtime, handle.id.as_str(), false).await;
+            assert_eq!(ended.status, CAPSULE_FAILED);
+            assert_eq!(ended.cause.as_deref(), Some(CAUSE_TASK_LOST));
+            assert_v2_home_cleared(&runtime, &component, &handle).await;
+        });
+    }
+
     #[cfg(unix)]
     /// A3-R S3 fix 1. A guard dropped with its end owed hands the end to a
     /// task, and the runtime shuts down before it runs that task, as a

@@ -97,6 +97,8 @@ struct ComponentActivation {
     /// This activation's own-code limits; the shipped values unless a test
     /// sets them on the entry before start.
     fuel: u64,
+    /// Fuel a v2 resident starts with. v1 keeps `fuel`.
+    v2_fuel: u64,
     run_deadline: Duration,
     events: Option<mpsc::UnboundedSender<v2::elastos::bus::types::Event>>,
     cancel_requested: Arc<AtomicBool>,
@@ -307,7 +309,18 @@ impl ComponentProvider {
     /// entry to take.
     pub async fn forget_instance(&self, capsule_id: &CapsuleId) {
         self.instances.write().await.remove(capsule_id);
+        self.frames.lock().expect("frames").remove(&capsule_id.0);
         self.clear_bridge_principal(capsule_id).await;
+    }
+
+    /// Sets the fuel a v2 resident starts with. A caller does this before start.
+    pub async fn set_v2_fuel(&self, id: &CapsuleId, fuel: u64) -> Result<()> {
+        let mut instances = self.instances.write().await;
+        let instance = instances
+            .get_mut(id)
+            .ok_or_else(|| ElastosError::CapsuleNotFound(id.0.clone()))?;
+        instance.v2_fuel = fuel;
+        Ok(())
     }
 
     /// The one engine every v1 component in this process compiles and runs on.
@@ -502,6 +515,7 @@ impl ComponentProvider {
                 sealed,
                 stop_requested: Arc::new(AtomicBool::new(false)),
                 fuel: COMPONENT_FUEL,
+                v2_fuel: V2_FUEL,
                 run_deadline: COMPONENT_RUN_DEADLINE,
                 events: None,
                 cancel_requested: Arc::new(AtomicBool::new(false)),
@@ -521,12 +535,170 @@ impl ComponentProvider {
         })
     }
 
-    /// Starts a loaded v1 activation on a blocking thread and returns after
-    /// instantiation, just before the worker calls the guest's `run` export. The guest keeps
-    /// running on that thread; the worker publishes its outcome
-    /// ([`ActivationOutcome`]) and removes the activation entry when the run
-    /// ends. [`ComputeProvider::start`] awaits the outcome on top of this.
+    /// A v2 guest on its own thread. The call returns when the guest is ready.
+    /// The thread publishes the ending, and this task turns that ending into
+    /// the activation's outcome.
+    async fn start_v2_resident(&self, handle: &CapsuleHandle) -> Result<ResidentActivation> {
+        let (sender, receiver) = mpsc::unbounded_channel();
+        let hostcall = self.bus_hostcall.read().unwrap().clone();
+        let principal_id = self
+            .bridge_principals
+            .read()
+            .await
+            .get(&handle.id)
+            .cloned()
+            .flatten();
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+        let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+        let (outcome_tx, outcome_rx) = tokio::sync::watch::channel(None);
+        let instances = self.instances.clone();
+        #[cfg(test)]
+        let endings = self.endings.clone();
+        let frames = self.frames.clone();
+        let mut entries = self.instances.write().await;
+        let instance = entries
+            .get_mut(&handle.id)
+            .ok_or_else(|| ElastosError::CapsuleNotFound(handle.id.0.clone()))?;
+        if instance.status != CapsuleStatus::Loading {
+            return Err(ElastosError::Compute(
+                "v2 component is already running".into(),
+            ));
+        }
+        let state = ComponentState {
+            sealed: instance.sealed,
+            grants: instance.grants.clone(),
+            frames,
+            ..ComponentState::new(hostcall, handle.id.0.clone(), principal_id)
+        };
+        let (engine, component) = (instance.engine.clone(), instance.component.clone());
+        let control = V2RunControl {
+            stop_requested: instance.stop_requested.clone(),
+            cancel_requested: instance.cancel_requested.clone(),
+            #[cfg(test)]
+            max_ticks: instance.test_max_ticks,
+            #[cfg(not(test))]
+            max_ticks: V2_EPOCH_TICKS,
+            fuel: instance.v2_fuel,
+            fuel_slice: V2_FUEL_SLICE,
+            #[cfg(test)]
+            pending_read: instance.pending_read.clone(),
+        };
+        let ending_cancel = control.cancel_requested.clone();
+        #[cfg(test)]
+        let panic_now = self.panic_next_v2.swap(false, Ordering::AcqRel);
+        #[cfg(not(test))]
+        let panic_now = false;
+        instance.status = CapsuleStatus::Running;
+        instance.events = Some(sender);
+        drop(entries);
+
+        let (abort_tx, abort_rx) = tokio::sync::oneshot::channel();
+        let spawned = std::thread::Builder::new()
+            .name("component-v2".into())
+            .spawn(move || {
+                let rt = match tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                {
+                    Ok(rt) => rt,
+                    Err(err) => {
+                        let _ = ready_tx.send(Err(ElastosError::Compute(format!(
+                            "v2 guest runtime: {err}"
+                        ))));
+                        return;
+                    }
+                };
+                let task = rt.spawn(async move {
+                    #[cfg(test)]
+                    if panic_now {
+                        panic!("injected v2 task panic");
+                    }
+                    #[cfg(not(test))]
+                    let _ = panic_now;
+                    Self::run_v2(engine, component, state, receiver, control, ready_tx).await
+                });
+                let _ = abort_tx.send(task.abort_handle());
+                let ending = match rt.block_on(task) {
+                    Ok(Ok(ending)) => ending.to_string(),
+                    Ok(Err(_)) if ending_cancel.load(Ordering::Acquire) => "cancelled".to_string(),
+                    Ok(Err(error)) => error.to_string(),
+                    Err(error) if error.is_cancelled() => "cancelled".to_string(),
+                    Err(error) => format!("panicked: {error}"),
+                };
+                let _ = done_tx.send(ending);
+            });
+        if let Err(err) = spawned {
+            self.instances.write().await.remove(&handle.id);
+            return Err(ElastosError::Compute(format!("v2 guest thread: {err}")));
+        }
+
+        let id_for_end = handle.id.clone();
+        tokio::spawn(async move {
+            let ending = done_rx
+                .await
+                .unwrap_or_else(|_| "v2 guest thread ended".to_string());
+            tracing::info!(capsule_id = %id_for_end, %ending, "component v2 run ended");
+            let outcome = match ending.as_str() {
+                "returned" => ActivationOutcome::Returned,
+                "stopped" | "cancelled" => ActivationOutcome::Stopped,
+                _ => ActivationOutcome::Trapped(ending.clone()),
+            };
+            let _ = outcome_tx.send(Some(outcome));
+            instances.write().await.remove(&id_for_end);
+            #[cfg(test)]
+            endings.write().await.insert(id_for_end, ending);
+        });
+
+        let abort = match abort_rx.await {
+            Ok(abort) => abort,
+            Err(_) => {
+                self.instances.write().await.remove(&handle.id);
+                return Err(ElastosError::Compute(
+                    "v2 guest thread ended before it started".into(),
+                ));
+            }
+        };
+        {
+            let mut entries = self.instances.write().await;
+            if let Some(instance) = entries.get_mut(&handle.id) {
+                instance.task = Some(abort);
+            } else {
+                abort.abort();
+            }
+        }
+        match ready_rx.await {
+            Ok(result) => result?,
+            Err(_) => {
+                return Err(ElastosError::Compute(
+                    "v2 resident task ended during start".into(),
+                ));
+            }
+        }
+        Ok(ResidentActivation {
+            handle: handle.clone(),
+            outcome: outcome_rx,
+        })
+    }
+
+    /// Starts a loaded activation and returns once the guest is ready. A v1
+    /// guest runs on a blocking thread. A v2 guest runs on its own thread, so
+    /// a request worker is not the one inside the guest. Dropping the handle
+    /// does not end the guest. The worker publishes the outcome and removes
+    /// the activation entry when the run ends.
     pub async fn start_resident(&self, handle: &CapsuleHandle) -> Result<ResidentActivation> {
+        let is_v2 = self
+            .instances
+            .read()
+            .await
+            .get(&handle.id)
+            .ok_or_else(|| ElastosError::CapsuleNotFound(handle.id.0.clone()))?
+            .manifest
+            .bus_contract
+            .as_deref()
+            == Some(ELASTOS_BUS_V2_CONTRACT);
+        if is_v2 {
+            return self.start_v2_resident(handle).await;
+        }
         let hostcall = self.bus_hostcall.read().unwrap().clone();
         let principal_id = self
             .bridge_principals
@@ -540,11 +712,6 @@ impl ComponentProvider {
             let instance = instances
                 .get_mut(&handle.id)
                 .ok_or_else(|| ElastosError::CapsuleNotFound(handle.id.0.clone()))?;
-            if instance.manifest.bus_contract.as_deref() == Some(ELASTOS_BUS_V2_CONTRACT) {
-                return Err(ElastosError::Compute(
-                    "Bus v2 contract not yet runnable".into(),
-                ));
-            }
             if instance.status != CapsuleStatus::Loading {
                 return Err(ElastosError::Compute(format!(
                     "component {} is already running",
@@ -867,97 +1034,13 @@ impl ComputeProvider for ComponentProvider {
     }
 
     /// Starts the guest and waits for it to end, as a bounded activation. A
-    /// resident caller uses [`ComponentProvider::start_resident`] instead.
+    /// v2 guest stays up: this returns when that guest is ready. A resident
+    /// caller uses [`ComponentProvider::start_resident`] and waits for the end.
     async fn start(&self, handle: &CapsuleHandle) -> Result<()> {
-        let is_v2 = self
-            .instances
-            .read()
-            .await
-            .get(&handle.id)
-            .ok_or_else(|| ElastosError::CapsuleNotFound(handle.id.0.clone()))?
-            .manifest
-            .bus_contract
-            .as_deref()
-            == Some(ELASTOS_BUS_V2_CONTRACT);
-        if is_v2 {
-            let (sender, receiver) = mpsc::unbounded_channel();
-            let hostcall = self.bus_hostcall.read().unwrap().clone();
-            let principal_id = self
-                .bridge_principals
-                .read()
-                .await
-                .get(&handle.id)
-                .cloned()
-                .flatten();
-            let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
-            let instances = self.instances.clone();
-            #[cfg(test)]
-            let endings = self.endings.clone();
-            let id = handle.id.clone();
-            let frames = self.frames.clone();
-            let mut entries = self.instances.write().await;
-            let instance = entries
-                .get_mut(&handle.id)
-                .ok_or_else(|| ElastosError::CapsuleNotFound(handle.id.0.clone()))?;
-            if instance.status != CapsuleStatus::Loading {
-                return Err(ElastosError::Compute(
-                    "v2 component is already running".into(),
-                ));
-            }
-            let state = ComponentState {
-                sealed: instance.sealed,
-                grants: instance.grants.clone(),
-                frames,
-                ..ComponentState::new(hostcall, handle.id.0.clone(), principal_id)
-            };
-            let (engine, component) = (instance.engine.clone(), instance.component.clone());
-            let control = V2RunControl {
-                stop_requested: instance.stop_requested.clone(),
-                cancel_requested: instance.cancel_requested.clone(),
-                #[cfg(test)]
-                max_ticks: instance.test_max_ticks,
-                #[cfg(not(test))]
-                max_ticks: V2_EPOCH_TICKS,
-                fuel: V2_FUEL,
-                fuel_slice: V2_FUEL_SLICE,
-                #[cfg(test)]
-                pending_read: instance.pending_read.clone(),
-            };
-            let ending_cancel = control.cancel_requested.clone();
-            #[cfg(test)]
-            let panic = self.panic_next_v2.swap(false, Ordering::AcqRel);
-            let run = tokio::spawn(async move {
-                #[cfg(test)]
-                if panic {
-                    panic!("injected v2 task panic");
-                }
-                Self::run_v2(engine, component, state, receiver, control, ready_tx).await
-            });
-            instance.task = Some(run.abort_handle());
-            instance.status = CapsuleStatus::Running;
-            instance.events = Some(sender);
-            tokio::spawn(async move {
-                let ending = match run.await {
-                    Ok(Ok(ending)) => ending.to_string(),
-                    Ok(Err(_)) if ending_cancel.load(Ordering::Acquire) => "cancelled".to_string(),
-                    Ok(Err(error)) => error.to_string(),
-                    Err(error) if error.is_cancelled() => "cancelled".to_string(),
-                    Err(error) => format!("panicked: {error}"),
-                };
-                tracing::info!(capsule_id = %id, %ending, "component v2 run ended");
-                instances.write().await.remove(&id);
-                #[cfg(test)]
-                endings.write().await.insert(id.clone(), ending);
-            });
-            drop(entries);
-            return match ready_rx.await {
-                Ok(result) => result,
-                Err(_) => Err(ElastosError::Compute(
-                    "v2 resident task ended during start".into(),
-                )),
-            };
-        }
         let mut resident = self.start_resident(handle).await?;
+        if resident.handle.manifest.bus_contract.as_deref() == Some(ELASTOS_BUS_V2_CONTRACT) {
+            return Ok(());
+        }
         match resident.ended().await {
             ActivationOutcome::Trapped(message) => Err(ElastosError::Compute(message)),
             // A natural return and an intentional stop both end well.
@@ -970,6 +1053,8 @@ impl ComputeProvider for ComponentProvider {
         // entry running between the two.
         let mut instances = self.instances.write().await;
         let Some(instance) = instances.get(&handle.id) else {
+            drop(instances);
+            self.frames.lock().expect("frames").remove(&handle.id.0);
             return Ok(());
         };
         let running = instance.status == CapsuleStatus::Running
@@ -986,12 +1071,14 @@ impl ComputeProvider for ComponentProvider {
         if let Some(instance) = instances.get_mut(&handle.id) {
             if instance.manifest.bus_contract.as_deref() == Some(ELASTOS_BUS_V2_CONTRACT) {
                 instance.stop_requested.store(true, Ordering::Release);
+                instance.grants.lock().expect("grant book").clear();
                 task = instance
                     .task
                     .take()
                     .map(|task| (task, instance.cancel_requested.clone()));
             }
         }
+        self.frames.lock().expect("frames").remove(&handle.id.0);
         instances.remove(&handle.id);
         drop(instances);
         if let Some((task, cancel_requested)) = task {
@@ -2009,6 +2096,34 @@ mod tests {
             .abort();
         assert_eq!(v2_ending(&provider, &aborted).await, "cancelled");
         assert!(provider.instances.read().await.is_empty());
+    }
+
+    /// A stop empties the grant book the guest holds and drops its frame.
+    #[tokio::test]
+    async fn v2_stop_clears_the_grant_book_and_the_frame() {
+        let provider = ComponentProvider::new();
+        let bytes = wat::parse_str(include_str!(
+            "../../../../tests/fixtures/components/v2-resident.wat"
+        ))
+        .unwrap();
+        let handle = load_v2_fixture(&provider, bytes).await;
+        let book = provider.instances.read().await[&handle.id].grants.clone();
+        book.lock()
+            .unwrap()
+            .hold("g1", "localhost://Users/self/Documents/note.bin", "read");
+        provider
+            .present_held_frame(
+                &handle.id.0,
+                crate::providers::bus2_ui::UI_MEDIA_TYPE,
+                br#"{"frame":[{"text":"up"}]}"#,
+                &book.lock().unwrap(),
+            )
+            .unwrap();
+        provider.start(&handle).await.unwrap();
+        assert!(provider.read_v2_frame(&handle.id.0).is_some());
+        provider.stop(&handle).await.unwrap();
+        assert!(book.lock().unwrap().is_empty());
+        assert!(provider.read_v2_frame(&handle.id.0).is_none());
     }
 
     #[tokio::test]

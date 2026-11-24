@@ -155,6 +155,16 @@ impl GrantBook {
             grant.revoked = true;
         }
     }
+
+    /// Drops every grant this guest holds. A stop does this. A revoke of one
+    /// grant does not.
+    pub fn clear(&mut self) {
+        self.grants.clear();
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.grants.is_empty()
+    }
 }
 
 /// One frame. An image is a grant id and a resource name. It holds no bytes.
