@@ -673,12 +673,13 @@ fn sync_managed_runtime_child_components_manifest(
     for (name, parent_binary) in verified_binaries {
         std::fs::copy(parent_binary, child_bin_dir.join(name))?;
     }
-    if let Some(source) = crate::setup::installed_release_source(parent_data_dir)? {
-        crate::installed_release::project_verified_release(
+    match crate::setup::installed_release_source(parent_data_dir)? {
+        Some(source) => crate::installed_release::project_verified_release(
             parent_data_dir,
             &child_data_dir,
             &source,
-        )?;
+        )?,
+        None => crate::installed_release::clear_projected_release(&child_data_dir)?,
     }
     Ok(())
 }
@@ -1653,6 +1654,12 @@ fn summarize_runtime_start_failure_contents(contents: &str) -> Option<String> {
         ));
     }
 
+    if contents.contains("Installed artifact differs from its signed checksum") {
+        return Some(format!(
+            "The managed runtime is still on the release it started with. Open Home again to restart it.\nLast runtime error: {last_line}"
+        ));
+    }
+
     Some(format!("Last runtime error: {}", last_line))
 }
 
@@ -2203,6 +2210,16 @@ mod tests {
             std::fs::read(child.join("sources.json")).unwrap(),
             std::fs::read(parent.data.join("sources.json")).unwrap()
         );
+        assert_eq!(projected_mode(&child.join("sources.json")), 0o600);
+        let head = elastos_common::localhost::publisher_release_head_path(&child);
+        assert_eq!(projected_mode(&head), 0o600);
+        assert_eq!(
+            projected_mode(&elastos_common::localhost::publisher_release_manifest_path(
+                &child
+            )),
+            0o600
+        );
+        assert_eq!(projected_mode(head.parent().unwrap()), 0o700);
     }
 
     #[cfg(unix)]
@@ -2234,6 +2251,14 @@ mod tests {
             .unwrap()
         );
         assert!(!elastos_common::localhost::publisher_release_manifest_path(&child).exists());
+        assert_eq!(projected_mode(&child.join("installation")), 0o700);
+        assert_eq!(
+            projected_mode(&elastos_common::localhost::installation_release_head_path(
+                &child
+            )),
+            0o600
+        );
+        assert_eq!(projected_mode(&child.join("sources.json")), 0o600);
     }
 
     #[cfg(unix)]
@@ -2365,6 +2390,245 @@ mod tests {
         assert!(
             message.contains("No trusted source configured"),
             "{message}"
+        );
+    }
+
+    #[cfg(unix)]
+    fn projected_mode(path: &std::path::Path) -> u32 {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::symlink_metadata(path)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777
+    }
+
+    /// The head copied into the child is the head the parent verified. A write
+    /// to the head file after that read must not reach the child.
+    #[cfg(unix)]
+    #[test]
+    fn signed_home_child_keeps_the_head_from_the_verified_read() {
+        let parent = sign_managed_provider_home();
+        let head_path = elastos_common::localhost::publisher_release_head_path(&parent.data);
+        let original = std::fs::read(&head_path).unwrap();
+        let hooked = head_path.clone();
+        let _interrupt = crate::installed_release::tests::VerifiedReadInterrupt::arm(move || {
+            std::fs::write(&hooked, b"changed-after-the-verified-read").unwrap();
+        });
+        let child = sync_managed_child(&parent.data);
+        let copied = std::fs::read(elastos_common::localhost::publisher_release_head_path(
+            &child,
+        ))
+        .unwrap();
+        assert_eq!(copied, original);
+        start_signed_provider(&child, "localhost-provider");
+    }
+
+    /// Door-removal plant: `fs::read` follows the symlink and the child receives
+    /// the target. A bounded no-follow read refuses, and the child has no copy.
+    #[cfg(unix)]
+    #[test]
+    fn signed_home_child_does_not_follow_or_overread_sources() {
+        let parent = sign_managed_provider_home();
+        let real = parent.data.join("sources-real.json");
+        std::fs::rename(parent.data.join("sources.json"), &real).unwrap();
+        std::os::unix::fs::symlink(&real, parent.data.join("sources.json")).unwrap();
+        let home = managed_runtime_child_home_dir(&parent.data, RUNTIME_KIND_MANAGED_HOME);
+        let error =
+            sync_managed_runtime_child_components_manifest(&parent.data, &home).unwrap_err();
+        let child = managed_runtime_child_data_dir(&home);
+        assert!(
+            !child.join("sources.json").exists(),
+            "symlink sources reached the child: {error}"
+        );
+
+        let parent = sign_managed_provider_home();
+        let mut bytes = std::fs::read(parent.data.join("sources.json")).unwrap();
+        bytes.pop();
+        bytes.extend(br#","pad":""#);
+        bytes.extend(std::iter::repeat_n(b'x', (256 * 1024) + 1));
+        bytes.extend(br#""}"#);
+        std::fs::write(parent.data.join("sources.json"), &bytes).unwrap();
+        let home = managed_runtime_child_home_dir(&parent.data, RUNTIME_KIND_MANAGED_HOME);
+        let error =
+            sync_managed_runtime_child_components_manifest(&parent.data, &home).unwrap_err();
+        let child = managed_runtime_child_data_dir(&home);
+        assert!(
+            !child.join("sources.json").exists(),
+            "oversized sources reached the child: {error:#}"
+        );
+    }
+
+    /// A crash leftover inside `installation/` refuses admission. The next sync
+    /// removes it, and that sync fsyncs the installation directory.
+    #[cfg(unix)]
+    #[test]
+    fn crash_leftover_refuses_until_sync_and_the_installation_dir_is_fsynced() {
+        let parent = sign_managed_provider_home();
+        parent.publish_consumed();
+        let capture = crate::installed_release::tests::SyncCapture::start();
+        let child = sync_managed_child(&parent.data);
+        assert!(
+            capture.includes(&child.join("installation")),
+            "projection must fsync the installation directory"
+        );
+        drop(capture);
+        let leftover = child.join("installation/.release-head.json.project");
+        std::fs::write(&leftover, b"torn").unwrap();
+        let error = crate::setup::verify_installed_component_start(
+            &child,
+            "localhost-provider",
+            &child.join("bin/localhost-provider"),
+        )
+        .unwrap_err();
+        assert!(format!("{error:#}").contains("require repair"), "{error:#}");
+        let child = sync_managed_child(&parent.data);
+        assert!(!leftover.exists());
+        start_signed_provider(&child, "localhost-provider");
+    }
+
+    /// While the child is still on the release it started with, an updated
+    /// parent runtime refuses the next helper start. The owner sees that
+    /// refusal through the runtime-start summary. The runtime hash no longer
+    /// matches, so the next ensure leaves the reuse branch and syncs the child.
+    #[cfg(unix)]
+    #[test]
+    fn running_child_refuses_the_next_helper_after_an_update_until_ensure_restarts_it() {
+        let mut parent = sign_managed_provider_home();
+        let child = sync_managed_child(&parent.data);
+        start_signed_provider(&child, "localhost-provider");
+        let runtime = std::path::PathBuf::from(
+            serde_json::from_slice::<serde_json::Value>(
+                &std::fs::read(parent.data.join("sources.json")).unwrap(),
+            )
+            .unwrap()["sources"][0]["install_path"]
+                .as_str()
+                .unwrap(),
+        );
+        let running_hash = sha256_file(&runtime).unwrap();
+        std::fs::write(&runtime, b"updated signed runtime").unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&runtime, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let (head, release) = parent.release_pair_at_version("0.8.0");
+        parent.publish_exact("0.8.0", head, release);
+        let updated_hash = sha256_file(&runtime).unwrap();
+        assert_ne!(running_hash, updated_hash);
+        start_signed_provider(&parent.data, "localhost-provider");
+        let error = crate::setup::verify_installed_component_start(
+            &child,
+            "localhost-provider",
+            &child.join("bin/localhost-provider"),
+        )
+        .unwrap_err();
+        let refusal = format!("{error:#}");
+        assert!(
+            refusal.contains("Installed artifact differs from its signed checksum"),
+            "{refusal}"
+        );
+        let log = child.join("runtime.log");
+        std::fs::write(&log, &refusal).unwrap();
+        let summary = summarize_runtime_start_failure(&log).unwrap();
+        assert!(
+            summary.contains("Open Home again to restart it"),
+            "{summary}"
+        );
+        let owner = format_runtime_start_exit_message(
+            "home",
+            &log,
+            std::process::Command::new("false").status().unwrap(),
+        );
+        assert!(owner.contains(&summary), "{owner}");
+        // ensure reuses the running child only when the stored binary, policy
+        // and dependency hashes all match. This binary hash changed, so ensure
+        // does not reuse it and syncs the replacement before that child starts.
+        assert_ne!(running_hash, updated_hash);
+        let child = sync_managed_child(&parent.data);
+        start_signed_provider(&child, "did-provider");
+    }
+
+    /// A pending journal beside the parent's install path names the parent Home.
+    /// The child's host-start gate refuses it as another Home.
+    #[cfg(unix)]
+    #[test]
+    fn pending_journal_beside_the_parent_install_refuses_the_child() {
+        let parent = sign_managed_provider_home();
+        let child = sync_managed_child(&parent.data);
+        start_signed_provider(&child, "did-provider");
+        let runtime = std::path::PathBuf::from(
+            serde_json::from_slice::<serde_json::Value>(
+                &std::fs::read(child.join("sources.json")).unwrap(),
+            )
+            .unwrap()["sources"][0]["install_path"]
+                .as_str()
+                .unwrap(),
+        );
+        let journal = runtime
+            .parent()
+            .unwrap()
+            .join(".elastos.update-journal.json");
+        std::fs::write(
+            &journal,
+            serde_json::to_vec(&serde_json::json!({
+                "schema": "elastos.install-transaction/v1",
+                "transaction_id": "0123456789abcdef0123456789abcdef",
+                "data_dir": parent.data.display().to_string(),
+                "binary_basename": runtime.file_name().unwrap().to_str().unwrap(),
+                "phase": "committing",
+                "entries": []
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&journal, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        let error = crate::setup::verify_installed_component_start(
+            &child,
+            "localhost-provider",
+            &child.join("bin/localhost-provider"),
+        )
+        .unwrap_err();
+        let message = format!("{error:#}");
+        assert!(
+            message.contains("Installation recovery belongs to a different Home"),
+            "{message}"
+        );
+    }
+
+    /// A parent that no longer has a release clears the child's projection,
+    /// including a symlink, and the child is refused again.
+    #[cfg(unix)]
+    #[test]
+    fn parent_without_a_source_clears_the_child_projection() {
+        let parent = sign_managed_provider_home();
+        let child = sync_managed_child(&parent.data);
+        start_signed_provider(&child, "localhost-provider");
+        let secret = child.join("secret-sources");
+        std::fs::write(&secret, b"keep").unwrap();
+        std::fs::remove_file(child.join("sources.json")).unwrap();
+        std::os::unix::fs::symlink(&secret, child.join("sources.json")).unwrap();
+        std::fs::create_dir_all(child.join("installation")).unwrap();
+        std::fs::write(child.join("installation/release-head.json"), b"stale").unwrap();
+        std::fs::remove_file(parent.data.join("sources.json")).unwrap();
+        let child = sync_managed_child(&parent.data);
+        assert!(!child.join("sources.json").exists());
+        assert_eq!(std::fs::read(&secret).unwrap(), b"keep");
+        assert!(!elastos_common::localhost::publisher_release_head_path(&child).exists());
+        assert!(!elastos_common::localhost::publisher_release_manifest_path(&child).exists());
+        assert!(!child.join("installation").exists());
+        assert!(child.join("components.json").exists());
+        let error = crate::setup::verify_installed_component_start(
+            &child,
+            "localhost-provider",
+            &child.join("bin/localhost-provider"),
+        )
+        .unwrap_err();
+        assert!(
+            format!("{error:#}").contains("No trusted source configured"),
+            "{error:#}"
         );
     }
 

@@ -1,5 +1,65 @@
 use super::*;
+use std::cell::RefCell;
 use std::os::unix::fs::{symlink, PermissionsExt};
+
+thread_local! {
+    static AFTER_VERIFIED_READ: RefCell<Option<Box<dyn Fn()>>> = RefCell::new(None);
+    static SYNC_PATHS: RefCell<Option<Vec<std::path::PathBuf>>> = const { RefCell::new(None) };
+}
+
+pub(crate) fn after_verified_release_read() {
+    AFTER_VERIFIED_READ.with(|slot| {
+        if let Some(hook) = slot.borrow().as_ref() {
+            hook();
+        }
+    });
+}
+
+pub(crate) struct VerifiedReadInterrupt;
+
+impl VerifiedReadInterrupt {
+    pub(crate) fn arm(hook: impl Fn() + 'static) -> Self {
+        AFTER_VERIFIED_READ.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
+        Self
+    }
+}
+
+impl Drop for VerifiedReadInterrupt {
+    fn drop(&mut self) {
+        AFTER_VERIFIED_READ.with(|slot| *slot.borrow_mut() = None);
+    }
+}
+
+pub(crate) fn note_sync(path: &Path) {
+    SYNC_PATHS.with(|slot| {
+        if let Some(paths) = slot.borrow_mut().as_mut() {
+            paths.push(path.to_path_buf());
+        }
+    });
+}
+
+pub(crate) struct SyncCapture;
+
+impl SyncCapture {
+    pub(crate) fn start() -> Self {
+        SYNC_PATHS.with(|slot| *slot.borrow_mut() = Some(Vec::new()));
+        Self
+    }
+
+    pub(crate) fn includes(&self, path: &Path) -> bool {
+        SYNC_PATHS.with(|slot| {
+            slot.borrow()
+                .as_ref()
+                .is_some_and(|paths| paths.iter().any(|saved| saved == path))
+        })
+    }
+}
+
+impl Drop for SyncCapture {
+    fn drop(&mut self) {
+        SYNC_PATHS.with(|slot| *slot.borrow_mut() = None);
+    }
+}
 
 use serde_json::{json, Value};
 
