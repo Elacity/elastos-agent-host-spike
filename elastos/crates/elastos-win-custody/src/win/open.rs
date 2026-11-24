@@ -11,8 +11,9 @@ use std::path::{Path, PathBuf};
 
 use elastos_bundle_identity_windows_handle as windows_handle;
 use windows_sys::Wdk::Storage::FileSystem::{
-    FILE_CREATE, FILE_DIRECTORY_FILE, FILE_NON_DIRECTORY_FILE, FILE_OPEN, FILE_OPEN_REPARSE_POINT,
-    FILE_SYNCHRONOUS_IO_NONALERT,
+    FileRenameInformation, NtSetInformationFile, RtlNtStatusToDosErrorNoTeb, FILE_CREATE,
+    FILE_DIRECTORY_FILE, FILE_NON_DIRECTORY_FILE, FILE_OPEN, FILE_OPEN_REPARSE_POINT,
+    FILE_RENAME_INFORMATION, FILE_SYNCHRONOUS_IO_NONALERT,
 };
 use windows_sys::Win32::Foundation::{ERROR_ALREADY_EXISTS, ERROR_FILE_EXISTS};
 use windows_sys::Win32::Security::Authorization::{SetSecurityInfo, SE_FILE_OBJECT};
@@ -21,15 +22,15 @@ use windows_sys::Win32::Security::{
     PSID,
 };
 use windows_sys::Win32::Storage::FileSystem::{
-    FileAttributeTagInfo, FileDispositionInfoEx, FileRenameInfo, GetFileInformationByHandleEx,
+    FileAttributeTagInfo, FileDispositionInfoEx, GetFileInformationByHandleEx,
     SetFileInformationByHandle, DELETE, FILE_ADD_FILE, FILE_ADD_SUBDIRECTORY,
     FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_REPARSE_POINT,
     FILE_ATTRIBUTE_TAG_INFO, FILE_DISPOSITION_FLAG_DELETE, FILE_DISPOSITION_INFO_EX,
     FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_GENERIC_EXECUTE,
-    FILE_GENERIC_READ, FILE_GENERIC_WRITE, FILE_READ_ATTRIBUTES, FILE_READ_DATA, FILE_RENAME_INFO,
-    FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, READ_CONTROL, SYNCHRONIZE, WRITE_DAC,
-    WRITE_OWNER,
+    FILE_GENERIC_READ, FILE_GENERIC_WRITE, FILE_READ_ATTRIBUTES, FILE_READ_DATA, FILE_SHARE_DELETE,
+    FILE_SHARE_READ, FILE_SHARE_WRITE, READ_CONTROL, SYNCHRONIZE, WRITE_DAC, WRITE_OWNER,
 };
+use windows_sys::Win32::System::IO::IO_STATUS_BLOCK;
 
 use super::sd::{build_sd, current_user_sid, verify_not_writable_by_others, verify_owner_only};
 use super::{invalid, io_at, reparse_at};
@@ -91,11 +92,12 @@ pub fn open_owner_dir(path: &Path) -> Result<File, CustodyError> {
     )
 }
 
-/// The directory is not a reparse point. The current user owns it. No ACE grants
-/// write to anyone except that user, SYSTEM, and Administrators.
+/// The directory is not a reparse point. Its owner is the current user, SYSTEM,
+/// or Administrators. No ACE grants write to anyone outside that set.
 ///
-/// A directory Home creates still uses [`create_owner_dir`]. This check is only
-/// for a directory that already existed, such as the operator data root.
+/// A directory Home creates still uses [`create_owner_dir`] and is owned by the
+/// current user. This check is only for a directory that already existed, such
+/// as the operator data root.
 pub fn refuse_other_writers(path: &Path) -> Result<(), CustodyError> {
     let file = open_at(
         path,
@@ -110,11 +112,13 @@ pub fn refuse_other_writers(path: &Path) -> Result<(), CustodyError> {
 
 /// Rename the open file `source` to `dest_name` inside `directory`.
 ///
-/// The directory open is handle-relative. A reparse point on the directory,
-/// on `source`, or on `dest_name` is refused. `dest_name` is one component.
-/// The file keeps the security descriptor it already has; this call does not
-/// write a new DACL. When `replace_existing` is false, an existing destination
-/// is left in place.
+/// The directory open is handle-relative. The rename is `NtSetInformationFile`
+/// with `FileRenameInformation`: `RootDirectory` is that open directory and the
+/// name is one component, so the kernel does not walk a path and does not follow
+/// a reparse point. A reparse point on the directory, on `source`, or on
+/// `dest_name` is refused. The file keeps the security descriptor it already
+/// has; this call does not write a new DACL. When `replace_existing` is false,
+/// an existing destination is left in place.
 ///
 /// `source` must be a handle from [`open_owner_file`] with [`Disp::CreateNew`]:
 /// that open includes `DELETE`, which the rename requires. A later slice can
@@ -502,48 +506,71 @@ fn rename_handle(
     dest_name: &OsStr,
     replace_existing: bool,
 ) -> io::Result<()> {
-    let mut wide: Vec<u16> = dest_name.encode_wide().collect();
-    if wide.is_empty() || wide.len() > 255 {
+    // One component, counted in UTF-16. A separator would make the kernel walk
+    // from RootDirectory and follow a reparse point. FileRenameInformation uses
+    // the byte length and does not take a trailing NUL.
+    let wide: Vec<u16> = dest_name.encode_wide().collect();
+    if !one_component_name(dest_name)
+        || wide.is_empty()
+        || wide.len() > 255
+        || wide
+            .iter()
+            .any(|&unit| matches!(unit, 0 | 0x2F | 0x3A | 0x5C))
+    {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             "child name is not one component",
         ));
     }
-    // FileName is a NUL-terminated wide string. FileNameLength excludes the NUL.
-    wide.push(0);
-    let name_bytes = ((wide.len() - 1) * 2) as u32;
-    const REPLACE_AT: usize = std::mem::offset_of!(FILE_RENAME_INFO, Anonymous);
-    const ROOT_AT: usize = std::mem::offset_of!(FILE_RENAME_INFO, RootDirectory);
-    const LEN_AT: usize = std::mem::offset_of!(FILE_RENAME_INFO, FileNameLength);
-    const NAME_AT: usize = std::mem::offset_of!(FILE_RENAME_INFO, FileName);
+    let name_bytes = (wide.len() * 2) as u32;
+    const REPLACE_AT: usize = std::mem::offset_of!(FILE_RENAME_INFORMATION, Anonymous);
+    const ROOT_AT: usize = std::mem::offset_of!(FILE_RENAME_INFORMATION, RootDirectory);
+    const LEN_AT: usize = std::mem::offset_of!(FILE_RENAME_INFORMATION, FileNameLength);
+    const NAME_AT: usize = std::mem::offset_of!(FILE_RENAME_INFORMATION, FileName);
     const ROOT_LEN: usize = std::mem::size_of::<usize>();
-    const _: () = assert!(REPLACE_AT + 4 <= ROOT_AT);
-    const _: () = assert!(ROOT_AT + ROOT_LEN <= LEN_AT);
-    const _: () = assert!(LEN_AT + 4 <= NAME_AT);
+    // BOOLEAN ReplaceIfExists is the first byte. Pointer alignment then places
+    // RootDirectory where the kernel's FileRenameInformation structure places it.
+    const _: () = assert!(REPLACE_AT == 0);
+    const _: () = assert!(ROOT_AT == ROOT_LEN);
+    const _: () = assert!(LEN_AT == ROOT_AT + ROOT_LEN);
+    const _: () = assert!(NAME_AT == LEN_AT + 4);
+    const _: () = assert!(NAME_AT.is_multiple_of(2));
+    const _: () =
+        assert!(std::mem::size_of::<windows_sys::Win32::Foundation::HANDLE>() == ROOT_LEN);
     let total = NAME_AT + wide.len() * 2;
     let mut storage = vec![0u64; total.div_ceil(std::mem::size_of::<u64>())];
-    // SAFETY: `storage` is zeroed, 8-byte aligned, and at least `total` bytes.
-    // The slice is that prefix. Field offsets come from `FILE_RENAME_INFO`, whose
-    // alignment is 8. Bytes are copied into those offsets; the name occupies the
-    // flexible `FileName` tail, including its NUL. Both handles stay live for the
-    // one `SetFileInformationByHandle` call.
-    let renamed = unsafe {
-        let buf = std::slice::from_raw_parts_mut(storage.as_mut_ptr().cast::<u8>(), total);
-        buf[REPLACE_AT..REPLACE_AT + 4].copy_from_slice(&u32::from(replace_existing).to_ne_bytes());
-        let root = directory.as_raw_handle() as usize;
-        buf[ROOT_AT..ROOT_AT + ROOT_LEN].copy_from_slice(&root.to_ne_bytes());
-        buf[LEN_AT..LEN_AT + 4].copy_from_slice(&name_bytes.to_ne_bytes());
-        let name = std::slice::from_raw_parts(wide.as_ptr().cast::<u8>(), wide.len() * 2);
-        buf[NAME_AT..NAME_AT + name.len()].copy_from_slice(name);
-        SetFileInformationByHandle(
+    let mut iosb = IO_STATUS_BLOCK::default();
+    // SAFETY: `storage` is zeroed, pointer-aligned, and the `total` prefix is a
+    // `FILE_RENAME_INFORMATION`. The low byte is ReplaceIfExists. RootDirectory
+    // is the open parent. FileNameLength is the byte count of one component and
+    // does not include a NUL. The slice ends before `NtSetInformationFile`.
+    // Both handles stay live for that call. The source handle was opened with
+    // DELETE. `iosb` is writable for the call.
+    // `SetFileInformationByHandle(FileRenameInfo)` rejects a non-NULL
+    // RootDirectory with ERROR_INVALID_PARAMETER. This call does not.
+    let status = unsafe {
+        {
+            let buf = std::slice::from_raw_parts_mut(storage.as_mut_ptr().cast::<u8>(), total);
+            buf[REPLACE_AT] = u8::from(replace_existing);
+            let root = directory.as_raw_handle() as usize;
+            buf[ROOT_AT..ROOT_AT + ROOT_LEN].copy_from_slice(&root.to_ne_bytes());
+            buf[LEN_AT..LEN_AT + 4].copy_from_slice(&name_bytes.to_ne_bytes());
+            let name = std::slice::from_raw_parts(wide.as_ptr().cast::<u8>(), wide.len() * 2);
+            buf[NAME_AT..NAME_AT + name.len()].copy_from_slice(name);
+        }
+        NtSetInformationFile(
             source.as_raw_handle(),
-            FileRenameInfo,
+            &mut iosb,
             storage.as_ptr().cast(),
             total as u32,
+            FileRenameInformation,
         )
     };
-    if renamed == 0 {
-        Err(io::Error::last_os_error())
+    if status < 0 {
+        // SAFETY: RtlNtStatusToDosErrorNoTeb accepts any NTSTATUS value.
+        Err(io::Error::from_raw_os_error(
+            unsafe { RtlNtStatusToDosErrorNoTeb(status) } as i32,
+        ))
     } else {
         Ok(())
     }
