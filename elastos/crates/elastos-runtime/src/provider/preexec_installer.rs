@@ -5,8 +5,8 @@ use super::super::{
     landlock_plan, rights::AdmittedRights, rights_table::RuntimeProviderId,
     seccomp_list::AuditArch, seccomp_program,
 };
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
-use std::{ffi::CString, fmt};
+use std::fmt;
+use std::os::fd::{AsRawFd, OwnedFd};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Step {
@@ -98,11 +98,9 @@ struct RootPin {
 
 pub(super) struct Prepared {
     plan: landlock_plan::Plan,
-    paths: Vec<CString>,
+    /// Opened in the parent with `O_NOFOLLOW`. The child adds these descriptors.
+    rule_fds: Vec<OwnedFd>,
     filters: Vec<libc::sock_filter>,
-    /// Every directory root. The child opens each one with no-follow and
-    /// compares its device and inode before adding that Landlock rule.
-    root_pins: Vec<RootPin>,
 }
 
 fn host_audit_arch() -> AuditArch {
@@ -137,14 +135,19 @@ fn assemble(
     plan: landlock_plan::Plan,
     root_pins: Vec<RootPin>,
 ) -> Result<Prepared, String> {
-    let paths = plan
-        .rules
-        .iter()
-        .map(|rule| {
-            CString::new(std::os::unix::ffi::OsStrExt::as_bytes(rule.1.as_os_str()))
-                .map_err(|_| format!("Landlock path contains NUL: {}", rule.0))
-        })
-        .collect::<Result<Vec<_>, _>>()?;
+    let mut rule_fds = Vec::with_capacity(plan.rules.len());
+    for (index, rule) in plan.rules.iter().enumerate() {
+        let expect = root_pins
+            .iter()
+            .find(|pin| pin.index == index)
+            .map(|pin| (pin.dev, pin.ino));
+        // Loaders and resolver files may be symlinks. The granted inode is the
+        // target. Model files, the broker socket, and the listen directory are not.
+        let follow = matches!(rule.0, "LANDLOCK_LOADER_PATHS" | "READ_ONLY_FILE");
+        let fd = elastos_common::model_landlock_files::open_rule(&rule.1, expect, follow)
+            .map_err(|error| format!("Landlock path could not be pinned: {} ({error})", rule.0))?;
+        rule_fds.push(fd);
+    }
     let filters = to_sock_filters(seccomp_program::program(
         provider,
         admitted,
@@ -152,9 +155,8 @@ fn assemble(
     ))?;
     Ok(Prepared {
         plan,
-        paths,
+        rule_fds,
         filters,
-        root_pins,
     })
 }
 
@@ -198,39 +200,37 @@ pub(super) unsafe fn install(
                 if keep < 3 || (executable != -1 && (executable < 3 || executable == keep)) {
                     return Err(libc::EINVAL);
                 }
-                let (first, second) = if executable == -1 || keep < executable {
-                    (keep, executable)
-                } else {
-                    (executable, keep)
+                let preserved = |fd: i32| {
+                    fd == keep
+                        || fd == executable
+                        || prepared
+                            .rule_fds
+                            .iter()
+                            .any(|owned| owned.as_raw_fd() == fd)
                 };
-                if first > 3
-                    && unsafe {
-                        libc::syscall(libc::SYS_close_range, 3u32, (first - 1) as u32, 0u32)
-                    } < 0
-                {
-                    return Err(unsafe { *libc::__errno_location() });
+                let mut highest = keep.max(executable);
+                for owned in &prepared.rule_fds {
+                    highest = highest.max(owned.as_raw_fd());
                 }
-                if second != -1 {
-                    if second > first + 1
-                        && unsafe {
-                            libc::syscall(
-                                libc::SYS_close_range,
-                                (first + 1) as u32,
-                                (second - 1) as u32,
-                                0u32,
-                            )
-                        } < 0
-                    {
-                        return Err(unsafe { *libc::__errno_location() });
+                let mut fd = 3;
+                while fd <= highest {
+                    if preserved(fd) {
+                        fd += 1;
+                        continue;
+                    }
+                    let start = fd;
+                    while fd <= highest && !preserved(fd) {
+                        fd += 1;
                     }
                     if unsafe {
-                        libc::syscall(libc::SYS_close_range, (second + 1) as u32, u32::MAX, 0u32)
+                        libc::syscall(libc::SYS_close_range, start as u32, (fd - 1) as u32, 0u32)
                     } < 0
                     {
                         return Err(unsafe { *libc::__errno_location() });
                     }
-                } else if unsafe {
-                    libc::syscall(libc::SYS_close_range, (first + 1) as u32, u32::MAX, 0u32)
+                }
+                if unsafe {
+                    libc::syscall(libc::SYS_close_range, (highest + 1) as u32, u32::MAX, 0u32)
                 } < 0
                 {
                     return Err(unsafe { *libc::__errno_location() });
@@ -258,53 +258,17 @@ pub(super) unsafe fn install(
                 fd
             }
             Step::Add(index) => {
-                let Some(path) = prepared.paths.get(index) else {
+                let Some(directory) = prepared.rule_fds.get(index) else {
                     return Err(libc::EINVAL);
                 };
                 let Some(rule) = prepared.plan.rules.get(index) else {
                     return Err(libc::EINVAL);
                 };
-                let allowed = rule.2;
-                // Every directory root was opened before fork. Open it again
-                // without following a symlink and require the same device and
-                // inode. DIRECTORY_OPEN_FLAGS is
-                // O_PATH|O_CLOEXEC|O_NOFOLLOW|O_DIRECTORY on Linux.
-                let pinned = prepared
-                    .root_pins
-                    .iter()
-                    .find(|pin| pin.index == index)
-                    .copied();
-                let directory = if let Some(pin) = pinned {
-                    match super::super::root_pin::open_pinned_directory(
-                        path,
-                        super::super::root_pin::DIRECTORY_OPEN_FLAGS,
-                        pin.dev,
-                        pin.ino,
-                    ) {
-                        Ok(directory) => directory,
-                        Err(errno) => return Err(errno),
-                    }
-                } else {
-                    let fd = unsafe { libc::open(path.as_ptr(), libc::O_PATH | libc::O_CLOEXEC) };
-                    if fd < 0 {
-                        return Err(unsafe { *libc::__errno_location() });
-                    }
-                    // The descriptor was just opened and is not owned elsewhere.
-                    unsafe { OwnedFd::from_raw_fd(fd) }
-                };
                 let attr = PathAttr {
-                    allowed_access: allowed,
+                    allowed_access: rule.2,
                     parent_fd: directory.as_raw_fd(),
                 };
-                let answer = unsafe {
-                    libc::syscall(libc::SYS_landlock_add_rule, ruleset, 1u32, &attr, 0u32)
-                };
-                let errno = unsafe { *libc::__errno_location() };
-                drop(directory);
-                if answer < 0 {
-                    return Err(errno);
-                }
-                answer
+                unsafe { libc::syscall(libc::SYS_landlock_add_rule, ruleset, 1u32, &attr, 0u32) }
             }
             Step::Restrict => unsafe {
                 libc::syscall(libc::SYS_landlock_restrict_self, ruleset, 0u32)
@@ -365,6 +329,7 @@ pub(super) fn prepare_path_allow(
 mod tests {
     use super::super::super::{path_allow, root_pin};
     use super::*;
+    use std::ffi::CString;
     use std::os::fd::AsRawFd;
     use std::os::unix::ffi::OsStrExt;
     use std::os::unix::fs::MetadataExt;
@@ -381,6 +346,7 @@ mod tests {
             provider_executable: executable.to_path_buf(),
             storage_dev: meta.dev(),
             storage_ino: meta.ino(),
+            local_files: Default::default(),
         }
     }
 

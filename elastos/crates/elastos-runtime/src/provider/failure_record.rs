@@ -79,6 +79,7 @@ pub(super) fn start(
     args: &[&CStr],
     stdin_read: Option<i32>,
     stdout_write: Option<i32>,
+    local_files: &elastos_common::model_landlock_files::LocalModelFiles,
 ) -> Result<libc::pid_t, LaunchError> {
     let _path = CString::new(executable.path().as_os_str().as_bytes()).map_err(|_| {
         LaunchError::BeforeFork(
@@ -105,6 +106,7 @@ pub(super) fn start(
             provider_executable: executable.path().to_path_buf(),
             storage_dev: storage.dev,
             storage_ino: storage.ino,
+            local_files: local_files.clone(),
         },
     )
     .map_err(LaunchError::BeforeFork)?;
@@ -505,6 +507,7 @@ mod tests {
             provider_executable: executable.to_path_buf(),
             storage_dev: meta.dev(),
             storage_ino: meta.ino(),
+            local_files: Default::default(),
         }
     }
 
@@ -520,6 +523,7 @@ mod tests {
             &[],
             None,
             None,
+            &elastos_common::model_landlock_files::LocalModelFiles::default(),
         );
         assert!(
             matches!(result, Err(LaunchError::BeforeFork(ref reason)) if reason == "landlock probe refused: PROVIDER_EXECUTABLE path contains NUL")
@@ -611,6 +615,7 @@ mod tests {
             &[],
             None,
             None,
+            &elastos_common::model_landlock_files::LocalModelFiles::default(),
         ) {
             Err(LaunchError::ChildFailed { pid, reason }) => (pid, reason),
             Ok(pid) => {
@@ -862,6 +867,7 @@ mod tests {
             &[],
             None,
             None,
+            &elastos_common::model_landlock_files::LocalModelFiles::default(),
         );
         let kept = std::fs::read(root.join("kept"))
             .unwrap_or_else(|_| panic!("the canary and its permissions stay unchanged"));

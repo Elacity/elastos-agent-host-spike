@@ -88,13 +88,14 @@ pub(super) fn start_provider(
     executable: &super::CheckedExecutable,
     checked: CheckedDirectory<'_>,
     stdio: ChildStdio,
+    local_files: &elastos_common::model_landlock_files::LocalModelFiles,
 ) -> Result<Launched, String> {
     let admitted = super::rights::check_rights_against_runtime_templates(
         provider,
         authority,
         rights_table::RIGHTS,
     )?;
-    dispatch(provider, &admitted, executable, checked, stdio)
+    dispatch(provider, &admitted, executable, checked, stdio, local_files)
 }
 
 /// The signed-authority gate for localhost, object, and chain. Both OS arms
@@ -296,6 +297,7 @@ fn dispatch(
     executable: &super::CheckedExecutable,
     checked: CheckedDirectory<'_>,
     stdio: ChildStdio,
+    local_files: &elastos_common::model_landlock_files::LocalModelFiles,
 ) -> Result<Launched, String> {
     require_grant(admitted)?;
     // `start` compares the reopened path with this directory, builds the plan,
@@ -310,6 +312,7 @@ fn dispatch(
         args,
         Some(stdio.stdin),
         Some(stdio.stdout),
+        local_files,
     )
     .map_err(|error| match error {
         failure_record::LaunchError::BeforeFork(reason) => reason,
@@ -329,6 +332,7 @@ fn dispatch(
     executable: &super::CheckedExecutable,
     checked: CheckedDirectory<'_>,
     stdio: ChildStdio,
+    _local_files: &elastos_common::model_landlock_files::LocalModelFiles,
 ) -> Result<Launched, String> {
     require_grant(admitted)?;
     let profile = super::macos_profile::render_macos_profile(provider, admitted);
@@ -770,6 +774,7 @@ fn dispatch(
     executable: &super::CheckedExecutable,
     checked: CheckedDirectory<'_>,
     stdio: ChildStdio,
+    _local_files: &elastos_common::model_landlock_files::LocalModelFiles,
 ) -> Result<Launched, String> {
     refuse_unsupported_os(provider, admitted, executable.path(), checked, stdio)
 }
@@ -1327,7 +1332,7 @@ mod tests {
         assert!(!production.contains("applied_rows"));
         let normalised: String = production.split_whitespace().collect::<Vec<_>>().join(" ");
         assert!(normalised.contains(
-            "failure_record::start( provider, admitted, checked, executable, args, Some(stdio.stdin), Some(stdio.stdout), )"
+            "failure_record::start( provider, admitted, checked, executable, args, Some(stdio.stdin), Some(stdio.stdout), local_files, )"
         ));
         assert!(production.contains("render_macos_profile(provider, admitted)"));
         assert!(
@@ -1387,6 +1392,7 @@ mod tests {
             provider_executable: PathBuf::from("/bin/did"),
             storage_dev: 0,
             storage_ino: 0,
+            local_files: Default::default(),
         };
         let narrow =
             super::super::landlock_plan::build(RuntimeProviderId::Did, &admitted, &bindings, 5)
@@ -1448,6 +1454,7 @@ mod tests {
                 &super::super::CheckedExecutable::for_test(&program),
                 checked_directory(dir.path()),
                 stdio(),
+                &elastos_common::model_landlock_files::LocalModelFiles::default(),
             )
             .map(|_| ()),
             Err(
@@ -1474,6 +1481,7 @@ mod tests {
                 &super::super::CheckedExecutable::for_test(&program),
                 checked,
                 stdio(),
+                &elastos_common::model_landlock_files::LocalModelFiles::default(),
             )
             .unwrap_err(),
             "provider start is refused: the reopened storage root is not the checked directory"
@@ -1655,6 +1663,7 @@ mod tests {
             provider_executable: PathBuf::from("/bin/model"),
             storage_dev: 7,
             storage_ino: 9,
+            local_files: Default::default(),
         }
     }
 

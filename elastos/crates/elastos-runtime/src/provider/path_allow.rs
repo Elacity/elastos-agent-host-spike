@@ -335,6 +335,7 @@ mod tests {
                 provider_executable: "/bin/Did".into(),
                 storage_dev: 1,
                 storage_ino: 1,
+                local_files: Default::default(),
             },
             5,
         )

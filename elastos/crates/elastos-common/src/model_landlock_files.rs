@@ -1,8 +1,8 @@
 //! Exact files a local model start may name.
 //!
 //! Landlock attaches these as one rule per existing inode. A signed manifest
-//! that omits `local-model-files` gets none of them. The slot below is set on
-//! the thread that builds the plan and cleared before that thread waits.
+//! that omits `local-model-files` gets none of them. The caller passes these
+//! files into the plan. The parent opens each rule and passes that descriptor.
 //!
 //! AF_UNIX `connect` is `LANDLOCK_ACCESS_FS_WRITE_FILE` on the socket inode
 //! that already exists. `LANDLOCK_ACCESS_NET_CONNECT_TCP` is TCP only and does
@@ -20,7 +20,6 @@
 //! gets `MAKE_SOCK|REMOVE_FILE` and nothing else, so the broker socket beside
 //! it cannot be replaced. `/dev/null`, `/dev/urandom`, and `/proc` are absent.
 
-use std::cell::RefCell;
 use std::collections::BTreeSet;
 use std::path::{Component, Path, PathBuf};
 
@@ -45,7 +44,7 @@ pub const LISTEN_DIR: u64 = MAKE_SOCK | REMOVE_FILE;
 
 pub const MAX_LOCAL_OFFERS: usize = 2;
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct LocalModelFiles {
     pub models: Vec<PathBuf>,
     pub engines: Vec<PathBuf>,
@@ -66,30 +65,6 @@ pub struct AdmittedLocal {
 pub enum AdmitError {
     Io(std::io::Error),
     Rejected(String),
-}
-
-pub struct ClearGuard;
-
-impl Drop for ClearGuard {
-    fn drop(&mut self) {
-        clear();
-    }
-}
-
-thread_local! {
-    static ADMITTED: RefCell<LocalModelFiles> = RefCell::new(LocalModelFiles::default());
-}
-
-pub fn install(files: LocalModelFiles) {
-    ADMITTED.with(|slot| *slot.borrow_mut() = files);
-}
-
-pub fn clear() {
-    ADMITTED.with(|slot| *slot.borrow_mut() = LocalModelFiles::default());
-}
-
-pub fn clear_on_drop() -> ClearGuard {
-    ClearGuard
 }
 
 pub fn broker_socket_paths(base: &Path, count: usize) -> Vec<PathBuf> {
@@ -137,43 +112,43 @@ pub fn prepare_listen_dir(base: &Path, index: usize) -> std::io::Result<PathBuf>
 
 /// `Some` when `form` is one of the four local-model rules. An empty list
 /// means the rule is admitted and no file was installed (a hosted start).
-pub fn grants_for(form: &str) -> Option<Vec<(&'static str, PathBuf, u64)>> {
-    ADMITTED.with(|slot| {
-        let files = slot.borrow();
-        let grants = match form {
-            MODEL_RULE => files
-                .models
+pub fn grants_for(
+    form: &str,
+    files: &LocalModelFiles,
+) -> Option<Vec<(&'static str, PathBuf, u64)>> {
+    let grants = match form {
+        MODEL_RULE => files
+            .models
+            .iter()
+            .map(|path| ("MODEL", path.clone(), READ_FILE))
+            .collect(),
+        ENGINE_RULE => files
+            .engines
+            .iter()
+            .map(|path| ("ENGINE", path.clone(), BINARY))
+            .collect(),
+        LIBRARY_RULE => files
+            .libraries
+            .iter()
+            .map(|path| ("ENGINE_LIBRARY", path.clone(), BINARY))
+            .collect(),
+        SOCKET_RULE => {
+            let mut grants: Vec<_> = files
+                .sockets
                 .iter()
-                .map(|path| ("MODEL", path.clone(), READ_FILE))
-                .collect(),
-            ENGINE_RULE => files
-                .engines
-                .iter()
-                .map(|path| ("ENGINE", path.clone(), BINARY))
-                .collect(),
-            LIBRARY_RULE => files
-                .libraries
-                .iter()
-                .map(|path| ("ENGINE_LIBRARY", path.clone(), BINARY))
-                .collect(),
-            SOCKET_RULE => {
-                let mut grants: Vec<_> = files
-                    .sockets
+                .map(|path| ("ENGINE_SOCKET", path.clone(), WRITE_FILE))
+                .collect();
+            grants.extend(
+                files
+                    .listen_dirs
                     .iter()
-                    .map(|path| ("ENGINE_SOCKET", path.clone(), WRITE_FILE))
-                    .collect();
-                grants.extend(
-                    files
-                        .listen_dirs
-                        .iter()
-                        .map(|path| ("ENGINE_LISTEN", path.clone(), LISTEN_DIR)),
-                );
-                grants
-            }
-            _ => return None,
-        };
-        Some(grants)
-    })
+                    .map(|path| ("ENGINE_LISTEN", path.clone(), LISTEN_DIR)),
+            );
+            grants
+        }
+        _ => return None,
+    };
+    Some(grants)
 }
 
 /// Admit at most two local offers. `selected` is the engine, weights, and
@@ -240,6 +215,7 @@ pub fn admit_offers(
         if !file_inside(base, &model, true) {
             return Err(AdmitError::Rejected("unsafe model artifact path".into()));
         }
+        model_weights(&model)?;
         return Ok(AdmittedLocal {
             files: LocalModelFiles::default(),
             offer_ids: Vec::new(),
@@ -277,6 +253,7 @@ pub fn admit_offers(
         {
             return Err(AdmitError::Rejected("unsafe model artifact path".into()));
         }
+        model_weights(&offer_model)?;
         engines.push(offer_engine);
         models.push(offer_model);
     }
@@ -337,6 +314,82 @@ fn file_inside(base: &Path, path: &Path, file: bool) -> bool {
     path.starts_with(base)
         && std::fs::canonicalize(path).ok().as_deref() == Some(path)
         && std::fs::metadata(path).is_ok_and(|metadata| metadata.is_file() == file)
+}
+
+/// One link, owned by the Runtime, and readable by the owner only.
+#[cfg(unix)]
+fn model_weights(path: &Path) -> Result<(), AdmitError> {
+    use std::os::unix::fs::MetadataExt as _;
+    let meta = std::fs::symlink_metadata(path).map_err(AdmitError::Io)?;
+    let mode = meta.mode() & 0o7777;
+    if meta.file_type().is_symlink()
+        || !meta.is_file()
+        || meta.nlink() != 1
+        || meta.uid() != unsafe { libc::geteuid() }
+        || (mode != 0o600 && mode != 0o400)
+    {
+        return Err(AdmitError::Rejected("unsafe model weights".into()));
+    }
+    Ok(())
+}
+
+/// Remove a plan payload the provider must not see. Absence is an empty list.
+pub fn take_local_model_files(
+    extra: &mut serde_json::Value,
+) -> Result<LocalModelFiles, &'static str> {
+    let Some(value) = extra
+        .as_object_mut()
+        .and_then(|map| map.remove("runtime_local_model_files"))
+    else {
+        return Ok(LocalModelFiles::default());
+    };
+    serde_json::from_value(value).map_err(|_| "local model files are unreadable")
+}
+
+/// Open one Landlock rule in the parent. `O_NOFOLLOW` refuses a symlink.
+/// A system loader may be a symlink; that call passes the canonical target,
+/// still opened with `O_NOFOLLOW`. Model files never follow.
+#[cfg(target_os = "linux")]
+pub fn open_rule(
+    path: &Path,
+    expect: Option<(u64, u64)>,
+    follow_system: bool,
+) -> std::io::Result<std::os::fd::OwnedFd> {
+    match open_nofollow(path, expect) {
+        Err(error) if follow_system && error.raw_os_error() == Some(libc::ELOOP) => {
+            open_nofollow(&path.canonicalize()?, None)
+        }
+        other => other,
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn open_nofollow(path: &Path, expect: Option<(u64, u64)>) -> std::io::Result<std::os::fd::OwnedFd> {
+    use std::os::fd::{AsRawFd as _, FromRawFd as _, OwnedFd};
+    use std::os::unix::ffi::OsStrExt as _;
+    use std::os::unix::fs::MetadataExt as _;
+    let name = std::ffi::CString::new(path.as_os_str().as_bytes())
+        .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "path contains NUL"))?;
+    let fd = unsafe {
+        libc::open(
+            name.as_ptr(),
+            libc::O_PATH | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+        )
+    };
+    if fd < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let owned = unsafe { OwnedFd::from_raw_fd(fd) };
+    if let Some((dev, ino)) = expect {
+        let file = unsafe { std::fs::File::from_raw_fd(owned.as_raw_fd()) };
+        let meta = file.metadata();
+        std::mem::forget(file);
+        let meta = meta?;
+        if meta.dev() != dev || meta.ino() != ino {
+            return Err(std::io::Error::other("rule inode changed"));
+        }
+    }
+    Ok(owned)
 }
 
 #[cfg(unix)]
@@ -529,6 +582,7 @@ mod tests {
         std::fs::create_dir_all(&admitted).unwrap();
         let model = admitted.join(name);
         std::fs::write(&model, b"gguf").unwrap();
+        std::fs::set_permissions(&model, std::fs::Permissions::from_mode(0o600)).unwrap();
         (engine, model, bundle)
     }
 
@@ -576,6 +630,7 @@ mod tests {
         std::fs::create_dir_all(&model_2_dir).unwrap();
         let model_2 = model_2_dir.join("other.gguf");
         std::fs::write(&model_2, b"gguf").unwrap();
+        std::fs::set_permissions(&model_2, std::fs::Permissions::from_mode(0o600)).unwrap();
         let engine_2 = bundle.join("llama-server-b");
         std::fs::write(&engine_2, b"engine").unwrap();
         let two = serde_json::json!([
@@ -611,6 +666,60 @@ mod tests {
         .expect_err("three offers");
         match error {
             AdmitError::Rejected(reason) => assert_eq!(reason, "too many local model offers"),
+            AdmitError::Io(error) => panic!("{error}"),
+        }
+    }
+
+    #[test]
+    fn group_readable_weights_are_refused() {
+        let temp = tempfile::tempdir().unwrap();
+        let base = temp.path().canonicalize().unwrap();
+        let (engine, model, bundle) = tree(&base, &hex_id(3), "weights.gguf");
+        std::fs::set_permissions(&model, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let offers = serde_json::json!([{
+            "id": "one",
+            "adapter": {
+                "kind": "local_llama_cpp_text",
+                "engine": {"path": engine},
+                "model": {"path": model}
+            }
+        }]);
+        let error = admit_offers(
+            &base,
+            offers.as_array().unwrap(),
+            "dylib",
+            Some((&engine, &model, &bundle)),
+        )
+        .expect_err("group-readable weights");
+        match error {
+            AdmitError::Rejected(reason) => assert_eq!(reason, "unsafe model weights"),
+            AdmitError::Io(error) => panic!("{error}"),
+        }
+    }
+
+    #[test]
+    fn a_second_link_to_the_weights_is_refused() {
+        let temp = tempfile::tempdir().unwrap();
+        let base = temp.path().canonicalize().unwrap();
+        let (engine, model, bundle) = tree(&base, &hex_id(4), "weights.gguf");
+        std::fs::hard_link(&model, base.join("alias.gguf")).unwrap();
+        let offers = serde_json::json!([{
+            "id": "one",
+            "adapter": {
+                "kind": "local_llama_cpp_text",
+                "engine": {"path": engine},
+                "model": {"path": model}
+            }
+        }]);
+        let error = admit_offers(
+            &base,
+            offers.as_array().unwrap(),
+            "dylib",
+            Some((&engine, &model, &bundle)),
+        )
+        .expect_err("hard link");
+        match error {
+            AdmitError::Rejected(reason) => assert_eq!(reason, "unsafe model weights"),
             AdmitError::Io(error) => panic!("{error}"),
         }
     }

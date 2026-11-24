@@ -93,6 +93,7 @@ pub(super) struct Bindings {
     pub provider_executable: PathBuf,
     pub storage_dev: u64,
     pub storage_ino: u64,
+    pub local_files: elastos_common::model_landlock_files::LocalModelFiles,
 }
 
 pub(super) fn require_abi(reported: io::Result<u32>) -> Result<u32, String> {
@@ -162,7 +163,10 @@ fn build_for_arch(
                 | r#"(allow iokit-open-user-client (iokit-user-client-class "AGXDeviceUserClient") (iokit-user-client-class "IOSurfaceRootUserClient"))"#
                 | r#"(allow mach-lookup (global-name "com.apple.MTLCompilerService"))"#
                     if matches!(provider, RuntimeProviderId::Model) => {}
-                other => match elastos_common::model_landlock_files::grants_for(other) {
+                other => match elastos_common::model_landlock_files::grants_for(
+                    other,
+                    &bindings.local_files,
+                ) {
                     Some(grants) => {
                         for (label, path, mask) in grants {
                             rules.push(PathRule(label, path, mask));
@@ -516,6 +520,7 @@ mod tests {
                 provider_executable: format!("/bin/{provider:?}").into(),
                 storage_dev: 7,
                 storage_ino: 9,
+                local_files: Default::default(),
             };
             let admitted = super::super::rights::admit_committed(provider);
             for arch in [LoaderArch::X86_64, LoaderArch::Aarch64] {
@@ -597,6 +602,7 @@ mod tests {
             provider_executable: "/bin/model".into(),
             storage_dev: 7,
             storage_ino: 9,
+            local_files: Default::default(),
         };
         for arch in [ModelArch::X86_64, ModelArch::Aarch64] {
             let plan = linux_model_plan(&admitted, &bindings, arch, 5).unwrap();
@@ -651,9 +657,8 @@ mod tests {
     #[test]
     fn local_model_files_grant_the_admitted_paths_only() {
         use elastos_common::model_landlock_files::{
-            install, LocalModelFiles, BINARY, LISTEN_DIR, READ_FILE, WRITE_FILE,
+            LocalModelFiles, BINARY, LISTEN_DIR, READ_FILE, WRITE_FILE,
         };
-        let _clear = elastos_common::model_landlock_files::clear_on_drop();
         let model = PathBuf::from("/tmp/elastos-m5-model");
         let other = PathBuf::from("/tmp/elastos-m5-other");
         let engine = PathBuf::from("/tmp/elastos-m5-engine");
@@ -662,19 +667,19 @@ mod tests {
         let socket = PathBuf::from("/tmp/elastos-m5/0.sock");
         let device = PathBuf::from("/tmp/elastos-m5/device.key");
         let listen = PathBuf::from("/tmp/elastos-m5/0.listen");
-        install(LocalModelFiles {
-            models: vec![model.clone()],
-            engines: vec![engine.clone()],
-            libraries: vec![library.clone()],
-            sockets: vec![socket.clone()],
-            listen_dirs: vec![listen.clone()],
-        });
         let admitted = super::super::rights::admit_committed(RuntimeProviderId::Model);
         let bindings = Bindings {
             storage_root: "/provider/model".into(),
             provider_executable: "/bin/model".into(),
             storage_dev: 7,
             storage_ino: 9,
+            local_files: LocalModelFiles {
+                models: vec![model.clone()],
+                engines: vec![engine.clone()],
+                libraries: vec![library.clone()],
+                sockets: vec![socket.clone()],
+                listen_dirs: vec![listen.clone()],
+            },
         };
         let plan = build_for_arch(
             RuntimeProviderId::Model,

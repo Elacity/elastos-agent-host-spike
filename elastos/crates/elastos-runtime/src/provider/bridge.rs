@@ -1565,11 +1565,12 @@ impl ProviderBridge {
         storage_root: &Path,
         config: ProviderConfig,
     ) -> Result<Confined, BridgeError> {
-        // The Linux model start installs exact files on this thread. Drop the
-        // guard before the first wait so another task on this thread cannot
-        // observe them. A child can only add Landlock and seccomp limits, so
-        // the provider and the engine it execs share this one plan.
-        let _files = elastos_common::model_landlock_files::clear_on_drop();
+        // A child can only add Landlock and seccomp limits, so the provider
+        // and the engine it execs share this one plan.
+        let mut config = config;
+        let local_files =
+            elastos_common::model_landlock_files::take_local_model_files(&mut config.extra)
+                .map_err(|reason| BridgeError::InitFailed(reason.into()))?;
         let Some(provider) =
             super::rights_table::RuntimeProviderId::from_component_key(component_key)
         else {
@@ -1596,10 +1597,15 @@ impl ProviderBridge {
             &created_root.name,
         );
         let (stdin_read, stdout_write, stdio) = Self::protocol_pipes()?;
-        let launched =
-            super::os_entry::start_provider(provider, authority, binary_path, checked, stdio)
-                .map_err(BridgeError::Refused)?;
-        drop(_files);
+        let launched = super::os_entry::start_provider(
+            provider,
+            authority,
+            binary_path,
+            checked,
+            stdio,
+            &local_files,
+        )
+        .map_err(BridgeError::Refused)?;
         // The child holds its copies; these are the parent's, and must close
         // so the child sees EOF on stdin and the parent sees EOF on stdout.
         drop(stdin_read);
@@ -1927,13 +1933,12 @@ impl ProviderBridge {
         files.listen_dirs = (0..admitted.offer_ids.len())
             .map(|index| elastos_common::model_landlock_files::engine_listen_dir(base, index))
             .collect();
-        elastos_common::model_landlock_files::install(files.clone());
-        let _clear = elastos_common::model_landlock_files::clear_on_drop();
         let bindings = super::landlock_plan::Bindings {
             storage_root: storage_root.to_path_buf(),
             provider_executable: binary_path.path().to_path_buf(),
             storage_dev: 0,
             storage_ino: 0,
+            local_files: files.clone(),
         };
         let plan = super::os_entry::model_linux_attachment(
             authority,
@@ -1966,9 +1971,8 @@ impl ProviderBridge {
                 .map_err(|reason| BridgeError::InitFailed(reason.into()))?;
         let returned = config.clone();
         let sockets = bound.sockets.clone();
-        // Spawn reads the slot, then clears it before its first wait. Forgetting
-        // this guard keeps that clear on the installing thread.
-        std::mem::forget(_clear);
+        config.extra["runtime_local_model_files"] = serde_json::to_value(&files)
+            .map_err(|_| BridgeError::InitFailed("local model files are unreadable".into()))?;
         let confined = Self::spawn_confined(
             "model-provider",
             authority,
