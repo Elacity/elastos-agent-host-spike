@@ -11,6 +11,7 @@ import {
   createdAgentOwnedBy,
   LIVE_SESSION_COORDS,
   gatewayHealthOk,
+  grantWaitSatisfied,
   journalFileInRoot,
   ownerDocumentUnchanged,
   ownerNoteRelative,
@@ -134,6 +135,23 @@ test("signed start requires requested then completed ok by agent_id", () => {
   assert.equal(startedOnly.step_up.ok, false);
   assert.equal(startedOnly.started.ok, true);
   assert.equal(startedOnly.ok, false);
+});
+
+test("grant wait ignores the route row's marker files", () => {
+  const markers = [
+    { path: "UsersAI/aaaaaaaaaaaa/Documents/own-marker.txt" },
+    { path: "UsersAI/bbbbbbbbbbbb/Documents/cross-read.txt" },
+  ];
+  assert.equal(grantWaitSatisfied(markers, [rootA, rootB], []), false);
+  const journal = markers.concat([
+    { path: "UsersAI/aaaaaaaaaaaa/.AppData/Agents/agent-host/tasks/demo/journal" },
+    { path: "UsersAI/bbbbbbbbbbbb/.AppData/Agents/agent-host/tasks/demo/journal" },
+  ]);
+  assert.equal(grantWaitSatisfied(journal, [rootA, rootB], []), true);
+  assert.equal(grantWaitSatisfied([], [rootA, rootB], [
+    { status: 200, resource: rootA },
+    { status: 200, resource: rootB },
+  ]), true);
 });
 
 test("journal row requires the file under the agent root", () => {

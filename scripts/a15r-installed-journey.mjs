@@ -385,6 +385,31 @@ export function signedStartAudit(events, agentIds) {
   return { ok: stepUp.ok && started.ok, step_up: stepUp, started };
 }
 
+function plantedRouteMarker(path) {
+  const rel = String(path || "").replaceAll("\\", "/").replace(/^\/+/, "");
+  const base = rel.slice(rel.lastIndexOf("/") + 1);
+  return base === "own-marker.txt" || base === "cross-read.txt";
+}
+
+// A root is ready when the guest has a file there or the owner approved a
+// grant for it. The route row's own marker files are not the guest's files.
+export function grantWaitSatisfied(files, roots, grants) {
+  const wanted = Array.isArray(roots) ? roots : [];
+  if (wanted.length === 0) return false;
+  return wanted.every((root) => {
+    const suffix = rootSuffix(root);
+    if (!suffix || suffix.includes("..")) return false;
+    const fileHit = (files || []).some((file) => {
+      const rel = String(file?.path || "").replaceAll("\\", "/").replace(/^\/+/, "");
+      return !plantedRouteMarker(rel) && rel.includes(suffix);
+    });
+    const grantHit = (grants || []).some((grant) => (
+      grant?.status === 200 && String(grant.resource || "").includes(root)
+    ));
+    return fileHit || grantHit;
+  });
+}
+
 export function journalFileInRoot(files, root) {
   const suffix = rootSuffix(root);
   if (!suffix || suffix.includes("..")) return false;
@@ -642,11 +667,9 @@ async function approveGrants(deadlineMs) {
       acted = true;
     }
     const files = interestingFiles();
-    const own = [state.rootA, state.rootB].every((root) => (
-      files.some((file) => file.path.includes(rootSuffix(root)))
-      || state.grants.some((grant) => grant.status === 200 && String(grant.resource).includes(root))
-    ));
-    if (own && !acted) return "ready";
+    if (grantWaitSatisfied(files, [state.rootA, state.rootB], state.grants) && !acted) {
+      return "ready";
+    }
     await sleep(500);
   }
   return "timeout";
