@@ -81,6 +81,8 @@ pub(crate) fn ensure_regular_auth_parent(_data_dir: &Path, _parent: &Path) -> an
 
 #[cfg(unix)]
 pub(crate) fn open_regular_lock_file(path: &Path, label: &str) -> anyhow::Result<File> {
+    use std::os::unix::fs::PermissionsExt;
+
     let mut options = OpenOptions::new();
     options.create(true).truncate(false).read(true).write(true);
     #[cfg(unix)]
@@ -91,7 +93,11 @@ pub(crate) fn open_regular_lock_file(path: &Path, label: &str) -> anyhow::Result
     if !file.metadata()?.is_file() {
         anyhow::bail!("{label} lock must be a regular non-symlink file");
     }
-    set_secret_file_permissions(path)?;
+    // The mode belongs to the inode this descriptor already holds.
+    #[cfg(test)]
+    before_lock_file_mode(path);
+    file.set_permissions(std::fs::Permissions::from_mode(0o600))
+        .with_context(|| format!("failed to restrict secret file permissions for {path:?}"))?;
     Ok(file)
 }
 
@@ -212,6 +218,9 @@ pub(crate) fn write_secret_bytes_atomic(
         file.write_all(bytes)?;
         file.sync_all()?;
         std::fs::rename(&temp, path)?;
+        #[cfg(unix)]
+        set_open_secret_file_permissions(&file)?;
+        #[cfg(not(unix))]
         set_secret_file_permissions(path)?;
         sync_parent_directory(path)?;
         #[cfg(test)]
@@ -245,4 +254,145 @@ fn run_auth_state_write_hook(path: &Path) -> anyhow::Result<()> {
         hook(path)?;
     }
     Ok(())
+
+/// Sets mode `0600` on a descriptor the caller already holds.
+#[cfg(unix)]
+pub(crate) fn set_open_secret_file_permissions(file: &File) -> anyhow::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    file.set_permissions(std::fs::Permissions::from_mode(0o600))
+        .context("failed to restrict secret file permissions")?;
+    Ok(())
+}
+
+#[cfg(all(test, unix))]
+thread_local! {
+    static BEFORE_LOCK_FILE_MODE: std::cell::Cell<Option<fn(&Path)>> =
+        const { std::cell::Cell::new(None) };
+}
+
+#[cfg(all(test, unix))]
+fn before_lock_file_mode(path: &Path) {
+    BEFORE_LOCK_FILE_MODE.with(|hook| {
+        if let Some(hook) = hook.take() {
+            hook(path);
+        }
+    });
+}
+
+#[cfg(all(test, unix))]
+fn clear_lock_file_mode_hook() {
+    BEFORE_LOCK_FILE_MODE.with(|hook| hook.set(None));
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::{
+        clear_lock_file_mode_hook, open_regular_lock_file, set_open_secret_file_permissions,
+        BEFORE_LOCK_FILE_MODE,
+    };
+    use std::fs::{self, File, OpenOptions};
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::Path;
+
+    fn mode(path: &Path) -> u32 {
+        fs::symlink_metadata(path).unwrap().permissions().mode() & 0o777
+    }
+
+    fn descriptor_mode(file: &File) -> u32 {
+        file.metadata().unwrap().permissions().mode() & 0o777
+    }
+
+    fn write_mode(path: &Path, bytes: &[u8], bits: u32) {
+        fs::write(path, bytes).unwrap();
+        fs::set_permissions(path, fs::Permissions::from_mode(bits)).unwrap();
+    }
+
+    fn swap_lock_path_for_victim(locked: &Path) {
+        let victim = locked.with_file_name("victim");
+        fs::remove_file(locked).unwrap();
+        std::os::unix::fs::symlink(&victim, locked).unwrap();
+    }
+
+    struct ClearHook;
+    impl Drop for ClearHook {
+        fn drop(&mut self) {
+            clear_lock_file_mode_hook();
+        }
+    }
+
+    #[test]
+    fn swapped_lock_path_does_not_change_the_target_mode() {
+        let _clear = ClearHook;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("auth-state.json.lock");
+        let victim = dir.path().join("victim");
+        write_mode(&victim, b"victim", 0o644);
+        write_mode(&path, b"lock", 0o644);
+        BEFORE_LOCK_FILE_MODE.with(|hook| hook.set(Some(swap_lock_path_for_victim)));
+        let file = open_regular_lock_file(&path, "auth state").unwrap();
+        assert!(fs::symlink_metadata(&path)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(mode(&victim), 0o644, "symlink target mode changed");
+        assert_eq!(descriptor_mode(&file), 0o600);
+    }
+
+    #[test]
+    fn open_descriptor_mode_does_not_follow_a_swapped_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("secret");
+        let victim = dir.path().join("victim");
+        write_mode(&victim, b"victim", 0o644);
+        write_mode(&path, b"secret", 0o644);
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
+        swap_lock_path_for_victim(&path);
+        set_open_secret_file_permissions(&file).unwrap();
+        assert_eq!(mode(&victim), 0o644, "symlink target mode changed");
+        assert_eq!(descriptor_mode(&file), 0o600);
+    }
+
+    #[test]
+    fn existing_loose_lock_ends_at_0600() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("auth-state.json.lock");
+        write_mode(&path, b"lock", 0o666);
+        open_regular_lock_file(&path, "auth state").unwrap();
+        assert_eq!(mode(&path), 0o600);
+    }
+
+    #[test]
+    fn unreadable_lock_is_refused_and_keeps_its_mode() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("auth-state.json.lock");
+        write_mode(&path, b"lock", 0o000);
+        let error = open_regular_lock_file(&path, "auth state").unwrap_err();
+        let text = format!("{error:#}");
+        assert!(text.contains("failed to open"), "{text}");
+        assert!(
+            error.chain().any(|cause| {
+                cause
+                    .downcast_ref::<std::io::Error>()
+                    .is_some_and(|io| io.kind() == std::io::ErrorKind::PermissionDenied)
+            }),
+            "{text}"
+        );
+        assert_eq!(mode(&path), 0o000);
+    }
+
+    #[test]
+    fn unreadable_recovery_key_is_refused_and_keeps_its_mode() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ElastOS/System/Auth/recovery-archive.key");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        write_mode(&path, &[7u8; 32], 0o000);
+        let error = crate::auth::load_or_create_recovery_archive_key(dir.path()).unwrap_err();
+        let text = format!("{error:#}");
+        assert!(text.contains("failed to read"), "{text}");
+        assert_eq!(mode(&path), 0o000);
+    }
 }
