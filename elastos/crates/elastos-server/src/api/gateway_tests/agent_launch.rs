@@ -43,6 +43,7 @@ struct RuntimeHost {
     stops: Arc<std::sync::Mutex<Vec<Value>>>,
     runtime: Arc<crate::runtime::Runtime>,
     audit: Arc<elastos_runtime::primitives::audit::AuditLog>,
+    pending: Arc<elastos_runtime::capability::pending::PendingRequestStore>,
 }
 
 impl Drop for RuntimeHost {
@@ -477,7 +478,7 @@ async fn serve_runtime(data: &std::path::Path) -> RuntimeHost {
         session_registry: sessions,
         capability_manager: manager,
         capability_store: store,
-        pending_store: pending,
+        pending_store: pending.clone(),
         namespace_store: None,
         provider_registry: None,
         audit_log: Some(audit),
@@ -542,7 +543,28 @@ async fn serve_runtime(data: &std::path::Path) -> RuntimeHost {
         stops,
         runtime,
         audit: kept_audit,
+        pending,
     }
+}
+
+/// The guest is live when its pending capability request exists, or a live
+/// row remains. The wait yields; it does not sleep.
+async fn guest_is_live(world: &World, agent_id: &str, session_id: &str) -> bool {
+    let blocked = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let pending = world.runtime.pending.list_pending().await;
+            if pending
+                .iter()
+                .any(|request| request.session_id.0 == session_id)
+            {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .is_ok();
+    blocked || live_principal(&live(world).await, agent_id) == 1
 }
 
 async fn world() -> World {
@@ -1103,7 +1125,12 @@ async fn owner_stop_reaches_a_guest_when_the_agent_or_the_home_is_off() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "turn on: {body}");
-    started(&world, &world.agent_a).await;
+    let started = started(&world, &world.agent_a).await;
+    let session = started["session_id"].as_str().unwrap().to_string();
+    assert!(
+        guest_is_live(&world, &world.agent_a, &session).await,
+        "the guest was not live after the last start"
+    );
     let (status, body) = call(
         &world.app,
         "/api/apps/system/agents/disable",
@@ -1118,6 +1145,10 @@ async fn owner_stop_reaches_a_guest_when_the_agent_or_the_home_is_off() {
         other_status,
         StatusCode::OK,
         "another owner stopped an agent while agents are off: {other_body}"
+    );
+    assert!(
+        guest_is_live(&world, &world.agent_a, &session).await,
+        "the guest was not live before Stop"
     );
     let (status, body) = stop(&world, &world.admin, &world.agent_a).await;
     assert_eq!(
@@ -1162,9 +1193,14 @@ async fn a_second_stop_of_the_same_agent_is_not_a_server_error() {
     );
     let (status, body) = stop(&world, &world.admin, &world.agent_a).await;
     assert_ne!(status, StatusCode::INTERNAL_SERVER_ERROR, "{body}");
+    let refusal: serde_json::Value = serde_json::from_str(&body).unwrap_or(Value::Null);
     assert!(
-        status == StatusCode::CONFLICT && body.contains("no running session"),
-        "a stop after the guest ended was not a clean refusal: {status} {body}"
+        status == StatusCode::CONFLICT
+            && refusal["code"] == "agent_no_session"
+            && refusal["reason"]
+                .as_str()
+                .is_some_and(|reason| reason.contains("no running session")),
+        "a stop after the guest ended was not a coded refusal: {status} {body}"
     );
     assert_eq!(stop_reasons(&world, &session).len(), 1);
 }
@@ -1271,5 +1307,59 @@ async fn one_owners_stop_leaves_the_other_owners_agent_running() {
             && live_principal(&rows, &agent_c) == 1
             && rows.iter().any(|row| row.name == HOST),
         "one owner's stop ended the other owner's agent: {status} {body} rows={rows:?}"
+    );
+}
+
+/// Today a Start while a session is still running after Stop is accepted, and
+/// a second live session is added. Stop's answer lists that row as stopped.
+#[tokio::test]
+async fn stop_that_does_not_end_says_stopping_and_start_is_refused() {
+    let world = world().await;
+    let agent = world.agent_a.clone();
+    world
+        .runtime
+        .runtime
+        .plant_open_agent_stop_for_test(&agent, "session-held")
+        .await;
+    let _limit = world
+        .runtime
+        .runtime
+        .limit_stop_wait_for_test(std::time::Duration::from_millis(20));
+    let (runtime_status, runtime_body) = runtime_stop(&world, json!({ "agent_id": &agent })).await;
+    let (gateway_status, gateway_body) = stop(&world, &world.admin, &agent).await;
+    let after_stop = live_principal(&live(&world).await, &agent);
+    let token = step_up(&world.app, &world.admin, &agent).await;
+    let (start_status, start_body) = start(&world, &world.admin, &agent, &token).await;
+    let after_start = live_principal(&live(&world).await, &agent);
+    let runtime_json: Value = serde_json::from_str(&runtime_body).unwrap_or(Value::Null);
+    let gateway_json: Value = serde_json::from_str(&gateway_body).unwrap_or(Value::Null);
+    let start_json: Value = serde_json::from_str(&start_body).unwrap_or(Value::Null);
+    let runtime_stopped = runtime_json["stopped"]
+        .as_array()
+        .map(Vec::len)
+        .unwrap_or(0);
+    let runtime_stopping = runtime_json["stopping"]
+        .get(0)
+        .and_then(|row| row["status"].as_str());
+    let gateway_stopped = gateway_json["stopped"]
+        .as_array()
+        .map(Vec::len)
+        .unwrap_or(0);
+    let gateway_stopping = gateway_json["stopping"]
+        .get(0)
+        .and_then(|row| row["status"].as_str());
+    assert!(
+        runtime_status == StatusCode::ACCEPTED
+            && gateway_status == StatusCode::ACCEPTED
+            && runtime_stopped == 0
+            && runtime_stopping == Some("stopping")
+            && gateway_stopped == 0
+            && gateway_stopping == Some("stopping")
+            && start_status == StatusCode::CONFLICT
+            && start_json["code"] == "agent_stopping"
+            && start_json["reason"] == "this agent is stopping"
+            && after_stop == 1
+            && after_start == 1,
+        "today Stop says stopped and Start adds a session: runtime {runtime_status} {runtime_body}; gateway {gateway_status} {gateway_body}; after stop {after_stop}; start {start_status} {start_body}; after start {after_start}"
     );
 }
