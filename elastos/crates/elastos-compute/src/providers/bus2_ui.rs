@@ -601,7 +601,7 @@ mod tests {
             nested.extend_from_slice(br#"{"a":"#);
         }
         nested.extend_from_slice(br#"null"#);
-        nested.extend(std::iter::repeat(b'}').take(200));
+        nested.extend(std::iter::repeat_n(b'}', 200));
         let err = serde_json::from_slice::<serde_json::Value>(&nested).expect_err("serde depth");
         assert!(
             err.to_string().contains("recursion"),
