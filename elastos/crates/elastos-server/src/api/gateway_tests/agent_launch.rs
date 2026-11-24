@@ -1312,8 +1312,7 @@ fn signed_audit_events(world: &World) -> Vec<RuntimeAuditEventV1> {
 fn latest_step_up_id(world: &World) -> String {
     let row = signed_audit_events(world)
         .into_iter()
-        .filter(|event| event.event_type == "auth.passkey_step_up.completed")
-        .next_back()
+        .rfind(|event| event.event_type == "auth.passkey_step_up.completed")
         .unwrap();
     serde_json::from_str::<Value>(&row.reason).unwrap()["step_up_id"]
         .as_str()
