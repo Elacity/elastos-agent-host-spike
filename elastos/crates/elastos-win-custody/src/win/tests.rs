@@ -6,7 +6,7 @@ use windows_sys::Win32::Storage::FileSystem::FILE_GENERIC_READ;
 
 use super::open::{
     clear_created_verify_failure, create_owner_dir, fail_next_created_verify, open_accepted_file,
-    open_owner_file, Disp,
+    open_owner_file, rename_owner_file, Disp, READ_WRITE,
 };
 use super::sd::{verify_owner_only, OWNER_USE};
 use crate::CustodyError;
@@ -198,6 +198,20 @@ fn accepted_file_open_takes_the_accepted_root_rule() {
     let error = open_accepted_file(&path, FILE_GENERIC_READ, false).expect_err("users write");
     assert!(matches!(error, CustodyError::ForeignDacl { .. }), "{error}");
     assert_eq!(std::fs::read(&path).unwrap(), MARKER);
+}
+
+#[test]
+fn rename_to_a_one_unit_name_succeeds() {
+    let scratch = Scratch::new("rename-one");
+    // The rename accepts only an owner-only directory here.
+    let dir = scratch.0.join("owner");
+    drop(create_owner_dir(&dir).unwrap());
+    let source_path = dir.join("source.tmp");
+    let file = open_owner_file(&source_path, READ_WRITE, Disp::CreateNew).unwrap();
+    rename_owner_file(&dir, &file, &source_path, std::ffi::OsStr::new("k"), false).unwrap();
+    drop(file);
+    assert!(dir.join("k").is_file());
+    assert!(!source_path.exists());
 }
 
 #[test]

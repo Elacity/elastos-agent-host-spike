@@ -15942,8 +15942,18 @@ mod tests {
         assert!(!output.contains(TEST_CID));
         assert!(!output.contains("private-fixture-marker"));
         // The not-ready read is one call, then the local backend is asked to
-        // prepare (Linux, macOS, and Windows since W6).
-        assert_eq!(ipfs.requests.lock().await.len(), 2);
+        // prepare where the platform supports it (Linux, macOS, and Windows
+        // since W6); any other platform makes only the first call.
+        let local_calls = if cfg!(any(
+            target_os = "linux",
+            target_os = "macos",
+            target_os = "windows"
+        )) {
+            2
+        } else {
+            1
+        };
+        assert_eq!(ipfs.requests.lock().await.len(), local_calls);
         assert_eq!(availability.requests.lock().await.len(), 1);
     }
 

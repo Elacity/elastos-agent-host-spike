@@ -551,11 +551,15 @@ fn rename_handle(
     const _: () = assert!(NAME_AT.is_multiple_of(2));
     const _: () =
         assert!(std::mem::size_of::<windows_sys::Win32::Foundation::HANDLE>() == ROOT_LEN);
-    let total = NAME_AT + wide.len() * 2;
+    // NtSetInformationFile refuses a Length below sizeof(FILE_RENAME_INFORMATION),
+    // which a one-unit name would otherwise produce; the documented minimum is
+    // sizeof(FILE_RENAME_INFORMATION) + FileNameLength.
+    let total = std::mem::size_of::<FILE_RENAME_INFORMATION>() + wide.len() * 2;
     let mut storage = vec![0u64; total.div_ceil(std::mem::size_of::<u64>())];
     let mut iosb = IO_STATUS_BLOCK::default();
-    // SAFETY: `storage` is zeroed, pointer-aligned, and the `total` prefix is a
-    // `FILE_RENAME_INFORMATION`. The low byte is ReplaceIfExists. RootDirectory
+    // SAFETY: `storage` is zeroed, pointer-aligned, and at least `total` bytes: a
+    // `FILE_RENAME_INFORMATION` followed by room for the name, which starts at
+    // `FileName` inside it. The low byte is ReplaceIfExists. RootDirectory
     // is the open parent. FileNameLength is the byte count of one component and
     // does not include a NUL. The slice ends before `NtSetInformationFile`.
     // Both handles stay live for that call. The source handle was opened with
