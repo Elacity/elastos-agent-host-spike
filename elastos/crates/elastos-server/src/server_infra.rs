@@ -2752,7 +2752,10 @@ mod tests {
         (temp, data_dir, binary)
     }
 
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[cfg(any(
+        target_os = "linux",
+        all(target_os = "macos", not(elastos_unsupported_os_check))
+    ))]
     fn did_probe_failure(data_dir: &Path) -> String {
         let path = data_dir.join("did/probe.error");
         match fs::read_to_string(&path) {

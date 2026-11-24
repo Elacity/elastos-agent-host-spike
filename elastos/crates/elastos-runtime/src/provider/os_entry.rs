@@ -30,7 +30,6 @@ pub(super) struct CheckedDirectory<'a> {
 /// The caller creates both pipes, passes the child ends to the launcher, and
 /// drops them after the call. The parent ends travel through this value so the
 /// launched handle carries the only remaining copies.
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(super) struct ChildStdio {
     pub stdin: i32,
     pub stdout: i32,
@@ -233,7 +232,8 @@ fn start_path_allow_os(
         ))
     ))]
     {
-        let _ = (provider, admitted, executable, data_dir, stdio);
+        let _ = (provider, admitted, executable, data_dir);
+        let _ = (stdio.stdin, stdio.stdout, stdio.to_child, stdio.from_child);
         Err(UNSUPPORTED_OS.to_string())
     }
 }

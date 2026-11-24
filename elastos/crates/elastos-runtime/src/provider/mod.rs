@@ -28,14 +28,14 @@ mod local_model_broker;
 mod macos_profile;
 #[cfg(unix)]
 mod os_entry;
-#[cfg(unix)]
+#[rustfmt::skip] #[cfg(all(not(elastos_unsupported_os_check), any(target_os = "macos", all(target_os = "linux", any(target_arch = "x86_64", target_arch = "aarch64")))))]
 mod path_allow;
 mod registry;
 #[cfg(unix)]
 mod rights;
 #[cfg(unix)]
 mod rights_table;
-#[cfg(unix)]
+#[rustfmt::skip] #[cfg(all(not(elastos_unsupported_os_check), any(target_os = "macos", all(target_os = "linux", any(target_arch = "x86_64", target_arch = "aarch64")))))]
 mod root_pin;
 #[cfg(unix)]
 mod seccomp_list;
