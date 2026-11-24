@@ -1128,7 +1128,22 @@ pub(crate) mod tests {
                     "fixture rejects first valid create".into(),
                 ));
             }
-            Ok(serde_json::json!({"status": "ok", "data": {"ok": true}}))
+            let binding: elastos_model_contract::RuntimeCreateBinding =
+                serde_json::from_value(request["runtime_binding"].clone())
+                    .expect("the Runtime stamps every model create");
+            let answer = request["input"]["prompt"].as_str().unwrap_or_default();
+            Ok(serde_json::json!({
+                "status": "ok",
+                "data": {
+                    "schema": "elastos.model.run/v1",
+                    "run_id": elastos_model_contract::model_run_id(&binding),
+                    "offer_id": request["offer_id"],
+                    "operation": request["operation"],
+                    "status": "completed",
+                    "sequence_cursor": 1,
+                    "terminal": {"status": "completed", "output": {"text": answer}},
+                }
+            }))
         }
     }
 
@@ -6946,6 +6961,38 @@ pub(crate) mod tests {
     }
 
     #[cfg(unix)]
+    /// A `send` plan line for one run create whose input prompt is the task's
+    /// own text, so the fixture's answer names the task it answers. The body
+    /// file is written under the agent's own root, as
+    /// [`Self::model_create_line_for`] does for its fixed prompt.
+    fn task_create_line(home: &ProbeLaunch, agent: &str, request_id: &str, task: &str) -> String {
+        let resource = crate::provider_resource::build_capability_resource(
+            "model",
+            "runs_create",
+            &serde_json::json!({"offer_id": "offer:fixture"}),
+        )
+        .unwrap();
+        let body = format!(
+            "{{\"offer_id\":\"offer:fixture\",\"operation\":\"text.generate\",\"input\":{{\"schema\":\"elastos.model.input.text/v1\",\"prompt\":\"{task}\"}},\"request_id\":\"{request_id}\"}}"
+        );
+        let root = home.root(agent);
+        let hash = hex::encode(elastos_runtime::signature::hash_content(body.as_bytes()));
+        let body_uri = format!("{root}/memory/model-create-{hash}.json");
+        let body_path =
+            elastos_common::localhost::rooted_localhost_fs_path(&home.data_dir, &body_uri).unwrap();
+        crate::auth::write_principal_root_object(
+            &home.data_dir,
+            agent,
+            &root,
+            &body_uri,
+            &body_path,
+            body.as_bytes(),
+        )
+        .unwrap();
+        format!("send\t{resource}\t{resource}\truns_create\texecute\t{body_uri}")
+    }
+
+    #[cfg(unix)]
     async fn run_model_plan(
         home: &ProbeLaunch,
         dir: &std::path::Path,
@@ -7428,6 +7475,110 @@ pub(crate) mod tests {
             "the body file's text arrives intact"
         );
     }
+
+    /// Two agents work through one Runtime-issued model grant: each launch
+    /// asks for the runs resource, creates one run, and records the answer
+    /// under its own `UsersAI` root. The recorded answer is that agent's own
+    /// task, and each stamped create names its own agent as the principal.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn agent_task_through_bus_model_grant() {
+        if crate::agents::require_build().is_err() {
+            return;
+        }
+        let home = ProbeLaunch::new(&[]).await;
+        let (dir, cid) = home.model_host("model-host", Some(1_140));
+        let a = home.create_agent_for_host("model-a", &cid);
+        let b = home.create_agent_for_host("model-b", &cid);
+        let model = Arc::new(CapturingModelProvider::default());
+        let registry = Arc::new(elastos_runtime::provider::ProviderRegistry::new());
+        registry.register(model.clone()).await;
+        registry.register(home.provider.clone()).await;
+        home.runtime
+            .set_provider_registry(
+                registry,
+                home.capability_manager.clone(),
+                home.pending_store.clone(),
+                home.data_dir.clone(),
+            )
+            .await;
+        model.watch(home.runtime.clone());
+
+        let tasks = [
+            (a.as_str(), "request:agent-a", "count the sparks"),
+            (b.as_str(), "request:agent-b", "name the ring"),
+        ];
+        assert_ne!(home.root(&a), home.root(&b), "each agent has its own root");
+        for (agent, request_id, task) in tasks {
+            let lines = [
+                "invoke\telastos://model/offers\telastos://model/offers\toffers_list\tread\t"
+                    .to_string(),
+                task_create_line(&home, agent, request_id, task),
+            ];
+            run_model_lines(&home, &dir, agent, &lines).await;
+            let results = home.results(agent);
+            assert_eq!(results.len(), 2, "{results:?}");
+            assert!(
+                plan_outcome(&results, 0).starts_with("ok"),
+                "the offers list reached the provider: {results:?}"
+            );
+            let outcome = plan_outcome(&results, 1);
+            assert!(outcome.starts_with("ok "), "{results:?}");
+            let (_, body) = outcome.split_once(' ').unwrap();
+            let answer: serde_json::Value =
+                serde_json::from_str(body).unwrap_or_else(|err| panic!("{err}: {outcome}"));
+            assert_eq!(
+                answer["data"]["terminal"]["output"]["text"],
+                serde_json::json!(task),
+                "the answer recorded under {agent}'s own root names its own task: {outcome}"
+            );
+        }
+        // Agent B's turn left agent A's recorded answer where it was.
+        for (agent, _, task) in tasks {
+            let results = home.results(agent);
+            let kept = plan_outcome(&results, 1);
+            let (_, body) = kept.split_once(' ').unwrap();
+            let kept: serde_json::Value = serde_json::from_str(body).unwrap();
+            assert_eq!(
+                kept["data"]["terminal"]["output"]["text"],
+                serde_json::json!(task),
+                "{agent}'s own answer is still in its own root: {results:?}"
+            );
+        }
+        let calls = create_calls(&model);
+        assert_eq!(calls.len(), 2, "{calls:?}");
+        assert_eq!(calls[0]["runtime_binding"]["principal_id"], a);
+        assert_eq!(calls[1]["runtime_binding"]["principal_id"], b);
+        assert_eq!(calls[0]["input"]["prompt"], "count the sparks");
+        assert_eq!(calls[1]["input"]["prompt"], "name the ring");
+    }
+
+    /// A plan line whose grant names the probe's own journal while the invoke
+    /// still reaches for the model runs resource: the Runtime refuses the
+    /// capability mismatch and the provider records nothing.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn agent_model_call_without_the_grant_is_refused() {
+        if crate::agents::require_build().is_err() {
+            return;
+        }
+        let (home, dir, agent, model) = admitted_model_agent(Some(1_140)).await;
+        let granted = task_create_line(&home, &agent, "request:no-grant", "count the sparks");
+        let journal = "localhost://UsersAI/self/.AppData/Agents/agent-host/tasks/t1/journal";
+        let mut fields: Vec<&str> = granted.split('\t').collect();
+        fields[1] = journal;
+        let outcome = run_model_lines(&home, &dir, &agent, &[fields.join("\t")]).await;
+        assert!(
+            outcome.contains("Capability validation failed"),
+            "{outcome}"
+        );
+        assert!(
+            create_calls(&model).is_empty(),
+            "the refused create never reached the provider"
+        );
+        assert!(model.requests().is_empty(), "{:?}", model.requests());
+    }
+
     #[cfg(unix)]
     /// A signed component that declares no agent has no ceiling entry, and
     /// its model invoke still reaches the provider. One call is recorded.
