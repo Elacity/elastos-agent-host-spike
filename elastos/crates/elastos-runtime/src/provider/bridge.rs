@@ -3,7 +3,7 @@
 //! Manages stdin/stdout communication with a provider capsule process.
 //! The runtime sends ProviderRequests and receives ProviderResponses
 //! over line-delimited JSON.
-#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[cfg(target_os = "macos")]
 use std::collections::BTreeMap;
 use std::path::Path;
 #[cfg(target_os = "macos")]
@@ -60,7 +60,7 @@ const INIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// Timeout for provider shutdown (5 seconds)
 const SHUTDOWN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
-#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[cfg(target_os = "macos")]
 const MAX_LOCAL_MODEL_SLOTS: usize = 64;
 #[cfg(target_os = "macos")]
 const HOSTED_RUN_BINDING_TTL: std::time::Duration = std::time::Duration::from_secs(7200);
@@ -4861,8 +4861,6 @@ int main(void) {
     #[tokio::test]
     #[ignore = "requires ELASTOS_MODEL_BROKER_PROOF_CONFIG with installed provider and admitted local Smol artifacts"]
     async fn installed_model_provider_completes_smollm2_through_runtime_broker() {
-        use sha2::{Digest as _, Sha256};
-
         let input_path = std::env::var("ELASTOS_MODEL_BROKER_PROOF_CONFIG").unwrap();
         let fixture: serde_json::Value =
             serde_json::from_slice(&std::fs::read(input_path).unwrap()).unwrap();
@@ -4870,7 +4868,6 @@ int main(void) {
         let config: ProviderConfig =
             serde_json::from_value(fixture["provider_config"].clone()).unwrap();
         let offer_id = fixture["offer_id"].as_str().unwrap();
-        #[cfg(target_os = "macos")]
         #[cfg(target_os = "macos")]
         let local_offer = config.extra["offers"]
             .as_array()
@@ -4917,6 +4914,7 @@ int main(void) {
         }
         #[cfg(target_os = "macos")]
         {
+            use sha2::{Digest as _, Sha256};
             let socket = sockets[offer_id].clone();
             let input = serde_json::json!({
                 "schema": "elastos.model.input.text/v1",

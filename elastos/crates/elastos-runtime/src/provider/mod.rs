@@ -20,14 +20,13 @@ mod checked_executable;
 pub mod dispatch;
 #[cfg(unix)]
 mod landlock_plan;
-#[cfg(target_os = "linux")]
 #[cfg(all(
     test,
     any(target_arch = "x86_64", target_arch = "aarch64"),
     not(target_os = "macos")
 ))]
 mod linux_model_seccomp;
-#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[cfg(target_os = "macos")]
 mod local_model_broker;
 #[cfg(unix)]
 mod macos_profile;
