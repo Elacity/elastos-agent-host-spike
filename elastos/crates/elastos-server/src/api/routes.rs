@@ -7249,6 +7249,62 @@ pub(crate) mod tests {
         );
     }
 
+    /// One create through the bridge, as a session that did not Start. The
+    /// account is the one [`crate::runtime::Runtime::model_dispatch_for_test`]
+    /// reads for `session`, which is the live run's agent account when the
+    /// caller has shared it.
+    #[cfg(unix)]
+    async fn invoke_shared_account_create(home: &ProbeLaunch, agent: &str, session: &str) {
+        use elastos_runtime::capability::{Action, ResourceId, TokenConstraints};
+        let resource = crate::provider_resource::build_capability_resource(
+            "model",
+            "runs_create",
+            &serde_json::json!({"offer_id": "offer:fixture"}),
+        )
+        .unwrap();
+        let token = home.capability_manager.grant(
+            session,
+            ResourceId::new(&resource),
+            Action::Execute,
+            TokenConstraints::default(),
+            None,
+        );
+        let line = serde_json::json!({
+            "id": 71,
+            "request": {
+                "type": "resource_invoke",
+                "uri": resource,
+                "operation": "runs_create",
+                "token": token.to_base64().expect("a minted token is base64"),
+                "body": {
+                    "offer_id": "offer:fixture",
+                    "operation": "text.generate",
+                    "input": {
+                        "schema": "elastos.model.input.text/v1",
+                        "prompt": "hi with fixture padding"
+                    },
+                    "request_id": "request:concurrent"
+                },
+            }
+        })
+        .to_string();
+        let ctx = home
+            .runtime
+            .bridge_context_for_test(session, Some(agent.to_string()))
+            .await;
+        crate::resource_bridge::handle_component_resource_request(&line, ctx)
+            .await
+            .expect("the planted session's create reaches the bridge");
+        home.capability_manager
+            .revoke(*token.id(), "planted model create")
+            .await
+            .expect("the planted create grant is revoked");
+    }
+
+    /// Two creates at one moment share one agent's ceiling. The second create
+    /// is a planted session of that agent and did not go through Start. A
+    /// second Start while the run is live is refused. After the run ends, a
+    /// later Start is admitted and completes without another create.
     #[cfg(unix)]
     #[tokio::test]
     async fn concurrent_creates_share_cap() {
@@ -7261,20 +7317,50 @@ pub(crate) mod tests {
             &agent,
             &[model_create_line(&home, &agent, "request:concurrent", "")],
         );
+        let planted = "planted-model-session";
+        home.runtime
+            .register_capsule(crate::runtime::RunningCapsuleInfo {
+                id: planted.to_string(),
+                name: "planted".to_string(),
+                status: "running".to_string(),
+                capsule_type: elastos_common::CapsuleType::Wasm,
+                handle: None,
+                session_id: planted.to_string(),
+                principal: Some(agent.clone()),
+                cause: None,
+                ended_at: None,
+            })
+            .await;
+        home.runtime
+            .insert_agent_session_for_test(crate::runtime::AgentSessionRecord {
+                agent_id: agent.clone(),
+                owner: "planted-owner".into(),
+                host_cid: "planted".into(),
+                launch_id: "launch:planted-model-session".into(),
+                session_id: planted.to_string(),
+            })
+            .await;
         let grants =
             grant_probe_requests(home.pending_store.clone(), home.capability_manager.clone());
-        let (first, second) = tokio::join!(
-            home.launch_from(&dir, &agent),
-            home.launch_from(&dir, &agent)
-        );
-        let first = first.unwrap().0;
-        let second = second.unwrap().0;
+        let first = home.launch_from(&dir, &agent).await.unwrap().0;
         assert_eq!(first.status, "starting");
-        assert_eq!(second.status, "starting");
+        home.runtime
+            .share_agent_model_account_for_test(&first.id, planted);
+        let planted_create = invoke_shared_account_create(&home, &agent, planted);
+        let refused = home.launch_from(&dir, &agent);
+        let (_planted_create, refused) = tokio::join!(planted_create, refused);
+        let (code, body) = match refused {
+            Err(err) => err,
+            Ok(_) => panic!("the second Start was admitted"),
+        };
+        assert!(code == StatusCode::CONFLICT && body == "this agent is already running");
         assert_eq!(
             home.wait_ended(&first.id).await.cause.as_deref(),
             Some("completed")
         );
+        home.plan(&agent, &[]);
+        let second = home.launch_from(&dir, &agent).await.unwrap().0;
+        assert_eq!(second.status, "starting");
         assert_eq!(
             home.wait_ended(&second.id).await.cause.as_deref(),
             Some("completed")

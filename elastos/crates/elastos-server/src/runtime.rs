@@ -1125,6 +1125,32 @@ impl Runtime {
         }
     }
 
+    /// The model account a capsule's bridge calls spend. The key is the agent
+    /// admission stored for that capsule, so every session of the agent shares
+    /// one ceiling. A missing entry is not an admitted agent.
+    fn model_dispatch_budget(
+        capsule_id: &str,
+        ceilings: &StdRwLock<HashMap<String, AgentModelCeiling>>,
+        account: &Arc<ModelBudget>,
+        offers: &Arc<StdRwLock<HashMap<String, crate::resource_bridge::ModelOfferBound>>>,
+    ) -> (
+        Option<u64>,
+        Option<crate::resource_bridge::ModelDispatchBudget>,
+    ) {
+        let held = ceilings
+            .read()
+            .unwrap_or_else(|it| it.into_inner())
+            .get(capsule_id)
+            .cloned();
+        let ceiling = held.as_ref().map(|held| held.ceiling);
+        let budget = held.map(|held| crate::resource_bridge::ModelDispatchBudget {
+            agent: held.key,
+            account: account.clone(),
+            offers: offers.clone(),
+        });
+        (ceiling, budget)
+    }
+
     /// Set the provider registry and capability manager for provider dispatch
     /// and real token minting.
     ///
@@ -1177,18 +1203,12 @@ impl Runtime {
                     .unwrap_or_else(|it| it.into_inner())
                     .get(capsule_id)
                     .cloned();
-                let model_admission = host_model_token_ceilings
-                    .read()
-                    .unwrap_or_else(|it| it.into_inner())
-                    .get(capsule_id)
-                    .cloned();
-                let model_token_ceiling = model_admission.as_ref().map(|held| held.ceiling);
-                let model_budget =
-                    model_admission.map(|held| crate::resource_bridge::ModelDispatchBudget {
-                        agent: held.key,
-                        account: host_model_budget.clone(),
-                        offers: host_model_offer_bounds.clone(),
-                    });
+                let (model_token_ceiling, model_budget) = Self::model_dispatch_budget(
+                    capsule_id,
+                    &host_model_token_ceilings,
+                    &host_model_budget,
+                    &host_model_offer_bounds,
+                );
                 // The stop this activation was asked for, if any: the bridge's
                 // wait loop leaves a long capability wait through it.
                 let stop = host_activation_stops
@@ -2928,6 +2948,88 @@ impl Runtime {
             launch,
             model_token_ceiling,
             stop,
+        }
+    }
+
+    /// Gives `planted_id` the model account and manifest ceiling `live_id`
+    /// already holds. This does not Start the planted session and does not
+    /// admit a live run.
+    #[cfg(test)]
+    pub(crate) fn share_agent_model_account_for_test(&self, live_id: &str, planted_id: &str) {
+        let held = self
+            .bridge_model_token_ceilings
+            .read()
+            .unwrap_or_else(|err| err.into_inner())
+            .get(live_id)
+            .cloned()
+            .expect("the live run holds this agent's model account");
+        self.bridge_model_token_ceilings
+            .write()
+            .unwrap_or_else(|err| err.into_inner())
+            .insert(planted_id.to_string(), held);
+        let bounds = self
+            .bridge_manifest_capabilities
+            .read()
+            .ok()
+            .and_then(|guard| guard.get(live_id).cloned())
+            .unwrap_or_default();
+        if let Ok(mut guard) = self.bridge_manifest_capabilities.write() {
+            guard.insert(planted_id.to_string(), bounds);
+        }
+    }
+
+    /// The account [`Self::model_dispatch_budget`] would hand this capsule.
+    #[cfg(test)]
+    pub(crate) fn model_dispatch_for_test(
+        &self,
+        capsule_id: &str,
+    ) -> (
+        Option<u64>,
+        Option<crate::resource_bridge::ModelDispatchBudget>,
+    ) {
+        Self::model_dispatch_budget(
+            capsule_id,
+            &self.bridge_model_token_ceilings,
+            &self.model_budget,
+            &self.model_offer_bounds,
+        )
+    }
+
+    /// The bridge context the hostcall builds for `capsule_id`, including the
+    /// model account from [`Self::model_dispatch_budget`].
+    #[cfg(test)]
+    pub(crate) async fn bridge_context_for_test(
+        &self,
+        capsule_id: &str,
+        principal_id: Option<String>,
+    ) -> crate::resource_bridge::BridgeContext {
+        let registry = self
+            .provider_registry
+            .read()
+            .await
+            .clone()
+            .expect("the runtime has a provider registry");
+        let authority = self
+            .instance_authority
+            .read()
+            .unwrap_or_else(|err| err.into_inner())
+            .clone()
+            .expect("the runtime has its capability plane");
+        let tables = self.bridge_tables_for_test(capsule_id);
+        let (model_token_ceiling, model_budget) = self.model_dispatch_for_test(capsule_id);
+        crate::resource_bridge::BridgeContext {
+            provider_registry: registry,
+            capability_manager: authority.capability_manager,
+            pending_store: authority.pending_store,
+            capsule_id: capsule_id.to_string(),
+            session_id: capsule_id.to_string(),
+            principal_id,
+            manifest_capabilities: tables.manifest_capabilities,
+            data_dir: Some(authority.data_dir),
+            launch: tables.launch,
+            model_token_ceiling,
+            model_budget,
+            stop: tables.stop,
         }
     }
 
