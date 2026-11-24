@@ -858,40 +858,24 @@ pub async fn read_runtime_coords(path: &Path) -> Option<RuntimeCoords> {
 }
 
 async fn validate_runtime_coords(path: &Path, coords: RuntimeCoords) -> Option<RuntimeCoords> {
-    let api_base = match LoopbackHttpBaseUrl::parse(&coords.api_url) {
-        Ok(api_base) => api_base,
-        Err(_) => {
-            let _ = std::fs::remove_file(path);
-            return None;
-        }
-    };
-
     if !pid_is_alive(coords.pid) {
         let _ = std::fs::remove_file(path);
         return None;
     }
-
+    let api_base = LoopbackHttpBaseUrl::parse(&coords.api_url).ok()?;
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(2))
         .build()
         .ok()?;
-
     let healthy = client
         .get(api_base.join("/api/health").ok()?)
         .send()
         .await
         .ok()
-        .is_some_and(|r| r.status().is_success());
-    if !healthy {
-        let _ = std::fs::remove_file(path);
+        .is_some_and(|response| response.status().is_success());
+    if !healthy || !attach_secret_matches(&client, &api_base, &coords.attach_secret).await {
         return None;
     }
-
-    if !attach_secret_matches(&client, &api_base, &coords.attach_secret).await {
-        let _ = std::fs::remove_file(path);
-        return None;
-    }
-
     Some(coords)
 }
 
@@ -2283,5 +2267,147 @@ mod tests {
                 None => std::env::remove_var(self.key),
             }
         }
+    }
+
+    #[cfg(unix)]
+    fn live_gateway_coords(url: &str, secret: &str) -> RuntimeCoords {
+        RuntimeCoords {
+            api_url: url.to_string(),
+            attach_secret: secret.to_string(),
+            pid: std::process::id(),
+            runtime_kind: RUNTIME_KIND_GATEWAY.to_string(),
+            binary_sha256: String::new(),
+            policy_sha256: String::new(),
+            dependency_sha256: String::new(),
+            generation: "generation".to_string(),
+            home_url: String::new(),
+        }
+    }
+
+    #[cfg(unix)]
+    async fn status_server(
+        health: axum::http::StatusCode,
+        attach: axum::http::StatusCode,
+    ) -> (String, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let app = Router::new()
+            .route("/api/health", get(move || async move { health }))
+            .route(
+                "/api/auth/attach",
+                axum::routing::post(move || async move { attach }),
+            );
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        (url, server)
+    }
+
+    /// A validating read must not delete a live owner's file when health,
+    /// attach, or the URL fails. A dead pid is still removed, and that removal
+    /// plus a leftover live file both allow a later start.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_failed_health_read_keeps_a_live_owner_and_a_stale_file_does_not_block_start() {
+        let dead = tempfile::tempdir().unwrap();
+        let dead_path = gateway_runtime_coord_path(dead.path());
+        let mut dead_coords = live_gateway_coords("http://127.0.0.1:9", "secret");
+        dead_coords.pid = u32::MAX;
+        write_runtime_coords(&dead_path, &dead_coords).unwrap();
+        assert!(
+            read_attachable_runtime_coords(dead.path(), AttachableRuntimeKind::Gateway)
+                .await
+                .is_none()
+        );
+        assert!(!dead_path.exists(), "a dead pid left its coordinates file");
+        let restarted = crate::api::gateway_local_control::start_gateway_local_control(
+            dead.path(),
+            std::sync::Arc::new(elastos_runtime::provider::ProviderRegistry::new()),
+        )
+        .await
+        .expect("a later start after a dead pid was cleaned");
+        let restarted_coords =
+            read_attachable_runtime_coords(dead.path(), AttachableRuntimeKind::Gateway).await;
+        assert_eq!(
+            restarted_coords.as_ref().map(|coords| coords.pid),
+            Some(std::process::id()),
+            "a stale dead-pid file blocked a later start: {restarted_coords:?}"
+        );
+        restarted.shutdown().await.unwrap();
+
+        let (bad_health_url, bad_health) = status_server(
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            axum::http::StatusCode::OK,
+        )
+        .await;
+        let (bad_attach_url, bad_attach) = status_server(
+            axum::http::StatusCode::OK,
+            axum::http::StatusCode::UNAUTHORIZED,
+        )
+        .await;
+        let cases = [
+            ("bad url", "not a url", "secret"),
+            ("health", bad_health_url.as_str(), "secret"),
+            ("attach", bad_attach_url.as_str(), "secret"),
+        ];
+        let mut deleted = Vec::new();
+        let mut health_dir = None;
+        for (name, url, secret) in cases {
+            let dir = tempfile::tempdir().unwrap();
+            let path = gateway_runtime_coord_path(dir.path());
+            write_runtime_coords(&path, &live_gateway_coords(url, secret)).unwrap();
+            assert!(
+                read_attachable_runtime_coords(dir.path(), AttachableRuntimeKind::Gateway)
+                    .await
+                    .is_none(),
+                "{name} read accepted bad coordinates"
+            );
+            if !path.exists() {
+                deleted.push(name);
+            }
+            if name == "health" {
+                health_dir = Some(dir);
+            }
+        }
+        let health_dir = health_dir.unwrap();
+        let health_path = gateway_runtime_coord_path(health_dir.path());
+        let owner_held = health_path.exists()
+            && super::gateway_children::Owner::read(health_dir.path())
+                .and_then(|owner| owner.lock_start())
+                .is_ok();
+        let mut later = String::from("file was deleted before a later start");
+        if health_path.exists() {
+            match crate::api::gateway_local_control::start_gateway_local_control(
+                health_dir.path(),
+                std::sync::Arc::new(elastos_runtime::provider::ProviderRegistry::new()),
+            )
+            .await
+            {
+                Ok(control) => {
+                    let coords = read_attachable_runtime_coords(
+                        health_dir.path(),
+                        AttachableRuntimeKind::Gateway,
+                    )
+                    .await;
+                    later = match coords {
+                        Some(coords)
+                            if coords.pid == std::process::id()
+                                && coords.api_url != bad_health_url =>
+                        {
+                            "started".to_string()
+                        }
+                        other => format!("later start left {other:?}"),
+                    };
+                    control.shutdown().await.unwrap();
+                }
+                Err(error) => later = format!("later start failed: {error:#}"),
+            }
+        }
+        bad_health.abort();
+        bad_attach.abort();
+        assert!(
+            deleted.is_empty() && owner_held && later == "started",
+            "a live owner's coordinates were deleted on read ({deleted:?}); owner lock held={owner_held}; later start over the leftover file: {later}"
+        );
     }
 }
