@@ -4353,10 +4353,12 @@ int main(void) {
             .parent()
             .unwrap()
             .to_path_buf();
+        let copies = std::fs::canonicalize(temp.path().join("provider-copies")).unwrap();
+        let resolved_copy = std::fs::canonicalize(&copy_dir).unwrap();
         assert!(
-            copy_dir.starts_with(temp.path().join("provider-copies")),
+            resolved_copy.starts_with(&copies),
             "copy {} is under the Home provider-copies",
-            copy_dir.display()
+            resolved_copy.display()
         );
         let name = copy_dir.file_name().unwrap().to_str().unwrap();
         assert!(
@@ -4414,8 +4416,9 @@ int main(void) {
             .verify_at_spawn()
             .unwrap();
         let copy_dir = prepared.exec_path().parent().unwrap().to_path_buf();
-        let root = temp.path().join("provider-copies");
-        assert_eq!(copy_dir.parent(), Some(root.as_path()));
+        let copy = std::fs::canonicalize(&copy_dir).unwrap();
+        let root = std::fs::canonicalize(temp.path().join("provider-copies")).unwrap();
+        assert_eq!(copy.parent(), Some(root.as_path()));
         assert!(copy_dir.exists(), "spawn receives a copy in its Home");
         let command = Command::new(prepared.exec_path());
         let result = ProviderBridge::spawn_command(

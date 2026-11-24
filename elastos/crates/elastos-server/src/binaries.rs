@@ -360,9 +360,10 @@ fn embedded_helper_manifest(key: &str) -> Option<&'static str> {
     }
 }
 
-/// A file beside an embedded helper is not authority. The data directory is
-/// not signed, so a different file cannot stop Home and cannot change rights.
-/// A missing file is normal. Anything else is logged and ignored.
+/// A file in the data folder is not authority. The signed binary is the
+/// authority against `capsules/<key>/capsule.json`. An owner who installs
+/// another signed source is outside this check. A missing file is normal.
+/// Anything else is logged and ignored.
 fn note_on_disk_helper_manifest(key: &str, path: &Path, embedded: &str) {
     match elastos_common::capsule_manifest_file::read(path) {
         Ok(on_disk) if on_disk == embedded.as_bytes() => {}

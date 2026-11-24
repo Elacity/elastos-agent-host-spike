@@ -528,10 +528,25 @@ async fn an_updated_home_reads_existing_files_through_the_fence() {
             if !meta.is_dir() || meta.dev() == root_dev {
                 continue;
             }
-            if let Ok(dir) = tempfile::tempdir_in(&path) {
-                other = Some(dir);
-                break;
+            let Ok(dir) = tempfile::tempdir_in(&path) else {
+                continue;
+            };
+            let probe = dir.path().join("mode-probe");
+            if std::fs::write(&probe, b"mode").is_err() {
+                continue;
             }
+            if std::fs::set_permissions(&probe, std::fs::Permissions::from_mode(0o640)).is_err() {
+                continue;
+            }
+            let Ok(probed) = std::fs::symlink_metadata(&probe) else {
+                continue;
+            };
+            if probed.mode() & 0o777 != 0o640 {
+                continue;
+            }
+            eprintln!("other-volume-read {}", path.display());
+            other = Some(dir);
+            break;
         }
         if other.is_some() {
             break;
@@ -541,8 +556,37 @@ async fn an_updated_home_reads_existing_files_through_the_fence() {
         let data = old_home(dir.path());
         assert_ne!(std::fs::metadata(&data).unwrap().dev(), root_dev);
         read_localhost(&data).await;
-        eprintln!("other-volume-read {}", data.display());
+        eprintln!("other-volume-read used {}", data.display());
     } else {
         eprintln!("other-volume-read none");
     }
+}
+
+/// Source and installed Homes both run `setup_server_infrastructure_impl`.
+/// That function creates every file-backed root before the first helper spawn.
+/// Chain's own directory is created inside `spawn_path_allow` before start.
+#[test]
+fn file_backed_roots_exist_before_the_first_helper_spawn() {
+    let server = include_str!("server_infra.rs");
+    let roots = server
+        .find("ensure_file_backed_roots(&data_dir)")
+        .expect("roots");
+    let local = server
+        .find("spawn_allow_listed_provider(\"localhost-provider\"")
+        .expect("localhost");
+    let object = server
+        .find("spawn_allow_listed_provider(\"object-provider\"")
+        .expect("object");
+    let chain = server
+        .find("spawn_allow_listed_provider(\"chain-provider\"")
+        .expect("chain");
+    assert!(roots < local && local < object && object < chain);
+    let bridge = include_str!("../../elastos-runtime/src/provider/bridge.rs");
+    let chain_root = bridge
+        .find("Self::ensure_chain_provider_root(data_dir)")
+        .expect("chain root");
+    let start = bridge
+        .find("super::os_entry::start_path_allow(")
+        .expect("start");
+    assert!(chain_root < start);
 }

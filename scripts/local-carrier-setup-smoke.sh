@@ -460,7 +460,18 @@ for _ in $(seq 1 60); do
 done
 
 if [[ ! -f "${RUNTIME_COORDS}" ]]; then
-    echo "runtime-coords.json was not created. See ${LOG_PATH}" >&2
+    echo "runtime-coords.json was not created. Last 80 lines of ${LOG_PATH}:" >&2
+    if [[ -f "${LOG_PATH}" ]]; then
+        tail -n 80 "${LOG_PATH}" | python3 -c '
+import sys
+marks = ("BEGIN PRIVATE KEY", "BEGIN OPENSSH PRIVATE KEY", "BEGIN RSA PRIVATE KEY", "attach_secret")
+for line in sys.stdin:
+    if any(mark in line for mark in marks):
+        sys.stderr.write("[redacted]\n")
+    else:
+        sys.stderr.write(line)
+'
+    fi
     exit 1
 fi
 

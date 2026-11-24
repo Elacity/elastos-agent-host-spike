@@ -19,6 +19,8 @@ When running Cargo from the repository root, pass
 - Rust 1.95.0, pinned by the repository's
   [`rust-toolchain.toml`](../rust-toolchain.toml)
 - Git
+- Linux 6.2 or newer (Landlock ABI 3). Kernels from Linux 5.13 through 6.1 (Landlock ABI 1 and 2), including Debian 12 and Jetson images on those kernels, are refused by name.
+- The signed binary is the authority against a file in the data folder (`capsules/<key>/capsule.json`). An owner who installs another signed source is outside this check.
 
 Platform requirements depend on the code path. Linux/crosvm microVM work
 requires Linux and KVM. macOS source staging uses VZ; see the

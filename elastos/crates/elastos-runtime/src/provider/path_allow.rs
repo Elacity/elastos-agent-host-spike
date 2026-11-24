@@ -593,7 +593,7 @@ mod tests {
         for relative in ["ElastOS/kept.txt", "chain-provider/kept.txt"] {
             let path = data.join(relative);
             let meta = std::fs::symlink_metadata(&path).unwrap();
-            assert_eq!(meta.mode() & 0o777, 0o640, "{relative}");
+            assert_eq!(meta.mode() & 0o777, 0o640, "{}", path.display());
             assert_eq!(meta.uid(), super::current_user(), "{relative}");
             assert_eq!(std::fs::read(&path).unwrap(), b"kept-from-the-old-home");
         }
@@ -628,7 +628,7 @@ mod tests {
     #[test]
     #[ignore = "needs a second writable volume; test-elastos lists this ignored and does not run it"]
     fn an_updated_home_on_another_volume_is_fenced() {
-        use std::os::unix::fs::MetadataExt;
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
         let root_dev = std::fs::metadata("/").unwrap().dev();
         let mut other = None;
         for mount in ["/dev/shm", "/Volumes", "/mnt", "/media"] {
@@ -643,10 +643,25 @@ mod tests {
                 if !meta.is_dir() || meta.dev() == root_dev {
                     continue;
                 }
-                if let Ok(dir) = tempfile::tempdir_in(&path) {
-                    other = Some(dir);
-                    break;
+                let Ok(dir) = tempfile::tempdir_in(&path) else {
+                    continue;
+                };
+                let probe = dir.path().join("mode-probe");
+                if std::fs::write(&probe, b"mode").is_err() {
+                    continue;
                 }
+                if std::fs::set_permissions(&probe, std::fs::Permissions::from_mode(0o640)).is_err() {
+                    continue;
+                }
+                let Ok(probed) = std::fs::symlink_metadata(&probe) else {
+                    continue;
+                };
+                if probed.mode() & 0o777 != 0o640 {
+                    continue;
+                }
+                eprintln!("other-volume {}", path.display());
+                other = Some(dir);
+                break;
             }
             if other.is_some() {
                 break;
@@ -654,13 +669,13 @@ mod tests {
         }
         let Some(dir) = other else {
             eprintln!("other-volume none");
-            panic!("no second writable volume; this test fails instead of passing");
+            panic!("no second writable volume that keeps unix mode 0640; this test fails instead of passing");
         };
         let data = old_home(dir.path());
         let dev = std::fs::metadata(&data).unwrap().dev();
         assert_ne!(dev, root_dev, "the other volume is the boot volume");
         assert_old_home_fenced(&data);
-        eprintln!("other-volume {}", data.display());
+        eprintln!("other-volume used {}", data.display());
     }
 
     #[test]
