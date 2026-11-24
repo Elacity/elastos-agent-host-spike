@@ -833,8 +833,7 @@ mod tests {
         std::fs::write(canary.join("kept"), b"kept").unwrap();
         std::fs::set_permissions(&canary, std::fs::Permissions::from_mode(0o755)).unwrap();
         let rows = did_rows();
-        let abi =
-            landlock_plan::kernel_abi().expect("Landlock ABI 5 is required for this kernel row");
+        let abi = landlock_plan::kernel_abi().expect("this kernel has no Landlock");
         let index = landlock_plan::build(
             RuntimeProviderId::Did,
             &rows,

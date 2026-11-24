@@ -8,10 +8,11 @@ use std::{
     path::{Path, PathBuf},
 };
 
-// The lab's STORAGE_ROOT, executable, and ABI-5 handled masks (confine.rs:8560-8582, 8685).
+// STORAGE is the file-write row (confine.rs). BINARY is execute plus read.
+// `handled_fs` is the filesystem mask that ABI defines. ABI 4's TCP rights and
+// ABI 6's scope stay in other ruleset fields, which this plan leaves unset.
 const STORAGE: u64 = 0x41be;
 const BINARY: u64 = 0x5;
-const HANDLED: u64 = 0xffff;
 /// `LANDLOCK_ACCESS_FS_READ_FILE` (1 << 2). A resolver file is not a storage root.
 const READ_FILE: u64 = 4;
 /// glibc NSS and the resolver. Optional files stay closed: the note measured
@@ -95,15 +96,25 @@ pub(super) struct Bindings {
     pub storage_ino: u64,
 }
 
-pub(super) fn require_abi(reported: io::Result<u32>) -> Result<u32, String> {
-    let abi = reported.map_err(|_| NO_LANDLOCK.to_string())?;
-    if abi < 3 {
-        return Err(format!("linux confinement refused: the Landlock ABI cannot express the (allow file-read* file-write* (subpath (param \"STORAGE_ROOT\"))) row, which needs ABI 3 and this kernel reports ABI {abi}"));
-    }
-    if abi < 5 {
-        return Err(format!("linux confinement refused: the Landlock ABI cannot express the default-denial file rights, which needs ABI 5 and this kernel reports ABI {abi}"));
-    }
-    Ok(abi)
+/// Filesystem rights defined at `abi`. Bit 13 is refer (ABI 2), bit 14 is
+/// truncate (ABI 3), bit 15 is ioctl on devices (ABI 5).
+pub(super) fn handled_fs(abi: u32) -> u64 {
+    0x1fff | u64::from(abi >= 2) << 13 | u64::from(abi >= 3) << 14 | u64::from(abi >= 5) << 15
+}
+
+/// ABI this provider needs. Truncate stays in `STORAGE` and `renameat2` stays
+/// on the storage list, so refer is not subtracted. The literal name `ioctl`
+/// is subtracted when the seccomp list does not admit it.
+#[rustfmt::skip]
+pub(super) fn abi_required(names: &[&str]) -> u32 {
+    if names.contains(&"ioctl") { 5 } else if STORAGE & (1 << 14) != 0 { 3 } else { 2 }
+}
+
+#[rustfmt::skip]
+pub(super) fn require_abi(provider: RuntimeProviderId, admitted: &AdmittedRights, reported: io::Result<u32>) -> Result<u32, String> {
+    let arch = if cfg!(target_arch = "x86_64") { super::seccomp_list::AuditArch::X86_64 } else { super::seccomp_list::AuditArch::Aarch64 };
+    let needed = abi_required(&super::seccomp_list::linux_seccomp_list(provider, admitted, arch));
+    match reported { Ok(abi) if abi >= needed => Ok(abi), Ok(abi) => Err(format!("linux confinement refused: this kernel reports Landlock ABI {abi}; {} needs ABI {needed}", if needed >= 5 { "ioctl on devices" } else { "truncate" })), Err(_) => Err(NO_LANDLOCK.to_string()) }
 }
 
 #[cfg(target_os = "linux")]
@@ -121,7 +132,7 @@ fn query_abi() -> io::Result<u32> {
     Err(io::Error::from(io::ErrorKind::Unsupported))
 }
 pub(super) fn kernel_abi() -> Result<u32, String> {
-    require_abi(query_abi())
+    query_abi().map_err(|_| NO_LANDLOCK.to_string())
 }
 
 pub(super) fn build(
@@ -140,7 +151,7 @@ fn build_for_arch(
     arch: LoaderArch,
     abi: u32,
 ) -> Result<Plan, String> {
-    let abi = require_abi(Ok(abi))?;
+    let abi = require_abi(provider, admitted, Ok(abi))?;
     let mut rules = Vec::new();
     // Path rules come from the admitted rows. Loader paths stay with the provider.
     for row in admitted.rows() {
@@ -171,7 +182,7 @@ fn build_for_arch(
     }
     Ok(Plan {
         abi,
-        handled: HANDLED,
+        handled: handled_fs(abi),
         rules,
         storage_dev: bindings.storage_dev,
         storage_ino: bindings.storage_ino,
@@ -195,7 +206,7 @@ pub(super) fn build_path_allow_plan(
     executable: &Path,
     abi: u32,
 ) -> Result<Plan, String> {
-    let abi = require_abi(Ok(abi))?;
+    let abi = require_abi(provider, admitted, Ok(abi))?;
     let storage = admitted.admits("storage");
     if storage && roots.is_empty() {
         return Err("provider start is refused: the path allow-list has no file roots".to_string());
@@ -245,7 +256,7 @@ pub(super) fn build_path_allow_plan(
     let storage_ino = root_ino.first().copied().unwrap_or(0);
     Ok(Plan {
         abi,
-        handled: HANDLED,
+        handled: handled_fs(abi),
         rules,
         storage_dev,
         storage_ino,
@@ -370,22 +381,66 @@ mod tests {
         result
     }
 
+    fn localhost_grant() -> super::super::rights::AdmittedRights {
+        super::super::rights::admit_runtime_grant(Localhost)
+    }
+
     #[test]
-    fn abi_decision_matches_lab_refusals() {
+    fn abi_rows_name_the_kernel_and_narrow_the_handled_mask() {
+        let admitted = localhost_grant();
+        let exe = Path::new("/bin/localhost-provider");
+        let root = || AllowRoot {
+            name: "ElastOS",
+            path: "/data/ElastOS".into(),
+            dev: 1,
+            ino: 2,
+        };
         for abi in [1, 2] {
-            assert_eq!(require_abi(Ok(abi)), Err(format!("linux confinement refused: the Landlock ABI cannot express the (allow file-read* file-write* (subpath (param \"STORAGE_ROOT\"))) row, which needs ABI 3 and this kernel reports ABI {abi}")));
+            let err = build_path_allow_plan(Localhost, &admitted, &[root()], exe, abi).unwrap_err();
+            assert!(
+                err.contains(&format!("this kernel reports Landlock ABI {abi}")),
+                "{err}"
+            );
+            assert!(err.contains("truncate needs ABI 3"), "{err}");
         }
-        assert_eq!(require_abi(Ok(3)), Err("linux confinement refused: the Landlock ABI cannot express the default-denial file rights, which needs ABI 5 and this kernel reports ABI 3".to_string()));
-        assert_eq!(require_abi(Ok(4)), Err("linux confinement refused: the Landlock ABI cannot express the default-denial file rights, which needs ABI 5 and this kernel reports ABI 4".to_string()));
         assert_eq!(
-            require_abi(Err(io::Error::other("query failed"))),
+            require_abi(Localhost, &admitted, Err(io::Error::other("query failed"))),
             Err("linux confinement refused: the kernel has no Landlock".to_string())
         );
-        for abi in [5, 6, 8] {
-            assert_eq!(require_abi(Ok(abi)), Ok(abi));
+        for (abi, mask) in [(3, 0x7fff_u64), (4, 0x7fff), (5, 0xffff), (6, 0xffff)] {
+            let plan = build_path_allow_plan(Localhost, &admitted, &[root()], exe, abi).unwrap();
+            assert_eq!(plan.abi, abi);
+            assert_eq!(plan.handled, mask, "abi {abi}");
+            assert_eq!(plan.handled, handled_fs(abi));
         }
         #[cfg(not(target_os = "linux"))]
         assert_eq!(query_abi().unwrap_err().kind(), io::ErrorKind::Unsupported);
+    }
+
+    #[test]
+    fn ioctl_in_a_seccomp_list_requires_abi_5() {
+        use super::super::seccomp_list::AuditArch;
+        for provider in [Did, Wallet, Model, Localhost, Object, Chain] {
+            let admitted = if matches!(provider, Did | Wallet | Model) {
+                super::super::rights::admit_committed(provider)
+            } else {
+                super::super::rights::admit_runtime_grant(provider)
+            };
+            for arch in [AuditArch::X86_64, AuditArch::Aarch64] {
+                let names =
+                    super::super::seccomp_list::linux_seccomp_list(provider, &admitted, arch);
+                let needed = abi_required(&names);
+                if names.contains(&"ioctl") {
+                    assert!(
+                        needed >= 5,
+                        "{provider:?} {arch:?} admits ioctl and ABI {needed} does not cover it"
+                    );
+                } else {
+                    assert_eq!(needed, 3, "{provider:?} {arch:?}");
+                }
+            }
+        }
+        assert_eq!(abi_required(&["openat", "ioctl"]), 5);
     }
 
     #[rustfmt::skip]

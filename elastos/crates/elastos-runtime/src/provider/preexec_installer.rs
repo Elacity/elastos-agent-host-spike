@@ -105,6 +105,9 @@ pub(super) struct Prepared {
     root_pins: Vec<RootPin>,
 }
 
+#[rustfmt::skip]
+#[cfg(all(target_os = "linux", not(any(target_arch = "x86_64", target_arch = "aarch64"))))] compile_error!("linux confinement refused: this architecture has no seccomp list");
+
 fn host_audit_arch() -> AuditArch {
     if cfg!(target_arch = "x86_64") {
         AuditArch::X86_64
@@ -367,7 +370,7 @@ mod tests {
     use super::*;
     use std::os::fd::AsRawFd;
     use std::os::unix::ffi::OsStrExt;
-    use std::os::unix::fs::MetadataExt;
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
     use std::path::Path;
 
     fn helper_grant(provider: RuntimeProviderId) -> super::super::super::rights::AdmittedRights {
@@ -405,7 +408,7 @@ mod tests {
 
     #[test]
     fn installed_child_closes_fds_and_denies_outside_file_and_socket() {
-        landlock_plan::kernel_abi().expect("Landlock ABI 5 is required for this kernel row");
+        landlock_plan::kernel_abi().expect("this kernel has no Landlock");
         let root = tempfile::tempdir().unwrap();
         let allowed_path = root.path().join("allowed");
         std::fs::write(&allowed_path, b"ok").unwrap();
@@ -605,14 +608,20 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     fn chain_prepared(data: &Path) -> (super::Prepared, usize) {
-        landlock_plan::kernel_abi().expect("Landlock ABI 5 is required for this kernel row");
+        let abi = landlock_plan::kernel_abi().expect("this kernel has no Landlock");
         std::fs::create_dir(data.join("identity")).unwrap();
         std::fs::create_dir(data.join("chain-provider")).unwrap();
         let executable = Path::new("/opt/elastos/helper-provider");
         let admitted = helper_grant(RuntimeProviderId::Chain);
-        let (_confinement, plan) =
-            path_allow::render_with_plan(RuntimeProviderId::Chain, &admitted, data, executable, 5)
-                .unwrap_or_else(|err| panic!("render before the swap: {err}"));
+        let (_confinement, plan) = path_allow::render_with_plan(
+            RuntimeProviderId::Chain,
+            &admitted,
+            data,
+            executable,
+            abi,
+        )
+        .unwrap_or_else(|err| panic!("render before the swap: {err}"));
+        assert_eq!(plan.handled, landlock_plan::handled_fs(plan.abi));
         let root_index = plan
             .rules
             .iter()
@@ -695,7 +704,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn a_clean_path_allow_plan_installs_and_allows_its_root_but_not_the_device_key() {
-        landlock_plan::kernel_abi().expect("Landlock ABI 5 is required for this kernel row");
+        let abi = landlock_plan::kernel_abi().expect("this kernel has no Landlock");
         let tmp = tempfile::tempdir().unwrap();
         let data = tmp.path();
         let identity = data.join("identity");
@@ -708,9 +717,15 @@ mod tests {
         std::fs::write(&allowed_path, b"ok").unwrap();
         let executable = Path::new("/bin/true");
         let admitted = helper_grant(RuntimeProviderId::Chain);
-        let (_confinement, plan) =
-            path_allow::render_with_plan(RuntimeProviderId::Chain, &admitted, data, executable, 5)
-                .unwrap_or_else(|err| panic!("clean render: {err}"));
+        let (_confinement, plan) = path_allow::render_with_plan(
+            RuntimeProviderId::Chain,
+            &admitted,
+            data,
+            executable,
+            abi,
+        )
+        .unwrap_or_else(|err| panic!("clean render: {err}"));
+        assert_eq!(plan.handled, landlock_plan::handled_fs(abi));
         let prepared = prepare_path_allow(RuntimeProviderId::Chain, &admitted, plan).unwrap();
         let chain_filter = super::to_sock_filters(super::super::super::seccomp_program::program(
             RuntimeProviderId::Chain,
@@ -753,9 +768,10 @@ mod tests {
             &local_grant,
             data,
             executable,
-            5,
+            abi,
         )
         .unwrap();
+        assert_eq!(local_plan.handled, landlock_plan::handled_fs(abi));
         let local =
             prepare_path_allow(RuntimeProviderId::Localhost, &local_grant, local_plan).unwrap();
         let local_filter = super::to_sock_filters(super::super::super::seccomp_program::program(
@@ -771,9 +787,10 @@ mod tests {
             &object_grant,
             data,
             executable,
-            5,
+            abi,
         )
         .unwrap();
+        assert_eq!(object_plan.handled, landlock_plan::handled_fs(abi));
         let object =
             prepare_path_allow(RuntimeProviderId::Object, &object_grant, object_plan).unwrap();
         assert_ne!(
@@ -791,6 +808,22 @@ mod tests {
         }));
         let allowed_c = CString::new(allowed_path.as_os_str().as_bytes()).unwrap();
         let key_c = CString::new(key_path.as_os_str().as_bytes()).unwrap();
+        let outside = tmp.path().join("outside-fence.txt");
+        let outside_c = CString::new(outside.as_os_str().as_bytes()).unwrap();
+        let hosts_c = CString::new("/etc/hosts").unwrap();
+        let other_c = CString::new("/bin/false").unwrap();
+        assert!(
+            prepared
+                .plan
+                .rules
+                .iter()
+                .any(|rule| rule.0 == "READ_ONLY_FILE" && rule.1.ends_with("hosts")),
+            "chain must rule /etc/hosts so truncate of a read-only file can be checked"
+        );
+        let kept = data.join("ElastOS/kept.txt");
+        std::fs::write(&kept, b"kept-from-the-old-home").unwrap();
+        std::fs::set_permissions(&kept, std::fs::Permissions::from_mode(0o640)).unwrap();
+        let kept_c = CString::new(kept.as_os_str().as_bytes()).unwrap();
         let report = std::fs::File::open("/dev/null").unwrap();
         assert!(report.as_raw_fd() >= 3);
         let pid = unsafe { libc::fork() };
@@ -838,19 +871,124 @@ mod tests {
             } else {
                 key_errno
             };
-            unsafe { libc::_exit(code) };
+            if code != 0 {
+                unsafe { libc::_exit(code) };
+            }
+            let outside_fd = unsafe {
+                libc::syscall(
+                    libc::SYS_openat,
+                    libc::AT_FDCWD,
+                    outside_c.as_ptr(),
+                    libc::O_WRONLY | libc::O_CREAT | libc::O_TRUNC,
+                    0o644,
+                )
+            };
+            let outside_errno = unsafe { *libc::__errno_location() };
+            if outside_fd >= 0 {
+                unsafe { libc::close(outside_fd as i32) };
+                unsafe { libc::_exit(83) };
+            }
+            if outside_errno != libc::EACCES {
+                unsafe { libc::_exit(83) };
+            }
+            let hosts = unsafe {
+                libc::syscall(
+                    libc::SYS_openat,
+                    libc::AT_FDCWD,
+                    hosts_c.as_ptr(),
+                    libc::O_RDONLY,
+                )
+            };
+            if hosts < 0 {
+                unsafe { libc::_exit(88) };
+            }
+            unsafe { libc::close(hosts as i32) };
+            let trunc = unsafe {
+                libc::syscall(
+                    libc::SYS_openat,
+                    libc::AT_FDCWD,
+                    hosts_c.as_ptr(),
+                    libc::O_RDONLY | libc::O_TRUNC,
+                )
+            };
+            let trunc_errno = unsafe { *libc::__errno_location() };
+            if trunc >= 0 {
+                unsafe { libc::close(trunc as i32) };
+                unsafe { libc::_exit(85) };
+            }
+            if trunc_errno != libc::EACCES {
+                unsafe { libc::_exit(85) };
+            }
+            let mut argv = [other_c.as_ptr(), std::ptr::null()];
+            let mut envp = [std::ptr::null::<libc::c_char>()];
+            let exec = unsafe {
+                libc::syscall(
+                    libc::SYS_execve,
+                    other_c.as_ptr(),
+                    argv.as_mut_ptr(),
+                    envp.as_mut_ptr(),
+                )
+            };
+            if exec >= 0 || unsafe { *libc::__errno_location() } != libc::EACCES {
+                unsafe { libc::_exit(86) };
+            }
+            let again = unsafe {
+                libc::syscall(
+                    libc::SYS_openat,
+                    libc::AT_FDCWD,
+                    allowed_c.as_ptr(),
+                    libc::O_RDONLY | libc::O_CLOEXEC,
+                )
+            };
+            if again < 0 {
+                unsafe { libc::_exit(81) };
+            }
+            let mut window = 0i32;
+            let ioctl =
+                unsafe { libc::syscall(libc::SYS_ioctl, again, libc::FIONREAD, &mut window) };
+            let ioctl_errno = unsafe { *libc::__errno_location() };
+            unsafe { libc::close(again as i32) };
+            if ioctl >= 0 || ioctl_errno != libc::EACCES {
+                unsafe { libc::_exit(87) };
+            }
+            unsafe { libc::_exit(0) };
         }
         let mut status = 0;
         assert_eq!(unsafe { libc::waitpid(pid, &mut status, 0) }, pid);
         assert_eq!(
             status, 0,
-            "a clean fence plan must install (wait status {status}, exit {}, signal {}): 81 allowed open failed, 82 device key was readable, 161 close_range, 162 create, 163 add, 164 no_new_privs, 165 restrict, 166 seccomp, any other exit is the device-key errno",
+            "a clean fence plan must install (wait status {status}, exit {}, signal {}): 81 allowed open failed, 82 device key was readable, 83 write outside was not EACCES, 85 truncate of /etc/hosts was not EACCES, 86 exec of /bin/false was not EACCES, 87 ioctl was not EACCES, 88 read of /etc/hosts failed, 161 close_range, 162 create, 163 add, 164 no_new_privs, 165 restrict, 166 seccomp, any other exit is the device-key errno",
             libc::WEXITSTATUS(status),
             if libc::WIFSIGNALED(status) {
                 libc::WTERMSIG(status)
             } else {
                 0
             },
+        );
+        let kept_pid = unsafe { libc::fork() };
+        assert!(kept_pid >= 0);
+        if kept_pid == 0 {
+            if unsafe { install(&local, report.as_raw_fd(), -1) }.is_err() {
+                unsafe { libc::_exit(89) };
+            }
+            let opened = unsafe {
+                libc::syscall(
+                    libc::SYS_openat,
+                    libc::AT_FDCWD,
+                    kept_c.as_ptr(),
+                    libc::O_RDONLY | libc::O_CLOEXEC,
+                )
+            };
+            unsafe { libc::_exit(if opened >= 0 { 0 } else { 90 }) };
+        }
+        let mut kept_status = 0;
+        assert_eq!(
+            unsafe { libc::waitpid(kept_pid, &mut kept_status, 0) },
+            kept_pid
+        );
+        assert_eq!(
+            kept_status, 0,
+            "localhost plan must open an existing ElastOS/kept.txt (exit 89 install failed, exit 90 open failed, status {kept_status})"
         );
     }
 }
