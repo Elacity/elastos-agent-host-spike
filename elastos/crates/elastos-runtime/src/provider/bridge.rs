@@ -1809,10 +1809,32 @@ impl ProviderBridge {
         })
     }
 
-    /// Start localhost or object on that provider's path allow-list.
+    /// `chain-provider/` must be a real directory before the path allow-list
+    /// renders. Create it when Home has not yet. A symlink is refused.
+    fn ensure_chain_provider_root(data_dir: &Path) -> Result<(), BridgeError> {
+        use std::os::unix::fs::PermissionsExt;
+        let root = data_dir.join("chain-provider");
+        match std::fs::symlink_metadata(&root) {
+            Ok(metadata) if metadata.file_type().is_symlink() => Err(BridgeError::Refused(
+                "provider start is refused: chain-provider is a symlink".into(),
+            )),
+            Ok(metadata) if !metadata.is_dir() => Err(BridgeError::Refused(
+                "provider start is refused: chain-provider is not a directory".into(),
+            )),
+            Ok(_) => Ok(()),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                std::fs::create_dir(&root).map_err(BridgeError::Io)?;
+                std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700))
+                    .map_err(BridgeError::Io)?;
+                Ok(())
+            }
+            Err(err) => Err(BridgeError::Io(err)),
+        }
+    }
+
+    /// Start localhost, object, or chain on that provider's path allow-list.
     ///
-    /// Chain stays on the plain spawn until slice C3. There is no single
-    /// storage root. A refusal starts nothing.
+    /// There is no single storage root. A refusal starts nothing.
     pub async fn spawn_path_allow(
         component_key: &str,
         binary_path: &CheckedExecutable,
@@ -1820,9 +1842,7 @@ impl ProviderBridge {
         config: ProviderConfig,
     ) -> Result<Confined, BridgeError> {
         if component_key == "chain-provider" {
-            return Err(BridgeError::Refused(
-                "provider start is refused: chain-provider stays unconfined until slice C3".into(),
-            ));
+            Self::ensure_chain_provider_root(data_dir)?;
         }
         if super::rights_table::RuntimeProviderId::path_allow(component_key).is_none() {
             return Err(BridgeError::Refused(format!(

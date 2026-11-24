@@ -92,9 +92,15 @@ pub(super) fn render_macos_profile(
 pub(super) fn render_path_allow_profile(
     roots: &[&str],
     metadata_slots: usize,
+    chain: bool,
 ) -> Result<String, String> {
     if roots.is_empty() {
         return Err("provider start is refused: the path allow-list has no file roots".to_string());
+    }
+    if chain && metadata_slots != 0 {
+        return Err(
+            "provider start is refused: the chain profile has no metadata grants".to_string(),
+        );
     }
     let mut lines = Vec::with_capacity(HEAD.len() + 3 + roots.len() + metadata_slots);
     for line in HEAD {
@@ -121,6 +127,17 @@ pub(super) fn render_path_allow_profile(
         lines.push(format!(
             "(allow file-read-metadata (literal (param \"META_{index}\")))"
         ));
+    }
+    if chain {
+        // Measured on this Mac against the real chain-provider binary.
+        // `(deny network*)` stays; outbound is this scoped line only.
+        lines.push(
+            "(allow network-outbound (remote unix-socket (literal \"/private/var/run/mDNSResponder\")) (remote ip))"
+                .to_string(),
+        );
+        lines.push(
+            "(allow file-read* (literal \"/var\") (literal \"/var/run/resolv.conf\"))".to_string(),
+        );
     }
     let mut rendered = lines.join("\n");
     rendered.push('\n');
@@ -359,5 +376,30 @@ mod tests {
         assert_eq!(disk["rights"][1], pinned["rights"][1], "pin d0dd5693 model executable");
         assert_eq!(disk["platform_baseline"]["rules"][0], pinned["platform_baseline"]["rules"][0], "pin d0dd5693 model startup root");
         assert_eq!(disk["platform_baseline"]["rules"][1], pinned["platform_baseline"]["rules"][1], "pin d0dd5693 model sysctl");
+    }
+
+    #[test]
+    fn chain_seatbelt_is_the_measured_outbound_set() {
+        let chain = render_path_allow_profile(&["chain-provider"], 0, true).unwrap();
+        assert_eq!(
+            chain,
+            "\
+(version 1)
+(deny default)
+(deny network*)
+(allow process-exec (literal (param \"PROVIDER_EXECUTABLE\")))
+(allow file-read* (literal \"/\"))
+(allow sysctl-read)
+(allow file-read* file-write* (subpath (param \"chain-provider\")))
+(allow network-outbound (remote unix-socket (literal \"/private/var/run/mDNSResponder\")) (remote ip))
+(allow file-read* (literal \"/var\") (literal \"/var/run/resolv.conf\"))
+"
+        );
+        assert!(!chain.contains("mach-lookup"));
+        assert!(!chain.contains("/etc"));
+        let other = render_path_allow_profile(&["ElastOS"], 1, false).unwrap();
+        assert!(!other.contains("network-outbound"));
+        assert!(!other.contains("/var"));
+        assert!(other.contains("META_0"));
     }
 }

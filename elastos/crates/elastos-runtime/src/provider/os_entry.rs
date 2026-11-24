@@ -229,7 +229,10 @@ fn start_path_allow_os(
     })?;
     let mut defines = Vec::new();
     for rule in &confinement.landlock {
-        if matches!(rule.name, "PROVIDER_EXECUTABLE" | "LANDLOCK_LOADER_PATHS") {
+        if matches!(
+            rule.name,
+            "PROVIDER_EXECUTABLE" | "LANDLOCK_LOADER_PATHS" | "READ_ONLY_FILE"
+        ) {
             continue;
         }
         defines.push((rule.name.to_string(), rule.path.clone()));
@@ -1228,7 +1231,7 @@ mod tests {
             probe.push_str("),\n        (\"foreign\", ");
             probe.push_str(&foreign_lit);
             probe.push_str(
-                "),\n    ];\n    for (name, path) in checks {\n        let code = match std::fs::File::open(path) {\n            Ok(_) => \"open\".to_string(),\n            Err(err) => err.raw_os_error().unwrap_or(-1).to_string(),\n        };\n        report.push_str(name);\n        report.push('=');\n        report.push_str(&code);\n        report.push('\\n');\n    }\n    if std::fs::write(",
+                "),\n    ];\n    for (name, path) in checks {\n        let code = match std::fs::File::open(path) {\n            Ok(_) => \"open\".to_string(),\n            Err(err) => err.raw_os_error().unwrap_or(-1).to_string(),\n        };\n        let stat = match std::fs::symlink_metadata(path) {\n            Ok(_) => \"stat\".to_string(),\n            Err(err) => err.raw_os_error().unwrap_or(-1).to_string(),\n        };\n        report.push_str(name);\n        report.push('=');\n        report.push_str(&code);\n        report.push('\\n');\n        report.push_str(name);\n        report.push_str(\"_stat=\");\n        report.push_str(&stat);\n        report.push('\\n');\n    }\n    if std::fs::write(",
             );
             probe.push_str(&result_lit);
             probe.push_str(", report).is_err() {\n        std::process::exit(91);\n    }\n}\n");
@@ -1269,6 +1272,20 @@ mod tests {
                 "{key} opened identity/device.key or failed another way: {report} ({})",
                 wait_text(status)
             );
+            // macOS Seatbelt refuses lstat. Linux Landlock does not gate inode
+            // metadata, so stat stays allowed and this assertion records that gap.
+            #[cfg(target_os = "macos")]
+            assert_eq!(
+                line("device_stat"),
+                "1",
+                "{key} stat of identity/device.key: {report}"
+            );
+            #[cfg(target_os = "linux")]
+            assert_eq!(
+                line("device_stat"),
+                "stat",
+                "{key} Landlock does not gate inode metadata; stat of identity/device.key stays allowed: {report}"
+            );
             assert_eq!(
                 line("own"),
                 "open",
@@ -1279,6 +1296,290 @@ mod tests {
                 "{key} opened a path outside its roots: {report}"
             );
         }
+    }
+
+    /// The real `chain-provider` binary, started by `start_path_allow`.
+    ///
+    /// Run on Linux with `--ignored` and `ELASTOS_CHAIN_PROVIDER_BIN` set.
+    /// The kernel Landlock ABI must be at least 5. The same test runs on macOS.
+    /// Linux-only companions, not this test: `a_root_swapped_for_a_symlink_between_render_and_install_is_refused_by_the_installer`
+    /// and `a_clean_path_allow_plan_installs_and_allows_its_root_but_not_the_device_key`.
+    #[cfg(all(
+        not(elastos_unsupported_os_check),
+        any(
+            target_os = "macos",
+            all(
+                target_os = "linux",
+                any(target_arch = "x86_64", target_arch = "aarch64")
+            )
+        )
+    ))]
+    #[ignore = "needs ELASTOS_CHAIN_PROVIDER_BIN; Linux also needs Landlock ABI >= 5"]
+    #[test]
+    fn chain_provider_binary_answers_inside_its_fence() {
+        use sha2::{Digest, Sha256};
+        use std::io::{Read, Write};
+
+        let bin = PathBuf::from(
+            std::env::var("ELASTOS_CHAIN_PROVIDER_BIN").unwrap_or_else(|_| {
+                panic!("ELASTOS_CHAIN_PROVIDER_BIN is required to run this ignored test")
+            }),
+        );
+        assert!(bin.is_file(), "chain binary {}", bin.display());
+        let binary_bytes = std::fs::read(&bin).unwrap();
+        eprintln!("chain binary sha256 {:x}", Sha256::digest(&binary_bytes));
+        let arch = if cfg!(target_arch = "x86_64") {
+            super::super::seccomp_list::AuditArch::X86_64
+        } else {
+            super::super::seccomp_list::AuditArch::Aarch64
+        };
+        let admitted = super::super::rights::admit_runtime_grant(
+            super::super::rights_table::RuntimeProviderId::Chain,
+        );
+        let prog = super::super::seccomp_program::program(
+            super::super::rights_table::RuntimeProviderId::Chain,
+            &admitted,
+            arch,
+        );
+        let mut words = Vec::with_capacity(prog.len() * 16);
+        for instruction in &prog {
+            for word in instruction {
+                words.extend_from_slice(&word.to_le_bytes());
+            }
+        }
+        eprintln!(
+            "chain seccomp program sha256 {:x} ({} instructions)",
+            Sha256::digest(&words),
+            prog.len()
+        );
+        match super::super::landlock_plan::kernel_abi() {
+            Ok(abi) => eprintln!("landlock abi {abi}"),
+            Err(_) => eprintln!("macOS, no Landlock"),
+        }
+
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let data = std::fs::canonicalize(temp.path()).unwrap();
+        std::fs::set_permissions(&data, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let chain_root = data.join("chain-provider");
+        std::fs::create_dir(&chain_root).unwrap();
+        std::fs::set_permissions(&chain_root, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let identity = data.join("identity");
+        std::fs::create_dir(&identity).unwrap();
+        let device_key = identity.join("device.key");
+        std::fs::write(&device_key, b"device-key-sentinel").unwrap();
+        let state = chain_root.join("node-lifecycle-state.json");
+        std::os::unix::fs::symlink("../identity/device.key", &state).unwrap();
+
+        fn write_line(fd: i32, line: &str) {
+            let mut bytes = line.as_bytes().to_vec();
+            bytes.push(b'\n');
+            let mut sent = 0;
+            while sent < bytes.len() {
+                let n =
+                    unsafe { libc::write(fd, bytes[sent..].as_ptr().cast(), bytes.len() - sent) };
+                assert!(
+                    n > 0,
+                    "write to chain helper: {}",
+                    std::io::Error::last_os_error()
+                );
+                sent += n as usize;
+            }
+        }
+        fn read_line(fd: i32, pending: &mut Vec<u8>, timeout: std::time::Duration) -> String {
+            let start = std::time::Instant::now();
+            loop {
+                if let Some(at) = pending.iter().position(|byte| *byte == b'\n') {
+                    let line: Vec<u8> = pending.drain(..=at).collect();
+                    return String::from_utf8(line).unwrap();
+                }
+                if start.elapsed() > timeout {
+                    panic!(
+                        "chain helper sent no line: {}",
+                        String::from_utf8_lossy(pending)
+                    );
+                }
+                let mut pollfd = libc::pollfd {
+                    fd,
+                    events: libc::POLLIN,
+                    revents: 0,
+                };
+                let left = timeout
+                    .saturating_sub(start.elapsed())
+                    .as_millis()
+                    .min(1_000) as i32;
+                let ready = unsafe { libc::poll(&mut pollfd, 1, left.max(1)) };
+                assert!(ready >= 0, "poll: {}", std::io::Error::last_os_error());
+                if ready == 0 {
+                    continue;
+                }
+                let mut chunk = [0u8; 2048];
+                let n = unsafe { libc::read(fd, chunk.as_mut_ptr().cast(), chunk.len()) };
+                assert!(n >= 0, "read: {}", std::io::Error::last_os_error());
+                if n == 0 {
+                    panic!(
+                        "chain helper closed stdout: {}",
+                        String::from_utf8_lossy(pending)
+                    );
+                }
+                pending.extend_from_slice(&chunk[..n as usize]);
+            }
+        }
+        fn ask(
+            launched: &Launched,
+            pending: &mut Vec<u8>,
+            line: &str,
+            timeout: std::time::Duration,
+        ) -> serde_json::Value {
+            write_line(launched.to_child.as_raw_fd(), line);
+            let text = read_line(launched.from_child.as_raw_fd(), pending, timeout);
+            serde_json::from_str(text.trim()).unwrap_or_else(|err| panic!("{err} in {text}"))
+        }
+        fn launch(bin: &std::path::Path, data: &std::path::Path) -> Launched {
+            let (pipes, child_in, child_out) = probe_stdio();
+            let started = start_path_allow(
+                "chain-provider",
+                &super::super::CheckedExecutable::for_test(bin),
+                data,
+                pipes,
+            );
+            unsafe {
+                libc::close(child_in);
+                libc::close(child_out);
+            }
+            started.unwrap_or_else(|err| panic!("chain-provider did not start: {err}"))
+        }
+        let quick = std::time::Duration::from_secs(20);
+
+        let mut pending = Vec::new();
+        let launched = launch(&bin, &data);
+        let networks = ask(&launched, &mut pending, "{\"op\":\"networks\"}", quick);
+        assert_eq!(networks["status"], "ok", "{networks}");
+        assert!(networks["data"]["networks"].is_array(), "{networks}");
+        let denied = ask(
+            &launched,
+            &mut pending,
+            "{\"op\":\"node_lifecycle\",\"network\":\"esc-mainnet\",\"action\":\"status\"}",
+            quick,
+        );
+        assert_eq!(
+            denied["code"], "node_lifecycle_state_unavailable",
+            "{denied}"
+        );
+        let message = denied["message"].as_str().unwrap_or("");
+        assert!(
+            message.contains("Permission denied") || message.contains("Operation not permitted"),
+            "{denied}"
+        );
+        assert!(!message.contains("device-key-sentinel"), "{denied}");
+        let _ = ask(&launched, &mut pending, "{\"op\":\"shutdown\"}", quick);
+        let status = reap_probe(launched.pid, &launched.from_child);
+        drop(launched);
+        assert!(
+            libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0,
+            "poisoned chain helper {}",
+            wait_text(status)
+        );
+        std::fs::remove_file(&state).unwrap();
+
+        let mut pending = Vec::new();
+        let launched = launch(&bin, &data);
+        let clean = ask(
+            &launched,
+            &mut pending,
+            "{\"op\":\"node_lifecycle\",\"network\":\"esc-mainnet\",\"action\":\"status\"}",
+            quick,
+        );
+        assert_eq!(clean["status"], "ok", "{clean}");
+        let saved =
+            std::fs::read_to_string(&state).unwrap_or_else(|err| panic!("state file: {err}"));
+        let parsed: serde_json::Value = serde_json::from_str(&saved).unwrap();
+        assert_eq!(parsed["schema"], "elastos.chain.node_lifecycle_state/v1");
+        assert!(parsed["networks"]["esc-mainnet"].is_object(), "{saved}");
+        assert!(std::fs::symlink_metadata(&state).unwrap().is_file());
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(5)));
+            let mut buf = [0u8; 4096];
+            let _ = stream.read(&mut buf);
+            let body = b"{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":\"0x10\"}";
+            let header = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            let _ = stream.write_all(header.as_bytes());
+            let _ = stream.write_all(body);
+        });
+        let init = serde_json::json!({
+            "op": "init",
+            "config": { "networks": [{
+                "id": "fixture",
+                "display_name": "Fixture",
+                "kind": "evm_json_rpc",
+                "chain_id": 1,
+                "native_symbol": "ETH",
+                "provider": "test",
+                "mainnet": false,
+                "explorer_url": null,
+                "rpc_url": format!("http://127.0.0.1:{port}")
+            }] }
+        });
+        let inited = ask(&launched, &mut pending, &init.to_string(), quick);
+        assert_eq!(inited["status"], "ok", "{inited}");
+        let block = ask(
+            &launched,
+            &mut pending,
+            "{\"op\":\"block_number\",\"network\":\"fixture\"}",
+            quick,
+        );
+        assert_eq!(block["status"], "ok", "{block}");
+        assert_eq!(block["data"]["block_number_hex"], "0x10", "{block}");
+
+        let https = serde_json::json!({
+            "op": "init",
+            "config": { "networks": [{
+                "id": "public",
+                "display_name": "Public",
+                "kind": "evm_json_rpc",
+                "chain_id": 1,
+                "native_symbol": "ETH",
+                "provider": "test",
+                "mainnet": false,
+                "explorer_url": null,
+                "rpc_url": "https://example.com/"
+            }] }
+        });
+        let https_init = ask(&launched, &mut pending, &https.to_string(), quick);
+        assert_eq!(https_init["status"], "ok", "{https_init}");
+        let https_block = ask(
+            &launched,
+            &mut pending,
+            "{\"op\":\"block_number\",\"network\":\"public\"}",
+            std::time::Duration::from_secs(25),
+        );
+        let code = https_block["code"].as_str().unwrap_or("");
+        let https_message = https_block["message"].as_str().unwrap_or("");
+        if code == "upstream_unreachable" {
+            eprintln!("chain HTTPS leg has no egress: {https_message}");
+        } else {
+            assert!(
+                code == "upstream_invalid_json"
+                    || (code == "upstream_http_error" && https_message.contains("405")),
+                "https://example.com/ {https_block}"
+            );
+            eprintln!("chain HTTPS leg: {code} {https_message}");
+        }
+        let _ = ask(&launched, &mut pending, "{\"op\":\"shutdown\"}", quick);
+        let status = reap_probe(launched.pid, &launched.from_child);
+        drop(launched);
+        assert!(
+            libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0,
+            "clean chain helper {}",
+            wait_text(status)
+        );
     }
 
     fn probe_stdio() -> (ChildStdio, i32, i32) {

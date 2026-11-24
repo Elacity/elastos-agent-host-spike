@@ -253,8 +253,20 @@ mod tests {
         let local_x86 = linux_seccomp_list(RuntimeProviderId::Localhost, &local, AuditArch::X86_64);
         let object_x86 = linux_seccomp_list(RuntimeProviderId::Object, &object, AuditArch::X86_64);
         let chain_x86 = linux_seccomp_list(RuntimeProviderId::Chain, &chain, AuditArch::X86_64);
+        let chain_arm = linux_seccomp_list(RuntimeProviderId::Chain, &chain, AuditArch::Aarch64);
         let did_x86 = linux_seccomp_list(RuntimeProviderId::Did, &did, AuditArch::X86_64);
-        assert_eq!(chain_x86, did_x86, "chain adds no calls until slice C3");
+        assert_ne!(chain_x86, did_x86, "chain keeps its own grant");
+        for name in ["connect", "recvfrom", "sendmmsg", "epoll_create1", "epoll_ctl", "epoll_pwait", "epoll_wait", "eventfd2", "exit", "rseq", "rt_sigprocmask", "rename"] {
+            assert!(chain_x86.contains(&name), "chain x86_64 is missing {name}");
+        }
+        assert!(!chain_x86.contains(&"renameat"));
+        assert!(chain_arm.contains(&"renameat") && chain_arm.contains(&"epoll_pwait"));
+        assert!(!chain_arm.contains(&"rename") && !chain_arm.contains(&"epoll_wait"));
+        for name in ["socket", "getsockopt", "sendto", "fcntl", "clone", "clone3", "setsockopt", "bind", "listen", "pipe2"] {
+            assert!(!chain_x86.contains(&name) && !chain_arm.contains(&name), "{name} is not an unconditional chain allow");
+            assert!(!local_x86.contains(&name) && !object_x86.contains(&name), "{name} leaked onto another helper");
+        }
+        assert!(!local_x86.contains(&"sendmmsg") && !object_x86.contains(&"sendmmsg"));
         assert!(local_x86.contains(&"rmdir"));
         assert!(!local_x86.contains(&"flock"));
         assert!(!local_x86.contains(&"socket"));

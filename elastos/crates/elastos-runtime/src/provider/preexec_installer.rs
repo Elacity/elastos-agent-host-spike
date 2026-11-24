@@ -677,9 +677,16 @@ mod tests {
             prepared.filters, chain_filter,
             "the chain allow-list filter is chain's own grant"
         );
-        assert_eq!(
+        assert_ne!(
             prepared.filters, did_filter,
-            "chain has no extra calls until slice C3"
+            "the chain allow-list filter is chain's own grant"
+        );
+        let sendmmsg =
+            super::super::super::seccomp_program::number("sendmmsg", super::host_audit_arch())
+                .unwrap();
+        assert!(
+            prepared.filters.iter().any(|insn| insn.k == sendmmsg),
+            "chain filter is missing sendmmsg"
         );
         for name in elastos_common::localhost::FILE_BACKED_ROOTS {
             let path = data.join(name);

@@ -19,7 +19,9 @@ const NUMBERS: &str = concat!(
     "clone:56:220 clone3:435:435 ",
     // Linux probe rows. The measured x86-only dup2, getpgrp, and readlink
     // have no AArch64 syscall or libc::SYS_* constant; '-' excludes each there.
-    "accept4:288:242 bind:49:200 connect:42:203 dup2:33:- getpgrp:111:- getpid:39:172 getsockopt:55:209 kill:62:129 listen:50:201 pipe2:293:59 readlink:89:- recvfrom:45:207 rt_sigprocmask:14:135 sendto:44:206 setpgid:109:154 socket:41:198 waitid:247:95",
+    "accept4:288:242 bind:49:200 connect:42:203 dup2:33:- getpgrp:111:- getpid:39:172 getsockopt:55:209 kill:62:129 listen:50:201 pipe2:293:59 readlink:89:- recvfrom:45:207 rt_sigprocmask:14:135 sendto:44:206 setpgid:109:154 socket:41:198 waitid:247:95 ",
+    // Chain network stack. `sendmmsg` is glibc DNS; `setsockopt` is argument-checked.
+    "sendmmsg:307:269 setsockopt:54:208",
 );
 
 // An absent cell excludes that call by policy on this architecture. An absent row is an error.
@@ -88,9 +90,104 @@ pub(super) fn program(
             rules[at][3] = number(name, arch).expect("model rule needs an architecture number");
         }
         code.extend(rules);
+    } else if matches!(provider, RuntimeProviderId::Chain) {
+        code.extend(chain_argument_rules(arch));
     } else {
         code.push(stmt(6, DENY));
     }
+    code
+}
+
+/// Chain argument tail. Allow-list entries win on the first match, so these
+/// names stay out of `measured_syscalls`. Pinned to reqwest 0.12.28, tokio
+/// 1.52.1, mio 1.2.0, hyper-util 0.1.20, and socket2 0.6.3
+/// (`chain_filter_names_the_pinned_network_stack`).
+fn chain_argument_rules(arch: AuditArch) -> Vec<Instruction> {
+    let nr = |name: &str| number(name, arch).expect("chain rule needs an architecture number");
+    let mut code = Vec::new();
+    // clone3: glibc falls back to clone when this returns ENOSYS.
+    code.extend([jump(0x15, nr("clone3"), 0, 1), stmt(6, 0x0005_0026)]);
+    // clone: a thread (CLONE_THREAD) or the measured vfork flags. A fork is denied.
+    code.extend([
+        jump(0x15, nr("clone"), 0, 6),
+        stmt(0x20, 16),
+        jump(0x45, 0x10000, 0, 1),
+        stmt(6, ALLOW),
+        jump(0x15, 0x4111, 0, 1),
+        stmt(6, ALLOW),
+        stmt(6, DENY),
+    ]);
+    // fcntl: F_GETFD, F_DUPFD_CLOEXEC, F_GETFL, F_SETFL. set_nonblocking needs the last two.
+    code.extend([
+        jump(0x15, nr("fcntl"), 0, 7),
+        stmt(0x20, 24),
+        jump(0x15, 1, 3, 0),
+        jump(0x15, 0x406, 2, 0),
+        jump(0x15, 3, 1, 0),
+        jump(0x15, 4, 0, 1),
+        stmt(6, ALLOW),
+        stmt(6, DENY),
+    ]);
+    // futex: wait, wake, and the two lock ops, with the private and clock bits cleared.
+    code.extend([
+        jump(0x15, nr("futex"), 0, 8),
+        stmt(0x20, 24),
+        stmt(0x54, 0xffff_fe7f),
+        jump(0x15, 0, 3, 0),
+        jump(0x15, 1, 2, 0),
+        jump(0x15, 9, 1, 0),
+        jump(0x15, 10, 0, 1),
+        stmt(6, ALLOW),
+        stmt(6, DENY),
+    ]);
+    // prlimit64: a thread-stack query (pid 0, new limit 0). Both halves of each argument.
+    code.extend([
+        jump(0x15, nr("prlimit64"), 0, 10),
+        stmt(0x20, 16),
+        jump(0x15, 0, 0, 7),
+        stmt(0x20, 20),
+        jump(0x15, 0, 0, 5),
+        stmt(0x20, 32),
+        jump(0x15, 0, 0, 3),
+        stmt(0x20, 36),
+        jump(0x15, 0, 0, 1),
+        stmt(6, ALLOW),
+        stmt(6, DENY),
+    ]);
+    // socket: AF_INET and AF_INET6. AF_UNIX and AF_NETLINK stay denied.
+    code.extend([
+        jump(0x15, nr("socket"), 0, 5),
+        stmt(0x20, 16),
+        jump(0x15, 2, 1, 0),
+        jump(0x15, 10, 0, 1),
+        stmt(6, ALLOW),
+        stmt(6, DENY),
+    ]);
+    // setsockopt: IP_RECVERR and IPV6_RECVERR only. TCP options stay denied.
+    code.extend([
+        jump(0x15, nr("setsockopt"), 0, 10),
+        stmt(0x20, 24),
+        jump(0x15, 0, 0, 3),
+        stmt(0x20, 32),
+        jump(0x15, 11, 0, 5),
+        stmt(6, ALLOW),
+        jump(0x15, 41, 0, 3),
+        stmt(0x20, 32),
+        jump(0x15, 25, 0, 1),
+        stmt(6, ALLOW),
+        stmt(6, DENY),
+    ]);
+    // getsockopt: SO_ERROR. take_error fails closed without it.
+    code.extend([
+        jump(0x15, nr("getsockopt"), 0, 6),
+        stmt(0x20, 24),
+        jump(0x15, 1, 0, 3),
+        stmt(0x20, 32),
+        jump(0x15, 4, 0, 1),
+        stmt(6, ALLOW),
+        stmt(6, DENY),
+    ]);
+    code.push(stmt(6, DENY));
     code
 }
 
@@ -272,6 +369,95 @@ mod tests {
                 assert!(!super::super::rights::git_show(&spec).status.success(), "{provider} golden is absent at pin d0dd5693; added at {added}");
             }
             assert!(super::super::rights::git_show(&format!("{added}:capsules/wallet-provider/tests/{provider}-seccomp-x86_64.golden")).status.success(), "{provider} golden is the post-pin addition at {added}");
+        }
+    }
+
+    /// Chain's own argument rules. An unconditional allow of `socket` would
+    /// accept AF_UNIX here, and a missing `clone3` rule would return EACCES.
+    #[test]
+    fn chain_filter_decides_the_argument_cases() {
+        let admitted = super::super::rights::admit_runtime_grant(RuntimeProviderId::Chain);
+        let cases: &[(&str, &str, [u64; 6], u32)] = &[
+            ("thread clone", "clone", [0x3d_0f00, 0, 0, 0, 0, 0], super::ALLOW),
+            ("measured vfork", "clone", [0x4111, 0, 0, 0, 0, 0], super::ALLOW),
+            ("plain fork", "clone", [0x11, 0, 0, 0, 0, 0], super::DENY),
+            ("clone3", "clone3", [0, 0, 0, 0, 0, 0], 0x0005_0026),
+            ("fcntl getfd", "fcntl", [3, 1, 0, 0, 0, 0], super::ALLOW),
+            ("fcntl dupfd_cloexec", "fcntl", [3, 0x406, 0, 0, 0, 0], super::ALLOW),
+            ("fcntl getfl", "fcntl", [3, 3, 0, 0, 0, 0], super::ALLOW),
+            ("fcntl setfl", "fcntl", [3, 4, 0, 0, 0, 0], super::ALLOW),
+            ("fcntl setfd", "fcntl", [3, 2, 0, 0, 0, 0], super::DENY),
+            ("futex wait", "futex", [0, 0, 0, 0, 0, 0], super::ALLOW),
+            ("futex wake", "futex", [0, 1, 0, 0, 0, 0], super::ALLOW),
+            ("futex lock", "futex", [0, 9, 0, 0, 0, 0], super::ALLOW),
+            ("futex unlock", "futex", [0, 10, 0, 0, 0, 0], super::ALLOW),
+            ("futex private wait", "futex", [0, 128, 0, 0, 0, 0], super::ALLOW),
+            ("futex requeue", "futex", [0, 3, 0, 0, 0, 0], super::DENY),
+            ("prlimit64", "prlimit64", [0, 0, 0, 0, 0, 0], super::ALLOW),
+            ("prlimit64 other pid", "prlimit64", [1, 0, 0, 0, 0, 0], super::DENY),
+            ("prlimit64 new limit", "prlimit64", [0, 0, 1, 0, 0, 0], super::DENY),
+            ("socket inet", "socket", [2, 1, 0, 0, 0, 0], super::ALLOW),
+            ("socket inet6", "socket", [10, 1, 0, 0, 0, 0], super::ALLOW),
+            ("socket unix", "socket", [1, 1, 0, 0, 0, 0], super::DENY),
+            ("socket netlink", "socket", [16, 3, 0, 0, 0, 0], super::DENY),
+            ("setsockopt ip recverr", "setsockopt", [6, 0, 11, 0, 0, 0], super::ALLOW),
+            ("setsockopt ipv6 recverr", "setsockopt", [6, 41, 25, 0, 0, 0], super::ALLOW),
+            ("setsockopt keepalive", "setsockopt", [6, 1, 9, 0, 0, 0], super::DENY),
+            ("setsockopt nodelay", "setsockopt", [6, 6, 1, 0, 0, 0], super::DENY),
+            ("getsockopt so_error", "getsockopt", [6, 1, 4, 0, 0, 0], super::ALLOW),
+            ("getsockopt other", "getsockopt", [6, 1, 7, 0, 0, 0], super::DENY),
+            ("connect", "connect", [6, 0, 0, 0, 0, 0], super::ALLOW),
+            ("sendmmsg", "sendmmsg", [6, 0, 0, 0, 0, 0], super::ALLOW),
+            ("sendto", "sendto", [6, 0, 0, 0, 0, 0], super::DENY),
+            ("pipe2", "pipe2", [0, 0, 0, 0, 0, 0], super::DENY),
+        ];
+        for arch in [AuditArch::X86_64, AuditArch::Aarch64] {
+            let audit = match arch { AuditArch::X86_64 => 0xc000_003e, AuditArch::Aarch64 => 0xc000_00b7 };
+            let prog = program(RuntimeProviderId::Chain, &admitted, arch);
+            assert!(prog.len() <= 256, "{arch:?} chain filter is {} instructions", prog.len());
+            for (label, name, args, want) in cases {
+                let Some(nr) = number(name, arch) else { continue };
+                let got = interpret(&prog, nr, *args, audit);
+                assert_eq!(got, *want, "{arch:?} {label} returned {got:#x}");
+            }
+        }
+    }
+
+    /// The chain filter is coupled to these crate versions. A lockfile bump
+    /// fails here instead of becoming EACCES inside a running helper.
+    #[test]
+    fn chain_filter_names_the_pinned_network_stack() {
+        const PINNED: &[(&str, &str)] = &[
+            ("reqwest", "0.12.28"),
+            ("tokio", "1.52.1"),
+            ("mio", "1.2.0"),
+            ("hyper-util", "0.1.20"),
+            ("socket2", "0.6.3"),
+        ];
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../../capsules/chain-provider/Cargo.lock"
+        );
+        let lock = std::fs::read_to_string(path).unwrap_or_else(|err| panic!("{path}: {err}"));
+        for (name, version) in PINNED {
+            let mut found = Vec::new();
+            let mut lines = lock.lines();
+            while let Some(line) = lines.next() {
+                if line == "[[package]]" {
+                    let crate_name = lines.next().unwrap_or("");
+                    let crate_version = lines.next().unwrap_or("");
+                    if crate_name == format!("name = \"{name}\"") {
+                        found.push(
+                            crate_version
+                                .strip_prefix("version = \"")
+                                .and_then(|rest| rest.strip_suffix('"'))
+                                .unwrap_or(crate_version)
+                                .to_string(),
+                        );
+                    }
+                }
+            }
+            assert_eq!(found, vec![(*version).to_string()], "{name} left the pinned chain stack");
         }
     }
 }

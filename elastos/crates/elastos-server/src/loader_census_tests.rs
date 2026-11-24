@@ -661,7 +661,7 @@ fn rows() -> Vec<Row> {
             "native provider",
             "checksum",
             "P2-8",
-            15,
+            12,
         ),
         row(
             "elastos-server/src/server_infra.rs",

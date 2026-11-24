@@ -1553,7 +1553,11 @@ fn trust_columns_cover_each_loader_and_bind_to_source() {
         (
             "elastos-server/src/server_infra.rs",
             "setup_server_infrastructure_impl",
-            ["ProviderBridge::", "spawn(&path, generic_chain_config)"].concat(),
+            [
+                "spawn_allow_listed_provider(",
+                "\"chain-provider\", &path, &data_dir, chain_config)",
+            ]
+            .concat(),
             1,
         ),
         (

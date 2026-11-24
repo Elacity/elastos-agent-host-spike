@@ -12,6 +12,12 @@ use std::{
 const STORAGE: u64 = 0x41be;
 const BINARY: u64 = 0x5;
 const HANDLED: u64 = 0xffff;
+/// `LANDLOCK_ACCESS_FS_READ_FILE` (1 << 2). A resolver file is not a storage root.
+const READ_FILE: u64 = 4;
+/// glibc NSS and the resolver. Optional files stay closed: the note measured
+/// `/etc/gai.conf` and `/etc/host.conf` as nonfatal, and glibc 2.39 does not
+/// open `ld.so.cache` or `libnss`.
+const CHAIN_RESOLVER_FILES: &[&str] = &["/etc/nsswitch.conf", "/etc/hosts", "/etc/resolv.conf"];
 const NO_LANDLOCK: &str = "linux confinement refused: the kernel has no Landlock";
 
 #[derive(Clone, Copy, Debug)]
@@ -223,6 +229,15 @@ pub(super) fn build_path_allow_plan(
     ));
     for path in loader_paths(provider, LoaderArch::host()) {
         rules.push(PathRule("LANDLOCK_LOADER_PATHS", path.into(), BINARY));
+    }
+    if matches!(provider, RuntimeProviderId::Chain) {
+        for path in CHAIN_RESOLVER_FILES {
+            // Follow the symlink for existence, and store the literal path.
+            // The installer opens that literal with O_PATH, which lands on the target inode.
+            if std::fs::metadata(path).is_ok() {
+                rules.push(PathRule("READ_ONLY_FILE", (*path).into(), READ_FILE));
+            }
+        }
     }
     Ok(PathAllowPlan {
         abi,
@@ -462,5 +477,46 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn chain_read_only_files_are_the_three_resolver_paths() {
+        let root = AllowRoot {
+            name: "chain-provider",
+            path: "/data/chain-provider".into(),
+            dev: 1,
+            ino: 2,
+        };
+        let plan =
+            build_path_allow_plan(Chain, &[root], Path::new("/bin/chain-provider"), 5).unwrap();
+        assert_eq!(plan.rules[0].0, "chain-provider");
+        let files: Vec<_> = plan
+            .rules
+            .iter()
+            .filter(|rule| rule.0 == "READ_ONLY_FILE")
+            .collect();
+        for rule in &files {
+            let path = rule.1.to_str().unwrap();
+            assert!(
+                CHAIN_RESOLVER_FILES.contains(&path),
+                "unexpected resolver file {path}"
+            );
+            assert_eq!(rule.2, READ_FILE);
+            assert!(!path.contains("identity") && !path.contains("gai.conf"));
+            assert!(!path.contains("host.conf") && !path.contains("ld.so"));
+        }
+        let local = AllowRoot {
+            name: "ElastOS",
+            path: "/data/ElastOS".into(),
+            dev: 1,
+            ino: 2,
+        };
+        let local_plan =
+            build_path_allow_plan(Localhost, &[local], Path::new("/bin/localhost-provider"), 5)
+                .unwrap();
+        assert!(local_plan
+            .rules
+            .iter()
+            .all(|rule| rule.0 != "READ_ONLY_FILE"));
     }
 }

@@ -548,8 +548,8 @@ async fn request_model_provider_status(
     .map_err(|err| anyhow::anyhow!("model-provider status request failed: {err}"))
 }
 
-/// Start localhost or object on that provider's path allow-list.
-/// Chain stays on the plain spawn until slice C3.
+/// Start localhost, object, or chain on that provider's path allow-list.
+/// Windows stays on the plain spawn.
 #[cfg(unix)]
 async fn spawn_allow_listed_provider(
     component_key: &str,
@@ -878,13 +878,16 @@ pub(crate) async fn register_chain_provider_plane(
     }
     let generic_config = chain_provider_bridge_config_without_protected_network(&runtime_issuer);
     // Admit against the signed release of the Home this chain plane serves.
-    // Chain stays on this plain spawn until slice C3.
-    let bridge = provider::ProviderBridge::spawn(
+    // The chain process starts inside its own path allow-list.
+    let confined = provider::ProviderBridge::spawn_path_allow(
+        "chain-provider",
         &checked_native_provider_with_data_dir(data_dir, binary_path),
+        data_dir,
         generic_config,
     )
     .await
     .map_err(|err| anyhow::anyhow!("failed to spawn chain-provider: {err}"))?;
+    let bridge = std::sync::Arc::clone(confined.bridge());
     match bridge
         .request(provider::bridge::ProviderRequest::Init { config })
         .await
@@ -901,9 +904,8 @@ pub(crate) async fn register_chain_provider_plane(
             anyhow::bail!("chain-provider transport failed while applying configuration: {err}");
         }
     }
-    let chain_provider: Arc<dyn provider::Provider> = Arc::new(
-        provider::CapsuleProvider::with_scheme(Arc::new(bridge), "chain"),
-    );
+    let chain_provider: Arc<dyn provider::Provider> =
+        Arc::new(provider::CapsuleProvider::with_scheme(bridge, "chain"));
     provider_registry
         .register_sub_provider("chain", chain_provider)
         .await
@@ -1523,9 +1525,11 @@ async fn setup_server_infrastructure_impl(
             let generic_chain_config = chain_provider_bridge_config_without_protected_network(
                 &protected_content_runtime_issuer,
             );
-            match provider::ProviderBridge::spawn(&path, generic_chain_config).await {
+            let chain_config = generic_chain_config;
+            match spawn_allow_listed_provider("chain-provider", &path, &data_dir, chain_config)
+                .await
+            {
                 Ok(bridge) => {
-                    let bridge = Arc::new(bridge);
                     let mut transport_ready = true;
                     if let Some(config) = protected_chain_config {
                         match bridge

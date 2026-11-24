@@ -3,9 +3,9 @@
 //! A single `STORAGE_ROOT` of the data directory would include
 //! `identity/device.key`. Each helper gets its own child directories instead.
 //! Each of those directories must already exist, be owned by the current user,
-//! and must not be a symlink. `spawn_path_allow` starts localhost and object.
-//! Chain stays on the plain spawn until slice C3. The single-root
-//! `spawn_confined` does not start these helpers.
+//! and must not be a symlink. `spawn_path_allow` starts localhost, object,
+//! and chain. Chain's resolver files are read-only and are not a storage
+//! root. The single-root `spawn_confined` does not start these helpers.
 
 use std::ffi::CString;
 use std::os::unix::ffi::OsStrExt;
@@ -241,6 +241,36 @@ fn resolve_roots(
     Ok(resolved)
 }
 
+fn read_only_files_are_the_resolver_list(
+    provider: HelperId,
+    data_dir: &Path,
+    rules: &[HelperLandlockRule],
+) -> Result<(), String> {
+    const FILES: &[&str] = &["/etc/nsswitch.conf", "/etc/hosts", "/etc/resolv.conf"];
+    let files: Vec<_> = rules
+        .iter()
+        .filter(|rule| rule.name == "READ_ONLY_FILE")
+        .collect();
+    if !matches!(provider, HelperId::Chain) {
+        if files.is_empty() {
+            return Ok(());
+        }
+        return Err(
+            "provider start is refused: a read-only resolver file is not a chain grant".into(),
+        );
+    }
+    for rule in files {
+        let text = rule.path.to_str().unwrap_or("");
+        if !FILES.contains(&text) || rule.mask != 4 || rule.path.starts_with(data_dir) {
+            return Err(format!(
+                "provider start is refused: {} is not a chain resolver file",
+                rule.path.display()
+            ));
+        }
+    }
+    Ok(())
+}
+
 pub(super) fn render(
     component_key: &str,
     data_dir: &Path,
@@ -265,8 +295,15 @@ pub(super) fn render_with_plan(
         );
     }
     let names: Vec<&str> = roots.iter().map(|root| root.name).collect();
-    let metadata = metadata_literals(data_dir)?;
-    let seatbelt = super::macos_profile::render_path_allow_profile(&names, metadata.len())?;
+    let chain = matches!(provider, HelperId::Chain);
+    // Chain's measured profile has no ancestor metadata. The data directory
+    // stays out of the Seatbelt text, so identity/device.key stays unreadable.
+    let metadata = if chain {
+        Vec::new()
+    } else {
+        metadata_literals(data_dir)?
+    };
+    let seatbelt = super::macos_profile::render_path_allow_profile(&names, metadata.len(), chain)?;
     if seatbelt.contains("STORAGE_ROOT")
         || seatbelt.contains("STORAGE_PARENT")
         || seatbelt.contains("identity")
@@ -310,6 +347,7 @@ pub(super) fn render_with_plan(
             "provider start is refused: the Landlock plan reaches identity/device.key".to_string(),
         );
     }
+    read_only_files_are_the_resolver_list(provider, data_dir, &landlock)?;
     Ok((
         HelperConfinement {
             seatbelt,
@@ -437,15 +475,31 @@ mod tests {
                 5,
             )
             .unwrap_or_else(|err| panic!("{component_key}: {err}"));
+            let chain = *component_key == "chain-provider";
             assert!(rendered
                 .seatbelt
                 .starts_with("(version 1)\n(deny default)\n(deny network*)\n"));
-            assert!(!rendered.seatbelt.contains("(allow network"));
-            assert!(
-                !rendered.metadata.is_empty(),
-                "{component_key} metadata literals"
-            );
-            assert!(rendered.metadata.iter().any(|path| path == data_dir));
+            if chain {
+                assert!(rendered.seatbelt.contains(
+                    "(allow network-outbound (remote unix-socket (literal \"/private/var/run/mDNSResponder\")) (remote ip))"
+                ));
+                assert!(rendered.seatbelt.contains(
+                    "(allow file-read* (literal \"/var\") (literal \"/var/run/resolv.conf\"))"
+                ));
+                assert!(!rendered.seatbelt.contains("mach-lookup"));
+                assert!(!rendered.seatbelt.contains("/etc"));
+                assert!(
+                    rendered.metadata.is_empty(),
+                    "chain metadata would name the data directory"
+                );
+            } else {
+                assert!(!rendered.seatbelt.contains("(allow network"));
+                assert!(
+                    !rendered.metadata.is_empty(),
+                    "{component_key} metadata literals"
+                );
+                assert!(rendered.metadata.iter().any(|path| path == data_dir));
+            }
             assert!(rendered
                 .metadata
                 .iter()
@@ -473,19 +527,31 @@ mod tests {
                 } else if quoted(line, "(subpath \"").is_some() || line.contains("(subpath ") {
                     panic!("{component_key} subpath is not a named root: {line}");
                 } else if let Some(path) = quoted(line, "(literal \"") {
-                    assert_eq!(path, "/", "{component_key} literal {path}");
+                    let allowed = if chain {
+                        path == "/"
+                            || path == "/var"
+                            || path == "/var/run/resolv.conf"
+                            || path == "/private/var/run/mDNSResponder"
+                    } else {
+                        path == "/"
+                    };
+                    assert!(allowed, "{component_key} literal {path}");
                 }
             }
             assert_eq!(subpaths, *expected, "{component_key} seatbelt roots");
             assert_eq!(literals.first().copied(), Some("PROVIDER_EXECUTABLE"));
-            assert!(
-                literals.len() > 1
-                    && literals
-                        .iter()
-                        .skip(1)
-                        .all(|name| name.starts_with("META_")),
-                "{component_key} literals {literals:?}"
-            );
+            if chain {
+                assert_eq!(literals, ["PROVIDER_EXECUTABLE"]);
+            } else {
+                assert!(
+                    literals.len() > 1
+                        && literals
+                            .iter()
+                            .skip(1)
+                            .all(|name| name.starts_with("META_")),
+                    "{component_key} literals {literals:?}"
+                );
+            }
             for line in rendered.seatbelt.lines() {
                 if line.contains("META_") {
                     assert!(line.contains("file-read-metadata"), "{line}");
@@ -495,8 +561,26 @@ mod tests {
             }
 
             let (roots, rest): (Vec<_>, Vec<_>) = rendered.landlock.iter().partition(|rule| {
-                rule.name != "PROVIDER_EXECUTABLE" && rule.name != "LANDLOCK_LOADER_PATHS"
+                rule.name != "PROVIDER_EXECUTABLE"
+                    && rule.name != "LANDLOCK_LOADER_PATHS"
+                    && rule.name != "READ_ONLY_FILE"
             });
+            let resolver: Vec<_> = rendered
+                .landlock
+                .iter()
+                .filter(|rule| rule.name == "READ_ONLY_FILE")
+                .collect();
+            if chain {
+                const ALLOWED: &[&str] = &["/etc/nsswitch.conf", "/etc/hosts", "/etc/resolv.conf"];
+                for rule in &resolver {
+                    let path = rule.path.to_str().unwrap();
+                    assert!(ALLOWED.contains(&path), "{path}");
+                    assert_eq!(rule.mask, 4, "{path}");
+                    assert!(!rule.path.starts_with(data_dir));
+                }
+            } else {
+                assert!(resolver.is_empty(), "{component_key} gained resolver files");
+            }
             assert_eq!(roots.len(), expected.len(), "{component_key} root count");
             for (rule, name) in roots.iter().zip(expected.iter()) {
                 let path = data_dir.join(name);

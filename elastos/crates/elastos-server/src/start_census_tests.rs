@@ -345,7 +345,7 @@ fn places() -> Vec<Place> {
             "elastos-server/src/server_infra.rs",
             "setup_server_infrastructure_impl",
             spawn.clone(),
-            13,
+            12,
             P2_2,
         ),
         place(
@@ -353,7 +353,7 @@ fn places() -> Vec<Place> {
             "spawn_allow_listed_provider",
             spawn.clone(),
             2,
-            "localhost and object path allow-list; windows stays plain",
+            "localhost, object, and chain path allow-list; windows stays plain",
         ),
         place(
             "elastos-server/src/server_infra.rs",
