@@ -94,7 +94,7 @@ pub(crate) async fn start_gateway_server_with_ready(
     .await
 }
 
-async fn start_gateway_server_with_shutdown(
+pub(super) async fn start_gateway_server_with_shutdown(
     addr: &str,
     provider_registry: Option<Arc<ProviderRegistry>>,
     collaboration: GatewayCollaborationContext,
@@ -111,6 +111,7 @@ async fn start_gateway_server_with_shutdown(
     crate::auth::verify_auth_audit_chain_ready(&data_dir)?;
     let listener = TcpListener::bind(addr).await?;
     let local_control_registry = provider_registry.clone();
+    let agent_providers = provider_registry.clone();
     let gateway_api_url = if addr.parse::<axum::http::uri::Authority>()?.port_u16() == Some(0) {
         trusted_gateway_api_url(&listener.local_addr()?.to_string())?
     } else {
@@ -174,6 +175,13 @@ async fn start_gateway_server_with_shutdown(
         }
         None => None,
     };
+    let agent_plane = match crate::api::agent_plane::start(&data_dir, agent_providers).await {
+        Ok(plane) => Some(plane),
+        Err(error) => {
+            tracing::info!(%error, "agent runtime stayed down");
+            None
+        }
+    };
     // Every Home start, local or public and whoever launched it, publishes its
     // coordinates here. Cleanup then proves this Home ready before removing files.
     let backup_cleanup = gateway_local_control.as_ref().map(|_| {
@@ -218,6 +226,9 @@ async fn start_gateway_server_with_shutdown(
             (&mut server).await
         }
     };
+    if let Some(plane) = agent_plane {
+        plane.shutdown().await;
+    }
     if let Some(task) = backup_cleanup {
         task.abort();
     }

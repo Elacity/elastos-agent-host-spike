@@ -655,6 +655,18 @@ struct RuntimeAgentLaunchResponse {
     status: String,
 }
 
+/// The agent Runtime's coordinates, or the name of a plane task that has ended.
+async fn live_agent_coords(
+    data_dir: &FsPath,
+) -> anyhow::Result<crate::runtime_control::RuntimeCoords> {
+    if let Some(name) = crate::api::agent_plane::task_fault(data_dir) {
+        anyhow::bail!(name);
+    }
+    crate::api::agent_plane::live_coords(data_dir)
+        .await
+        .ok_or_else(|| anyhow::anyhow!("agent runtime is not running"))
+}
+
 /// Ask the live Home Runtime to start one agent. `capsule_dir` is the
 /// directory `verify_agent_host` already checked. The grant was minted by the
 /// caller after the passkey step-up was consumed.
@@ -664,9 +676,7 @@ pub(super) async fn launch_runtime_agent(
     agent_id: &str,
     launch_grant: &str,
 ) -> anyhow::Result<StartedRuntimeAgent> {
-    let coords = load_live_runtime_coords(data_dir)
-        .await
-        .ok_or_else(|| anyhow::anyhow!("local runtime is not running"))?;
+    let coords = live_agent_coords(data_dir).await?;
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(60))
         .build()?;
@@ -759,9 +769,7 @@ pub(super) async fn stop_runtime_agent(
     data_dir: &FsPath,
     agent_id: &str,
 ) -> anyhow::Result<RuntimeAgentStop> {
-    let coords = load_live_runtime_coords(data_dir)
-        .await
-        .ok_or_else(|| anyhow::anyhow!("local runtime is not running"))?;
+    let coords = live_agent_coords(data_dir).await?;
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(60))
         .build()?;

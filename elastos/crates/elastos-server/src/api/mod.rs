@@ -5,6 +5,7 @@
 //! - Capability request/grant/deny flow
 //! - Health and status endpoints
 
+pub(crate) mod agent_plane;
 pub mod auth_gateway;
 pub mod browser_capsules;
 pub mod browser_engine_protocol;

@@ -95,6 +95,11 @@ pub struct ServerConfig {
     pub attach_secret: Option<String>,
     /// Operator-approved host helpers that must live as long as this API server.
     pub host_helpers: Vec<HostHelperProcess>,
+    /// Serve the stored-agent routes on this Runtime.
+    pub agents_only: bool,
+    /// A listener this process already holds. The plain server uses it and
+    /// does not bind again. `None` binds `addr`.
+    pub listener: Option<TcpListener>,
 }
 
 pub struct HostHelperProcess {
@@ -169,6 +174,9 @@ pub(crate) fn shell_capability_routes(
 /// `start_server_with_sessions` serves this router, and the test server
 /// builds it too, so tests reach the routes `elastos serve` serves.
 pub(crate) fn build_router(config: ServerConfig) -> anyhow::Result<Router> {
+    if config.agents_only {
+        return crate::api::agent_plane::router(config);
+    }
     let ServerConfig {
         runtime,
         session_registry,
@@ -188,6 +196,8 @@ pub(crate) fn build_router(config: ServerConfig) -> anyhow::Result<Router> {
         ready_tx: _,
         attach_secret,
         host_helpers: _,
+        agents_only: _,
+        listener: _,
     } = config;
     // Runtime keeps this control API on its own configured origin.
     // Browser capsules use the gateway launch boundary.
@@ -567,8 +577,12 @@ pub(crate) fn build_router(config: ServerConfig) -> anyhow::Result<Router> {
 /// Start the HTTP API server on the router `build_router` makes from `config`.
 pub async fn start_server_with_sessions(mut config: ServerConfig) -> anyhow::Result<()> {
     let _host_helpers = std::mem::take(&mut config.host_helpers);
+    let bound = config.listener.take();
     let (ready_tx, tls_config) = (config.ready_tx.take(), config.tls_config.clone());
     let (addr, has_capsule) = (config.addr.clone(), config.capsule_dir.is_some());
+    if tls_config.is_some() && bound.is_some() {
+        anyhow::bail!("a bound listener is served without TLS");
+    }
     let app = build_router(config)?;
 
     // Start server with or without TLS
@@ -586,7 +600,10 @@ pub async fn start_server_with_sessions(mut config: ServerConfig) -> anyhow::Res
             .serve(app.into_make_service())
             .await?;
     } else {
-        let listener = TcpListener::bind(&addr).await?;
+        let listener = match bound {
+            Some(listener) => listener,
+            None => TcpListener::bind(&addr).await?,
+        };
         tracing::info!("API server listening on http://{} (sessions enabled)", addr);
         if has_capsule {
             tracing::info!("Web capsule available at http://{}", addr);
@@ -639,6 +656,8 @@ pub(crate) mod tests {
             ready_tx: None,
             attach_secret: None,
             host_helpers: Vec::new(),
+            agents_only: false,
+            listener: None,
         })
         .expect("the test server's router builds")
     }
@@ -682,6 +701,86 @@ pub(crate) mod tests {
             }
         }
         assert!(wrong.is_empty(), "{wrong:#?}");
+    }
+
+    /// The socket passed in is the socket that answers. `addr` is a port this
+    /// test does not bind, so a drop-and-bind would miss the request.
+    #[tokio::test]
+    async fn a_bound_listener_is_the_socket_that_serves() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Arc::new(
+            elastos_storage::providers::LocalFSProvider::new(dir.path().join("storage"))
+                .await
+                .unwrap(),
+        );
+        let runtime = Arc::new(Runtime::with_providers_and_component(
+            storage,
+            Vec::new(),
+            None,
+        ));
+        let audit = Arc::new(AuditLog::new());
+        let sessions = Arc::new(SessionRegistry::new(audit.clone()));
+        let store = Arc::new(elastos_runtime::capability::CapabilityStore::new());
+        let manager = Arc::new(CapabilityManager::new(
+            store.clone(),
+            audit.clone(),
+            Arc::new(elastos_runtime::primitives::metrics::MetricsManager::new()),
+        ));
+        let pending = Arc::new(PendingRequestStore::new(audit));
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(start_server_with_sessions(ServerConfig {
+            runtime,
+            session_registry: sessions,
+            capability_manager: manager,
+            capability_store: store,
+            pending_store: pending,
+            namespace_store: None,
+            provider_registry: None,
+            audit_log: None,
+            identity_state: None,
+            docs_dir: None,
+            addr: "127.0.0.1:1".to_string(),
+            capsule_dir: None,
+            data_dir: None,
+            tls_config: None,
+            supervisor: None,
+            ready_tx: Some(ready_tx),
+            attach_secret: None,
+            host_helpers: Vec::new(),
+            agents_only: false,
+            listener: Some(listener),
+        }));
+        let _stop = AbortOnDrop(task.abort_handle());
+        let ready = tokio::time::timeout(std::time::Duration::from_secs(5), ready_rx).await;
+        assert!(
+            ready.ok().and_then(Result::ok).is_some(),
+            "the server did not keep the bound listener"
+        );
+        let url = format!("http://127.0.0.1:{port}/api/health");
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(2))
+            .build()
+            .unwrap();
+        let mut status = 0;
+        for _ in 0..50 {
+            if let Ok(response) = client.get(&url).send().await {
+                status = response.status().as_u16();
+                if status == 200 {
+                    break;
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert_eq!(status, 200, "health on the bound port {port} was {status}");
+    }
+
+    struct AbortOnDrop(tokio::task::AbortHandle);
+    impl Drop for AbortOnDrop {
+        fn drop(&mut self) {
+            self.0.abort();
+        }
     }
 
     #[tokio::test]

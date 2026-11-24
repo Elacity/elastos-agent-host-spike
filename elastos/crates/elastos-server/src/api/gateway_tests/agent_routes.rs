@@ -112,6 +112,71 @@ mod off {
         assert_eq!(std::fs::read(agent_file(dir.path())).unwrap(), written);
         assert_eq!(audit_len(dir.path()), events);
     }
+
+    /// A default build leaves agents off. Start returns the feature refusal
+    /// before it binds or writes, so this process gains no listener and the
+    /// data folder gains no coordinates file and no attach secret.
+    #[tokio::test]
+    async fn a_default_build_starts_no_agent_listener_secret_or_coordinates() {
+        let source = include_str!("../agent_plane.rs");
+        let start = source.find("pub(crate) async fn start(").expect("start");
+        let end = source[start..]
+            .find("\npub(crate) fn ")
+            .map(|at| start + at)
+            .unwrap_or(source.len());
+        let body = &source[start..end];
+        let gate = body.find("build_allows()").expect("the build gate");
+        let owned = body
+            .find("start_owned(")
+            .expect("start reaches the owned runtime");
+        assert!(
+            gate < owned,
+            "the build gate runs after the owned runtime can bind"
+        );
+
+        let temp = tempfile::tempdir().unwrap();
+        let data = temp.path().join("data");
+        std::fs::create_dir_all(&data).unwrap();
+        let _lock =
+            crate::host_lock::acquire_host_process_lock(&data, "gateway", "127.0.0.1:0").unwrap();
+        let before = tcp_listeners();
+        let result = crate::api::agent_plane::start(&data, None).await;
+        let after = tcp_listeners();
+        let coords = crate::api::agent_plane::coords_path(&data);
+        let refused = result
+            .as_ref()
+            .err()
+            .is_some_and(|error| error.to_string().contains(crate::agents::FEATURE_OFF));
+        assert!(
+            refused && !coords.exists() && before == after,
+            "a default build started the agent runtime: refused={refused} coords={} before={before:?} after={after:?} result={result:?}",
+            coords.exists()
+        );
+        if let Ok(plane) = result {
+            plane.shutdown().await;
+        }
+    }
+
+    fn tcp_listeners() -> Vec<String> {
+        let output = std::process::Command::new("/usr/sbin/lsof")
+            .args([
+                "-nP",
+                "-a",
+                "-p",
+                &std::process::id().to_string(),
+                "-iTCP",
+                "-sTCP:LISTEN",
+            ])
+            .output()
+            .expect("lsof");
+        let mut rows: Vec<String> = String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .skip(1)
+            .map(str::to_string)
+            .collect();
+        rows.sort();
+        rows
+    }
 }
 
 #[cfg(feature = "prototype-agents")]

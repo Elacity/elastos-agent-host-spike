@@ -492,6 +492,8 @@ async fn serve_runtime(data: &std::path::Path) -> RuntimeHost {
         ready_tx: None,
         attach_secret: Some(secret.clone()),
         host_helpers: Vec::new(),
+        agents_only: false,
+        listener: None,
     })
     .unwrap()
     .layer(axum::middleware::from_fn_with_state(
@@ -526,15 +528,19 @@ async fn serve_runtime(data: &std::path::Path) -> RuntimeHost {
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
     assert!(healthy, "the runtime launch route did not answer health");
-    std::fs::write(
-        crate::runtime_control::home_runtime_coord_path(data),
-        serde_json::to_vec(&json!({
-            "api_url": url,
-            "attach_secret": secret,
-            "pid": std::process::id(),
-            "runtime_kind": crate::runtime_control::RUNTIME_KIND_MANAGED_HOME,
-        }))
-        .unwrap(),
+    crate::runtime_control::write_runtime_coords(
+        &crate::api::agent_plane::coords_path(data),
+        &crate::runtime_control::RuntimeCoords {
+            api_url: url,
+            attach_secret: secret,
+            pid: std::process::id(),
+            runtime_kind: "agent".to_string(),
+            binary_sha256: String::new(),
+            policy_sha256: String::new(),
+            dependency_sha256: String::new(),
+            generation: String::new(),
+            home_url: String::new(),
+        },
     )
     .unwrap();
     RuntimeHost {
@@ -866,7 +872,34 @@ async fn started_by(world: &World, person: &Person, agent_id: &str) -> Value {
 }
 
 async fn started(world: &World, agent_id: &str) -> Value {
-    started_by(world, &world.admin, agent_id).await
+    let value = started_by(world, &world.admin, agent_id).await;
+    // The launch route registers the row and its session record before it
+    // answers. A Stop cannot miss a guest that is still live. Wait until that
+    // row is visible, and fail here with the reason when it is not, rather
+    // than letting a later Stop report 409.
+    for _ in 0..40 {
+        let rows = world.runtime.runtime.list_capsules().await;
+        if rows
+            .iter()
+            .any(|info| info.ended_at.is_none() && info.principal.as_deref() == Some(agent_id))
+        {
+            return value;
+        }
+        let ended: Vec<_> = rows
+            .iter()
+            .filter(|info| info.principal.as_deref() == Some(agent_id))
+            .map(|info| format!("{} cause={:?}", info.status, info.cause))
+            .collect();
+        if !ended.is_empty() {
+            panic!(
+                "Start answered for {agent_id} and that guest has already ended, so a Stop would 409. The row was registered before the answer; it is not missing. {ended:?} answer={value}"
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    panic!(
+        "Start answered for {agent_id} and no row was registered. The launch route registers the row before it answers, so a Stop would 409 for a guest the owner was told had started. answer={value}"
+    );
 }
 
 async fn runtime_stop(world: &World, body: Value) -> (StatusCode, String) {
@@ -1112,8 +1145,17 @@ async fn owner_stop_reaches_a_guest_when_the_agent_or_the_home_is_off() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "retire: {body}");
+    assert_eq!(
+        live_principal(&live(&world).await, &world.agent_b),
+        0,
+        "retire ended that guest"
+    );
     let (status, body) = stop(&world, &world.admin, &world.agent_b).await;
-    assert_eq!(status, StatusCode::OK, "stop while retired: {body}");
+    assert_eq!(status, StatusCode::CONFLICT, "stop while retired: {body}");
+    assert!(
+        body.contains("no running session") || body.contains("already stopped"),
+        "{body}"
+    );
     assert_eq!(live_principal(&live(&world).await, &world.agent_b), 0);
 
     let (status, body) = call(
@@ -1157,6 +1199,34 @@ async fn owner_stop_reaches_a_guest_when_the_agent_or_the_home_is_off() {
         "stop while the Home has agents off: {body}"
     );
     assert_eq!(live_principal(&live(&world).await, &world.agent_a), 0);
+}
+
+#[tokio::test]
+async fn another_owner_cannot_retire_a_live_guest() {
+    let world = world().await;
+    started(&world, &world.agent_a).await;
+    let (status, body) = call(
+        &world.app,
+        "/api/apps/system/agents/retire",
+        &world.other.system_token,
+        "null",
+        Some(json!({ "agent_id": world.agent_a })),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "another owner's retire: {body}"
+    );
+    assert!(
+        body.contains("the caller owns no agent with that id"),
+        "{status} {body}"
+    );
+    assert_eq!(
+        live_principal(&live(&world).await, &world.agent_a),
+        1,
+        "another owner's retire ended the guest: {status} {body}"
+    );
 }
 
 #[tokio::test]

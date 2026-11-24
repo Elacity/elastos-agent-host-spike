@@ -2,6 +2,8 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+#[cfg(test)]
+use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex as StdMutex, RwLock as StdRwLock};
 use tokio::sync::RwLock;
@@ -20,6 +22,22 @@ use elastos_runtime::primitives::audit::AuditEvent;
 use elastos_runtime::primitives::SecureTimestamp;
 use elastos_runtime::provider::ProviderRegistry;
 use elastos_runtime::signature::{hash_content, SignatureVerifier};
+
+/// Test only: the next component host call panics inside the guest's call.
+#[cfg(test)]
+static PLANT_HOST_PANIC: AtomicBool = AtomicBool::new(false);
+
+/// Plant one panic in the next host call a guest makes. The flag is consumed
+/// by that call. Release builds do not carry this.
+#[cfg(all(test, feature = "prototype-agents"))]
+pub(crate) fn plant_host_panic() {
+    PLANT_HOST_PANIC.store(true, Ordering::Release);
+}
+
+#[cfg(test)]
+fn take_planted_host_panic() -> bool {
+    PLANT_HOST_PANIC.swap(false, Ordering::AcqRel)
+}
 
 /// The status of an activation that answered `starting` and whose worker has
 /// not yet reported that the guest entered `run`.
@@ -1186,6 +1204,10 @@ impl Runtime {
             let host_launch_contents = self.launch_contents.clone();
             let host_handle = tokio::runtime::Handle::current();
             component.set_bus_hostcall(Arc::new(move |line, capsule_id, principal_id| {
+                #[cfg(test)]
+                if take_planted_host_panic() {
+                    panic!("planted host panic");
+                }
                 let manifest_capabilities = host_manifest_capabilities
                     .read()
                     .ok()

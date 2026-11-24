@@ -116,6 +116,12 @@ pub async fn launch_capsule(
     reject_raw_launch_principal_id(req.principal_id.as_deref())?;
     let (launcher, admission, grant_name, agent_audit) = match req.agent_id.as_deref() {
         None => {
+            if crate::api::agent_plane::serves(data_dir.as_deref()) {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    "this runtime launches a stored agent".to_string(),
+                ));
+            }
             let (launcher, grant_name) = principal_from_launch_request(
                 data_dir.as_deref(),
                 path,
