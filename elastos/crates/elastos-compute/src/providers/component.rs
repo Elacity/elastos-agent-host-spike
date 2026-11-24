@@ -698,6 +698,8 @@ impl ComponentProvider {
             if cancel_requested.load(Ordering::Acquire) {
                 return Ok(UpdateDeadline::Interrupt);
             }
+            // Ticks are reset when an event is delivered. This refill then
+            // restores fuel, so an event source must bound those ticks.
             context.set_fuel(fuel)?;
             Ok(
                 if deadline_ticks.fetch_add(1, Ordering::AcqRel) + 1 >= max_ticks {
@@ -1818,13 +1820,14 @@ mod tests {
     }
 
     /// One tick is four yields. The clock moves only when a guest gives the
-    /// thread back, so the row does not use a wall-clock budget.
+    /// thread back, so the row does not use a wall-clock budget. Both guests
+    /// use the production fuel and slice. A slice as large as that fuel lets
+    /// the busy guest run without yielding.
     #[tokio::test(flavor = "current_thread")]
     async fn v2_busy_guest_does_not_finish_before_a_second_guest() {
         const TURNS_PER_TICK: u64 = 4;
         const SHORT_STARTS_AT: u64 = 2;
         const BUSY_TICKS: u64 = 12;
-        const SLICE: u64 = 1_000;
         let engine = quiet_v2_engine();
         let busy = Component::new(
             &engine,
@@ -1840,8 +1843,15 @@ mod tests {
         let (engine_busy, engine_short, clock_engine) = (engine.clone(), engine.clone(), engine);
         let mut work = std::pin::pin!(async move {
             let busy_run = async move {
-                let ending =
-                    drive_v2_guest(&engine_busy, busy, 32 * SLICE, SLICE, BUSY_TICKS, false).await;
+                let ending = drive_v2_guest(
+                    &engine_busy,
+                    busy,
+                    V2_FUEL,
+                    V2_FUEL_SLICE,
+                    BUSY_TICKS,
+                    false,
+                )
+                .await;
                 (ending, busy_turns.load(Ordering::Relaxed) / TURNS_PER_TICK)
             };
             let short_run = async move {
