@@ -1,5 +1,65 @@
 use super::*;
+use std::cell::RefCell;
 use std::os::unix::fs::{symlink, PermissionsExt};
+
+thread_local! {
+    static AFTER_VERIFIED_READ: RefCell<Option<Box<dyn Fn()>>> = RefCell::new(None);
+    static SYNC_PATHS: RefCell<Option<Vec<std::path::PathBuf>>> = const { RefCell::new(None) };
+}
+
+pub(crate) fn after_verified_release_read() {
+    AFTER_VERIFIED_READ.with(|slot| {
+        if let Some(hook) = slot.borrow().as_ref() {
+            hook();
+        }
+    });
+}
+
+pub(crate) struct VerifiedReadInterrupt;
+
+impl VerifiedReadInterrupt {
+    pub(crate) fn arm(hook: impl Fn() + 'static) -> Self {
+        AFTER_VERIFIED_READ.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
+        Self
+    }
+}
+
+impl Drop for VerifiedReadInterrupt {
+    fn drop(&mut self) {
+        AFTER_VERIFIED_READ.with(|slot| *slot.borrow_mut() = None);
+    }
+}
+
+pub(crate) fn note_sync(path: &Path) {
+    SYNC_PATHS.with(|slot| {
+        if let Some(paths) = slot.borrow_mut().as_mut() {
+            paths.push(path.to_path_buf());
+        }
+    });
+}
+
+pub(crate) struct SyncCapture;
+
+impl SyncCapture {
+    pub(crate) fn start() -> Self {
+        SYNC_PATHS.with(|slot| *slot.borrow_mut() = Some(Vec::new()));
+        Self
+    }
+
+    pub(crate) fn includes(&self, path: &Path) -> bool {
+        SYNC_PATHS.with(|slot| {
+            slot.borrow()
+                .as_ref()
+                .is_some_and(|paths| paths.iter().any(|saved| saved == path))
+        })
+    }
+}
+
+impl Drop for SyncCapture {
+    fn drop(&mut self) {
+        SYNC_PATHS.with(|slot| *slot.borrow_mut() = None);
+    }
+}
 
 use serde_json::{json, Value};
 
@@ -716,6 +776,46 @@ impl Fixture {
         head["payload"]["latest_release_cid"] = json!(raw_cid(&self.release));
         head["payload"]["release_sha256"] = json!(hex::encode(Sha256::digest(&self.release)));
         self.head = signed(head["payload"].take(), "elastos.release.head.v1", 71);
+        self.source.head_cid = raw_cid(&self.head);
+        self.publish();
+    }
+
+    pub(crate) fn publish_consumed(&self) {
+        self.publish_consumed_pair();
+    }
+
+    /// A publisher-signed pair at `version` over this install's current runtime
+    /// and components. The Home's source record is left unchanged.
+    pub(crate) fn release_pair_at_version(&self, version: &str) -> (Vec<u8>, Vec<u8>) {
+        let runtime = fs::read(&self.binary).unwrap();
+        let components = fs::read(self.data.join("components.json")).unwrap();
+        let release = signed(
+            json!({
+                "schema":"elastos.release/v1", "version": version, "channel":"stable",
+                "platforms": {(crate::update::detect_release_platform()): {
+                    "binary": descriptor(&runtime), "components": descriptor(&components)
+                }}
+            }),
+            "elastos.release.v1",
+            71,
+        );
+        let head = signed(
+            json!({
+                "schema":"elastos.release.head/v1", "version": version, "channel":"stable",
+                "latest_release_cid": raw_cid(&release),
+                "release_sha256": hex::encode(Sha256::digest(&release))
+            }),
+            "elastos.release.head.v1",
+            71,
+        );
+        (head, release)
+    }
+
+    /// Point this Home's source record at an already signed pair and publish it.
+    pub(crate) fn publish_exact(&mut self, version: &str, head: Vec<u8>, release: Vec<u8>) {
+        self.head = head;
+        self.release = release;
+        self.source.installed_version = version.to_string();
         self.source.head_cid = raw_cid(&self.head);
         self.publish();
     }
