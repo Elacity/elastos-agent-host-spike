@@ -74,6 +74,12 @@ const OWNER_ROOT_ENVELOPE_SALT: &str = "unsalted";
 const NOT_REGULAR: &str = "agent file path is not a regular file";
 #[cfg(unix)]
 const MODE_TOO_WIDE: &str = "agent file mode is wider than 0600";
+#[cfg(unix)]
+const NOT_OWNER: &str = "agent file owner is not this Runtime user";
+#[cfg(unix)]
+const TOO_MANY_LINKS: &str = "agent file has more than one link";
+#[cfg(unix)]
+const FILE_CHANGED: &str = "agent file changed while it was read";
 const CANNOT_READ: &str = "agent file cannot be read";
 const DOES_NOT_PARSE: &str = "agent file does not parse";
 const NOT_OUR_FORM: &str = "agent file holds a field or value this Runtime does not write";
@@ -110,6 +116,12 @@ const AGENT_EVENT_TYPES: &[&str] = &[
 #[cfg(test)]
 thread_local! {
     static LOAD_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static READ_SEAM: std::cell::Cell<Option<fn(&Path)>> = const { std::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
+pub(crate) fn set_read_seam(seam: Option<fn(&Path)>) {
+    READ_SEAM.with(|slot| slot.set(seam));
 }
 
 thread_local! {
@@ -359,8 +371,9 @@ fn parse_anchor_reason(reason: &str) -> Option<(u64, String)> {
 }
 
 /// The file's bytes, read through one handle, or `None` when there is no
-/// file. Refuses a path that is not a regular file under regular
-/// directories, and a file anyone but its owner can read or write.
+/// file. The open uses `O_NOFOLLOW`. Owner, link count, a regular file, and
+/// mode are read from that handle. The path must still name that same file
+/// before the handle is read.
 fn read_agent_file(data_dir: &Path, path: &Path) -> Result<Option<ReadFile>, &'static str> {
     #[cfg(windows)]
     {
@@ -369,17 +382,11 @@ fn read_agent_file(data_dir: &Path, path: &Path) -> Result<Option<ReadFile>, &'s
     }
     #[cfg(not(windows))]
     {
-        match std::fs::symlink_metadata(path) {
-            Ok(metadata) if metadata.is_file() => {}
-            Ok(_) => return Err(NOT_REGULAR),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(_) => return Err(CANNOT_READ),
-        }
-        // The file exists, so each parent exists: this only checks them.
-        let parents_regular = path.parent().is_some_and(|parent| {
-            crate::auth_state_files::ensure_regular_auth_parent(data_dir, parent).is_ok()
-        });
-        if !parents_regular {
+        // A symlinked parent is refused before the open. `O_NOFOLLOW` covers
+        // the last component only.
+        if path.parent().is_some_and(|parent| {
+            crate::auth_state_files::ensure_regular_auth_parent(data_dir, parent).is_err()
+        }) {
             return Err(NOT_REGULAR);
         }
         let mut options = std::fs::OpenOptions::new();
@@ -389,17 +396,53 @@ fn read_agent_file(data_dir: &Path, path: &Path) -> Result<Option<ReadFile>, &'s
             use std::os::unix::fs::OpenOptionsExt;
             options.custom_flags(libc::O_NOFOLLOW);
         }
-        let mut file = options.open(path).map_err(|_| NOT_REGULAR)?;
+        let mut file = match options.open(path) {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(_) => {
+                return Err(match std::fs::symlink_metadata(path) {
+                    Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
+                        NOT_REGULAR
+                    }
+                    Ok(_) => CANNOT_READ,
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+                    Err(_) => CANNOT_READ,
+                });
+            }
+        };
         let metadata = file.metadata().map_err(|_| CANNOT_READ)?;
-        if !metadata.is_file() {
-            return Err(NOT_REGULAR);
-        }
         #[cfg(unix)]
         {
-            use std::os::unix::fs::PermissionsExt;
+            use std::os::unix::fs::{MetadataExt, PermissionsExt};
+            if !metadata.is_file() {
+                return Err(NOT_REGULAR);
+            }
+            if metadata.uid() != unsafe { libc::geteuid() } {
+                return Err(NOT_OWNER);
+            }
+            if metadata.nlink() != 1 {
+                return Err(TOO_MANY_LINKS);
+            }
             if metadata.permissions().mode() & 0o7777 & !0o600 != 0 {
                 return Err(MODE_TOO_WIDE);
             }
+            #[cfg(test)]
+            READ_SEAM.with(|slot| {
+                if let Some(seam) = slot.get() {
+                    seam(path);
+                }
+            });
+            let still = std::fs::symlink_metadata(path).map_err(|_| FILE_CHANGED)?;
+            if !still.file_type().is_file()
+                || still.dev() != metadata.dev()
+                || still.ino() != metadata.ino()
+            {
+                return Err(FILE_CHANGED);
+            }
+        }
+        #[cfg(not(unix))]
+        if !metadata.is_file() {
+            return Err(NOT_REGULAR);
         }
         let commit = commit_mark_of(&file);
         let mut bytes = Vec::new();

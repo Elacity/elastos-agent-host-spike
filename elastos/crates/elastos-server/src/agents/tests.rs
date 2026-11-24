@@ -3127,6 +3127,72 @@ fn agent_lock_then_sign_in_lock() {
     writer.join().unwrap();
 }
 
+#[test]
+fn a_hard_link_of_the_agent_file_is_refused() {
+    let home = Home::new();
+    enable(&home);
+    let link = home.agent_file().with_file_name("agent-records-link.json");
+    std::fs::hard_link(home.agent_file(), &link).unwrap();
+    assert_eq!(home.refusal(), TOO_MANY_LINKS);
+    std::fs::remove_file(&link).unwrap();
+    assert!(matches!(home.load(), AgentFile::Loaded(_)));
+}
+
+#[test]
+fn a_path_replaced_before_the_read_is_refused() {
+    let home = Home::new();
+    enable(&home);
+    let opened = home.agent_bytes();
+    set_read_seam(Some(replace_agent_path));
+    struct Clear;
+    impl Drop for Clear {
+        fn drop(&mut self) {
+            set_read_seam(None);
+        }
+    }
+    let _clear = Clear;
+    match home.load() {
+        AgentFile::Unavailable(reason) => assert_eq!(reason, FILE_CHANGED),
+        other => panic!("the replaced path was read: {other:?}"),
+    }
+    assert_eq!(home.agent_bytes(), b"{}\n");
+    assert_ne!(home.agent_bytes(), opened.as_slice());
+}
+
+fn replace_agent_path(path: &Path) {
+    let other = path.with_file_name("agent-records-other.json");
+    std::fs::write(&other, b"{}\n").unwrap();
+    set_mode(&other, 0o600);
+    std::fs::rename(&other, path).unwrap();
+}
+
+#[test]
+fn another_owners_agent_file_is_refused_where_the_owner_can_be_set() {
+    let home = Home::new();
+    enable(&home);
+    let path = home.agent_file();
+    let c_path = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).unwrap();
+    let uid = unsafe { libc::geteuid() };
+    set_mode(&path, 0o644);
+    let changed = unsafe { libc::chown(c_path.as_ptr(), uid.wrapping_add(1), libc::gid_t::MAX) };
+    if changed != 0 {
+        let error = std::io::Error::last_os_error();
+        set_mode(&path, 0o600);
+        eprintln!("chown was not permitted: {error}");
+        return;
+    }
+    struct Restore(*const libc::c_char, libc::uid_t);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            unsafe {
+                libc::chown(self.0, self.1, libc::gid_t::MAX);
+            }
+        }
+    }
+    let _restore = Restore(c_path.as_ptr(), uid);
+    assert_eq!(home.refusal(), NOT_OWNER);
+}
+
 fn wait_lock_stage(stage: &str) {
     let started = std::time::Instant::now();
     while lock_order_stage() != stage {
