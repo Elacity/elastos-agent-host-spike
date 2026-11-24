@@ -9,8 +9,6 @@
 
 use super::rights::AdmittedRights;
 use super::rights_table::RuntimeProviderId;
-use std::ffi::CString;
-use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
@@ -125,23 +123,9 @@ fn current_user() -> u32 {
             "provider start is refused: {name} resolves outside the data directory"
         ));
     }
-    let (dev, ino) = (metadata.dev(), metadata.ino());
-    let c_path = CString::new(path.as_os_str().as_bytes())
-        .map_err(|_| format!("provider start is refused: {name} contains NUL"))?;
-    // The same open the installer repeats at launch. Dropping the descriptor
-    // closes it; render only needed the identity check.
-    let _held = super::root_pin::open_pinned_directory(
-        &c_path,
-        super::root_pin::DIRECTORY_OPEN_FLAGS,
-        dev,
-        ino,
-    )
-    .map_err(|errno| {
-        format!(
-            "provider start is refused: {name} is not the directory that was checked: errno {errno}"
-        )
-    })?;
-    Ok((dev, ino))
+    // Linux re-opens this directory in the child. macOS re-opens it immediately
+    // before sandbox-exec. Render records the device and inode from this stat.
+    Ok((metadata.dev(), metadata.ino()))
 }
 
 fn resolve_roots(
@@ -617,7 +601,6 @@ mod tests {
 
     #[test]
     fn an_updated_home_fences_helpers_and_keeps_existing_files() {
-        use std::os::unix::fs::MetadataExt;
         let held = tempfile::tempdir().unwrap();
         let data = old_home(held.path());
         assert_old_home_fenced(&data);
@@ -636,15 +619,24 @@ mod tests {
             canonical.display()
         );
         assert_old_home_fenced(&tmp_data);
+    }
 
+    /// A second writable volume. `cargo test` lists this ignored. Running it
+    /// with `--ignored` fences that volume, or fails when the machine has none.
+    /// `test-elastos` does not pass `--ignored`, and no CI job has a second
+    /// volume, so the job lists this ignored and does not run it for real.
+    #[test]
+    #[ignore = "needs a second writable volume; test-elastos lists this ignored and does not run it"]
+    fn an_updated_home_on_another_volume_is_fenced() {
+        use std::os::unix::fs::MetadataExt;
         let root_dev = std::fs::metadata("/").unwrap().dev();
         let mut other = None;
-        for mount in ["/Volumes", "/mnt", "/media"] {
-            let Ok(entries) = std::fs::read_dir(mount) else {
-                continue;
-            };
-            for entry in entries.flatten() {
-                let path = entry.path();
+        for mount in ["/dev/shm", "/Volumes", "/mnt", "/media"] {
+            let mut candidates = vec![std::path::PathBuf::from(mount)];
+            if let Ok(entries) = std::fs::read_dir(mount) {
+                candidates.extend(entries.flatten().map(|entry| entry.path()));
+            }
+            for path in candidates {
                 let Ok(meta) = std::fs::metadata(&path) else {
                     continue;
                 };
@@ -660,15 +652,15 @@ mod tests {
                 break;
             }
         }
-        if let Some(dir) = other {
-            let data = old_home(dir.path());
-            let dev = std::fs::metadata(&data).unwrap().dev();
-            assert_ne!(dev, root_dev, "the other volume is the boot volume");
-            assert_old_home_fenced(&data);
-            eprintln!("other-volume {}", data.display());
-        } else {
+        let Some(dir) = other else {
             eprintln!("other-volume none");
-        }
+            panic!("no second writable volume; this test fails instead of passing");
+        };
+        let data = old_home(dir.path());
+        let dev = std::fs::metadata(&data).unwrap().dev();
+        assert_ne!(dev, root_dev, "the other volume is the boot volume");
+        assert_old_home_fenced(&data);
+        eprintln!("other-volume {}", data.display());
     }
 
     #[test]

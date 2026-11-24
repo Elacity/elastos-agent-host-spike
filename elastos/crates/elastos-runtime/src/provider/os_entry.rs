@@ -6,9 +6,11 @@
 //! opens the path again and refuses when that directory is different, before
 //! the plan and the fork. macOS checks the same directory identity, then starts
 //! the provider through `sandbox-exec` with the rendered Seatbelt profile.
-//! Every other OS refuses before creating a process. The launcher and the
-//! Linux installer are private children of this module. The child path between
-//! fork and exec stays in `failure_record` and is unchanged here.
+//! Unix-like systems other than Linux and macOS refuse before creating a
+//! process. Windows fences are P2-11, parked, and are not this refusal. The
+//! launcher and the Linux installer are private children of this module. The
+//! child path between fork and exec stays in `failure_record` and is unchanged
+//! here.
 
 use super::rights::AdmittedRights;
 use super::rights_table::{self, RuntimeProviderId};
@@ -179,47 +181,14 @@ fn start_path_allow_os(
     }
     #[cfg(all(not(elastos_unsupported_os_check), target_os = "macos"))]
     {
-        let (confinement, _plan) = super::path_allow::render_with_plan(
+        let (confinement, plan) = super::path_allow::render_with_plan(
             provider,
             admitted,
             data_dir,
             executable.path(),
             5,
         )?;
-        let prepared = executable.verify_at_spawn()?;
-        let binary = std::fs::canonicalize(prepared.exec_path()).map_err(|error| {
-            format!("provider start is refused: cannot resolve provider executable: {error}")
-        })?;
-        let mut defines = Vec::new();
-        for rule in &confinement.landlock {
-            if matches!(
-                rule.0,
-                "PROVIDER_EXECUTABLE" | "LANDLOCK_LOADER_PATHS" | "READ_ONLY_FILE"
-            ) {
-                continue;
-            }
-            defines.push((rule.0.to_string(), rule.1.clone()));
-        }
-        for (index, path) in confinement.metadata.iter().enumerate() {
-            defines.push((format!("META_{index}"), path.clone()));
-        }
-        defines.push(("PROVIDER_EXECUTABLE".to_string(), binary.clone()));
-        let bound: Vec<(&str, &Path)> = defines
-            .iter()
-            .map(|(name, path)| (name.as_str(), path.as_path()))
-            .collect();
-        let mut command = macos_sandbox_command(
-            Path::new("/usr/bin/sandbox-exec"),
-            &confinement.seatbelt,
-            &binary,
-            &bound,
-            Some(data_dir),
-        )?;
-        // localhost stats the working directory before it reads init. That directory
-        // is the data directory, which has a metadata grant. The parent's directory
-        // does not.
-        command.current_dir(data_dir);
-        macos_launch(command, stdio, prepared)
+        launch_macos_path_allow(&confinement, &plan, executable, data_dir, stdio)
     }
     #[cfg(any(
         elastos_unsupported_os_check,
@@ -236,6 +205,52 @@ fn start_path_allow_os(
         let _ = (stdio.stdin, stdio.stdout, stdio.to_child, stdio.from_child);
         Err(UNSUPPORTED_OS.to_string())
     }
+}
+
+/// Re-open every allow-list root and refuse when the directory changed.
+///
+/// `plan.root_dev` lines up with the storage roots, which are the first rules.
+/// The executable, loader, and resolver paths are not roots. The attribute
+/// keeps each refusal on one line, as `require_real_root` does.
+#[cfg(all(not(elastos_unsupported_os_check), target_os = "macos"))]
+#[rustfmt::skip]
+fn confirm_allow_list_roots(plan: &super::landlock_plan::Plan) -> Result<(), String> {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+    for (index, rule) in plan.rules.iter().enumerate().take(plan.root_dev.len()) {
+        let path = CString::new(rule.1.as_os_str().as_bytes()).map_err(|_| format!("provider start is refused: {} contains NUL", rule.0))?;
+        super::root_pin::open_pinned_directory(&path, super::root_pin::DIRECTORY_OPEN_FLAGS, plan.root_dev[index], plan.root_ino[index])
+            .map_err(|errno| format!("provider start is refused: {} changed between the allow-list check and sandbox-exec: errno {errno}", rule.0))?;
+    }
+    Ok(())
+}
+
+/// Build the Seatbelt command and start it. The root check is the last step
+/// before `sandbox-exec`, so a directory swapped after render starts nothing.
+#[cfg(all(not(elastos_unsupported_os_check), target_os = "macos"))]
+#[rustfmt::skip]
+fn launch_macos_path_allow(
+    confinement: &super::path_allow::HelperConfinement, plan: &super::landlock_plan::Plan,
+    executable: &super::CheckedExecutable, data_dir: &Path, stdio: ChildStdio,
+) -> Result<Launched, String> {
+    let prepared = executable.verify_at_spawn()?;
+    let binary = std::fs::canonicalize(prepared.exec_path()).map_err(|error| format!("provider start is refused: cannot resolve provider executable: {error}"))?;
+    let mut defines: Vec<(String, std::path::PathBuf)> = confinement
+        .landlock
+        .iter()
+        .filter(|rule| !matches!(rule.0, "PROVIDER_EXECUTABLE" | "LANDLOCK_LOADER_PATHS" | "READ_ONLY_FILE"))
+        .map(|rule| (rule.0.to_string(), rule.1.clone()))
+        .collect();
+    defines.extend(confinement.metadata.iter().enumerate().map(|(index, path)| (format!("META_{index}"), path.clone())));
+    defines.push(("PROVIDER_EXECUTABLE".to_string(), binary.clone()));
+    let bound: Vec<(&str, &Path)> = defines.iter().map(|(name, path)| (name.as_str(), path.as_path())).collect();
+    confirm_allow_list_roots(plan)?;
+    let mut command = macos_sandbox_command(Path::new("/usr/bin/sandbox-exec"), &confinement.seatbelt, &binary, &bound, Some(data_dir))?;
+    // localhost stats the working directory before it reads init. That directory
+    // is the data directory, which has a metadata grant. The parent's directory
+    // does not.
+    command.current_dir(data_dir);
+    macos_launch(command, stdio, prepared)
 }
 
 fn require_grant(admitted: &AdmittedRights) -> Result<(), String> {
@@ -534,10 +549,12 @@ fn macos_sandbox_command(
     Ok(command)
 }
 
-/// The unsupported-OS arm. Real `dispatch` on an unsupported target calls this
-/// and returns it. Tests call this same function. `elastos_unsupported_os_check`
+/// Unix-like systems other than Linux and macOS. This arm refuses before a
+/// process exists. Real `dispatch` on one of those systems calls this and
+/// returns it. Tests call this same function. `elastos_unsupported_os_check`
 /// compiles that dispatch on a supported host: a FreeBSD target check cannot,
-/// because `ring`'s C build has no FreeBSD headers on this machine.
+/// because `ring`'s C build has no FreeBSD headers on this machine. Windows
+/// is not this arm. Windows fences are P2-11, parked.
 #[cfg(any(
     test,
     elastos_unsupported_os_check,
@@ -1812,6 +1829,95 @@ mod tests {
             format!("signal {}", libc::WTERMSIG(status))
         } else {
             format!("status {status}")
+        }
+    }
+
+    /// A root swapped after render and before sandbox-exec is refused.
+    /// Removing `confirm_allow_list_roots` makes this start a process.
+    #[cfg(all(target_os = "macos", not(elastos_unsupported_os_check)))]
+    #[test]
+    fn a_root_swapped_between_render_and_sandbox_exec_is_refused_and_starts_nothing() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let data = std::fs::canonicalize(temp.path()).unwrap();
+        let root = data.join("chain-provider");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let marker = root.join("started");
+        let source = temp.path().join("probe.rs");
+        std::fs::write(
+            &source,
+            r#"use std::io::{BufRead, Write};
+fn main() {
+    let _ = std::fs::write("chain-provider/started", b"started");
+    let stdin = std::io::stdin();
+    let mut out = std::io::stdout();
+    for line in stdin.lock().lines() {
+        if line.is_err() { break; }
+        if writeln!(out, "{{\"status\":\"ok\"}}").is_err() { break; }
+        let _ = out.flush();
+    }
+}
+"#,
+        )
+        .unwrap();
+        let binary = temp.path().join("probe");
+        let built = std::process::Command::new("rustc")
+            .args(["--edition", "2021", "-o"])
+            .arg(&binary)
+            .arg(&source)
+            .output()
+            .unwrap();
+        assert!(
+            built.status.success(),
+            "probe build failed: {}",
+            String::from_utf8_lossy(&built.stderr)
+        );
+        let admitted = super::super::rights::admit_runtime_grant(
+            super::super::rights_table::RuntimeProviderId::Chain,
+        );
+        let (confinement, plan) = super::super::path_allow::render_with_plan(
+            super::super::rights_table::RuntimeProviderId::Chain,
+            &admitted,
+            &data,
+            &binary,
+            5,
+        )
+        .unwrap_or_else(|err| panic!("render before the swap: {err}"));
+        let parked = data.join("parked-root");
+        std::fs::rename(&root, &parked).unwrap();
+        std::fs::create_dir(&root).unwrap();
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let (stdio, child_in, child_out) = probe_stdio();
+        let started = super::launch_macos_path_allow(
+            &confinement,
+            &plan,
+            &super::super::CheckedExecutable::for_test(&binary),
+            &data,
+            stdio,
+        );
+        unsafe {
+            libc::close(child_in);
+            libc::close(child_out);
+        }
+        match started {
+            Err(error) => {
+                assert!(error.contains("chain-provider"), "{error}");
+                assert!(error.contains("changed"), "{error}");
+                assert!(
+                    !marker.exists(),
+                    "a refused start wrote {}",
+                    marker.display()
+                );
+            }
+            Ok(launched) => {
+                unsafe {
+                    libc::kill(launched.pid, libc::SIGKILL);
+                    let mut status = 0;
+                    libc::waitpid(launched.pid, &mut status, 0);
+                }
+                panic!("a root swapped between render and sandbox-exec started a process");
+            }
         }
     }
 
