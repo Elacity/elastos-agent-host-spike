@@ -26,6 +26,7 @@ sha3 = "0.10"
 
 [dev-dependencies]
 agent-conformance = { path = "../../lab/agent-conformance" }
+elastos-identity = { path = "../../elastos/crates/elastos-identity" }
 libc = "0.2"
 tempfile = "3"
 

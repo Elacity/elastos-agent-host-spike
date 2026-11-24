@@ -627,8 +627,9 @@ fn provider_ruleset_inputs(name: &str, base: &Path) -> Result<ProviderRulesetInp
 }
 
 /// The `init` config the stand-in sends for `name` at `base`. The stand-in
-/// sends `base_path` to every provider. did also receives the isolated fixture
-/// device key so its `get_did` answers. model receives its own real config: the
+/// sends `base_path` to every provider. did receives the signing seed and the
+/// storage key of the isolated fixture device key, so `get_did` is that
+/// device's DID. model receives its own real config: the
 /// provider id, a hosted text offer that touches no file and contacts no
 /// endpoint at init, and a journal directory under the storage root this
 /// derivation names. It builds this one config for every provider.
@@ -636,7 +637,10 @@ fn provider_init_config(name: &str, base: &Path) -> Value {
     let mut config = json!({ "base_path": base.display().to_string() });
     match name {
         DID_PROVIDER => {
-            config["encryption_key"] = json!(hex::encode(DID_DEVICE_KEY));
+            let signing_seed = elastos_identity::derive_did_seed(&DID_DEVICE_KEY);
+            let storage_key = elastos_identity::derive_storage_key(&DID_DEVICE_KEY);
+            config["encryption_key"] = json!(hex::encode(storage_key));
+            config["extra"] = json!({ "signing_seed": hex::encode(signing_seed) });
         }
         MODEL_PROVIDER => {
             config["extra"] = json!({
@@ -5537,9 +5541,10 @@ fn standin_confined_journey(name: &str, provider: &Path, declared: &Value) {
                 .as_str()
                 .expect("get_did must name the DID")
                 .to_string();
-            assert!(
-                did_value.starts_with("did:key:"),
-                "get_did must answer a did:key DID: {did}"
+            assert_eq!(
+                did_value,
+                elastos_identity::derive_did(&DID_DEVICE_KEY).1,
+                "get_did must be the DID of the fixture device key: {did}"
             );
 
             let storage = provider_storage_root(DID_PROVIDER, &base);
@@ -6864,9 +6869,10 @@ fn did_standin_permitted_operations(
         .as_str()
         .unwrap_or_else(|| panic!("{label}: get_did must name the DID: {did_data}"))
         .to_string();
-    assert!(
-        did.starts_with("did:key:"),
-        "{label}: get_did must answer a did:key DID: {did}"
+    assert_eq!(
+        did,
+        elastos_identity::derive_did(&DID_DEVICE_KEY).1,
+        "{label}: get_did must be the DID of the fixture device key: {did}"
     );
     record.push(suite_entry("get_did", SuiteClass::Permitted, &did_data));
 
