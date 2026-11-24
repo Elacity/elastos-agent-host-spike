@@ -908,10 +908,36 @@ async fn serve_capability_store(
         .map_err(|err| anyhow::anyhow!("capability store unavailable: {err}"))
 }
 
+/// DID-provider init config.
+///
+/// The child receives the device signing seed and the existing
+/// `elastos-did-storage` key. It does not receive the raw device key.
+/// The local below is the storage-key hex. It is not the raw device key.
+/// Its name is the authority-census needle for the row
+/// `elastos-server/src/server_infra.rs` / `did_provider_bridge_config` /
+/// `encryption_key: device_key_hex` in `home_held_authority`.
+pub(crate) fn did_provider_bridge_config(
+    data_dir: &Path,
+    device_key: &[u8; 32],
+) -> provider::BridgeProviderConfig {
+    let signing_seed = elastos_identity::derive_did_seed(device_key);
+    let storage_key = elastos_identity::derive_storage_key(device_key);
+    let device_key_hex = hex::encode(storage_key);
+    provider::BridgeProviderConfig {
+        base_path: data_dir.to_string_lossy().to_string(),
+        allowed_paths: file_backed_prefixes(),
+        read_only: false,
+        encryption_key: device_key_hex,
+        extra: serde_json::json!({
+            "signing_seed": hex::encode(signing_seed),
+        }),
+    }
+}
+
 async fn start_did_provider(
     data_dir: &Path,
     provider_registry: &provider::ProviderRegistry,
-    device_key_hex: &str,
+    device_key: &[u8; 32],
 ) -> anyhow::Result<Option<Arc<provider::ProviderBridge>>> {
     // Refuse a symlink root before admission reads the signed release through it.
     if std::fs::symlink_metadata(data_dir).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
@@ -935,13 +961,7 @@ async fn start_did_provider(
             data_dir.display()
         )
     })?;
-    let did_config = provider::BridgeProviderConfig {
-        base_path: confined_data_dir.to_string_lossy().to_string(),
-        allowed_paths: file_backed_prefixes(),
-        read_only: false,
-        encryption_key: device_key_hex.to_owned(),
-        ..Default::default()
-    };
+    let did_config = did_provider_bridge_config(&confined_data_dir, device_key);
     // The bridge re-checks the admitted signed digest at spawn and starts the
     // bytes it checked.
     let checked = admitted
@@ -978,9 +998,9 @@ async fn start_did_provider(
 async fn start_did_provider_for_server(
     data_dir: &Path,
     provider_registry: &provider::ProviderRegistry,
-    device_key_hex: &str,
+    device_key: &[u8; 32],
 ) -> anyhow::Result<()> {
-    if let Err(err) = start_did_provider(data_dir, provider_registry, device_key_hex).await {
+    if let Err(err) = start_did_provider(data_dir, provider_registry, device_key).await {
         tracing::warn!("Skipping did-provider: {}", err);
         return Err(err);
     }
@@ -1086,7 +1106,7 @@ async fn setup_server_infrastructure_impl(
         Ok(())
     };
 
-    let _ = start_did_provider_for_server(&data_dir, &provider_registry, &device_key_hex).await;
+    let _ = start_did_provider_for_server(&data_dir, &provider_registry, &device_key).await;
 
     if spawn_host_providers {
         let binary_path = binaries::resolve_verified_native_provider_binary("localhost-provider")?
@@ -2704,7 +2724,7 @@ mod tests {
         .unwrap();
         fs::set_permissions(&fixture, fs::Permissions::from_mode(0o755)).unwrap();
         let registry = provider::ProviderRegistry::new();
-        assert!(start_did_provider(temp.path(), &registry, "fixture")
+        assert!(start_did_provider(temp.path(), &registry, &[0u8; 32])
             .await
             .unwrap()
             .is_none());
@@ -2721,7 +2741,7 @@ mod tests {
         let (_temp, data_dir, binary) = did_fixture();
         fs::write(&binary, b"changed after the row checksum").unwrap();
         let registry = provider::ProviderRegistry::new();
-        let error = start_did_provider(&data_dir, &registry, "fixture")
+        let error = start_did_provider(&data_dir, &registry, &[0u8; 32])
             .await
             .err()
             .unwrap();
@@ -2746,7 +2766,7 @@ mod tests {
                 fs::write(data_dir.join("config.toml"), "dev_mode = true\n").unwrap();
             }
             let registry = provider::ProviderRegistry::new();
-            let error = start_did_provider(&data_dir, &registry, "fixture")
+            let error = start_did_provider(&data_dir, &registry, &[7u8; 32])
                 .await
                 .err()
                 .unwrap_or_else(|| panic!("dev_mode={dev_mode} started the DID provider"));
@@ -2782,7 +2802,7 @@ mod tests {
         let linked_data_dir = temp.path().join("linked-data");
         std::os::unix::fs::symlink(&data_dir, &linked_data_dir).unwrap();
         let registry = provider::ProviderRegistry::new();
-        let error = match start_did_provider(&linked_data_dir, &registry, "fixture").await {
+        let error = match start_did_provider(&linked_data_dir, &registry, &[0u8; 32]).await {
             Err(error) => error,
             Ok(Some(bridge)) => {
                 bridge.shutdown().await.unwrap();
@@ -2807,7 +2827,7 @@ mod tests {
     async fn did_os_refusal_keeps_child_and_route_absent() {
         let (_temp, data_dir, _) = did_fixture();
         let registry = provider::ProviderRegistry::new();
-        let error = start_did_provider_for_server(&data_dir, &registry, "fixture")
+        let error = start_did_provider_for_server(&data_dir, &registry, &[0u8; 32])
             .await
             .err()
             .unwrap();
@@ -2834,7 +2854,7 @@ mod tests {
     async fn did_linux_admitted_row_answers_and_stays_confined() {
         let (_temp, data_dir, _) = did_fixture();
         let registry = provider::ProviderRegistry::new();
-        let bridge = start_did_provider(&data_dir, &registry, "fixture")
+        let bridge = start_did_provider(&data_dir, &registry, &[0u8; 32])
             .await
             .unwrap_or_else(|error| panic!("{error}; {}", did_probe_failure(&data_dir)))
             .unwrap();
@@ -2878,7 +2898,7 @@ mod tests {
     async fn did_macos_admitted_row_answers_and_stays_confined() {
         let (_temp, data_dir, _) = did_fixture();
         let registry = provider::ProviderRegistry::new();
-        let bridge = start_did_provider(&data_dir, &registry, "fixture")
+        let bridge = start_did_provider(&data_dir, &registry, &[0u8; 32])
             .await
             .unwrap_or_else(|error| panic!("{error}; {}", did_probe_failure(&data_dir)))
             .unwrap();
@@ -2921,7 +2941,7 @@ mod tests {
             )
             .await
             .unwrap();
-        let error = start_did_provider(&data_dir, &registry, "fixture")
+        let error = start_did_provider(&data_dir, &registry, &[0u8; 32])
             .await
             .err()
             .unwrap();
