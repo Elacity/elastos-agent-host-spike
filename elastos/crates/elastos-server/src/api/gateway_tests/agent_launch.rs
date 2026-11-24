@@ -1310,10 +1310,10 @@ fn signed_audit_events(world: &World) -> Vec<RuntimeAuditEventV1> {
 /// The step-up id the latest completed step-up ceremony spent, read from
 /// that ceremony's own signed row.
 fn latest_step_up_id(world: &World) -> String {
-    let row = signed_audit_events(&world)
+    let row = signed_audit_events(world)
         .into_iter()
         .filter(|event| event.event_type == "auth.passkey_step_up.completed")
-        .last()
+        .next_back()
         .unwrap();
     serde_json::from_str::<Value>(&row.reason).unwrap()["step_up_id"]
         .as_str()
