@@ -1726,3 +1726,377 @@ async fn a15r_real_restart_zero() {
     assert_eq!(case.audit("agent_plan.dispatch.started"), 1);
     assert!(case.calls.lock().await.is_empty() && after_calls.lock().await.is_empty());
 }
+
+/// Where an approved step is held, and how the instance ends while it is held.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PlanRowEnd {
+    Stop,
+    Completed,
+    Retire,
+    AgentsOff,
+}
+
+struct IdleCompute;
+
+#[async_trait::async_trait]
+impl elastos_compute::ComputeProvider for IdleCompute {
+    async fn load(
+        &self,
+        _: &std::path::Path,
+        _: elastos_common::CapsuleManifest,
+    ) -> elastos_common::Result<elastos_compute::CapsuleHandle> {
+        Err(elastos_common::ElastosError::InvalidManifest("idle".into()))
+    }
+
+    async fn start(&self, _: &elastos_compute::CapsuleHandle) -> elastos_common::Result<()> {
+        Err(elastos_common::ElastosError::InvalidManifest("idle".into()))
+    }
+
+    async fn stop(&self, _: &elastos_compute::CapsuleHandle) -> elastos_common::Result<()> {
+        Err(elastos_common::ElastosError::InvalidManifest("idle".into()))
+    }
+
+    async fn status(
+        &self,
+        _: &elastos_compute::CapsuleHandle,
+    ) -> elastos_common::Result<elastos_common::CapsuleStatus> {
+        Err(elastos_common::ElastosError::InvalidManifest("idle".into()))
+    }
+
+    async fn info(
+        &self,
+        _: &elastos_compute::CapsuleHandle,
+    ) -> elastos_common::Result<elastos_compute::CapsuleInfo> {
+        Err(elastos_common::ElastosError::InvalidManifest("idle".into()))
+    }
+
+    fn supports(&self, _: &elastos_common::CapsuleType) -> bool {
+        false
+    }
+}
+
+fn plan_bytes(dir: &Path, agent: &str, root: &str, target: &str) -> Vec<u8> {
+    let path = elastos_common::localhost::rooted_localhost_fs_path(dir, target).unwrap();
+    crate::auth::read_principal_root_object(dir, agent, root, target, &path).unwrap()
+}
+
+async fn stop_plan_agent(
+    runtime: Arc<crate::runtime::Runtime>,
+    agent: &str,
+) -> (StatusCode, serde_json::Value) {
+    let response = crate::api::routes::stop_agent_session(
+        axum::Extension(runtime),
+        axum::Extension(Arc::new(elastos_runtime::primitives::audit::AuditLog::new())),
+        axum::body::Bytes::from(serde_json::to_vec(&json!({ "agent_id": agent })).unwrap()),
+    )
+    .await;
+    let status = response.status();
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    (
+        status,
+        serde_json::from_slice(&bytes)
+            .unwrap_or(json!(String::from_utf8_lossy(&bytes).to_string())),
+    )
+}
+
+/// An approved own-root step cannot start, or write, after the instance ends.
+/// The hold is before the running check, after the one-use token is registered,
+/// or immediately before the write. Stop, natural completion, retire, and
+/// agents off are applied while the hold is set. The file stays as it was,
+/// except when the write had already reached the effect: that write lands,
+/// and Stop's answer while it was held is `stopping` (202).
+#[cfg(unix)]
+#[tokio::test]
+async fn an_approved_step_does_not_write_after_the_instance_ends() {
+    use crate::resource_bridge::PlanDispatchPoint;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static ROWS: AtomicU64 = AtomicU64::new(1);
+    let points = [
+        PlanDispatchPoint::BeforeCheck,
+        PlanDispatchPoint::AfterToken,
+        PlanDispatchPoint::InEffect,
+    ];
+    let ends = [
+        PlanRowEnd::Stop,
+        PlanRowEnd::Completed,
+        PlanRowEnd::Retire,
+        PlanRowEnd::AgentsOff,
+    ];
+    for point in points {
+        for end in ends {
+            let n = ROWS.fetch_add(1, Ordering::Relaxed);
+            plan_inflight_row(point, end, n).await;
+        }
+    }
+}
+
+async fn plan_inflight_row(
+    point: crate::resource_bridge::PlanDispatchPoint,
+    end: PlanRowEnd,
+    n: u64,
+) {
+    use crate::resource_bridge::PlanDispatchPoint;
+
+    let dir = tempfile::tempdir().unwrap();
+    let (state, calls) = agent_plan_dispatch_state(dir.path()).await;
+    let owner = passkey_authority(dir.path());
+    let agent = crate::agents::tests::plant_for_dispatch(
+        dir.path(),
+        &owner.principal_id,
+        &owner.principal_id,
+    );
+    let root = crate::auth::principal_stored_localhost_root(Some(dir.path()), &agent).unwrap();
+    let target = format!("{root}/Documents/plan.md");
+    let path = elastos_common::localhost::rooted_localhost_fs_path(dir.path(), &target).unwrap();
+    crate::auth::write_principal_root_object(dir.path(), &agent, &root, &target, &path, b"before")
+        .unwrap();
+    let before_raw = std::fs::read(&path).unwrap();
+
+    let storage = dir.path().join("cap-storage");
+    std::fs::create_dir_all(&storage).unwrap();
+    let runtime = Arc::new(crate::runtime::Runtime::new(
+        Arc::new(
+            elastos_storage::providers::LocalFSProvider::new(storage)
+                .await
+                .unwrap(),
+        ),
+        Arc::new(IdleCompute),
+    ));
+    let session = format!("session-plan-{n}");
+    runtime
+        .register_capsule(crate::runtime::RunningCapsuleInfo {
+            id: session.clone(),
+            name: "planted".to_string(),
+            status: crate::runtime::CAPSULE_RUNNING.to_string(),
+            capsule_type: elastos_common::CapsuleType::Wasm,
+            handle: None,
+            session_id: session.clone(),
+            principal: Some(agent.clone()),
+            cause: None,
+            ended_at: None,
+        })
+        .await;
+    runtime
+        .insert_agent_session_for_test(crate::runtime::AgentSessionRecord {
+            agent_id: agent.clone(),
+            owner: owner.principal_id.clone(),
+            host_cid: "cid".to_string(),
+            launch_id: format!("launch:{session}"),
+            session_id: session.clone(),
+        })
+        .await;
+    runtime.bind_plan_instance(&session, &agent);
+
+    let audit = Arc::new(elastos_runtime::primitives::audit::AuditLog::new());
+    let manager = Arc::new(elastos_runtime::capability::CapabilityManager::new(
+        Arc::new(elastos_runtime::capability::CapabilityStore::new()),
+        audit.clone(),
+        Arc::new(elastos_runtime::primitives::metrics::MetricsManager::new()),
+    ));
+    let store = Arc::new(elastos_runtime::capability::pending::PendingRequestStore::new(audit));
+    runtime
+        .set_provider_registry(
+            state.provider_registry.clone().unwrap(),
+            manager.clone(),
+            store.clone(),
+            dir.path().to_path_buf(),
+        )
+        .await;
+    let plan = json!({"steps": [{"scheme": "localhost", "operation": "write", "request": {
+        "path": target, "content": [112, 108, 97, 110]
+    }}]});
+    let created = crate::api::gateway::submit_pending_agent_plan(
+        dir.path(),
+        &owner.principal_id,
+        &agent,
+        &session,
+        &session,
+        &plan,
+        400 + n,
+    )
+    .unwrap();
+    let id = created["request_id"].as_str().unwrap().to_string();
+    let registry = state.provider_registry.clone().unwrap();
+    let ctx = crate::resource_bridge::BridgeContext {
+        provider_registry: registry,
+        capability_manager: manager.clone(),
+        pending_store: store.clone(),
+        capsule_id: session.clone(),
+        session_id: session.clone(),
+        principal_id: Some(agent.clone()),
+        manifest_capabilities: [
+            "elastos://availability/*",
+            "localhost://UsersAI/*",
+            "localhost://Users/*",
+        ]
+        .into_iter()
+        .map(|resource| elastos_common::AuthorityBound {
+            resource: resource.to_string(),
+            actions: None,
+        })
+        .collect(),
+        data_dir: Some(dir.path().to_path_buf()),
+        launch: None,
+        model_token_ceiling: Some(16),
+        model_budget: None,
+        stop: None,
+    };
+    crate::resource_bridge::retain_agent_plan_dispatch_authority(
+        &id,
+        &owner.principal_id,
+        &ctx,
+        &created["request"],
+    )
+    .unwrap();
+    set_approved(dir.path(), &id);
+    let pause = crate::resource_bridge::arm_plan_dispatch_hold(&id, point);
+    let state_for_dispatch = state.clone();
+    let owner_id = owner.principal_id.clone();
+    let request_id = id.clone();
+    let dispatch = tokio::spawn(async move {
+        super::gateway_inspect_actions::dispatch_approved_agent_plan(
+            &state_for_dispatch,
+            &dispatch_context(&owner_id),
+            &request_id,
+        )
+        .await
+    });
+    let reached =
+        tokio::time::timeout(std::time::Duration::from_secs(15), pause.entered.notified()).await;
+    assert!(reached.is_ok(), "{point:?} {end:?} did not reach its seam");
+
+    let mut stop_guard = None;
+    if point == PlanDispatchPoint::InEffect && end == PlanRowEnd::Stop {
+        let (status, body) = stop_plan_agent(Arc::clone(&runtime), &agent).await;
+        assert_eq!(status, StatusCode::ACCEPTED, "{point:?} {end:?} {body}");
+        assert!(
+            body["stopped"]
+                .as_array()
+                .is_some_and(|rows| rows.is_empty()),
+            "Stop said stopped while the write can still land: {body}"
+        );
+        assert!(body.get("already").is_none(), "{body}");
+        assert_eq!(body["stopping"][0]["status"], "stopping", "{body}");
+        assert_eq!(
+            plan_bytes(dir.path(), &agent, &root, &target),
+            b"before",
+            "{point:?} {end:?} wrote before Stop answered"
+        );
+    } else {
+        match end {
+            PlanRowEnd::Stop => {
+                stop_guard = Some(runtime.begin_agent_stop(&agent).await);
+                if point == PlanDispatchPoint::AfterToken {
+                    crate::api::handlers::settle::settle_and_revoke(
+                        &store,
+                        &manager,
+                        dir.path(),
+                        &session,
+                        "stopped: owner",
+                    )
+                    .await
+                    .unwrap();
+                }
+            }
+            PlanRowEnd::Completed => {
+                crate::runtime::Runtime::note_plan_instance_ended(&session);
+                runtime.end_planted_session_for_test(&session).await;
+                if point == PlanDispatchPoint::AfterToken {
+                    crate::api::handlers::settle::settle_and_revoke(
+                        &store,
+                        &manager,
+                        dir.path(),
+                        &session,
+                        "completed",
+                    )
+                    .await
+                    .unwrap();
+                }
+            }
+            PlanRowEnd::Retire => {
+                crate::agents::tests::stop_dispatch_agent(
+                    dir.path(),
+                    &owner.principal_id,
+                    &agent,
+                    false,
+                );
+            }
+            PlanRowEnd::AgentsOff => {
+                crate::agents::tests::stop_dispatch_agent(
+                    dir.path(),
+                    &owner.principal_id,
+                    &agent,
+                    true,
+                );
+            }
+        }
+    }
+    pause.release.notify_one();
+    let finished = tokio::time::timeout(std::time::Duration::from_secs(15), dispatch)
+        .await
+        .unwrap_or_else(|_| panic!("{point:?} {end:?} dispatch did not finish"));
+    drop(stop_guard);
+    finished
+        .unwrap()
+        .unwrap_or_else(|err| panic!("{point:?} {end:?} dispatch failed: {err}"));
+
+    let record = read_record(dir.path(), &id);
+    // Agents off drops the principal from the auth store, so the root API
+    // cannot open the object. The bytes on disk are the effect.
+    let raw = std::fs::read(&path)
+        .unwrap_or_else(|err| panic!("{point:?} {end:?} file after {record}: {err}"));
+    assert!(
+        calls.lock().await.is_empty(),
+        "{point:?} {end:?} called a provider"
+    );
+    if point == PlanDispatchPoint::InEffect {
+        // Agents off removes the principal before the write, so the write
+        // that already passed its checks is refused and the file stays.
+        // Stop, natural completion and retire leave the principal: the write lands.
+        if end == PlanRowEnd::AgentsOff {
+            assert_eq!(raw, before_raw, "{point:?} {end:?} wrote: {record}");
+            assert_eq!(record["status"], "refused", "{point:?} {end:?} {record}");
+            assert_eq!(
+                record["result"]["code"], "principal_context_required",
+                "{point:?} {end:?} {record}"
+            );
+            return;
+        }
+        assert_ne!(
+            raw, before_raw,
+            "{point:?} {end:?} did not record the write: {record}"
+        );
+        if let Ok(text) =
+            crate::auth::read_principal_root_object(dir.path(), &agent, &root, &target, &path)
+        {
+            assert_eq!(text, b"plan", "{point:?} {end:?} {record}");
+        }
+        assert_eq!(record["status"], "completed", "{point:?} {end:?} {record}");
+        return;
+    }
+    assert_eq!(
+        raw, before_raw,
+        "{point:?} {end:?} wrote after the instance ended"
+    );
+    assert_eq!(record["status"], "refused", "{point:?} {end:?} {record}");
+    let code = record["result"]["code"].as_str().unwrap_or("");
+    let expected = match (point, end) {
+        (PlanDispatchPoint::AfterToken, PlanRowEnd::Stop | PlanRowEnd::Completed) => {
+            assert!(
+                crate::resource_bridge::own_root_token_revoked_for_test(&id).await,
+                "{point:?} {end:?} left the one-use token usable"
+            );
+            "capability_denied"
+        }
+        // Turning agents off removes the principal, so the second invoke
+        // resolution refuses before the standing check. Retire leaves the
+        // principal and is caught as agent_inactive.
+        (PlanDispatchPoint::AfterToken, PlanRowEnd::AgentsOff) => "invalid_resource_invoke",
+        (_, PlanRowEnd::Retire | PlanRowEnd::AgentsOff) => "agent_inactive",
+        _ => "instance ended",
+    };
+    assert_eq!(code, expected, "{point:?} {end:?} {record}");
+}

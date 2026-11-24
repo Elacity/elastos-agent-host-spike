@@ -305,6 +305,50 @@ struct AgentStopMarks {
     next: u64,
 }
 
+/// A live instance a plan step may still act for, plus a write that has
+/// passed its checks and not yet finished.
+///
+/// Lock order: this mutex is never taken while `agent_launches` or
+/// `stop_marks` is held, and it is never held across an await. Start and
+/// Stop take `agent_launches`, then `stop_marks`.
+struct PlanEffects {
+    instances: HashMap<String, PlanInstance>,
+    /// Session id to the agent whose write has reached the effect.
+    inflight: HashMap<String, String>,
+}
+
+struct PlanInstance {
+    agent_id: String,
+    marks: Arc<StdMutex<AgentStopMarks>>,
+    launches: Arc<tokio::sync::Mutex<AgentLaunchState>>,
+    capsules: Arc<RwLock<HashMap<String, RunningCapsuleInfo>>>,
+    ended: bool,
+}
+
+pub(crate) struct PlanEffectGuard {
+    session_id: String,
+}
+
+impl Drop for PlanEffectGuard {
+    fn drop(&mut self) {
+        plan_effects().inflight.remove(&self.session_id);
+    }
+}
+
+static PLAN_EFFECTS: std::sync::OnceLock<StdMutex<PlanEffects>> = std::sync::OnceLock::new();
+
+fn plan_effects() -> std::sync::MutexGuard<'static, PlanEffects> {
+    PLAN_EFFECTS
+        .get_or_init(|| {
+            StdMutex::new(PlanEffects {
+                instances: HashMap::new(),
+                inflight: HashMap::new(),
+            })
+        })
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+}
+
 impl AgentStopMarks {
     fn holds(&self, agent_id: &str) -> bool {
         self.tokens.get(agent_id).is_some_and(|set| !set.is_empty())
@@ -621,6 +665,7 @@ impl ActivationContextHeld {
     /// here, so it happens at its 60 s even if nothing lists or registers
     /// again and every tokio runtime has shut down.
     async fn end_instance(mut self, status: &str, cause: &str) {
+        Runtime::note_plan_instance_ended(&self.id.0);
         let (status, cause) = match self.settled.clone() {
             Some(settled) => settled,
             None => {
@@ -1368,17 +1413,103 @@ impl Runtime {
             .insert(facts.launch_id.to_string(), facts.expires_at);
         let started = self.start_local_admitted(path, vec![], admission).await?;
         let session_id = started.0.id.0.clone();
+        let agent_id = facts.agent_id.to_string();
         state.sessions.insert(
             session_id.clone(),
             AgentSessionRecord {
-                agent_id: facts.agent_id.to_string(),
+                agent_id: agent_id.clone(),
                 owner: facts.owner.to_string(),
                 host_cid: facts.host_cid.to_string(),
                 launch_id: facts.launch_id.to_string(),
-                session_id,
+                session_id: session_id.clone(),
             },
         );
+        drop(state);
+        self.bind_plan_instance(&session_id, &agent_id);
         Ok(started)
+    }
+
+    /// Remember this running instance so a plan step can see the same stop
+    /// marks and the same ended row Start and Stop use.
+    pub(crate) fn bind_plan_instance(&self, session_id: &str, agent_id: &str) {
+        plan_effects().instances.insert(
+            session_id.to_string(),
+            PlanInstance {
+                agent_id: agent_id.to_string(),
+                marks: Arc::clone(&self.stop_marks),
+                launches: Arc::clone(&self.agent_launches),
+                capsules: Arc::clone(&self.running_capsules),
+                ended: false,
+            },
+        );
+    }
+
+    /// The instance's access has ended. Called at the start of the one end,
+    /// before its grants are revoked and before `ended_at` is written.
+    pub(crate) fn note_plan_instance_ended(session_id: &str) {
+        if let Some(instance) = plan_effects().instances.get_mut(session_id) {
+            instance.ended = true;
+        }
+    }
+
+    /// Whether a plan step for this session may still start. No bound instance
+    /// is not an ended one: a dispatch with no Runtime row keeps its other
+    /// checks. A bound instance is open only while it has not ended and Stop
+    /// has neither a token nor `stop_requested` for its agent.
+    pub(crate) async fn plan_instance_open(session_id: &str, agent_id: &str) -> bool {
+        let bound = {
+            let book = plan_effects();
+            match book.instances.get(session_id) {
+                None => return true,
+                Some(instance) if instance.ended || instance.agent_id != agent_id => return false,
+                Some(instance) => (
+                    Arc::clone(&instance.marks),
+                    Arc::clone(&instance.launches),
+                    Arc::clone(&instance.capsules),
+                ),
+            }
+        };
+        let (marks, launches, capsules) = bound;
+        let stopping = {
+            let mut state = launches.lock().await;
+            Self::refuse_start_for_stop(&marks, &capsules, &mut state, agent_id)
+        };
+        if stopping
+            || plan_effects()
+                .instances
+                .get(session_id)
+                .is_some_and(|it| it.ended)
+        {
+            return false;
+        }
+        let open = capsules
+            .read()
+            .await
+            .get(session_id)
+            .is_some_and(|info| info.ended_at.is_none());
+        open
+    }
+
+    /// A plan write has reached the effect. Stop must not say `stopped` while
+    /// this guard is alive: the write can still land.
+    pub(crate) fn enter_plan_effect(session_id: &str, agent_id: &str) -> PlanEffectGuard {
+        plan_effects()
+            .inflight
+            .insert(session_id.to_string(), agent_id.to_string());
+        PlanEffectGuard {
+            session_id: session_id.to_string(),
+        }
+    }
+
+    pub(crate) fn plan_effect_inflight(session_id: &str) -> bool {
+        plan_effects().inflight.contains_key(session_id)
+    }
+
+    pub(crate) fn inflight_plan_session(agent_id: &str) -> Option<String> {
+        plan_effects()
+            .inflight
+            .iter()
+            .find_map(|(session, agent)| (agent == agent_id).then(|| session.clone()))
     }
 
     /// Live session ids whose principal is `agent_id`. The capsule name is
@@ -1657,6 +1788,7 @@ impl Runtime {
                     cause: StdMutex::new(None),
                 }),
             );
+        self.bind_plan_instance(session_id, agent_id);
     }
 
     /// Ends a planted row so it is no longer live. The stopping mark is left

@@ -504,10 +504,33 @@ pub async fn stop_agent_session(
     stop_collected_agent_rows(&runtime, &agent_id).await
 }
 
+/// `stopping` (202) while a plan write that already reached its effect can
+/// still land. `stopped` is not said for that session.
+fn plan_write_still_open(agent_id: &str) -> Option<axum::response::Response> {
+    let session_id = crate::runtime::Runtime::inflight_plan_session(agent_id)?;
+    Some(
+        (
+            StatusCode::ACCEPTED,
+            Json(StopAgentResponse {
+                stopped: Vec::new(),
+                stopping: vec![StoppedAgentBody {
+                    session_id,
+                    status: "stopping".to_string(),
+                }],
+                already: None,
+            }),
+        )
+            .into_response(),
+    )
+}
+
 /// Reads and stops rows after the per-agent stopping flag is set.
 async fn stop_collected_agent_rows(runtime: &Runtime, agent_id: &str) -> axum::response::Response {
     let ids = runtime.live_sessions_for_agent(agent_id).await;
     if ids.is_empty() {
+        if let Some(response) = plan_write_still_open(agent_id) {
+            return response;
+        }
         return (
             StatusCode::NOT_FOUND,
             format!("agent {agent_id} has no running session"),
@@ -534,6 +557,9 @@ async fn stop_collected_agent_rows(runtime: &Runtime, agent_id: &str) -> axum::r
         }
     }
     if ready.is_empty() {
+        if let Some(response) = plan_write_still_open(agent_id) {
+            return response;
+        }
         if let Some(reason) = refusal {
             return (StatusCode::CONFLICT, reason.to_string()).into_response();
         }
@@ -575,7 +601,7 @@ async fn stop_collected_agent_rows(runtime: &Runtime, agent_id: &str) -> axum::r
                     .into_response();
             }
         };
-        if info.ended_at.is_none() {
+        if info.ended_at.is_none() || crate::runtime::Runtime::plan_effect_inflight(&id) {
             stopping.push(StoppedAgentBody {
                 session_id: info.session_id,
                 status: "stopping".to_string(),

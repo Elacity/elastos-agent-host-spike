@@ -373,6 +373,29 @@ pub(crate) async fn own_root_token_replay_refused_for_test(request_id: &str) -> 
             .is_err()
 }
 
+#[cfg(unix)]
+#[cfg(test)]
+pub(crate) async fn own_root_token_revoked_for_test(request_id: &str) -> bool {
+    let held = AGENT_PLAN_ONE_USE_TOKENS
+        .get()
+        .and_then(|tokens| tokens.lock().unwrap().get(request_id).cloned());
+    let Some((manager, token)) = held else {
+        return false;
+    };
+    matches!(
+        manager
+            .validate(
+                &token,
+                token.capsule(),
+                token.action(),
+                token.resource(),
+                None,
+            )
+            .await,
+        Err(elastos_runtime::capability::manager::ValidationError::TokenRevoked)
+    )
+}
+
 fn plan_authorities() -> &'static Mutex<HashMap<String, AgentPlanDispatchAuthority>> {
     AGENT_PLAN_DISPATCH_AUTHORITIES.get_or_init(|| Mutex::new(HashMap::new()))
 }
@@ -472,6 +495,155 @@ pub(crate) fn narrow_agent_plan_manifest_for_test(request_id: &str) {
     }];
 }
 
+/// The owner's record shows this code when a plan step is refused because
+/// its instance has ended or is stopping.
+const PLAN_INSTANCE_ENDED: &str = "instance ended";
+
+#[derive(Clone)]
+struct PlanStep {
+    #[cfg(test)]
+    request_id: String,
+    owner_id: String,
+    requester_id: String,
+    capsule_id: String,
+    data_dir: PathBuf,
+}
+
+tokio::task_local! {
+    static PLAN_STEP: PlanStep;
+}
+
+fn current_plan_step() -> Option<PlanStep> {
+    PLAN_STEP.try_with(Clone::clone).ok()
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum PlanDispatchPoint {
+    BeforeCheck,
+    AfterToken,
+    InEffect,
+}
+
+#[cfg(test)]
+struct PlanHold {
+    request_id: String,
+    point: PlanDispatchPoint,
+    entered: Arc<tokio::sync::Notify>,
+    release: Arc<tokio::sync::Notify>,
+}
+
+#[cfg(test)]
+static PLAN_HOLDS: Mutex<Vec<PlanHold>> = Mutex::new(Vec::new());
+
+#[cfg(test)]
+pub(crate) struct PlanDispatchPause {
+    pub entered: Arc<tokio::sync::Notify>,
+    pub release: Arc<tokio::sync::Notify>,
+}
+
+/// Hold the dispatch at `point` until the test releases it. The mutex is
+/// dropped before the wait.
+#[cfg(test)]
+pub(crate) fn arm_plan_dispatch_hold(
+    request_id: &str,
+    point: PlanDispatchPoint,
+) -> PlanDispatchPause {
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    PLAN_HOLDS
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+        .push(PlanHold {
+            request_id: request_id.to_string(),
+            point,
+            entered: Arc::clone(&entered),
+            release: Arc::clone(&release),
+        });
+    PlanDispatchPause { entered, release }
+}
+
+#[cfg(test)]
+async fn pause_plan_dispatch(request_id: &str, point: PlanDispatchPoint) {
+    let hold = {
+        let mut holds = PLAN_HOLDS.lock().unwrap_or_else(|err| err.into_inner());
+        let pos = holds
+            .iter()
+            .rposition(|hold| hold.request_id == request_id && hold.point == point);
+        pos.map(|pos| holds.swap_remove(pos))
+    };
+    if let Some(hold) = hold {
+        hold.entered.notify_one();
+        hold.release.notified().await;
+    }
+}
+
+async fn plan_step_refusal(
+    data_dir: &Path,
+    owner_id: &str,
+    requester_id: &str,
+    capsule_id: &str,
+) -> Option<serde_json::Value> {
+    if !crate::runtime::Runtime::plan_instance_open(capsule_id, requester_id).await {
+        return Some(resource_error_response(
+            PLAN_INSTANCE_ENDED,
+            PLAN_INSTANCE_ENDED,
+        ));
+    }
+    match acting_agent_owner(data_dir, requester_id) {
+        Ok(owner) if owner == owner_id => None,
+        _ => Some(resource_error_response(
+            "agent_inactive",
+            "agent can no longer dispatch",
+        )),
+    }
+}
+
+async fn register_one_use_grant(
+    ctx: &BridgeContext,
+    token: &CapabilityToken,
+    resource: &str,
+    action: Action,
+) -> Result<(), String> {
+    let pending = ctx
+        .pending_store
+        .create_request(
+            elastos_runtime::session::SessionId(ctx.capsule_id.clone()),
+            ResourceId::new(resource),
+            action,
+        )
+        .await;
+    ctx.pending_store
+        .grant_request(
+            pending.id.as_str(),
+            token.clone(),
+            elastos_runtime::capability::pending::GrantDuration::Session,
+        )
+        .await
+}
+
+/// The instance check again, then the inflight mark, then the hold. The mark
+/// stays until the caller finishes the write or the provider call.
+async fn guard_plan_effect() -> Result<Option<crate::runtime::PlanEffectGuard>, serde_json::Value> {
+    let Some(step) = current_plan_step() else {
+        return Ok(None);
+    };
+    if let Some(refusal) = plan_step_refusal(
+        &step.data_dir,
+        &step.owner_id,
+        &step.requester_id,
+        &step.capsule_id,
+    )
+    .await
+    {
+        return Err(refusal);
+    }
+    let guard = crate::runtime::Runtime::enter_plan_effect(&step.capsule_id, &step.requester_id);
+    #[cfg(test)]
+    pause_plan_dispatch(&step.request_id, PlanDispatchPoint::InEffect).await;
+    Ok(Some(guard))
+}
+
 /// Submit an approved stored step through the same normalization, authority
 /// checks and dispatch as an agent's ordinary resource invoke.
 pub(crate) async fn dispatch_agent_plan_step(
@@ -508,9 +680,13 @@ pub(crate) async fn dispatch_agent_plan_step(
     {
         return resource_error_response("admission_mismatch", "agent plan step changed");
     }
-    match acting_agent_owner(data_dir, requester_id) {
-        Ok(current_owner) if current_owner == owner_id => {}
-        _ => return resource_error_response("agent_inactive", "agent can no longer dispatch"),
+    // The admission is already removed. Refuse unless this instance is still
+    // running and not stopping. The same check runs again immediately before
+    // the write.
+    #[cfg(test)]
+    pause_plan_dispatch(request_id, PlanDispatchPoint::BeforeCheck).await;
+    if let Some(refusal) = plan_step_refusal(data_dir, owner_id, requester_id, capsule_id).await {
+        return refusal;
     }
     let uri = match build_capability_resource(scheme, operation, body) {
         Ok(uri) => uri,
@@ -585,13 +761,36 @@ pub(crate) async fn dispatch_agent_plan_step(
         };
         token
     };
+    if own_root
+        && register_one_use_grant(&ctx, &token, &dispatch.resource, dispatch.required_action)
+            .await
+            .is_err()
+    {
+        let _ = ctx
+            .capability_manager
+            .revoke(*token.id(), PLAN_INSTANCE_ENDED)
+            .await;
+        return resource_error_response("capability_denied", "agent plan grant was not registered");
+    }
+    #[cfg(test)]
+    pause_plan_dispatch(request_id, PlanDispatchPoint::AfterToken).await;
     let request = serde_json::json!({
         "uri": uri,
         "operation": operation,
         "body": body,
         "token": encode_bridge_capability_token(&token),
     });
-    authorize_and_dispatch_resource_invoke(&request, &ctx).await
+    let step = PlanStep {
+        #[cfg(test)]
+        request_id: request_id.to_string(),
+        owner_id: owner_id.to_string(),
+        requester_id: requester_id.to_string(),
+        capsule_id: capsule_id.to_string(),
+        data_dir: data_dir.to_path_buf(),
+    };
+    PLAN_STEP
+        .scope(step, authorize_and_dispatch_resource_invoke(&request, &ctx))
+        .await
 }
 
 #[derive(Clone)]
@@ -1157,6 +1356,14 @@ async fn authorize_and_dispatch_resource_invoke(
         return finish_component_invoke(bridge_ctx, &audit_id, &dispatch, outcome, response);
     }
 
+    // A plan step that reached here has passed validation. Check the instance
+    // again, and keep the write visible to Stop until it returns.
+    let _plan_effect = match guard_plan_effect().await {
+        Ok(guard) => guard,
+        Err(refusal) => {
+            return finish_component_invoke(bridge_ctx, &audit_id, &dispatch, "denied", refusal);
+        }
+    };
     if let Some(response) = protected_principal_root_resource_response(
         bridge_ctx,
         &dispatch.operation,
