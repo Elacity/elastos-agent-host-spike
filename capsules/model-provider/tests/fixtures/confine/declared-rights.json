@@ -22,6 +22,15 @@
         "(allow iokit-open-user-client (iokit-user-client-class \"AGXDeviceUserClient\") (iokit-user-client-class \"IOSurfaceRootUserClient\"))",
         "(allow mach-lookup (global-name \"com.apple.MTLCompilerService\"))"
       ]
+    },
+    {
+      "id": "local-model-files",
+      "rules": [
+        "(allow file-read* (literal (param \"MODEL\")))",
+        "(allow process-exec (literal (param \"ENGINE\")))",
+        "(allow file-read* (literal (param \"ENGINE_LIBRARY\")))",
+        "(allow file-read* file-write-data (literal (param \"ENGINE_SOCKET\")))"
+      ]
     }
   ],
   "platform_baseline": {
