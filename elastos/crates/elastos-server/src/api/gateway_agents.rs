@@ -11,6 +11,109 @@
 use super::*;
 use crate::agents::{Caller, CreateRequest, Refused};
 
+use elastos_runtime::auth::RuntimeAuditEventV1;
+
+/// The optional ids one signed agent row carries: the step-up challenge
+/// that authorized a start, the agent host capsule, and the runtime
+/// session, each present only when the row is about one.
+struct AgentAuditIds<'a> {
+    challenge_id: Option<&'a str>,
+    capsule_id: Option<&'a str>,
+    session_id: Option<&'a str>,
+}
+
+/// Test seam: the occurrence numbers of signed agent appends that fail for
+/// one data dir, so a test can reach a Start whose later row cannot be
+/// recorded.
+#[cfg(test)]
+static AGENT_AUDIT_APPEND_COUNTS: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<std::path::PathBuf, usize>>,
+> = std::sync::LazyLock::new(Default::default);
+
+#[cfg(test)]
+pub(in crate::api) static AGENT_AUDIT_APPEND_FAILURES: std::sync::LazyLock<
+    std::sync::Mutex<
+        std::collections::HashMap<std::path::PathBuf, std::collections::BTreeSet<usize>>,
+    >,
+> = std::sync::LazyLock::new(Default::default);
+
+/// Appends one signed audit row for an owner action on an agent, in the row
+/// shape the passkey step-up completion writes: the owner is the principal,
+/// and the agent's identity rides in the reason JSON because the signed
+/// audit event carries no agent column.
+fn append_agent_lifecycle_audit(
+    data_dir: &std::path::Path,
+    event_type: &str,
+    owner: &AgentsOwner,
+    ids: AgentAuditIds,
+    result: &str,
+    reason: serde_json::Value,
+) -> anyhow::Result<()> {
+    #[cfg(test)]
+    {
+        let mut counts = AGENT_AUDIT_APPEND_COUNTS.lock().unwrap();
+        let count = counts.entry(data_dir.to_path_buf()).or_default();
+        *count += 1;
+        let failing = AGENT_AUDIT_APPEND_FAILURES
+            .lock()
+            .unwrap()
+            .get(data_dir)
+            .is_some_and(|failures| failures.contains(&*count));
+        if failing {
+            anyhow::bail!("injected signed agent audit append failure");
+        }
+    }
+    crate::auth::append_audit_event(
+        data_dir,
+        RuntimeAuditEventV1 {
+            schema: RuntimeAuditEventV1::SCHEMA.to_string(),
+            event_id: format!("audit:{}", gateway_home_token::uuid_like_token()),
+            event_type: event_type.to_string(),
+            principal_id: Some(owner.principal.principal_id.clone()),
+            proof_binding_id: Some(owner.principal.proof_binding_id.clone()),
+            session_id: ids.session_id.map(str::to_string),
+            challenge_id: ids.challenge_id.map(str::to_string),
+            capsule_id: ids.capsule_id.map(str::to_string),
+            result: result.to_string(),
+            reason: serde_json::to_string(&reason)?,
+            occurred_at: now_ts(),
+            signer_did: None,
+            signature: None,
+        },
+    )
+}
+
+/// The sha256 that names the host package's bytes: the root digest of the
+/// bundle CID the admission walk produced, read back through the one CID
+/// form the lab defines.
+fn host_package_sha256(host: &crate::agent_admission::VerifiedAgentHost) -> anyhow::Result<String> {
+    let digest = elastos_common::cid_form(&host.package().bundle_cid)
+        .ok_or_else(|| anyhow::anyhow!("agent host package has no sha256 digest"))?;
+    Ok(hex::encode(digest))
+}
+
+/// The reason JSON of a signed Start row: the agent, the owner launch that
+/// authorized it, and the sha256 that names the host package's bytes. A
+/// failed launch adds the runtime's refusal.
+fn agent_start_reason(
+    agent_id: &str,
+    launch: &RequiredHomeLaunchToken,
+    host: &crate::agent_admission::VerifiedAgentHost,
+    host_sha256: &str,
+    error: Option<&str>,
+) -> serde_json::Value {
+    let mut reason = serde_json::json!({
+        "agent_id": agent_id,
+        "launch_id": launch.launch_id,
+        "host_package": host.package().name,
+        "host_package_sha256": host_sha256,
+    });
+    if let Some(error) = error {
+        reason["error"] = serde_json::Value::String(error.to_string());
+    }
+    reason
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RetireRequest {
@@ -138,6 +241,12 @@ pub(super) async fn agents_retire(
         let owner = agents_owner(&state, &headers)?;
         let request: RetireRequest = agents_request(&body)?;
         end_live_agent(&state.data_dir, &request.agent_id).await?;
+        // The record write that performs the retire also appends its signed
+        // row (agents.rs `write`), so the retire and its record are one
+        // operation and the audit chain trims its tail, so recording never
+        // waits on a full audit file. A second `agent.retired` row here
+        // would claim "ok" before the retire happened or error after the
+        // record already changed, so this route adds none.
         crate::agents::retire(
             &state.data_dir,
             &owner.caller(),
@@ -247,13 +356,14 @@ async fn start_agent(
     let owner = agents_owner(state, headers)?;
     let request: AgentLaunchRequest = agents_request(body)?;
     let launch = require_home_launch_token_binding(&state.data_dir, headers, &[SYSTEM_CAPSULE_ID])?;
-    consume_passkey_step_up_token(
+    let step_up = consume_passkey_step_up_for_effect(
         &state.data_dir,
         request.step_up_token.trim(),
         &launch,
         AGENT_START_STEP_UP_MAX_AGE_SECS,
         AGENT_START_OPERATION,
         &serde_json::json!({ "agent_id": request.agent_id }),
+        (false, |_| Ok(())),
     )?;
     let stored = crate::agents::stored_agent(
         &state.data_dir,
@@ -267,6 +377,25 @@ async fn start_agent(
         .map(|package| package.name.clone())
         .ok_or_else(|| anyhow::anyhow!("agent has no host package"))?;
     let host = crate::agent_admission::verify_agent_host(&state.data_dir, &host_name)?;
+    let host_sha256 = host_package_sha256(&host)?;
+    append_agent_lifecycle_audit(
+        &state.data_dir,
+        "agent.start.requested",
+        &owner,
+        AgentAuditIds {
+            challenge_id: Some(&step_up.step_up_id),
+            capsule_id: Some(host.package().name.as_str()),
+            session_id: None,
+        },
+        "ok",
+        agent_start_reason(&request.agent_id, &launch, &host, &host_sha256, None),
+    )
+    .map_err(|error| {
+        Refused(format!(
+            "agent '{}' was not started: its signed start request was not recorded: {error}",
+            request.agent_id
+        ))
+    })?;
     let grant = issue_home_agent_launch_token_with_context(
         &state.data_dir,
         &request.agent_id,
@@ -274,7 +403,72 @@ async fn start_agent(
         &owner.context,
     )?;
     let started =
-        launch_runtime_agent(&state.data_dir, host.directory(), &request.agent_id, &grant).await?;
+        match launch_runtime_agent(&state.data_dir, host.directory(), &request.agent_id, &grant)
+            .await
+        {
+            Ok(started) => started,
+            Err(error) => {
+                let outcome = append_agent_lifecycle_audit(
+                    &state.data_dir,
+                    "agent.start.completed",
+                    &owner,
+                    AgentAuditIds {
+                        challenge_id: Some(&step_up.step_up_id),
+                        capsule_id: Some(host.package().name.as_str()),
+                        session_id: None,
+                    },
+                    "failed",
+                    agent_start_reason(
+                        &request.agent_id,
+                        &launch,
+                        &host,
+                        &host_sha256,
+                        Some(&error.to_string()),
+                    ),
+                );
+                if let Err(audit_error) = outcome {
+                    return Err(audit_error.context(format!("agent start failed: {error}")));
+                }
+                return Err(error);
+            }
+        };
+    if let Err(audit_error) = append_agent_lifecycle_audit(
+        &state.data_dir,
+        "agent.start.completed",
+        &owner,
+        AgentAuditIds {
+            challenge_id: Some(&step_up.step_up_id),
+            capsule_id: Some(host.package().name.as_str()),
+            session_id: Some(&started.session_id),
+        },
+        "ok",
+        agent_start_reason(&request.agent_id, &launch, &host, &host_sha256, None),
+    ) {
+        // The launch succeeded, so the host is running with no signed
+        // completion row. The same stop path the Stop route uses ends the
+        // session and signs each stop, and the Start refuses by name
+        // instead of answering success for a start it could not record.
+        let outcome = stop_runtime_agent(&state.data_dir, &request.agent_id).await?;
+        for session in &outcome.stopped {
+            append_agent_lifecycle_audit(
+                &state.data_dir,
+                "agent.stopped",
+                &owner,
+                AgentAuditIds {
+                    challenge_id: None,
+                    capsule_id: Some(host.package().name.as_str()),
+                    session_id: Some(&session.session_id),
+                },
+                "ok",
+                serde_json::json!({ "agent_id": request.agent_id, "cause": "unrecorded_start" }),
+            )?;
+        }
+        return Err(Refused(format!(
+            "agent '{}' was started but its signed completion row was not recorded, so it was stopped: {audit_error}",
+            request.agent_id
+        ))
+        .into());
+    }
     Ok(AgentLaunchResponse {
         agent_id: request.agent_id,
         capsule_id: started.capsule_id,
@@ -314,12 +508,13 @@ pub(super) async fn agents_stop(
 /// owner owns this agent". The agent may be off or retired, and the Home may
 /// have turned agents off. A guest fails the admin check. Another owner fails
 /// the ownership check. Either refusal happens before the Runtime is asked
-/// to stop anything.
+/// to stop anything. The checked owner comes back, so the stop it authorized
+/// can be signed in its name.
 fn owner_may_stop(
     state: &GatewayState,
     headers: &HeaderMap,
     agent_id: Option<&str>,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<AgentsOwner> {
     let owner = agents_owner(state, headers)?;
     if let Some(agent_id) = agent_id {
         crate::agents::stored_agent_for_stop(
@@ -328,11 +523,13 @@ fn owner_may_stop(
             agent_id,
         )?;
     }
-    Ok(())
+    Ok(owner)
 }
 
 /// Owner check, then ask the Runtime to stop the live row whose principal is
-/// this agent. The request carries the agent id and no capsule name.
+/// this agent. The request carries the agent id and no capsule name. Every
+/// session the Runtime ended is signed into the audit chain in the owner's
+/// name, with the cause the Runtime recorded: the owner asked.
 async fn stop_agent(
     state: &GatewayState,
     headers: &HeaderMap,
@@ -340,7 +537,7 @@ async fn stop_agent(
 ) -> anyhow::Result<AgentStopResponse> {
     owner_may_stop(state, headers, None)?;
     let request: AgentStopRequest = agents_request(body)?;
-    owner_may_stop(state, headers, Some(&request.agent_id))?;
+    let owner = owner_may_stop(state, headers, Some(&request.agent_id))?;
     let outcome = stop_runtime_agent(&state.data_dir, &request.agent_id).await?;
     if outcome.stopped.is_empty() {
         let message = match outcome.already.as_deref() {
@@ -349,6 +546,30 @@ async fn stop_agent(
             _ => "this agent has no running session",
         };
         return Err(Refused(message.to_string()).into());
+    }
+    let host = crate::agents::stored_agent_for_stop(
+        &state.data_dir,
+        &owner.principal.principal_id,
+        &request.agent_id,
+    )?;
+    let capsule_id = host
+        .record
+        .agent_host_package
+        .as_ref()
+        .map(|package| package.name.as_str());
+    for session in &outcome.stopped {
+        append_agent_lifecycle_audit(
+            &state.data_dir,
+            "agent.stopped",
+            &owner,
+            AgentAuditIds {
+                challenge_id: None,
+                capsule_id,
+                session_id: Some(&session.session_id),
+            },
+            "ok",
+            serde_json::json!({ "agent_id": request.agent_id, "cause": "owner" }),
+        )?;
     }
     Ok(AgentStopResponse {
         agent_id: request.agent_id,

@@ -230,8 +230,8 @@ pub(crate) use gateway_passkey_step_up::{
     issue_passkey_step_up_token_for_test,
 };
 pub(super) use gateway_passkey_step_up::{
-    consume_or_recover_passkey_step_up_effect, consume_passkey_step_up_token,
-    require_hosted_step_up_launch,
+    consume_or_recover_passkey_step_up_effect, consume_passkey_step_up_for_effect,
+    consume_passkey_step_up_token, require_hosted_step_up_launch,
 };
 #[cfg(unix)]
 #[cfg(test)]
