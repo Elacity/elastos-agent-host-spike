@@ -4975,13 +4975,15 @@ pub fn load_or_create_recovery_archive_key(_data_dir: &Path) -> anyhow::Result<[
 
 #[cfg(unix)]
 fn set_secret_file_permissions(path: &Path) -> anyhow::Result<()> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let permissions = std::fs::Permissions::from_mode(0o600);
-        std::fs::set_permissions(path, permissions)
-            .with_context(|| format!("failed to restrict secret file permissions for {path:?}"))?;
-    }
+    use std::os::unix::fs::PermissionsExt;
+    // `fchmod` on the opened descriptor. A path chmod is not mediated by Landlock.
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)
+        .with_context(|| format!("failed to restrict secret file permissions for {path:?}"))?;
+    file.set_permissions(std::fs::Permissions::from_mode(0o600))
+        .with_context(|| format!("failed to restrict secret file permissions for {path:?}"))?;
     Ok(())
 }
 
