@@ -1,13 +1,18 @@
 import assert from "node:assert/strict";
 import crypto from "node:crypto";
+import fs from "node:fs";
 import test from "node:test";
 import {
   OWNER_DOCUMENT,
   OWNER_NOTE,
+  U3_NAMES,
   U4_ISOLATION_NOT_COVERED,
   agentStartRequestSha256,
   agentStartStepUps,
+  auditChainHash,
+  auditEventBytes,
   carriedAgentId,
+  createReplacesMint,
   createdAgentOwnedBy,
   LIVE_SESSION_COORDS,
   gatewayHealthOk,
@@ -15,11 +20,14 @@ import {
   journalFileInRoot,
   ownerDocumentUnchanged,
   ownerNoteRelative,
+  refusalIncludes,
   runtimeHealthOk,
   shellFailStatuses,
   signedAgentStarts,
   signedStartAudit,
+  storedOwnerIsCreatingOwner,
   userAreaRouteRefused,
+  verifyInstalledAudit,
 } from "./a15r-installed-journey.mjs";
 
 const agentA = "agent:v2:" + "a".repeat(32);
@@ -238,4 +246,63 @@ test("a shell failure does not pass a row the node did not check", () => {
   assert.equal(byName(atGateway, "release_signed"), "pass");
   assert.equal(byName(atGateway, "signing_key_deleted"), "pass");
   assert.equal(byName(atGateway, "runtime_started"), "not reached");
+});
+
+test("u3 create mode names the create rows and no start row", () => {
+  assert.equal(U3_NAMES.includes("u3_agent_started"), false);
+  assert.equal(U3_NAMES.includes("u3_agent_created"), true);
+  assert.equal(U3_NAMES.at(-1), "u3_create_audit");
+  const failed = shellFailStatuses("u3_agent_created", U3_NAMES);
+  assert.equal(failed[U3_NAMES.indexOf("u3_agent_created")], "fail");
+  assert.equal(failed[U3_NAMES.indexOf("release_signed")], "pass");
+  assert.equal(failed[U3_NAMES.indexOf("u3_create_audit")], "not reached");
+  assert.equal(failed.length, U3_NAMES.length);
+});
+
+test("stored owner is the product caller, not a different runner value", () => {
+  const product = "person:local:abc";
+  assert.equal(storedOwnerIsCreatingOwner(product, product), true);
+  assert.equal(storedOwnerIsCreatingOwner("person:spoof", product), false);
+  assert.equal(storedOwnerIsCreatingOwner(product, "person:local:other"), false);
+  assert.equal(storedOwnerIsCreatingOwner("", product), false);
+});
+
+test("create refusals keep their status and reason", () => {
+  assert.equal(refusalIncludes(409, "agent request is invalid: unknown field", 409, "agent request is invalid"), true);
+  assert.equal(refusalIncludes(200, "agent request is invalid", 409, "agent request is invalid"), false);
+  assert.equal(refusalIncludes(403, "admin passkey required", 403, "admin passkey required"), true);
+  assert.equal(refusalIncludes(403, "missing home launch token", 403, "missing home launch token"), true);
+  assert.equal(refusalIncludes(409, "agents are not turned on for this Home", 409, "agents are not turned on"), true);
+});
+
+test("create route replaced a caller-chosen mint", () => {
+  const agents = fs.readFileSync(new URL("../elastos/crates/elastos-server/src/agents.rs", import.meta.url), "utf8");
+  const route = fs.readFileSync(new URL("../elastos/crates/elastos-server/src/api/gateway.rs", import.meta.url), "utf8");
+  const replacement = createReplacesMint(agents, route);
+  assert.equal(replacement.ok, true);
+  assert.deepEqual(replacement.fields, ["display_name", "agent_host", "request_id"]);
+  assert.equal(replacement.route, "POST /api/apps/system/agents/create");
+  assert.equal(replacement.id_source, "auth::fresh_agent_id");
+  const accepted = agents.replace(
+    "pub(crate) request_id: String,\n}",
+    "pub(crate) request_id: String,\n    pub(crate) owner: String,\n}",
+  );
+  assert.equal(createReplacesMint(accepted, route).ok, false);
+});
+
+test("audit bytes match the signed fixture chain", () => {
+  const fixture = JSON.parse(fs.readFileSync(
+    new URL("../elastos/crates/elastos-server/fixtures/auth-state-populated.json", import.meta.url),
+    "utf8",
+  ));
+  const event = fixture.audit[0];
+  const link = fixture.audit_chain[0];
+  const eventHash = `sha256:${crypto.createHash("sha256").update(auditEventBytes(event, false)).digest("hex")}`;
+  assert.equal(eventHash, link.event_hash);
+  assert.equal(auditChainHash(link.sequence, link.event_id, link.previous_hash, eventHash), link.chain_hash);
+  const verified = verifyInstalledAudit(fixture, event.signer_did);
+  assert.equal(verified.ok, true, verified.reason);
+  const tampered = structuredClone(fixture);
+  tampered.audit[0].signature = `${"ab".repeat(63)}cd`;
+  assert.equal(verifyInstalledAudit(tampered, event.signer_did).ok, false);
 });
