@@ -8,23 +8,39 @@ const HEAD: &[&str] = &["(version 1)", "(deny default)", "(deny network*)"];
 
 /// Runtime-owned model launch inputs. Each numbered socket is a bound literal;
 /// the later caller supplies the canonical paths before starting the child.
-fn model_inputs() -> Vec<String> {
+fn model_inputs(local_files: bool) -> Vec<String> {
     // Lab-only X1 layout: 19 ancestors and 64 reserved socket slots. The
     // installer must derive these bounds from its verified launch inputs.
     // X2 is process-fork; proposal rows 2, 4 and 5 cover the fixed inputs.
-    let fixed = [
-        "(allow process-fork)",
-        r#"(allow file-read* (literal (param "MODEL")))"#,
-        r#"(allow file-read* (literal (param "MODEL_2")))"#,
-        r#"(allow file-read* (literal "/dev/urandom"))"#,
-        r#"(allow file-read* file-write-data (literal "/dev/null"))"#,
-        r#"(allow process-exec (literal (param "ENGINE")))"#,
-        r#"(allow process-exec (literal (param "ENGINE_2")))"#,
-        r#"(allow file-read* (subpath (param "ENGINE_BUNDLE")))"#,
-        r#"(allow file-read* (subpath "/usr/lib"))"#,
-        r#"(allow network-outbound (literal (param "HOSTED_SOCKET")))"#,
-    ];
-    let mut forms: Vec<String> = fixed.into_iter().map(str::to_string).collect();
+    // MODEL and ENGINE are the signed `local-model-files` rules. A manifest
+    // without that right gets neither model file. MODEL_2 and ENGINE_2 are
+    // the second offer the launcher binds. The Mac lab still needs the bundle
+    // subpath, `/usr/lib`, and `(allow file-read-data (literal "/"))`.
+    let mut forms: Vec<String> = [
+        ("(allow process-fork)", false),
+        (elastos_common::model_landlock_files::MODEL_RULE, true),
+        (r#"(allow file-read* (literal (param "MODEL_2")))"#, true),
+        (r#"(allow file-read* (literal "/dev/urandom"))"#, false),
+        (
+            r#"(allow file-read* file-write-data (literal "/dev/null"))"#,
+            false,
+        ),
+        (elastos_common::model_landlock_files::ENGINE_RULE, true),
+        (r#"(allow process-exec (literal (param "ENGINE_2")))"#, true),
+        (
+            r#"(allow file-read* (subpath (param "ENGINE_BUNDLE")))"#,
+            false,
+        ),
+        (r#"(allow file-read* (subpath "/usr/lib"))"#, false),
+        (
+            r#"(allow network-outbound (literal (param "HOSTED_SOCKET")))"#,
+            false,
+        ),
+    ]
+    .into_iter()
+    .filter(|rule| local_files || !rule.1)
+    .map(|rule| rule.0.to_string())
+    .collect();
     // macOS probe X1: 19 measured canonical ancestors, each a bound literal.
     for index in 0..19 {
         forms.push(format!(
@@ -80,8 +96,12 @@ pub(super) fn render_macos_profile(
     }
     let mut rendered = forms.join("\n");
     if matches!(provider, RuntimeProviderId::Model) {
+        let local_files = admitted
+            .rows()
+            .iter()
+            .any(|row| row.id == "local-model-files");
         rendered.push('\n');
-        rendered.push_str(&model_inputs().join("\n"));
+        rendered.push_str(&model_inputs(local_files).join("\n"));
     }
     rendered.push('\n');
     rendered
@@ -409,5 +429,31 @@ mod tests {
         assert!(!other.contains("network-outbound"));
         assert!(!other.contains("/var"));
         assert!(other.contains("META_0"));
+    }
+
+    #[test]
+    fn a_manifest_without_local_model_files_gets_no_model_file() {
+        let path = format!(
+            "{}/../../../capsules/model-provider/capsule.json",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        let mut manifest: elastos_common::CapsuleManifest =
+            serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        let mut authority = manifest.authority.take().unwrap();
+        authority
+            .rights
+            .retain(|right| right.id != "local-model-files");
+        let admitted = super::super::rights::check_rights_against_runtime_templates(
+            RuntimeProviderId::Model,
+            &authority,
+            super::super::rights_table::RIGHTS,
+        )
+        .unwrap();
+        let rendered = render_macos_profile(RuntimeProviderId::Model, &admitted);
+        assert!(
+            !rendered.contains("(param \"MODEL\")"),
+            "model file rule leaked"
+        );
+        assert!(!rendered.contains("(param \"MODEL_2\")"));
     }
 }
