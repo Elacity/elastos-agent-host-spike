@@ -220,7 +220,7 @@ impl ModelBudget {
         Ok(Hold { tokens })
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, target_os = "macos"))]
     pub(crate) fn held_for_test(&self, agent: &AgentKey) -> u64 {
         self.agents
             .lock()

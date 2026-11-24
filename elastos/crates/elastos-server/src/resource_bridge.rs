@@ -9124,6 +9124,8 @@ pub(crate) mod tests {
     const HOSTED_INPUT_LIMIT: u64 = 100;
     #[cfg(target_os = "macos")]
     const HOSTED_INLINE_LIMIT: u64 = 128;
+    #[cfg(target_os = "macos")]
+    const HOSTED_SECRET: &str = "fixture-hosted-secret";
 
     #[cfg(target_os = "macos")]
     fn hosted_offer_tokens() -> u64 {
@@ -9134,6 +9136,7 @@ pub(crate) mod tests {
     struct BrokerModel {
         data_dir: std::path::PathBuf,
         creates: Arc<std::sync::atomic::AtomicUsize>,
+        reply: Arc<std::sync::Mutex<String>>,
     }
 
     #[cfg(target_os = "macos")]
@@ -9188,6 +9191,7 @@ pub(crate) mod tests {
             .await
             .map_err(|_| ProviderError::Provider("hosted broker timed out".to_string()))?
             .map_err(|err| ProviderError::Provider(err.to_string()))?;
+            *self.reply.lock().unwrap() = forwarded.clone();
             if !forwarded.starts_with("HTTP/1.1 200") {
                 return Ok(serde_json::json!({
                     "status": "error",
@@ -9205,6 +9209,7 @@ pub(crate) mod tests {
         creates: Arc<std::sync::atomic::AtomicUsize>,
         hits: Arc<std::sync::atomic::AtomicUsize>,
         captured: Arc<std::sync::Mutex<String>>,
+        reply: Arc<std::sync::Mutex<String>>,
         owner_id: String,
         owner_proof: String,
         agent_id: String,
@@ -9352,6 +9357,7 @@ pub(crate) mod tests {
                     "kind": "open_ai_compatible_text",
                     "api_url": "https://openrouter.ai/api/v1/chat/completions",
                     "model": "fixture/model",
+                    "api_key": HOSTED_SECRET,
                     "hosted": {
                         "backend_provider_label": "OpenRouter",
                         "selection_mode": "pinned",
@@ -9387,6 +9393,7 @@ pub(crate) mod tests {
         .unwrap();
         let hits = Arc::new(AtomicUsize::new(0));
         let captured = Arc::new(std::sync::Mutex::new(String::new()));
+        let reply = Arc::new(std::sync::Mutex::new(String::new()));
         let hits_task = hits.clone();
         let captured_task = captured.clone();
         let sink = tokio::spawn(async move {
@@ -9450,6 +9457,7 @@ pub(crate) mod tests {
         let provider = Arc::new(BrokerModel {
             data_dir: temp.path().to_path_buf(),
             creates: creates.clone(),
+            reply: reply.clone(),
         });
         ctx.provider_registry
             .register_sub_provider("model", provider)
@@ -9460,6 +9468,7 @@ pub(crate) mod tests {
             creates,
             hits,
             captured,
+            reply,
             owner_id,
             owner_proof,
             agent_id,
@@ -9498,7 +9507,8 @@ pub(crate) mod tests {
         crate::auth::save_auth_state(data_dir, &state, None).unwrap();
     }
 
-    /// An admitted agent reaches the loopback broker once, with no credential.
+    /// An admitted agent reaches the loopback broker once. The fixture stores
+    /// a hosted secret. The guest result and the broker reply carry no Authorization.
     #[cfg(target_os = "macos")]
     #[tokio::test]
     async fn agent_hosted_run_reaches_the_egress_broker_once() {
@@ -9517,10 +9527,21 @@ pub(crate) mod tests {
         assert_eq!(created["response"]["result"]["status"], "ok", "{created}");
         assert_eq!(home.creates.load(std::sync::atomic::Ordering::SeqCst), 1);
         assert_eq!(home.hits.load(std::sync::atomic::Ordering::SeqCst), 1);
+        let secret = HOSTED_SECRET.to_ascii_lowercase();
         let captured = home.captured.lock().unwrap().to_ascii_lowercase();
         assert!(
-            !captured.contains("authorization"),
-            "the loopback sink saw a credential: {captured}"
+            captured.contains("authorization") && captured.contains(&secret),
+            "the fixture secret did not reach the upstream request: {captured}"
+        );
+        let guest = created.to_string().to_ascii_lowercase();
+        assert!(
+            !guest.contains("authorization") && !guest.contains(&secret),
+            "the guest result carried the hosted credential: {guest}"
+        );
+        let reply = home.reply.lock().unwrap().to_ascii_lowercase();
+        assert!(
+            !reply.contains("authorization") && !reply.contains(&secret),
+            "the broker reply carried the hosted credential: {reply}"
         );
         assert_eq!(
             home.account.held_for_test(&home.agent_key),
@@ -9631,6 +9652,47 @@ pub(crate) mod tests {
         assert_eq!(home.creates.load(std::sync::atomic::Ordering::SeqCst), 0);
         assert_eq!(home.hits.load(std::sync::atomic::Ordering::SeqCst), 0);
         assert_eq!(home.account.held_for_test(&home.agent_key), 0);
+        home.sink.abort();
+    }
+
+    /// An HTTP caller with an agent principal is refused. The same principal
+    /// is allowed on the Bus path that reserves. The context is injected.
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn http_caller_with_an_agent_principal_is_refused() {
+        let Some(home) = hosted_agent_home(hosted_offer_tokens()).await else {
+            return;
+        };
+        let request = serde_json::json!({
+            "offer_id": HOSTED_OFFER,
+            "operation": "text.generate",
+            "input": {"prompt": "hi"},
+            "request_id": "model-v1:1700000000000:s8",
+        });
+        let data_dir = home.ctx.data_dir.as_deref().unwrap();
+        assert!(
+            !crate::api::gateway::http_hosted_run_with_principal_for_test(
+                data_dir,
+                &home.agent_id,
+                &request,
+            ),
+            "the HTTP gate admitted an agent principal"
+        );
+        let bus = crate::api::gateway::bus_model_provider_request(
+            "runs_create",
+            &request,
+            Some(data_dir),
+            Some(&home.agent_id),
+            &home.ctx.capsule_id,
+            "capability:s8-http",
+            &home.ctx.capsule_id,
+        );
+        assert!(
+            bus.is_ok(),
+            "the reserving Bus path refused the agent: {bus:?}"
+        );
+        assert_eq!(home.creates.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert_eq!(home.hits.load(std::sync::atomic::Ordering::SeqCst), 0);
         home.sink.abort();
     }
 

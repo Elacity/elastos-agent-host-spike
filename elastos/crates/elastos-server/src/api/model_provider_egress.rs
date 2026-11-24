@@ -1912,7 +1912,7 @@ async fn unavailable(stream: &mut UnixStream) -> io::Result<()> {
         .await
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "macos"))]
 fn hosted_text_effect(
     data_dir: &Path,
     offer_id: &str,
@@ -1944,7 +1944,7 @@ fn hosted_text_effect(
     })
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "macos"))]
 pub(crate) fn approve_hosted_text_for_test(
     data_dir: &Path,
     offer_id: &str,
@@ -1969,7 +1969,7 @@ pub(crate) fn approve_hosted_text_for_test(
     Ok(id)
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "macos"))]
 pub(crate) fn end_hosted_decision_for_test(
     data_dir: &Path,
     id: &str,
@@ -1978,7 +1978,7 @@ pub(crate) fn end_hosted_decision_for_test(
     model_provider_egress_decision::end_decision(data_dir, id, owner_proof)
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "macos"))]
 pub(crate) async fn forward_hosted_text_for_test(
     data_dir: &Path,
     offer_id: &str,

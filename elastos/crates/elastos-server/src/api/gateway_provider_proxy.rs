@@ -1772,7 +1772,7 @@ pub(super) async fn gateway_provider_proxy(
                 Ok(value) => value,
                 Err((status, message)) => return (status, message).into_response(),
             };
-        if op == "runs_create" && !hosted_run_allowed(&state.data_dir, &context, &request) {
+        if op == "runs_create" && !hosted_run_allowed(&state.data_dir, &context, &request, false) {
             return (StatusCode::FORBIDDEN, HOSTED_RUN_ADMIN_ONLY).into_response();
         }
         // Approved remote model grants route new runs to the granting Runtime.
@@ -3999,13 +3999,14 @@ pub(super) fn provider_proxy_runtime_metadata_field(request: &serde_json::Value)
 const HOSTED_RUN_ADMIN_ONLY: &str =
     "Hosted AI on this Home is for admins. Local models are still available.";
 
-/// A hosted offer is open to an admin's own run, and to an admitted agent
-/// whose stored owner is an admin and has approved that offer. The agent's
-/// signed ceiling is reserved before that run is dispatched.
+/// An admin's own hosted run is allowed. An admitted agent whose stored
+/// owner is an admin and has approved that offer is allowed only when
+/// `reserving_bus` is the Bus path that reserves the signed ceiling.
 fn hosted_run_allowed(
     data_dir: &std::path::Path,
     context: &HomeLaunchTokenContext,
     request: &serde_json::Value,
+    reserving_bus: bool,
 ) -> bool {
     let offer_id = request["offer_id"].as_str().unwrap_or_default();
     if !crate::api::model_provider_config::is_hosted_offer_id(offer_id) {
@@ -4018,8 +4019,28 @@ fn hosted_run_allowed(
             crate::auth::ensure_proof_binding_not_revoked(&principal).is_ok()
                 && principal.principal_id == context.principal_id()
                 && (crate::auth::is_admin(&principal)
-                    || agent_owner_approved(data_dir, &principal, offer_id))
+                    || (reserving_bus && agent_owner_approved(data_dir, &principal, offer_id)))
         })
+}
+
+/// Asks the HTTP gate with a context built for this principal.
+#[cfg(test)]
+pub(crate) fn http_hosted_run_with_principal_for_test(
+    data_dir: &std::path::Path,
+    principal_id: &str,
+    request: &serde_json::Value,
+) -> bool {
+    let Ok(root) = crate::auth::ResolvedPrincipalRoot::resolve(data_dir, data_dir, principal_id)
+    else {
+        return false;
+    };
+    let proof = crate::auth::stored_principal_record(data_dir, principal_id)
+        .ok()
+        .flatten()
+        .map(|principal| principal.proof_binding_id);
+    let context =
+        HomeLaunchTokenContext::resolved(root, "s8-http".to_string(), proof, "s8-http".to_string());
+    hosted_run_allowed(data_dir, &context, request, false)
 }
 
 fn agent_owner_approved(
@@ -4208,7 +4229,7 @@ pub(crate) fn bus_model_provider_request(
     }
     let request = normalize_model_provider_request(op, &body, &context, capsule_id)
         .map_err(|(_, message)| ("invalid_model_request", message))?;
-    if op == "runs_create" && !hosted_run_allowed(data_dir, &context, &request) {
+    if op == "runs_create" && !hosted_run_allowed(data_dir, &context, &request, true) {
         return Err(("hosted_run_admin_only", HOSTED_RUN_ADMIN_ONLY.to_string()));
     }
     Ok(request)
