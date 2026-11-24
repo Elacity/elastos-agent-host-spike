@@ -115,13 +115,14 @@ pub(super) fn signed_image(info: &PlatformInfo) -> anyhow::Result<Option<VmImage
 }
 
 fn signed_image_for_home(data: &Path, info: &PlatformInfo) -> anyhow::Result<Option<VmImageEntry>> {
-    // A source Home explicitly opted into dev mode can retain an older archive
-    // pin without a signed image entry. An installed release always uses its
-    // signed entry, even if its config still says dev_mode = true.
-    if !info.extra.contains_key("vm_image")
-        && super::source_home_dev_mode(data)
-        && super::installed_release_source(data)?.is_none()
-    {
+    if !info.extra.contains_key("vm_image") {
+        // A source Home explicitly opted into dev mode can retain an older
+        // archive pin without a signed image entry. An installed release always
+        // uses its signed entry, even if its config still says dev_mode = true.
+        ensure!(
+            super::source_home_dev_mode(data) && super::installed_release_source(data)?.is_none(),
+            "Browser image has no signed VM image entry"
+        );
         return Ok(None);
     }
     signed_image(info)
@@ -164,19 +165,6 @@ fn signed_image_receipt(entry: &VmImageEntry) -> Value {
         "rootfs_sha256": entry.sha256,
         "kernel_sha256": entry.kernel.sha256,
         "initrd_sha256": entry.initrd.sha256,
-    })
-}
-
-fn legacy_signed_image_receipt_matches(recorded: &Value, entry: &VmImageEntry) -> bool {
-    // Earlier installations recorded the rootfs CID and release CID. They can
-    // be reused after verify_signed_image has checked all three current signed
-    // digests. New installations record the three digests directly.
-    recorded.as_object().is_some_and(|fields| {
-        fields.len() == 2
-            && fields.get("image_cid").and_then(Value::as_str) == Some(entry.cid.as_str())
-            && fields
-                .get("release_cid")
-                .is_some_and(|cid| cid.is_null() || cid.is_string())
     })
 }
 
@@ -873,8 +861,7 @@ fn verify_installed_with_cancel(
         .context("Browser signed image receipt is malformed")
         .map_err(BrowserVmImageInvalid::new)?;
         ensure!(
-            recorded == signed_image_receipt(entry)
-                || legacy_signed_image_receipt_matches(&recorded, entry),
+            recorded == signed_image_receipt(entry),
             "Browser signed image installation receipt differs from signed image"
         );
     }
@@ -1017,6 +1004,7 @@ pub(super) async fn install_via_carrier(
         install_archive_reader(&data, file, &info, &platform, &cancelled)
     })
     .await?
+    .map_err(|error| BrowserVmImageInvalid::new(error).into())
 }
 
 #[cfg(test)]
@@ -1307,6 +1295,13 @@ pub(super) mod tests {
 
     fn arm64_fixture(rootfs: &[u8]) -> Vec<(String, Vec<u8>)> {
         fixture_for_platform(rootfs, "linux-arm64")
+    }
+
+    /// Installs of entry-less unsigned fixtures exercise the dev-branch, which
+    /// only `signed_image_for_home` grants inside a dev-marked source Home.
+    fn mark_dev_home(data: &Path) {
+        fs::create_dir_all(data).unwrap();
+        fs::write(data.join("config.toml"), "dev_mode = true\n").unwrap();
     }
 
     fn fixture_for_platform(rootfs: &[u8], platform: &str) -> Vec<(String, Vec<u8>)> {
@@ -1841,16 +1836,6 @@ JSON
             fs::read(temp.path().join(INSTALL_PATH).join("rootfs.ext4")).unwrap(),
             original
         );
-        fs::write(
-            temp.path().join(INSTALL_PATH).join(SIGNED_IMAGE),
-            serde_json::to_vec(&json!({
-                "image_cid": signed_image(&info).unwrap().unwrap().cid,
-                "release_cid": "prior-release"
-            }))
-            .unwrap(),
-        )
-        .unwrap();
-        verify_installed(temp.path(), &next_release, "darwin-arm64").unwrap();
 
         let (replacement, mut changed) = archive(&arm64_fixture(b"changed-image"));
         changed.cid = Some(super::super::catalog_head_cid(&replacement).unwrap());
@@ -1899,6 +1884,30 @@ JSON
             "{missing:#}"
         );
         assert!(missing.to_string().contains("signed VM image entry"));
+    }
+
+    #[test]
+    fn installed_release_beats_dev_mode_when_entry_removed() {
+        let (_, info) = archive(&fixture(b"signed-image"));
+        assert!(info.cid.is_none() && !info.extra.contains_key("vm_image"));
+        let released = tempfile::tempdir().unwrap();
+        fs::write(released.path().join("config.toml"), "dev_mode = true\n").unwrap();
+        fs::write(
+            released.path().join("components.json"),
+            serde_json::to_vec(&json!({"external":{}, "profiles":{}})).unwrap(),
+        )
+        .unwrap();
+        crate::installed_release::tests::sign_test_install(released.path());
+        let error = signed_image_for_home(released.path(), &info)
+            .err()
+            .expect("installed release forces the signed entry outside dev mode");
+        assert!(
+            error.to_string().contains("no signed VM image entry"),
+            "{error:#}"
+        );
+        let dev = tempfile::tempdir().unwrap();
+        fs::write(dev.path().join("config.toml"), "dev_mode = true\n").unwrap();
+        assert!(signed_image_for_home(dev.path(), &info).unwrap().is_none());
     }
 
     #[test]
@@ -2032,6 +2041,7 @@ JSON
         let temp = tempfile::tempdir().unwrap();
         let data = temp.path();
         let (old, old_info) = archive(&arm64_fixture(b"first-image"));
+        mark_dev_home(data);
         install_archive(data, &old, &old_info, "darwin-arm64").unwrap();
         verify_installed(data, &old_info, "darwin-arm64").unwrap();
         let (next, info) = archive(&arm64_fixture(b"next-image"));
@@ -2060,6 +2070,7 @@ JSON
             let temp = tempfile::tempdir().unwrap();
             let data = temp.path();
             let mut files = arm64_fixture(b"original-image");
+            mark_dev_home(data);
             let mut receipt: Value = serde_json::from_slice(&files[0].1).unwrap();
             receipt["target_platform"] = json!(guest_platform(platform).unwrap());
             files[0].1 = serde_json::to_vec(&receipt).unwrap();
@@ -2104,6 +2115,7 @@ JSON
             0,
             "download file has no orphan pathname"
         );
+        mark_dev_home(temp.path());
         install_archive_reader(
             temp.path(),
             &mut file,
@@ -2205,7 +2217,7 @@ JSON
         let bind_addr = runtime.bound_sockets()[0];
         fs::write(
             target.path().join("config.toml"),
-            format!("carrier_bind_addr = \"{bind_addr}\"\n"),
+            format!("carrier_bind_addr = \"{bind_addr}\"\ndev_mode = true\n"),
         )
         .unwrap();
         let address = crate::carrier::tests::wait_for_direct_endpoint_addr(&publisher).await;
@@ -2325,12 +2337,149 @@ JSON
         runtime.close().await;
         publisher.close().await;
     }
+    /// The engine gate the gateway queries must see a corrupt re-download as a
+    /// typed invalid-image error, while a fetch-phase failure stays untyped.
+    #[tokio::test]
+    async fn browser_image_corrupt_redownload_reports_an_invalid_artifact_to_the_engine_gate() {
+        use tokio::io::{AsyncBufReadExt, BufReader};
+        let target = tempfile::tempdir().unwrap();
+        install_signed_browser_vm_image_fixture(target.path());
+        // A damaged installed set forces the engine gate to repair by re-download.
+        fs::write(
+            target.path().join(INSTALL_PATH).join("rootfs.ext4"),
+            b"damaged-image",
+        )
+        .unwrap();
+        // The archive helper is deterministic, so the same-length payload keeps
+        // the fetch's size contract and fails only the signed checksum.
+        let (bytes, info) = archive(&fixture(b"signed-image"));
+        let mut corrupt_bytes = bytes.clone();
+        corrupt_bytes[0] = corrupt_bytes[0].wrapping_add(1);
+        let publisher = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
+            .clear_ip_transports()
+            .portmapper_config(iroh::endpoint::PortmapperConfig::Disabled)
+            .alpns(vec![b"elastos/carrier/1".to_vec()])
+            .bind_addr("127.0.0.1:0".parse::<std::net::SocketAddr>().unwrap())
+            .unwrap()
+            .bind()
+            .await
+            .unwrap();
+        let runtime = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
+            .clear_ip_transports()
+            .portmapper_config(iroh::endpoint::PortmapperConfig::Disabled)
+            .bind_addr("127.0.0.1:0".parse::<std::net::SocketAddr>().unwrap())
+            .unwrap()
+            .bind()
+            .await
+            .unwrap();
+        let bind_addr = runtime.bound_sockets()[0];
+        fs::write(
+            target.path().join("config.toml"),
+            format!("carrier_bind_addr = \"{bind_addr}\"\n"),
+        )
+        .unwrap();
+        let address = crate::carrier::tests::wait_for_direct_endpoint_addr(&publisher).await;
+        let ticket = data_encoding::BASE32_NOPAD
+            .encode(&serde_json::to_vec(&json!({"endpoints":[address]})).unwrap())
+            .to_ascii_lowercase();
+        // The fixture's installed release drives admission; merge the Carrier
+        // transport into its default source so one source serves both roles.
+        let mut sources = crate::sources::load_trusted_sources(target.path()).unwrap();
+        let mut source = sources.default_source().cloned().unwrap();
+        source.publisher_node_id = publisher.id().to_string();
+        source.connect_ticket = ticket;
+        sources.sources = vec![source];
+        crate::sources::save_trusted_sources(target.path(), &sources).unwrap();
+        let server = publisher.clone();
+        let release_path = info.release_path.clone().unwrap();
+        let serving = tokio::spawn(async move {
+            let incoming = server.accept().await.unwrap();
+            let connection = incoming.await.unwrap();
+            let (mut send, recv) = connection.accept_bi().await.unwrap();
+            let mut request = String::new();
+            BufReader::new(recv).read_line(&mut request).await.unwrap();
+            assert_eq!(
+                serde_json::from_str::<Value>(&request).unwrap()["path"],
+                release_path
+            );
+            send.write_all(&(corrupt_bytes.len() as u64).to_be_bytes())
+                .await
+                .unwrap();
+            send.write_all(&corrupt_bytes).await.unwrap();
+            send.finish().unwrap();
+            assert!(matches!(
+                connection.closed().await,
+                iroh::endpoint::ConnectionError::ApplicationClosed(_)
+            ));
+        });
+        let error = super::super::ensure_browser_vm_image_for_local_engine(target.path())
+            .await
+            .unwrap_err();
+        serving.abort();
+        runtime.close().await;
+        publisher.close().await;
+        assert!(
+            error.downcast_ref::<BrowserVmImageInvalid>().is_some(),
+            "a corrupt re-download must reach the engine gate as an invalid image: {error:#}"
+        );
+    }
+
+    /// A fetch-phase failure keeps its raw error so the gateway reports
+    /// PreparationRequired instead of an invalid artifact.
+    #[tokio::test]
+    async fn browser_image_failed_carrier_fetch_stays_untyped_for_the_engine_gate() {
+        let target = tempfile::tempdir().unwrap();
+        install_signed_browser_vm_image_fixture(target.path());
+        fs::write(
+            target.path().join(INSTALL_PATH).join("rootfs.ext4"),
+            b"damaged-image",
+        )
+        .unwrap();
+        // No trusted source: the Carrier fetch phase fails before any archive check.
+        let error = super::super::ensure_browser_vm_image_for_local_engine(target.path())
+            .await
+            .unwrap_err();
+        assert!(
+            error.downcast_ref::<BrowserVmImageInvalid>().is_none(),
+            "a fetch-phase failure must stay untyped for the engine gate: {error:#}"
+        );
+        assert!(format!("{error:#}").contains("Trusted source Carrier fetch failed"));
+    }
+
+    /// An image row with neither a signed vm_image entry nor a cid is refused
+    /// by name before any Carrier fetch or filesystem write.
+    #[tokio::test]
+    async fn download_component_refuses_an_unverifiable_image_row_before_any_fetch_or_write() {
+        let target = tempfile::tempdir().unwrap();
+        let (_, info) = archive(&fixture(b"unverifiable-image"));
+        let row = crate::capsule_record::AdmittedRow::for_test(NAME, &info);
+        let dest = target.path().join(INSTALL_PATH);
+        let error = super::super::download_component(
+            target.path(),
+            &row,
+            &dest,
+            super::super::FirstPartyCarrierContext::Setup,
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            format!("{error:#}").contains("Browser image has no signed VM image entry"),
+            "the refusal must name the missing signed entry: {error:#}"
+        );
+        assert!(!dest.exists());
+        assert_eq!(
+            fs::read_dir(target.path()).unwrap().count(),
+            0,
+            "the refusal must leave no fetch or write behind"
+        );
+    }
 
     #[test]
     fn browser_image_corrupt_missing_and_mixed_files_preserve_installed_set() {
         let temp = tempfile::tempdir().unwrap();
         let data = temp.path();
         let (old, old_info) = archive(&arm64_fixture(b"working-image"));
+        mark_dev_home(data);
         install_archive(data, &old, &old_info, "darwin-arm64").unwrap();
         for index in 0..FILES.len() {
             for missing in [false, true] {
@@ -2359,6 +2508,7 @@ JSON
     fn browser_image_interrupted_download_and_invalid_archive_preserve_working_set() {
         let temp = tempfile::tempdir().unwrap();
         let (old, info) = archive(&arm64_fixture(b"working-image"));
+        mark_dev_home(temp.path());
         install_archive(temp.path(), &old, &info, "darwin-arm64").unwrap();
         assert!(
             install_archive(temp.path(), &old[..old.len() / 2], &info, "darwin-arm64").is_err()
@@ -2378,8 +2528,17 @@ JSON
         let temp = tempfile::tempdir().unwrap();
         let data = temp.path().join("fresh");
         let (bytes, info) = archive(&arm64_fixture(b"image"));
+        mark_dev_home(&data);
         assert!(install_archive(&data, &bytes, &info, "darwin-amd64").is_err());
-        assert!(!data.exists());
+        let installed: Vec<String> = fs::read_dir(&data)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            installed,
+            ["config.toml".to_owned()],
+            "a refused install must create nothing but the dev-mode config"
+        );
         let error = install_archive(&data, &bytes, &info, "linux-amd64").unwrap_err();
         assert!(error.to_string().contains("architecture does not match"));
         assert!(!data.join(INSTALL_PATH).exists());
@@ -2395,11 +2554,24 @@ JSON
     #[test]
     fn browser_image_archive_rejects_duplicates_and_unexpected_members() {
         let temp = tempfile::tempdir().unwrap();
+        // The dev opt-in lets the entry-less fixture reach the archive member
+        // check instead of refusing earlier for a missing signed image entry.
+        mark_dev_home(temp.path());
         for name in ["vmlinux", "extra-file"] {
             let mut files = arm64_fixture(b"image");
             files.push((name.into(), b"unexpected".to_vec()));
             let (bytes, info) = archive(&files);
-            assert!(install_archive(temp.path(), &bytes, &info, "darwin-arm64").is_err());
+            let error = install_archive(temp.path(), &bytes, &info, "darwin-arm64").unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("unexpected, duplicate or linked file"),
+                "{name}: {error:#}"
+            );
+            assert!(
+                error.to_string().contains(name),
+                "the refusal must name the offending member {name}: {error:#}"
+            );
             assert!(!temp.path().join(INSTALL_PATH).exists());
         }
     }
@@ -2410,6 +2582,7 @@ JSON
         fs::create_dir(temp.path().join("bin")).unwrap();
         fs::write(temp.path().join("bin/vmlinux"), b"capsule kernel").unwrap();
         let (bytes, info) = archive(&arm64_fixture(b"image"));
+        mark_dev_home(temp.path());
         install_archive(temp.path(), &bytes, &info, "linux-arm64").unwrap();
         verify_installed(temp.path(), &info, "linux-arm64").unwrap();
         assert_eq!(
@@ -2428,6 +2601,7 @@ JSON
         fs::create_dir(temp.path().join("bin")).unwrap();
         fs::write(temp.path().join("bin/vmlinux"), b"operator-owned").unwrap();
         let (bytes, info) = archive(&arm64_fixture(b"image"));
+        mark_dev_home(temp.path());
         assert!(install_archive(temp.path(), &bytes, &info, "darwin-arm64")
             .unwrap_err()
             .to_string()
@@ -2476,6 +2650,7 @@ JSON
         fs::write(abandoned.join(NAME).join("rootfs.ext4"), b"partial").unwrap();
         fs::write(temp.path().join("browser-vm/profile-state"), b"user-state").unwrap();
         let (bytes, info) = archive(&arm64_fixture(b"complete-image"));
+        mark_dev_home(temp.path());
         install_archive(temp.path(), &bytes, &info, "darwin-arm64").unwrap();
         assert!(!abandoned.exists());
         assert_eq!(
@@ -2519,6 +2694,7 @@ JSON
     fn browser_image_invalid_published_bundle_metadata_preserves_existing_bytes() {
         let temp = tempfile::tempdir().unwrap();
         let (bytes, info) = archive(&arm64_fixture(b"working-image"));
+        mark_dev_home(temp.path());
         install_archive(temp.path(), &bytes, &info, "darwin-arm64").unwrap();
         let base = serde_json::to_value(&info).unwrap();
         for (key, value) in [
@@ -2675,6 +2851,7 @@ JSON
     async fn browser_image_missing_trusted_source_keeps_working_set() {
         let temp = tempfile::tempdir().unwrap();
         let (old, info) = archive(&arm64_fixture(b"working-image"));
+        mark_dev_home(temp.path());
         let platform = super::super::detect_platform();
         if platform != "darwin-arm64" && platform != "linux-arm64" {
             return;
@@ -2767,6 +2944,7 @@ JSON
                 br#"{"adapters":[{"kind":"chromium_microvm","supervisor":{"program":"browser-vm-launcher"}}]}"#).unwrap();
             assert!(start_background_verification(temp.path(), platform).is_none());
             let (bytes, info) = archive(&arm64_fixture(b"startup-image"));
+            mark_dev_home(temp.path());
             install_archive(temp.path(), &bytes, &info, platform).unwrap();
             fs::remove_file(temp.path().join("config/browser-engine-adapter.json")).unwrap();
             assert!(start_background_verification(temp.path(), platform).is_none());
@@ -2902,6 +3080,7 @@ JSON
             for released in [false, true] {
                 let temp = tempfile::tempdir().unwrap();
                 let data = temp.path();
+                mark_dev_home(data);
                 let (bytes, info) = archive(&arm64_fixture(b"startup-image"));
                 install_archive(data, &bytes, &info, platform).unwrap();
                 fs::create_dir_all(data.join("config")).unwrap();
@@ -3409,6 +3588,7 @@ JSON
     #[test]
     fn browser_image_receipts_match_only_the_installed_release_row() {
         let temp = tempfile::tempdir().unwrap();
+        mark_dev_home(temp.path());
         let (bytes, info) = archive(&arm64_fixture(b"rootfs"));
         assert!(!receipts_match(temp.path(), &info));
         install_archive(temp.path(), &bytes, &info, "darwin-arm64").unwrap();
