@@ -111,6 +111,10 @@ pub struct ProviderInitExtra {
     /// Runtime-owned hosted HTTPS effect socket. It carries no provider key.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime_hosted_socket: Option<String>,
+    /// Host memory the Runtime read before confinement. The provider does not
+    /// read the host itself.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_host_memory: Option<elastos_common::host_memory::HostMemory>,
 }
 
 /// Private Init provenance projected by Runtime from its verified inventory.
@@ -1061,6 +1065,7 @@ mod tests {
             owner_reclaim: false,
             runtime_local_sockets: BTreeMap::new(),
             runtime_hosted_socket: None,
+            runtime_host_memory: None,
             provider_id: Some("model-provider".to_string()),
             journal_dir: Some(root.join("journal").to_string_lossy().into_owned()),
             offers: vec![local_llama_offer(&engine, &model)],
@@ -1163,6 +1168,7 @@ mod tests {
             owner_reclaim: false,
             runtime_local_sockets: BTreeMap::new(),
             runtime_hosted_socket: None,
+            runtime_host_memory: None,
             provider_id: None,
             journal_dir: Some("/tmp/model-provider".to_string()),
             offers: vec![ConfiguredOffer {

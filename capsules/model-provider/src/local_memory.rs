@@ -301,11 +301,25 @@ fn metadata(reader: impl Read) -> std::io::Result<Metadata> {
     })
 }
 
-/// Provider process fixtures may inject a fixed reading in debug builds.
-/// Runtime Get always calls the common observer directly.
-#[cfg(not(test))]
+static PASSED_MEMORY: std::sync::Mutex<Option<HostMemory>> = std::sync::Mutex::new(None);
+
+/// The Runtime's observation, taken before confinement. This replaces a read
+/// of the host from inside the provider.
+pub(crate) fn install_runtime_memory(memory: HostMemory) {
+    *PASSED_MEMORY.lock().expect("passed host memory") = Some(memory);
+}
+
+fn passed_memory() -> Option<HostMemory> {
+    *PASSED_MEMORY.lock().expect("passed host memory")
+}
+
+/// The memory the Runtime passed in. A debug process fixture may still name a
+/// fixed size. There is no host read from this process.
 pub(crate) fn host_memory() -> Result<HostMemory, LocalLlamaFault> {
-    #[cfg(debug_assertions)]
+    if let Some(memory) = passed_memory() {
+        return Ok(memory);
+    }
+    #[cfg(all(debug_assertions, not(test)))]
     if let Some(bytes) = test_free_memory() {
         return Ok(HostMemory {
             total: bytes,
@@ -313,19 +327,20 @@ pub(crate) fn host_memory() -> Result<HostMemory, LocalLlamaFault> {
             pressure: MemoryPressure::NotReported,
         });
     }
-    observed_memory(elastos_common::host_memory::observe_host_memory(
-        std::env::consts::OS,
-    ))
+    Err(LocalLlamaFault::MemoryObservationUnavailable)
 }
 
-/// The level a running local model watches; a fixed fixture reading reports none.
-#[cfg(not(test))]
+/// The pressure carried in the Runtime snapshot. A missing snapshot is critical
+/// so a running model stops instead of watching the host.
 pub(crate) fn memory_pressure() -> MemoryPressure {
-    #[cfg(debug_assertions)]
+    if let Some(memory) = passed_memory() {
+        return memory.pressure;
+    }
+    #[cfg(all(debug_assertions, not(test)))]
     if test_free_memory().is_some() {
         return MemoryPressure::NotReported;
     }
-    elastos_common::host_memory::observe_memory_pressure(std::env::consts::OS)
+    MemoryPressure::Critical
 }
 
 #[cfg(all(not(test), debug_assertions))]
@@ -369,6 +384,29 @@ mod tests {
     use crate::test_support::fake_gguf;
 
     const GIB: u64 = 1024 * MIB;
+
+    #[test]
+    fn confined_host_memory_is_the_passed_snapshot() {
+        install_runtime_memory(HostMemory {
+            total: 100,
+            available: 42,
+            pressure: MemoryPressure::Critical,
+        });
+        let memory = host_memory().expect("snapshot");
+        assert_eq!(memory.available, 42);
+        assert_eq!(memory.total, 100);
+        assert_eq!(memory_pressure(), MemoryPressure::Critical);
+        let source = include_str!("local_memory.rs");
+        let start = source
+            .find("pub(crate) fn host_memory()")
+            .expect("function");
+        let end = source[start..]
+            .find("fn test_free_memory()")
+            .expect("fixture");
+        let body = &source[start..start + end];
+        assert!(!body.contains("observe_host_memory"));
+        assert!(!body.contains("observe_memory_pressure"));
+    }
 
     #[test]
     fn admission_counts_a_repeated_prefix() {

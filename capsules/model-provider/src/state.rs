@@ -233,12 +233,14 @@ impl<A: AdapterExecutor> ModelProviderState<A> {
             let _ = value.remove("runtime_admitted_offers");
             let _ = value.remove("owner_reclaim");
             let _ = value.remove("runtime_local_sockets");
+            let _ = value.remove("runtime_host_memory");
         }
         if let Some(value) = new_identity.as_object_mut() {
             let _ = value.remove("offers");
             let _ = value.remove("runtime_admitted_offers");
             let _ = value.remove("owner_reclaim");
             let _ = value.remove("runtime_local_sockets");
+            let _ = value.remove("runtime_host_memory");
         }
         if old_identity != new_identity {
             return Err(ProviderFault::invalid_request(

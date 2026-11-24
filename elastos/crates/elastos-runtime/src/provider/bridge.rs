@@ -1814,6 +1814,9 @@ impl ProviderBridge {
         .map_err(BridgeError::Refused)?;
         config.extra["runtime_local_sockets"] = serde_json::json!(sockets);
         config.extra["runtime_hosted_socket"] = serde_json::json!(hosted_text);
+        config.extra["runtime_host_memory"] =
+            elastos_common::host_memory::runtime_host_memory_value()
+                .map_err(|reason| BridgeError::InitFailed(reason.into()))?;
         let returned = config.clone();
         let mut bridge = Self::spawn_command(
             prepared,
@@ -1958,6 +1961,9 @@ impl ProviderBridge {
         let bound = bind_broker_sockets(base, &admitted.offer_ids)?;
         let mut config = config;
         config.extra["runtime_local_sockets"] = serde_json::json!(bound.sockets);
+        config.extra["runtime_host_memory"] =
+            elastos_common::host_memory::runtime_host_memory_value()
+                .map_err(|reason| BridgeError::InitFailed(reason.into()))?;
         let returned = config.clone();
         let sockets = bound.sockets.clone();
         // Spawn reads the slot, then clears it before its first wait. Forgetting

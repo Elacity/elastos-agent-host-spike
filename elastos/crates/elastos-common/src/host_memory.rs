@@ -10,7 +10,7 @@ const MAX_MOUNT_ENTRIES: usize = 4096;
 const MAX_STAT_FIELDS: usize = 512;
 const CGROUP_ROOT: &str = "/sys/fs/cgroup";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct HostMemory {
     /// Effective physical/cgroup capacity, rather than currently free memory.
     pub total: u64,
@@ -21,7 +21,8 @@ pub struct HostMemory {
 }
 
 /// The host's memory pressure as the platform reports it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum MemoryPressure {
     /// The platform reports no level (Linux); room alone decides.
     NotReported,
@@ -59,6 +60,14 @@ pub fn model_memory_fit(minimum_memory_mb: u32, memory: Option<HostMemory>) -> M
 
 pub fn observe_host_memory(platform: &str) -> io::Result<HostMemory> {
     observe_host_memory_with_reader(platform, read_observation)
+}
+
+/// The snapshot the Runtime passes into a confined provider. The provider
+/// does not read the host itself.
+pub fn runtime_host_memory_value() -> Result<serde_json::Value, &'static str> {
+    let memory = observe_host_memory(std::env::consts::OS)
+        .map_err(|_| "host memory observation unavailable")?;
+    serde_json::to_value(memory).map_err(|_| "host memory observation unavailable")
 }
 
 /// Only the pressure level, cheap enough to check every second while a model

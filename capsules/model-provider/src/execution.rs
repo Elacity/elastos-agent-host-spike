@@ -236,6 +236,9 @@ impl ProviderCoordinator {
                         .adapters()
                         .update_local_model_sockets(runtime_sockets.runtime_local_sockets)
                         .await;
+                    if let Some(memory) = runtime_sockets.runtime_host_memory {
+                        crate::local_memory::install_runtime_memory(memory);
+                    }
                     provider.apply_refresh(refresh);
                     return self.status_response();
                 }
@@ -244,6 +247,9 @@ impl ProviderCoordinator {
                         .map_err(|_| {
                             ProviderFault::invalid_request("invalid model provider init config")
                         })?;
+                if let Some(memory) = runtime_sockets.runtime_host_memory {
+                    crate::local_memory::install_runtime_memory(memory);
+                }
                 let adapter = LiveAdapterExecutor::new_with_runtime_sockets(
                     self.handle.clone(),
                     self.update_tx.clone(),

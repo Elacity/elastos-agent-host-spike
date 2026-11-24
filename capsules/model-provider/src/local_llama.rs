@@ -847,11 +847,7 @@ fn fill_random(bytes: &mut [u8]) -> std::io::Result<()> {
     let mut filled = 0;
     while filled < bytes.len() {
         let wrote = unsafe {
-            libc::getrandom(
-                bytes[filled..].as_mut_ptr().cast(),
-                bytes.len() - filled,
-                0,
-            )
+            libc::getrandom(bytes[filled..].as_mut_ptr().cast(), bytes.len() - filled, 0)
         };
         if wrote < 0 {
             let error = std::io::Error::last_os_error();
