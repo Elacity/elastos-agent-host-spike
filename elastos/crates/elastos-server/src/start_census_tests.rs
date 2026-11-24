@@ -97,10 +97,17 @@ fn places() -> Vec<Place> {
     vec![
         place(
             "elastos-server/src/runtime.rs",
+            "load_dev_unsigned_component",
+            label_of("component", &admitted),
+            1,
+            "dev mode only: owner set dev_mode = true; nothing checked",
+        ),
+        place(
+            "elastos-server/src/runtime.rs",
             "run_signer",
             label_of("component", &admitted),
             1,
-            "folder start: trusted key, dev mode, or installed release",
+            "folder start: admitted walk CID, signer; requires refused",
         ),
         place(
             "elastos-server/src/runtime.rs",
@@ -729,7 +736,7 @@ fn is_capsule_host(receiver: &str) -> bool {
 
 /// The identifier before the `.` of a method call, skipping the whitespace a
 /// wrapped call puts between the two.
-fn receiver_before(text: &str, dot: usize) -> &str {
+pub(crate) fn receiver_before(text: &str, dot: usize) -> &str {
     let bytes = text.as_bytes();
     let mut end = dot;
     while end > 0 && bytes[end - 1].is_ascii_whitespace() {

@@ -709,6 +709,7 @@ struct BrowserCarrierExitRoute {
 
 #[derive(Debug, Clone)]
 enum BrowserRuntimeStreamTarget {
+    #[cfg(unix)]
     RemoteEngine {
         owner: crate::carrier::browser_engine_binding::RemoteEngineOwner,
         stream_id: String,

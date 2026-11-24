@@ -1,10 +1,16 @@
 name: Rust compile cache
 description: Content-addressed Rust compile cache for test jobs
+inputs:
+  sccache-cache-size:
+    description: The sccache daemon's disk cache cap, for example 2G
+    default: '2G'
 runs:
   using: composite
   steps:
     - name: install checksummed sccache
       continue-on-error: true
+      env:
+        SCCACHE_CACHE_SIZE: ${{ inputs.sccache-cache-size }}
       shell: bash
       run: |
         set -euo pipefail
@@ -37,12 +43,12 @@ runs:
         # credential and uses no remote backend.
         cache="$directory/objects"
         # Keep the daemon that compiles every later step alive for its check.
-        if SCCACHE_DIR="$cache" SCCACHE_CACHE_SIZE=2G SCCACHE_IDLE_TIMEOUT=0 \
+        if SCCACHE_DIR="$cache" SCCACHE_CACHE_SIZE="${SCCACHE_CACHE_SIZE:-2G}" SCCACHE_IDLE_TIMEOUT=0 \
             "$directory/$archive/sccache" --start-server; then
           echo "$directory/$archive" >> "$GITHUB_PATH"
           {
             echo "SCCACHE_DIR=$cache"
-            echo "SCCACHE_CACHE_SIZE=2G"
+            echo "SCCACHE_CACHE_SIZE=${SCCACHE_CACHE_SIZE:-2G}"
             echo "RUSTC_WRAPPER=sccache"
             echo "CARGO_INCREMENTAL=0"
           } >> "$GITHUB_ENV"

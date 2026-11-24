@@ -689,6 +689,14 @@ impl CollaborationDiscoveryService {
         })
     }
 
+    /// The ticket for Services on this Runtime. The handler is in-process.
+    pub(crate) fn private_local_ticket_blocking(
+        &self,
+    ) -> anyhow::Result<crate::carrier::PrivateCarrierTicket> {
+        let body = self.request_services_peer_blocking("get_ticket", serde_json::json!({}))?;
+        crate::carrier::require_services_private_ticket(&body)
+    }
+
     /// The configured Runtime owns Services receive progress, independently of
     /// whether any Home or Inbox document is open. One principal per pass keeps
     /// work bounded; each pass reloads current protected authority and selection.

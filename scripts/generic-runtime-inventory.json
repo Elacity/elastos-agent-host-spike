@@ -343,6 +343,21 @@
       "slice": 3
     },
     {
+      "file": "elastos/crates/elastos-server/src/api/gateway_tests/home_held_authority.rs",
+      "name": "custody-provider",
+      "slice": 3
+    },
+    {
+      "file": "elastos/crates/elastos-server/src/api/gateway_tests/home_held_authority.rs",
+      "name": "decrypt-provider",
+      "slice": 3
+    },
+    {
+      "file": "elastos/crates/elastos-server/src/api/gateway_tests/home_held_authority.rs",
+      "name": "protected-content",
+      "slice": 3
+    },
+    {
       "file": "elastos/crates/elastos-server/src/api/gateway_tests/home_system.rs",
       "name": "elacitylabs",
       "slice": 2

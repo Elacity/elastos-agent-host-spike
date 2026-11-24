@@ -2,26 +2,37 @@
 //! listed ticket constructions is a later P2-9 slice.
 
 use std::path::{Path, PathBuf};
+#[cfg(unix)]
 use std::sync::{Arc, Mutex};
+#[cfg(unix)]
 use std::time::Duration;
 
+#[cfg(unix)]
 use async_trait::async_trait;
+#[cfg(unix)]
 use base64::Engine as _;
+#[cfg(unix)]
 use elastos_runtime::provider::{
     Provider, ProviderCarrierRoute, ProviderError, ProviderInvocation, ProviderInvocationTransport,
     ProviderRegistry, ProviderTransfer, ResourceRequest, ResourceResponse,
 };
+#[cfg(unix)]
 use iroh::Watcher as _;
+#[cfg(unix)]
 use serde_json::{json, Value};
+#[cfg(unix)]
 use sha2::{Digest, Sha256};
 
+#[cfg(unix)]
 use crate::carrier::{
     start_carrier_node_with_registry, CarrierGossipProvider, CarrierNode, CarrierProviderInvoker,
 };
 
+#[cfg(unix)]
 const FILE_BYTES: &[u8] = b"carrier contract file bytes";
 
 #[derive(Debug)]
+#[cfg(unix)]
 struct Observation {
     bytes: Vec<u8>,
     sender_did: String,
@@ -29,6 +40,7 @@ struct Observation {
 }
 
 #[derive(Debug)]
+#[cfg(unix)]
 struct FileObservation {
     bytes: Vec<u8>,
     sender_did: String,
@@ -37,6 +49,7 @@ struct FileObservation {
 
 // The four verbs are addressed by DID or topic. Backend coordinates stay inside
 // the implementation. A second real backend later adds one impl and one call.
+#[cfg(unix)]
 #[async_trait]
 trait CarrierUnderTest: Send + Sync {
     async fn request_reply(
@@ -57,10 +70,9 @@ trait CarrierUnderTest: Send + Sync {
         bytes: &[u8],
         sender_id: Option<&str>,
     ) -> Result<Value, ProviderError>;
-    // Not a verb: a probe for today's refusal of a send that is not
-    // topic-addressed.
-    async fn send_to_peer_only(&self, peer_did: &str, bytes: &[u8])
-        -> Result<Value, ProviderError>;
+    /// One DID send: peer DID and opaque bytes. The record's sender is the
+    /// transport DID.
+    async fn deliver_did(&self, bytes: &[u8]) -> Result<Observation, ProviderError>;
     async fn request_file(
         &self,
         cid: &str,
@@ -73,11 +85,13 @@ trait CarrierUnderTest: Send + Sync {
     fn remote_calls(&self) -> usize;
 }
 
+#[cfg(unix)]
 struct ContractPlane {
     requests: Arc<Mutex<Vec<Value>>>,
 }
 
 #[async_trait]
+#[cfg(unix)]
 impl Provider for ContractPlane {
     async fn handle(&self, _: ResourceRequest) -> Result<ResourceResponse, ProviderError> {
         Err(ProviderError::Provider(
@@ -113,6 +127,7 @@ impl Provider for ContractPlane {
     }
 }
 
+#[cfg(unix)]
 struct CurrentCarrier {
     sender_node: CarrierNode,
     receiver_node: CarrierNode,
@@ -127,6 +142,7 @@ struct CurrentCarrier {
     _receiver_dir: tempfile::TempDir,
 }
 
+#[cfg(unix)]
 impl CurrentCarrier {
     async fn gossip(registry: &ProviderRegistry, request: Value) -> Result<Value, ProviderError> {
         let op = request["op"].as_str().unwrap_or_default().to_string();
@@ -319,6 +335,7 @@ impl CurrentCarrier {
 }
 
 #[async_trait]
+#[cfg(unix)]
 impl CarrierUnderTest for CurrentCarrier {
     async fn request_reply(
         &self,
@@ -380,6 +397,8 @@ impl CarrierUnderTest for CurrentCarrier {
         let bytes = base64::engine::general_purpose::STANDARD
             .decode(message["content"].as_str().unwrap_or_default())
             .map_err(|_| ProviderError::Provider("invalid message body".into()))?;
+        // The shown sender is the transport Home, or empty. A payload
+        // sender_id is not that Home.
         Ok(Some(Observation {
             bytes,
             sender_did: message["sender_id"].as_str().unwrap_or_default().into(),
@@ -396,17 +415,31 @@ impl CarrierUnderTest for CurrentCarrier {
         self.send_message(topic, bytes, sender_id).await
     }
 
-    async fn send_to_peer_only(
-        &self,
-        peer_did: &str,
-        bytes: &[u8],
-    ) -> Result<Value, ProviderError> {
-        Self::gossip(
-            &self.sender_registry,
-            json!({"op":"gossip_send", "peer_did":peer_did,
-                "message":base64::engine::general_purpose::STANDARD.encode(bytes)}),
-        )
-        .await
+    async fn deliver_did(&self, bytes: &[u8]) -> Result<Observation, ProviderError> {
+        let inbox = self
+            .receiver_node
+            .gossip_state
+            .lock()
+            .await
+            .did_messages
+            .clone();
+        let before = inbox.lock().expect("DID message inbox").len();
+        let answer =
+            crate::carrier::send_did_message(&self.sender_registry, &self.receiver_did, bytes)
+                .await?;
+        let recorded = inbox.lock().expect("DID message inbox");
+        assert_eq!(recorded.len(), before + 1, "DID message was not recorded");
+        let message = recorded.last().expect("DID message");
+        assert_eq!(message.bytes, bytes);
+        assert_eq!(
+            answer["data"]["sender_did"].as_str().unwrap_or(""),
+            message.source_endpoint_did
+        );
+        Ok(Observation {
+            bytes: message.bytes.clone(),
+            sender_did: message.source_endpoint_did.clone(),
+            answer,
+        })
     }
 
     async fn request_file(
@@ -470,16 +503,19 @@ impl CarrierUnderTest for CurrentCarrier {
     }
 }
 
+#[cfg(unix)]
 fn content_cid(bytes: &[u8]) -> String {
     let hash = cid::multihash::Multihash::<64>::wrap(0x12, &Sha256::digest(bytes)).unwrap();
     cid::Cid::new_v1(0x55, hash).to_string()
 }
 
+#[cfg(unix)]
 fn assert_no_topology(answer: &Value, carrier: &dyn CarrierUnderTest) {
     carrier.assert_private_answer(answer);
 }
 
 // Remote key-service traffic is planned over Carrier (PRINCIPLES 15). This verb carries opaque bytes.
+#[cfg(unix)]
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ContractRow {
     R1,
@@ -504,17 +540,22 @@ enum ContractRow {
     V1,
 }
 
+#[cfg(unix)]
 const MESSAGE_TOPIC: &str = "__test/p29-message";
+#[cfg(unix)]
 const NOTICE_TOPIC: &str = "__test/p29-notice";
 
+#[cfg(unix)]
 fn claimed_did_body() -> String {
     format!("claimed_did={}", elastos_identity::derive_did(&[213; 32]).1)
 }
 
+#[cfg(unix)]
 fn unknown_did() -> String {
     elastos_identity::derive_did(&[214; 32]).1
 }
 
+#[cfg(unix)]
 async fn gossip_roundtrip(
     carrier: &dyn CarrierUnderTest,
     topic: &str,
@@ -540,6 +581,7 @@ async fn gossip_roundtrip(
     (answer, received.expect("gossip receiver got no bytes"))
 }
 
+#[cfg(unix)]
 async fn send_gossip(
     carrier: &dyn CarrierUnderTest,
     topic: &str,
@@ -554,6 +596,7 @@ async fn send_gossip(
     }
 }
 
+#[cfg(unix)]
 async fn r1_request_reply_responder_bytes(carrier: &dyn CarrierUnderTest) {
     let body = claimed_did_body();
     let reply = carrier
@@ -563,6 +606,7 @@ async fn r1_request_reply_responder_bytes(carrier: &dyn CarrierUnderTest) {
     assert_eq!(reply.bytes, body.as_bytes());
 }
 
+#[cfg(unix)]
 async fn r2_request_reply_responder_authenticated_did(carrier: &dyn CarrierUnderTest) {
     let body = claimed_did_body();
     let reply = carrier
@@ -573,6 +617,7 @@ async fn r2_request_reply_responder_authenticated_did(carrier: &dyn CarrierUnder
     assert_ne!(reply.sender_did, body.trim_start_matches("claimed_did="));
 }
 
+#[cfg(unix)]
 async fn r3_request_reply_responder_unknown_did(carrier: &dyn CarrierUnderTest) {
     let calls = carrier.remote_calls();
     let refused = carrier
@@ -583,6 +628,7 @@ async fn r3_request_reply_responder_unknown_did(carrier: &dyn CarrierUnderTest) 
     assert_eq!(carrier.remote_calls(), calls);
 }
 
+#[cfg(unix)]
 async fn r4_request_reply_responder_private_answer(carrier: &dyn CarrierUnderTest) {
     let reply = carrier
         .request_reply(carrier.peer_did(), b"privacy")
@@ -591,6 +637,7 @@ async fn r4_request_reply_responder_private_answer(carrier: &dyn CarrierUnderTes
     assert_no_topology(&reply.answer, carrier);
 }
 
+#[cfg(unix)]
 async fn r5_request_reply_responder_without_grant(carrier: &dyn CarrierUnderTest) {
     let calls = carrier.remote_calls();
     let reply = carrier
@@ -601,6 +648,7 @@ async fn r5_request_reply_responder_without_grant(carrier: &dyn CarrierUnderTest
     assert_eq!(carrier.remote_calls(), calls + 1);
 }
 
+#[cfg(unix)]
 async fn r6_request_reply_responder_opaque_body(carrier: &dyn CarrierUnderTest) {
     let opaque = vec![0xa5; 64 * 1024];
     let reply = carrier
@@ -610,41 +658,58 @@ async fn r6_request_reply_responder_opaque_body(carrier: &dyn CarrierUnderTest) 
     assert_eq!(reply.bytes, opaque);
 }
 
+#[cfg(unix)]
+fn assert_visible_gossip_home(
+    received: &Observation,
+    carrier: &dyn CarrierUnderTest,
+    forged: &str,
+) {
+    assert_ne!(
+        received.sender_did, forged,
+        "a caller sender_id is not the sending Home"
+    );
+    assert!(
+        received.sender_did.is_empty() || received.sender_did == carrier.sender_did(),
+        "gossip shows the transport Home or no sender, got {}",
+        received.sender_did
+    );
+}
+
+// A topic delivers the bytes. The visible sender is the transport Home, or
+// none. A caller sender_id is not that Home.
+#[cfg(unix)]
 async fn m1_message_bytes(carrier: &dyn CarrierUnderTest) {
     let sent = b"message:contract bytes";
-    let (_, received) = gossip_roundtrip(carrier, MESSAGE_TOPIC, sent, false, None).await;
+    let forged = elastos_identity::derive_did(&[215; 32]).1;
+    assert_ne!(forged, carrier.sender_did());
+    let (_, received) = gossip_roundtrip(carrier, MESSAGE_TOPIC, sent, false, Some(&forged)).await;
     assert_eq!(received.bytes, sent);
+    assert_visible_gossip_home(&received, carrier, &forged);
 }
 
-// open: sender identity is not supplied by the backend at this layer; signed message types bind the signer above it
+// The recorded sender is the transport DID. A sender_id in the body is not the sender.
+#[cfg(unix)]
 async fn m2_message_sender_identity(carrier: &dyn CarrierUnderTest) {
     let claimed = elastos_identity::derive_did(&[213; 32]).1;
-    let (_, received) = gossip_roundtrip(
-        carrier,
-        MESSAGE_TOPIC,
-        b"message:identity",
-        false,
-        Some(&claimed),
-    )
-    .await;
     assert_ne!(claimed, carrier.sender_did());
-    assert_eq!(received.sender_did, claimed);
-}
-
-async fn m3_message_topic_address(carrier: &dyn CarrierUnderTest) {
-    let sent = b"message:topic address";
-    let (answer, received) = gossip_roundtrip(carrier, MESSAGE_TOPIC, sent, false, None).await;
-    assert_eq!(answer["status"], "ok");
-    assert_eq!(received.bytes, sent);
-    // a send carrying only a peer DID and no topic is refused today
-    let refused = carrier
-        .send_to_peer_only(carrier.peer_did(), sent)
+    let received = carrier
+        .deliver_did(format!("sender_id={claimed}").as_bytes())
         .await
         .unwrap();
-    assert_eq!(refused["status"], "error");
-    assert_eq!(refused["code"], "not_joined");
+    assert_eq!(received.sender_did, carrier.sender_did());
+    assert_ne!(received.sender_did, claimed);
 }
 
+// A message that names a peer DID and bytes is delivered. It does not need a topic.
+#[cfg(unix)]
+async fn m3_message_did_send(carrier: &dyn CarrierUnderTest) {
+    let sent = b"message:did address";
+    let received = carrier.deliver_did(sent).await.unwrap();
+    assert_eq!(received.bytes, sent);
+    assert_eq!(received.sender_did, carrier.sender_did());
+}
+
+#[cfg(unix)]
 async fn m4_message_private_answer(carrier: &dyn CarrierUnderTest) {
     let answer = carrier
         .send_message(MESSAGE_TOPIC, b"message:privacy", None)
@@ -654,10 +719,16 @@ async fn m4_message_private_answer(carrier: &dyn CarrierUnderTest) {
     assert_no_topology(&answer, carrier);
 }
 
+// A notice delivers the bytes and does not take a caller sender. The visible
+// sender is the transport Home, or none.
+#[cfg(unix)]
 async fn n1_notification_bytes_no_reply(carrier: &dyn CarrierUnderTest) {
     let sent = b"notice:contract bytes";
-    let (_, received) = gossip_roundtrip(carrier, NOTICE_TOPIC, sent, true, None).await;
+    let forged = elastos_identity::derive_did(&[215; 32]).1;
+    assert_ne!(forged, carrier.sender_did());
+    let (_, received) = gossip_roundtrip(carrier, NOTICE_TOPIC, sent, true, Some(&forged)).await;
     assert_eq!(received.bytes, sent);
+    assert_visible_gossip_home(&received, carrier, &forged);
     // After the round trip the neighbour link is up, so this acknowledgement
     // is the complete send answer: status, data.remote_peer_count and the
     // runtime's transfer metadata, no reply body and no further keys.
@@ -671,35 +742,29 @@ async fn n1_notification_bytes_no_reply(carrier: &dyn CarrierUnderTest) {
     );
 }
 
-// open: sender identity is not supplied by the backend at this layer; signed message types bind the signer above it
+// A notice uses the same DID send. The recorded sender is the transport DID.
+#[cfg(unix)]
 async fn n2_notification_sender_identity(carrier: &dyn CarrierUnderTest) {
     let claimed = elastos_identity::derive_did(&[213; 32]).1;
-    let (_, received) = gossip_roundtrip(
-        carrier,
-        NOTICE_TOPIC,
-        b"notice:identity",
-        true,
-        Some(&claimed),
-    )
-    .await;
     assert_ne!(claimed, carrier.sender_did());
-    assert_eq!(received.sender_did, claimed);
-}
-
-async fn n3_notification_topic_address(carrier: &dyn CarrierUnderTest) {
-    let sent = b"notice:topic address";
-    let (answer, received) = gossip_roundtrip(carrier, NOTICE_TOPIC, sent, true, None).await;
-    assert_eq!(answer["status"], "ok");
-    assert_eq!(received.bytes, sent);
-    // a send carrying only a peer DID and no topic is refused today
-    let refused = carrier
-        .send_to_peer_only(carrier.peer_did(), sent)
+    let received = carrier
+        .deliver_did(format!("sender_id={claimed}").as_bytes())
         .await
         .unwrap();
-    assert_eq!(refused["status"], "error");
-    assert_eq!(refused["code"], "not_joined");
+    assert_eq!(received.sender_did, carrier.sender_did());
+    assert_ne!(received.sender_did, claimed);
 }
 
+// A notice that names a peer DID and bytes is delivered. It does not need a topic.
+#[cfg(unix)]
+async fn n3_notification_did_send(carrier: &dyn CarrierUnderTest) {
+    let sent = b"notice:did address";
+    let received = carrier.deliver_did(sent).await.unwrap();
+    assert_eq!(received.bytes, sent);
+    assert_eq!(received.sender_did, carrier.sender_did());
+}
+
+#[cfg(unix)]
 async fn n4_notification_private_answer(carrier: &dyn CarrierUnderTest) {
     let answer = carrier
         .notify(NOTICE_TOPIC, b"notice:privacy", None)
@@ -709,6 +774,7 @@ async fn n4_notification_private_answer(carrier: &dyn CarrierUnderTest) {
     assert_no_topology(&answer, carrier);
 }
 
+#[cfg(unix)]
 async fn f1_file_request_responder_bytes(carrier: &dyn CarrierUnderTest) {
     let cid = content_cid(FILE_BYTES);
     let file = carrier
@@ -718,6 +784,7 @@ async fn f1_file_request_responder_bytes(carrier: &dyn CarrierUnderTest) {
     assert_eq!(file.bytes, FILE_BYTES);
 }
 
+#[cfg(unix)]
 async fn f2_file_request_responder_authenticated_did(carrier: &dyn CarrierUnderTest) {
     let cid = content_cid(FILE_BYTES);
     let file = carrier
@@ -727,6 +794,7 @@ async fn f2_file_request_responder_authenticated_did(carrier: &dyn CarrierUnderT
     assert_eq!(file.sender_did, carrier.sender_did());
 }
 
+#[cfg(unix)]
 async fn f3_file_request_responder_unknown_did(carrier: &dyn CarrierUnderTest) {
     let cid = content_cid(FILE_BYTES);
     let calls = carrier.remote_calls();
@@ -738,6 +806,7 @@ async fn f3_file_request_responder_unknown_did(carrier: &dyn CarrierUnderTest) {
     assert_eq!(carrier.remote_calls(), calls);
 }
 
+#[cfg(unix)]
 async fn f4_file_request_responder_private_answer(carrier: &dyn CarrierUnderTest) {
     let cid = content_cid(FILE_BYTES);
     let file = carrier
@@ -748,6 +817,7 @@ async fn f4_file_request_responder_private_answer(carrier: &dyn CarrierUnderTest
 }
 
 // open: the file-request receipt comes from the product fetch path (distinct-holder fetch), which this suite does not drive yet
+#[cfg(unix)]
 async fn f5_file_request_responder_receipt_open_today(carrier: &dyn CarrierUnderTest) {
     let cid = content_cid(FILE_BYTES);
     let file = carrier
@@ -758,6 +828,7 @@ async fn f5_file_request_responder_receipt_open_today(carrier: &dyn CarrierUnder
 }
 
 // open: waits for Rong (verb or WebSpace files)
+#[cfg(unix)]
 async fn v1_voice_open(carrier: &dyn CarrierUnderTest) {
     let answer = carrier.voice_probe().await.unwrap();
     assert_eq!(answer["status"], "error");
@@ -765,6 +836,7 @@ async fn v1_voice_open(carrier: &dyn CarrierUnderTest) {
 }
 
 // This list is the complete contract that a second backend runs.
+#[cfg(unix)]
 async fn run_contract(carrier: &dyn CarrierUnderTest, only: Option<ContractRow>) {
     use ContractRow::*;
     for row in [
@@ -782,11 +854,11 @@ async fn run_contract(carrier: &dyn CarrierUnderTest, only: Option<ContractRow>)
             R6 => r6_request_reply_responder_opaque_body(carrier).await,
             M1 => m1_message_bytes(carrier).await,
             M2 => m2_message_sender_identity(carrier).await,
-            M3 => m3_message_topic_address(carrier).await,
+            M3 => m3_message_did_send(carrier).await,
             M4 => m4_message_private_answer(carrier).await,
             N1 => n1_notification_bytes_no_reply(carrier).await,
             N2 => n2_notification_sender_identity(carrier).await,
-            N3 => n3_notification_topic_address(carrier).await,
+            N3 => n3_notification_did_send(carrier).await,
             N4 => n4_notification_private_answer(carrier).await,
             F1 => f1_file_request_responder_bytes(carrier).await,
             F2 => f2_file_request_responder_authenticated_did(carrier).await,
@@ -798,13 +870,14 @@ async fn run_contract(carrier: &dyn CarrierUnderTest, only: Option<ContractRow>)
     }
 }
 
+#[cfg(unix)]
 async fn run_current_row(row: ContractRow) {
     let carrier = CurrentCarrier::new().await;
     use ContractRow::*;
-    if matches!(row, M1 | M2 | M3 | M4) {
+    if matches!(row, M1 | M4) {
         carrier.join_topic(MESSAGE_TOPIC).await;
     }
-    if matches!(row, N1 | N2 | N3 | N4) {
+    if matches!(row, N1 | N4) {
         carrier.join_topic(NOTICE_TOPIC).await;
     }
     run_contract(&carrier, Some(row)).await;
@@ -843,18 +916,12 @@ current_row_test!(
     R6
 );
 current_row_test!(carrier_contract_m1_message_bytes_holds, M1);
-current_row_test!(carrier_contract_m2_message_sender_identity_open_today, M2);
-current_row_test!(carrier_contract_m3_message_topic_address_open_today, M3);
+current_row_test!(carrier_contract_m2_message_sender_identity_holds, M2);
+current_row_test!(carrier_contract_m3_message_did_send_holds, M3);
 current_row_test!(carrier_contract_m4_message_private_answer_holds, M4);
 current_row_test!(carrier_contract_n1_notification_bytes_no_reply_holds, N1);
-current_row_test!(
-    carrier_contract_n2_notification_sender_identity_open_today,
-    N2
-);
-current_row_test!(
-    carrier_contract_n3_notification_topic_address_open_today,
-    N3
-);
+current_row_test!(carrier_contract_n2_notification_sender_identity_holds, N2);
+current_row_test!(carrier_contract_n3_notification_did_send_holds, N3);
 current_row_test!(carrier_contract_n4_notification_private_answer_holds, N4);
 current_row_test!(carrier_contract_f1_file_request_responder_bytes_holds, F1);
 current_row_test!(

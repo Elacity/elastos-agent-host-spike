@@ -23,7 +23,9 @@ const LOCK_LEAF: &CStr = c"profile.ext4.lifetime.lock";
 
 #[derive(Debug)]
 pub(super) enum ProfileResetError {
+    #[cfg(unix)]
     Busy,
+    #[cfg(unix)]
     Unsafe(&'static str),
     #[cfg_attr(
         unix,
@@ -34,19 +36,23 @@ pub(super) enum ProfileResetError {
     )]
     UnsupportedHost,
     Io(std::io::Error),
+    #[cfg(unix)]
     WorkerFailed,
 }
 
 impl fmt::Display for ProfileResetError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            #[cfg(unix)]
             Self::Busy => formatter
                 .write_str("Browser profile is in use; close its Browser pages before Reset"),
+            #[cfg(unix)]
             Self::Unsafe(reason) => write!(formatter, "Browser profile reset refused: {reason}"),
             Self::UnsupportedHost => {
                 formatter.write_str("Browser profile reset requires a supported local disk lease")
             }
             Self::Io(error) => write!(formatter, "Browser profile reset failed: {error}"),
+            #[cfg(unix)]
             Self::WorkerFailed => formatter.write_str("Browser profile reset worker failed"),
         }
     }

@@ -8,18 +8,27 @@
 //!
 //! ## Trust boundary
 //!
-//! Carrier is a **transport-only** layer. It delivers gossip messages without
-//! authenticating sender identity or verifying message signatures. The
-//! `sender_id` and `signature` fields in GossipMessage are caller-controlled
-//! and NOT validated by Carrier — they are the application layer's
-//! responsibility. Capsules that need authenticated messages must implement
-//! their own signing and verification (the chat capsule does this via
-//! `signing_payload_hex` in app.rs).
+//! Carrier delivers gossip frames. A `sender_id` in the frame is not the
+//! sending Home. `gossip_send` does not take a caller `sender_id` as that
+//! Home. When the caller names this Home's own DID, that DID is stored as
+//! `signed_author` for the signature check above this layer. `gossip_recv`
+//! and `gossip_peek` show a sending Home only when the frame was delivered
+//! directly by that Home's Carrier key. A forwarded frame shows no sender.
+//! A signed envelope keeps its own signature check above this layer. That
+//! check reads the envelope, not the gossip `sender_id`.
+//!
+//! A DID message is not gossip. [`send_did_message`] names a peer DID and
+//! opaque bytes, and rides the PeerDid connection. The receiver records the
+//! sender from that connection's key. A `sender_id` in the body is not the sender.
+//! One Home keeps at most `DID_MESSAGE_INBOX_MAX_MESSAGES` messages, and each
+//! message is at most `DID_MESSAGE_MAX_BYTES` decoded bytes. A message past
+//! either cap is refused. Messages already stored stay.
 //!
 //! See `docs/CARRIER_TRUST_DECISION.md` for the rationale.
 
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
 use std::sync::{Arc, Weak};
 use std::time::Duration;
 
@@ -45,7 +54,9 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256, Sha512};
 #[cfg(unix)]
 use tokio::io;
-use tokio::io::{AsyncBufReadExt, AsyncReadExt as _, AsyncWriteExt, BufReader};
+#[cfg(any(unix, test))]
+use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncBufReadExt, AsyncReadExt as _, BufReader};
 #[cfg(unix)]
 use tokio::net::UnixStream;
 use tokio::sync::Mutex;
@@ -73,6 +84,8 @@ use crate::sources::{
 };
 
 const CARRIER_ALPN: &[u8] = b"elastos/carrier/1";
+/// Runtime target for one opaque message addressed by peer DID.
+const DID_MESSAGE_TARGET: &str = "did-message";
 #[path = "carrier_file.rs"]
 mod file_transfer;
 pub(crate) use file_transfer::fetch_file_from_trusted_source_to_bound;
@@ -395,6 +408,20 @@ const GOSSIP_CURSOR_MAX_CONSUMER_ID_BYTES: usize = 128;
 const GOSSIP_PEEK_MAX_MESSAGES: usize = 256;
 // Maximum complete encoded provider response returned by one gossip_peek.
 const GOSSIP_PEEK_MAX_BATCH_BYTES: usize = GOSSIP_TOPIC_BUFFER_MAX_BYTES;
+/// How many DID messages one Home keeps. A full inbox refuses the new message.
+const DID_MESSAGE_INBOX_MAX_MESSAGES: usize = 256;
+/// Largest DID message, in decoded bytes. A larger body is refused.
+const DID_MESSAGE_MAX_BYTES: usize = 48 * 1024;
+/// The peer's fixed token when the inbox is already at the length cap.
+const DID_MESSAGE_INBOX_FULL: &str = "did_message_inbox_full";
+/// The peer's fixed token when one message is past the byte cap.
+const DID_MESSAGE_TOO_LARGE: &str = "did_message_too_large";
+/// The peer's fixed token when the named DID is this Home.
+const DID_MESSAGE_SELF: &str = "did_message_self";
+const _: () = assert!(DID_MESSAGE_INBOX_MAX_MESSAGES == GOSSIP_PEEK_MAX_MESSAGES);
+const _: () = assert!(
+    DID_MESSAGE_INBOX_MAX_MESSAGES * DID_MESSAGE_MAX_BYTES == GOSSIP_TOPIC_BUFFER_MAX_BYTES
+);
 
 /// Well-known secret for topic discovery. Any Carrier node with this secret
 /// can discover peers on the same topic via DHT.
@@ -433,6 +460,10 @@ pub struct GossipMessage {
     pub signature: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sender_session_id: Option<String>,
+    /// DID this Home named when it sent the frame. Not the transport sender.
+    /// A caller value that is not this Home's DID is not stored.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signed_author: Option<String>,
 }
 
 fn requested_gossip_ts(request: &serde_json::Value) -> u64 {
@@ -457,9 +488,23 @@ fn requested_gossip_nonce(request: &serde_json::Value) -> u64 {
         .unwrap_or_else(random_gossip_nonce)
 }
 
+/// Who may be skipped for one retained frame, and who `gossip_recv` may show.
+#[derive(Clone, Debug, Default)]
+enum GossipFrameHome {
+    /// Forwarded. No Home to show or skip.
+    #[default]
+    Forwarded,
+    /// Direct Carrier delivery. Shown as `sender_id` and skippable.
+    Direct(String),
+    /// Inserted on this Home. Skippable, and not shown.
+    Local(String),
+}
+
 #[derive(Default)]
 struct TopicBuffer {
     messages: VecDeque<GossipMessage>,
+    /// One entry per message. The frame's `sender_id` is not this value.
+    checked_senders: VecDeque<GossipFrameHome>,
     base_index: u64,
     retained_bytes: usize,
     /// Gossip frames received from peers on this topic, kept across a rejoin
@@ -583,7 +628,9 @@ fn gossip_message_encoded_len(message: &GossipMessage) -> usize {
 }
 
 fn pop_gossip_buffer_front(buffer: &mut TopicBuffer) -> Option<GossipMessage> {
+    debug_assert_eq!(buffer.messages.len(), buffer.checked_senders.len());
     let message = buffer.messages.pop_front()?;
+    let _ = buffer.checked_senders.pop_front();
     buffer.retained_bytes = buffer
         .retained_bytes
         .checked_sub(gossip_message_encoded_len(&message))
@@ -593,6 +640,14 @@ fn pop_gossip_buffer_front(buffer: &mut TopicBuffer) -> Option<GossipMessage> {
 }
 
 fn push_gossip_buffer_message(buffer: &mut TopicBuffer, message: GossipMessage) -> bool {
+    push_gossip_buffer_frame(buffer, message, GossipFrameHome::Forwarded)
+}
+
+fn push_gossip_buffer_frame(
+    buffer: &mut TopicBuffer,
+    message: GossipMessage,
+    home: GossipFrameHome,
+) -> bool {
     if buffer
         .messages
         .iter()
@@ -615,7 +670,71 @@ fn push_gossip_buffer_message(buffer: &mut TopicBuffer, message: GossipMessage) 
     }
     buffer.retained_bytes += encoded_len;
     buffer.messages.push_back(message);
+    buffer.checked_senders.push_back(home);
+    debug_assert_eq!(buffer.messages.len(), buffer.checked_senders.len());
     true
+}
+
+/// A local insert has no Carrier delivery to show. It is still this Home,
+/// so `skip_sender_id` can drop it. A caller `sender_id` is not that Home.
+fn gossip_send_home(local_did: Option<&str>) -> GossipFrameHome {
+    match local_did.filter(|did| !did.is_empty()) {
+        Some(did) => GossipFrameHome::Local(did.to_string()),
+        None => GossipFrameHome::Forwarded,
+    }
+}
+
+/// The sending Home is the Carrier key that delivered the frame, and only
+/// when that delivery was direct. A forwarded frame has no sending Home.
+fn gossip_checked_sender(
+    scope: iroh_gossip::proto::DeliveryScope,
+    delivered_from: &iroh::EndpointId,
+) -> Option<String> {
+    if !scope.is_direct() {
+        return None;
+    }
+    public_key_to_did(delivered_from).ok()
+}
+
+fn frame_home_at(buffer: &TopicBuffer, index: usize) -> GossipFrameHome {
+    buffer
+        .checked_senders
+        .get(index)
+        .cloned()
+        .unwrap_or_default()
+}
+
+fn gossip_shown_sender(home: &GossipFrameHome) -> Option<&str> {
+    match home {
+        GossipFrameHome::Direct(did) if !did.is_empty() => Some(did.as_str()),
+        _ => None,
+    }
+}
+
+fn gossip_frame_matches_skip(home: &GossipFrameHome, skip: &str) -> bool {
+    let recorded = match home {
+        GossipFrameHome::Direct(did) | GossipFrameHome::Local(did) if !did.is_empty() => {
+            did.as_str()
+        }
+        _ => return false,
+    };
+    same_home_identity(recorded, skip)
+}
+
+fn gossip_recv_message(message: &GossipMessage, checked_sender: Option<&str>) -> serde_json::Value {
+    let mut value =
+        serde_json::to_value(message).expect("GossipMessage JSON serialization cannot fail");
+    let object = value
+        .as_object_mut()
+        .expect("GossipMessage JSON is an object");
+    object.remove("sender_id");
+    if let Some(sender) = checked_sender.filter(|sender| !sender.is_empty()) {
+        object.insert(
+            "sender_id".to_string(),
+            serde_json::Value::String(sender.to_string()),
+        );
+    }
+    value
 }
 
 /// Active neighbours a Community bootstrap node keeps. Homes behind NAT reach
@@ -753,6 +872,10 @@ pub struct GossipState {
     cursors: Arc<Mutex<HashMap<(String, String), GossipConsumerCursor>>>,
     peers: Arc<Mutex<Vec<String>>>,
     topic_peers: Arc<Mutex<HashMap<String, HashSet<String>>>>,
+    /// Messages this Home recorded from a PeerDid send. The sender is the
+    /// connection key, never a `sender_id` in the body. The vec stops at
+    /// `DID_MESSAGE_INBOX_MAX_MESSAGES`. A further message is refused.
+    pub(crate) did_messages: Arc<std::sync::Mutex<Vec<DidMessageRecord>>>,
     did: Option<String>,
     direct_only: bool,
     /// Set on a Community bootstrap node; every gossip actor it spawns is a hub.
@@ -791,6 +914,7 @@ impl GossipState {
             cursors: Arc::new(Mutex::new(HashMap::new())),
             peers: Arc::new(Mutex::new(Vec::new())),
             topic_peers: Arc::new(Mutex::new(HashMap::new())),
+            did_messages: Arc::new(std::sync::Mutex::new(Vec::new())),
             did,
             direct_only: false,
             community_hub: false,
@@ -1038,6 +1162,29 @@ async fn connect_ticket_endpoints(
 pub fn did_to_public_key(did: &str) -> Option<iroh::PublicKey> {
     let verifying_key = decode_did_key(did).ok()?;
     iroh::PublicKey::from_bytes(verifying_key.as_bytes()).ok()
+}
+
+/// The Carrier key named by a canonical DID or by that key's hex endpoint id.
+pub(crate) fn home_public_key(value: &str) -> Option<iroh::PublicKey> {
+    if value.is_empty() {
+        return None;
+    }
+    did_to_public_key(value).or_else(|| iroh::PublicKey::from_str(value).ok())
+}
+
+/// True when both strings name the same Home key.
+/// A DID and the hex form of that key match. An empty string matches nothing.
+pub(crate) fn same_home_identity(left: &str, right: &str) -> bool {
+    if left.is_empty() || right.is_empty() {
+        return false;
+    }
+    if left == right {
+        return true;
+    }
+    match (home_public_key(left), home_public_key(right)) {
+        (Some(left_key), Some(right_key)) => left_key == right_key,
+        _ => false,
+    }
 }
 
 pub(crate) fn public_key_to_did(public_key: &iroh::PublicKey) -> anyhow::Result<String> {
@@ -1584,6 +1731,84 @@ fn endpoint_addr_for_network(
         "direct-only Carrier has no IP route to the peer"
     );
     Ok(next)
+}
+
+pub(crate) const PRIVATE_CARRIER_TICKET_MAX_BYTES: usize = 8192;
+
+pub(crate) fn is_private_carrier_address_op(op: &str) -> bool {
+    matches!(op, "connect" | "get_ticket" | "remember_peer")
+}
+
+/// A Carrier ticket read from this process's handler. Callers do not build a
+/// Message grant to obtain it.
+pub(crate) struct PrivateCarrierTicket {
+    pub ticket: String,
+    pub node_id: String,
+}
+
+impl PrivateCarrierTicket {
+    pub(crate) fn from_handler_body(body: &serde_json::Value) -> Option<Self> {
+        if body.get("status").and_then(|status| status.as_str()) == Some("error") {
+            return None;
+        }
+        let data = body.get("data")?;
+        let ticket = data
+            .get("ticket")
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|ticket| {
+                !ticket.is_empty() && ticket.len() <= PRIVATE_CARRIER_TICKET_MAX_BYTES
+            })?;
+        let node_id = data
+            .get("node_id")
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|node_id| !node_id.is_empty())?;
+        Some(Self {
+            ticket: ticket.to_string(),
+            node_id: node_id.to_string(),
+        })
+    }
+}
+
+pub(crate) async fn read_private_carrier_ticket(
+    registry: &ProviderRegistry,
+    exported: bool,
+) -> Result<PrivateCarrierTicket> {
+    let request = if exported {
+        serde_json::json!({ "op": "get_ticket", "exported": true })
+    } else {
+        serde_json::json!({ "op": "get_ticket" })
+    };
+    let body = registry
+        .send_raw("peer", &request)
+        .await
+        .map_err(|err| anyhow::anyhow!("private Carrier ticket handler failed: {err}"))?;
+    if body.get("status").and_then(|status| status.as_str()) == Some("error") {
+        let message = body
+            .get("message")
+            .and_then(|message| message.as_str())
+            .unwrap_or("private Carrier ticket handler failed");
+        anyhow::bail!("{message}");
+    }
+    PrivateCarrierTicket::from_handler_body(&body)
+        .ok_or_else(|| anyhow::anyhow!("private Carrier ticket store is empty"))
+}
+
+pub(crate) fn require_services_private_ticket(
+    body: &serde_json::Value,
+) -> Result<PrivateCarrierTicket> {
+    PrivateCarrierTicket::from_handler_body(body).ok_or_else(|| {
+        let node_id = body
+            .pointer("/data/node_id")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("");
+        if node_id.trim().is_empty() {
+            anyhow::anyhow!("Carrier peer provider did not return a node id")
+        } else {
+            anyhow::anyhow!("Carrier peer provider did not return a bounded ticket")
+        }
+    })
 }
 
 fn retain_network_ticket_endpoints(
@@ -2219,7 +2444,8 @@ async fn handle_file_connection(
     gossip_state: Arc<Mutex<GossipState>>,
 ) -> Result<()> {
     let source_endpoint_id = conn.remote_id();
-    let transport = iroh_transport_observation(&source_endpoint_id)?;
+    let mut transport = iroh_transport_observation(&source_endpoint_id)?;
+    transport.did_messages = Some(gossip_state.lock().await.did_messages.clone());
     loop {
         let (mut send, recv) = match conn.accept_bi().await {
             Ok(streams) => streams,
@@ -2771,6 +2997,7 @@ async fn browser_carrier_exit_relay_path(
     Ok((PathBuf::from(path), stream_id.to_string()))
 }
 
+#[cfg(any(unix, test))]
 fn browser_carrier_relay_header(
     line: &[u8],
     stream_id: &str,
@@ -2851,11 +3078,20 @@ async fn bridge_browser_carrier_stream_to_relay(
     anyhow::bail!("Browser Carrier exit stream requires a Unix relay host")
 }
 
+/// One message a Home recorded from a PeerDid send.
+#[derive(Clone, Debug)]
+pub(crate) struct DidMessageRecord {
+    pub bytes: Vec<u8>,
+    pub source_endpoint_did: String,
+}
+
 /// Authenticated transport fact about the sending Runtime/device. This does
 /// not identify the author of a message carried in the request body.
 #[derive(Clone)]
 pub(crate) struct CarrierTransportObservation {
     sending_runtime_did: String,
+    /// Inbox of the receiving Home. Set on a live Carrier connection.
+    did_messages: Option<Arc<std::sync::Mutex<Vec<DidMessageRecord>>>>,
 }
 
 impl CarrierTransportObservation {
@@ -2867,6 +3103,7 @@ impl CarrierTransportObservation {
         );
         Ok(Self {
             sending_runtime_did: did,
+            did_messages: None,
         })
     }
 }
@@ -3082,6 +3319,9 @@ async fn carrier_provider_invoke_registry(
     }
 
     let source_endpoint_did = &transport.sending_runtime_did;
+    if target == DID_MESSAGE_TARGET {
+        return deliver_did_message(transport, &request);
+    }
     let runtime = request
         .get_mut("_runtime_invocation")
         .and_then(serde_json::Value::as_object_mut)
@@ -3195,21 +3435,116 @@ async fn carrier_provider_invoke_registry(
 }
 
 fn carrier_provider_target_allowed(target: &str) -> bool {
-    matches!(
-        target,
-        "content"
-            | "model"
-            | "custody"
-            | "rights"
-            | "key"
-            | "decrypt"
-            | "drm"
-            | "collaboration"
-            | "collaboration-direct"
-            | "collaboration-profile"
-            | "collaboration.history"
-            | "collaboration.shared"
-    )
+    target == DID_MESSAGE_TARGET
+        || matches!(
+            target,
+            "content"
+                | "model"
+                | "custody"
+                | "rights"
+                | "key"
+                | "decrypt"
+                | "drm"
+                | "collaboration"
+                | "collaboration-direct"
+                | "collaboration-profile"
+                | "collaboration.history"
+                | "collaboration.shared"
+        )
+}
+
+fn did_message_refused(code: &'static str, error: &'static str) -> Result<serde_json::Value> {
+    Ok(serde_json::json!({
+        "ok": false,
+        "code": code,
+        "error": error,
+    }))
+}
+
+fn deliver_did_message(
+    transport: &CarrierTransportObservation,
+    request: &serde_json::Value,
+) -> Result<serde_json::Value> {
+    if request.get("op").and_then(|value| value.as_str()) != Some("deliver") {
+        return did_message_refused(
+            "invalid_provider_invocation",
+            "DID message operation is deliver",
+        );
+    }
+    let body = request
+        .get("body")
+        .and_then(|value| value.as_str())
+        .unwrap_or("");
+    let bytes = match base64::engine::general_purpose::STANDARD.decode(body) {
+        Ok(bytes) => bytes,
+        Err(_) => {
+            return did_message_refused(
+                "invalid_provider_invocation",
+                "DID message body is not base64",
+            );
+        }
+    };
+    // A loopback observation has no inbox. That send names this Home.
+    let Some(inbox) = transport.did_messages.as_ref() else {
+        return did_message_refused(DID_MESSAGE_SELF, "DID message to this Home is refused");
+    };
+    if bytes.len() > DID_MESSAGE_MAX_BYTES {
+        return did_message_refused(
+            DID_MESSAGE_TOO_LARGE,
+            "DID message is larger than the byte cap",
+        );
+    }
+    // The recorded sender is the connection key. The body is not read for it.
+    let source_endpoint_did = transport.sending_runtime_did.clone();
+    let mut inbox = inbox.lock().expect("DID message inbox");
+    // Keep every message already stored. Refuse the new one.
+    if inbox.len() >= DID_MESSAGE_INBOX_MAX_MESSAGES {
+        return did_message_refused(DID_MESSAGE_INBOX_FULL, "DID message inbox is full");
+    }
+    inbox.push(DidMessageRecord {
+        bytes,
+        source_endpoint_did,
+    });
+    let stored = inbox.last().expect("DID message just recorded");
+    Ok(serde_json::json!({
+        "ok": true,
+        "result": {
+            "status": "ok",
+            "data": {
+                "body": base64::engine::general_purpose::STANDARD.encode(&stored.bytes),
+                "sender_did": &stored.source_endpoint_did,
+            }
+        }
+    }))
+}
+
+/// Send opaque bytes to one peer DID over the existing PeerDid connection.
+/// The call names no ticket, host, or port. An unknown DID is refused by that
+/// route and the peer records nothing.
+pub async fn send_did_message(
+    registry: &ProviderRegistry,
+    peer_did: &str,
+    bytes: &[u8],
+) -> std::result::Result<serde_json::Value, ProviderError> {
+    registry
+        .invoke_provider(ProviderInvocation {
+            source: "runtime".into(),
+            target: DID_MESSAGE_TARGET.into(),
+            op: "deliver".into(),
+            request: serde_json::json!({
+                "op": "deliver",
+                "body": base64::engine::general_purpose::STANDARD.encode(bytes),
+            }),
+            transfer: ProviderTransfer::Json,
+            range: None,
+            progress: None,
+            transport: ProviderInvocationTransport::Carrier(ProviderCarrierRoute::PeerDid {
+                peer_did: peer_did.to_string(),
+                timeout_ms: Some(2_000),
+                reply_wait_ms: Some(5_000),
+            }),
+        })
+        .await
 }
 
 fn validate_carrier_provider_invocation(
@@ -4550,6 +4885,7 @@ impl CarrierAvailabilityProvider {
             nonce: random_gossip_nonce(),
             signature: Some(signature.clone()),
             sender_session_id: None,
+            signed_author: None,
         };
         let bytes = serialize_gossip_wire_message(&msg).map_err(|encoded_bytes| {
             ProviderError::Provider(format!(
@@ -7367,7 +7703,7 @@ impl std::io::Write for BoundedJsonByteCounter {
 fn gossip_peek_response(
     cursor: u64,
     next_cursor: u64,
-    messages: &[&GossipMessage],
+    messages: &[serde_json::Value],
     limit: usize,
 ) -> serde_json::Value {
     serde_json::json!({
@@ -7395,9 +7731,9 @@ fn gossip_peek_response_envelope_max_bytes() -> usize {
 }
 
 fn bounded_gossip_peek_prefix<'a>(
-    messages: impl Iterator<Item = &'a GossipMessage>,
+    messages: impl Iterator<Item = (&'a GossipMessage, GossipFrameHome)>,
     limit: usize,
-) -> std::result::Result<Vec<&'a GossipMessage>, ()> {
+) -> std::result::Result<Vec<(&'a GossipMessage, GossipFrameHome)>, ()> {
     let mut selected = Vec::with_capacity(limit);
     let Some(encoded_messages_limit) =
         GOSSIP_PEEK_MAX_BATCH_BYTES.checked_sub(gossip_peek_response_envelope_max_bytes())
@@ -7405,7 +7741,7 @@ fn bounded_gossip_peek_prefix<'a>(
         return Err(());
     };
     let mut encoded_batch_bytes = 2_usize; // JSON array brackets.
-    for message in messages.take(limit) {
+    for (message, home) in messages.take(limit) {
         let separator_bytes = usize::from(!selected.is_empty());
         let Some(message_limit) = encoded_messages_limit
             .checked_sub(encoded_batch_bytes)
@@ -7420,14 +7756,25 @@ fn bounded_gossip_peek_prefix<'a>(
             bytes: 0,
             max_bytes: message_limit,
         };
-        if serde_json::to_writer(&mut counter, message).is_err() {
+        let visible = gossip_recv_message(message, gossip_shown_sender(&home));
+        if serde_json::to_writer(&mut counter, &visible).is_err() {
             if selected.is_empty() {
                 return Err(());
             }
             break;
         }
-        encoded_batch_bytes += separator_bytes + counter.bytes;
-        selected.push(message);
+        // Peek returns the visible frame. A direct Home DID can be longer
+        // than the stored sender_id, so that JSON counts. The stored frame
+        // can be longer than the frame peek shows, so that length counts too.
+        let counted = counter.bytes.max(gossip_message_encoded_len(message));
+        if counted > message_limit {
+            if selected.is_empty() {
+                return Err(());
+            }
+            break;
+        }
+        encoded_batch_bytes += separator_bytes + counted;
+        selected.push((message, home));
     }
     Ok(selected)
 }
@@ -7621,16 +7968,16 @@ impl Provider for CarrierGossipProvider {
                     }
                 };
 
-                let default_id = state
-                    .did
-                    .clone()
-                    .unwrap_or_else(|| state.endpoint.id().to_string());
+                // Only this Home's own DID is kept, and only as the signed
+                // author. Any other caller sender_id is ignored.
+                let signed_author = request
+                    .get("sender_id")
+                    .and_then(|value| value.as_str())
+                    .filter(|sender| !sender.is_empty() && state.did.as_deref() == Some(*sender))
+                    .map(str::to_string);
+                let home = gossip_send_home(state.did.as_deref());
                 let msg = GossipMessage {
-                    sender_id: request
-                        .get("sender_id")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or(&default_id)
-                        .to_string(),
+                    sender_id: String::new(),
                     sender_nick: sender_nick.to_string(),
                     content: message.to_string(),
                     ts: requested_gossip_ts(request),
@@ -7643,6 +7990,7 @@ impl Provider for CarrierGossipProvider {
                         .get("sender_session_id")
                         .and_then(|v| v.as_str())
                         .map(|s| s.to_string()),
+                    signed_author,
                 };
                 let bytes = match serialize_gossip_wire_message(&msg) {
                     Ok(bytes) => bytes,
@@ -7660,7 +8008,7 @@ impl Provider for CarrierGossipProvider {
                 {
                     let mut bufs = state.buffers.lock().await;
                     if let Some(buf) = bufs.get_mut(topic_name) {
-                        push_gossip_buffer_message(buf, msg.clone());
+                        push_gossip_buffer_frame(buf, msg.clone(), home);
                     }
                 }
 
@@ -7773,7 +8121,12 @@ impl Provider for CarrierGossipProvider {
                     None => limit,
                 };
                 let messages = match bounded_gossip_peek_prefix(
-                    buffer.messages.iter().skip(start),
+                    buffer
+                        .messages
+                        .iter()
+                        .enumerate()
+                        .skip(start)
+                        .map(|(index, message)| (message, frame_home_at(buffer, index))),
                     batch_limit,
                 ) {
                     Ok(messages) => messages,
@@ -7799,11 +8152,15 @@ impl Provider for CarrierGossipProvider {
                     },
                     limit,
                 });
+                let visible = messages
+                    .iter()
+                    .map(|(message, home)| gossip_recv_message(message, gossip_shown_sender(home)))
+                    .collect::<Vec<_>>();
 
                 Ok(gossip_peek_response(
                     cursor.position,
                     next_cursor,
-                    &messages,
+                    &visible,
                     limit,
                 ))
             }
@@ -7914,7 +8271,9 @@ impl Provider for CarrierGossipProvider {
                     .and_then(|v| v.as_str())
                     .unwrap_or("default")
                     .to_string();
-                // Skip messages from this sender (prevents local loopback echo)
+                // Skip this Home. The id is its DID, or the hex form of that key.
+                // A payload sender_id does not match. A local insert is this Home
+                // even though recv shows no sender.
                 let skip_sender_id = request
                     .get("skip_sender_id")
                     .and_then(|v| v.as_str())
@@ -7955,16 +8314,23 @@ impl Provider for CarrierGossipProvider {
                     0
                 };
 
-                let all: Vec<&GossipMessage> =
-                    buf.messages.iter().skip(start).take(limit).collect();
-                let count = all.len();
-                let messages: Vec<&GossipMessage> = if skip_sender_id.is_empty() {
-                    all
-                } else {
-                    all.into_iter()
-                        .filter(|m| m.sender_id != skip_sender_id)
-                        .collect()
-                };
+                let window: Vec<_> = buf
+                    .messages
+                    .iter()
+                    .enumerate()
+                    .skip(start)
+                    .take(limit)
+                    .map(|(index, message)| (message, frame_home_at(buf, index)))
+                    .collect();
+                let count = window.len();
+                let messages: Vec<serde_json::Value> = window
+                    .into_iter()
+                    .filter(|(_, home)| {
+                        skip_sender_id.is_empty()
+                            || !gossip_frame_matches_skip(home, &skip_sender_id)
+                    })
+                    .map(|(message, home)| gossip_recv_message(message, gossip_shown_sender(&home)))
+                    .collect();
 
                 let next_cursor = buf.base_index + start as u64 + count as u64;
                 cursor.position = next_cursor;
@@ -8289,7 +8655,11 @@ async fn handle_gossip_event(
             if let Some(buf) = bufs.get_mut(topic) {
                 buf.remote_frames = buf.remote_frames.wrapping_add(1);
                 if let Some(gossip_msg) = gossip_msg {
-                    push_gossip_buffer_message(buf, gossip_msg);
+                    let checked = match gossip_checked_sender(msg.scope, &msg.delivered_from) {
+                        Some(did) => GossipFrameHome::Direct(did),
+                        None => GossipFrameHome::Forwarded,
+                    };
+                    push_gossip_buffer_frame(buf, gossip_msg, checked);
                 }
             }
         }
@@ -8563,18 +8933,14 @@ impl CarrierProviderInvoker {
                 "Carrier loopback provider invocation failed: {err}"
             ))
         })?;
-        carrier_provider_invoke_result(response).map_err(|err| {
-            ProviderError::Provider(format!(
-                "Carrier loopback provider invocation failed: {err}"
-            ))
-        })
+        carrier_provider_invoke_result(response).map_err(carrier_loopback_provider_error)
     }
 }
 
-enum TicketRouteKind {
-    ConnectTicket,
-    PeerDid { reply_wait_ms: Option<u64> },
-}
+/// The one named refusal for the retired connect-ticket dial route. Tests
+/// assert it verbatim, so treat the wording as part of the Runtime contract.
+const CONNECT_TICKET_ROUTE_UNAVAILABLE: &str =
+    "Carrier connect-ticket provider route is unavailable; the Runtime dials only the peer-DID route";
 
 impl CarrierProviderInvoker {
     async fn invoke_ticket_endpoints(
@@ -8582,14 +8948,10 @@ impl CarrierProviderInvoker {
         endpoints: Vec<iroh::EndpointAddr>,
         peer_did: Option<&str>,
         timeout_secs: u64,
-        route_kind: TicketRouteKind,
+        reply_wait_ms: Option<u64>,
         invocation: &ProviderInvocation,
         request: serde_json::Value,
     ) -> std::result::Result<serde_json::Value, ProviderError> {
-        let (reply_wait_ms, peer_did_route) = match route_kind {
-            TicketRouteKind::ConnectTicket => (None, false),
-            TicketRouteKind::PeerDid { reply_wait_ms } => (reply_wait_ms, true),
-        };
         let peer_endpoint = self.peer_endpoint.as_ref().ok_or_else(|| {
             ProviderError::Unavailable(
                 "Carrier peer routing is not available on this Runtime".to_string(),
@@ -8692,7 +9054,7 @@ impl CarrierProviderInvoker {
             }
         }
 
-        if peer_did_route && !connected && !bounded {
+        if !connected && !bounded {
             return Err(ProviderError::Unavailable(
                 "no verified Carrier route to the requested peer".to_string(),
             ));
@@ -8809,20 +9171,13 @@ impl ProviderCarrierInvoker for CarrierProviderInvoker {
     ) -> std::result::Result<serde_json::Value, ProviderError> {
         let timeout_secs = carrier_route_timeout_secs(route);
         match route {
-            ProviderCarrierRoute::ConnectTicket {
-                connect_ticket,
-                peer_did,
-                ..
-            } => {
-                self.invoke_ticket_endpoints(
-                    decode_ticket_endpoints(connect_ticket),
-                    peer_did.as_deref(),
-                    timeout_secs,
-                    TicketRouteKind::ConnectTicket,
-                    invocation,
-                    request,
-                )
-                .await
+            ProviderCarrierRoute::ConnectTicket { .. } => {
+                // One dialling route: the Runtime dials only the peer-DID
+                // route. A connect ticket never opens a connection, so the
+                // answer is the named refusal before any provider effect.
+                Err(ProviderError::Unavailable(
+                    CONNECT_TICKET_ROUTE_UNAVAILABLE.to_string(),
+                ))
             }
             ProviderCarrierRoute::PeerDid {
                 peer_did,
@@ -8854,9 +9209,7 @@ impl ProviderCarrierInvoker for CarrierProviderInvoker {
                             endpoints.clone(),
                             Some(peer_did),
                             timeout_secs,
-                            TicketRouteKind::PeerDid {
-                                reply_wait_ms: *reply_wait_ms,
-                            },
+                            *reply_wait_ms,
                             invocation,
                             request.clone(),
                         )
@@ -9124,7 +9477,7 @@ pub(crate) const CARRIER_CONTENT_TOO_LARGE: &str = "content_too_large";
 /// A peer-DID call whose stream broke in transit, after the connect.
 pub(crate) const PEER_ROUTE_IN_TRANSIT: &str = "in_transit";
 
-const CARRIER_PROVIDER_DECISION_CODES: [&str; 10] = [
+const CARRIER_PROVIDER_DECISION_CODES: [&str; 13] = [
     "denied",
     "rate_limited",
     "offer_unavailable",
@@ -9135,6 +9488,9 @@ const CARRIER_PROVIDER_DECISION_CODES: [&str; 10] = [
     "provider_registry_unavailable",
     CARRIER_CONTENT_TOO_LARGE,
     crate::api::gateway::MODEL_AUTHORITY_TIMEOUT_CODE,
+    DID_MESSAGE_INBOX_FULL,
+    DID_MESSAGE_TOO_LARGE,
+    DID_MESSAGE_SELF,
 ];
 
 impl CarrierProviderDecision {
@@ -9188,6 +9544,24 @@ fn carrier_answer_read_error(error: std::io::Error) -> anyhow::Error {
 
 impl std::error::Error for CarrierProviderDecision {}
 
+/// A loopback self-send shows its decision token. Other loopback failures
+/// keep their existing text. A remote peer already receives only the token.
+fn carrier_loopback_provider_error(err: anyhow::Error) -> ProviderError {
+    let detail = if err
+        .downcast_ref::<CarrierProviderDecision>()
+        .is_some_and(|decision| decision.code == DID_MESSAGE_SELF)
+    {
+        DID_MESSAGE_SELF
+    } else {
+        return ProviderError::Provider(format!(
+            "Carrier loopback provider invocation failed: {err}"
+        ));
+    };
+    ProviderError::Provider(format!(
+        "Carrier loopback provider invocation failed: {detail}"
+    ))
+}
+
 fn carrier_provider_invoke_result(response: serde_json::Value) -> Result<serde_json::Value> {
     if response.get("ok").and_then(|value| value.as_bool()) == Some(true) {
         return Ok(response
@@ -9214,6 +9588,7 @@ impl CarrierClient {
     /// discovery-isolated endpoint. The accepted connection must present the
     /// requested endpoint identity; a substituted peer is rejected before any
     /// provider request is written.
+    #[cfg(unix)]
     pub(crate) async fn connect_resolved_peer(
         endpoint: &Endpoint,
         peer: iroh::PublicKey,
@@ -10134,8 +10509,11 @@ pub(crate) mod tests {
             })
             .sum();
         assert!(retained_bytes <= GOSSIP_TOPIC_BUFFER_MAX_BYTES);
+        let checked_senders =
+            std::iter::repeat_n(GossipFrameHome::Forwarded, messages.len()).collect();
         TopicBuffer {
             messages,
+            checked_senders,
             base_index,
             retained_bytes,
             remote_frames: 0,
@@ -10148,8 +10526,11 @@ pub(crate) mod tests {
     ) -> TopicBuffer {
         let messages: VecDeque<_> = messages.into_iter().collect();
         let retained_bytes = messages.iter().map(gossip_message_encoded_len).sum();
+        let checked_senders =
+            std::iter::repeat_n(GossipFrameHome::Forwarded, messages.len()).collect();
         TopicBuffer {
             messages,
+            checked_senders,
             base_index,
             retained_bytes,
             remote_frames: 0,
@@ -10925,6 +11306,7 @@ pub(crate) mod tests {
             nonce: 42,
             signature: None,
             sender_session_id: None,
+            signed_author: None,
         };
         let bytes = serde_json::to_vec(&msg).unwrap();
         let decoded: GossipMessage = serde_json::from_slice(&bytes).unwrap();
@@ -10946,6 +11328,7 @@ pub(crate) mod tests {
             nonce: 1,
             signature: Some("deadbeef".to_string()),
             sender_session_id: None,
+            signed_author: None,
         };
         let json = serde_json::to_string(&msg).unwrap();
         assert!(json.contains("\"signature\":\"deadbeef\""));
@@ -11035,6 +11418,7 @@ pub(crate) mod tests {
             nonce: 1,
             signature: None,
             sender_session_id: None,
+            signed_author: None,
         };
         let buffer = test_topic_buffer([message], 0);
         assert!(local_content_availability_catchup_message(&buffer.messages, &did).is_none());
@@ -11162,6 +11546,7 @@ pub(crate) mod tests {
             nonce: 1,
             signature: None,
             sender_session_id: None,
+            signed_author: None,
         };
 
         assert!(
@@ -11357,6 +11742,7 @@ pub(crate) mod tests {
                 nonce: 1,
                 signature: None,
                 sender_session_id: None,
+                signed_author: None,
             },
             did,
         )
@@ -14094,6 +14480,11 @@ pub(crate) mod tests {
         grant_peer(slow._dir.path(), &local_did, &["content.replica"]);
         // The holder published what the bounded fetch reads.
         slow.publish("bafyfixture");
+        // The first two calls take the plain-key branch: no remembered
+        // ticket, so Runtime resolves the peer DID itself. The wait makes
+        // that resolution in-process instead of depending on discovery
+        // timing, and its own bound stays outside the route budget below.
+        wait_for_verified_peer_route(&local_invoker, &local_node.endpoint, &slow.addr).await;
         let route =
             |op: &str, request: serde_json::Value, transfer: ProviderTransfer| ProviderInvocation {
                 source: "carrier-availability".into(),
@@ -14103,13 +14494,11 @@ pub(crate) mod tests {
                 transfer,
                 range: None,
                 progress: None,
-                transport: ProviderInvocationTransport::Carrier(
-                    ProviderCarrierRoute::ConnectTicket {
-                        connect_ticket: slow.ticket.clone(),
-                        peer_did: Some(slow.did.clone()),
-                        timeout_ms: Some(1_000),
-                    },
-                ),
+                transport: ProviderInvocationTransport::Carrier(ProviderCarrierRoute::PeerDid {
+                    peer_did: slow.did.clone(),
+                    timeout_ms: Some(1_000),
+                    reply_wait_ms: None,
+                }),
             };
 
         // An effectful operation keeps its open-ended answer past the route budget.
@@ -14142,65 +14531,23 @@ pub(crate) mod tests {
                 ProviderTransfer::Bytes,
             ))
             .await
-            .unwrap_err()
-            .to_string();
+            .unwrap_err();
         let cut_after = started.elapsed();
-        assert!(err.contains("response deadline of 1s passed"), "{err}");
+        assert!(
+            matches!(&err, ProviderError::Io(io) if io.kind() == std::io::ErrorKind::TimedOut),
+            "the plain-key bounded fetch is cut in transit at its budget: {err:?}"
+        );
         assert!(
             cut_after >= std::time::Duration::from_secs(1)
                 && cut_after < std::time::Duration::from_millis(2_400),
             "bounded fetch is cut at its budget, before the slow answer: {cut_after:?}"
         );
 
-        // A peer-DID route keeps the same rule: effects wait, bounded reads are cut.
-        let by_did = |op: &str, request: serde_json::Value, transfer: ProviderTransfer| {
-            let mut invocation = route(op, request, transfer);
-            invocation.transport =
-                ProviderInvocationTransport::Carrier(ProviderCarrierRoute::PeerDid {
-                    peer_did: slow.did.clone(),
-                    timeout_ms: Some(1_000),
-                    reply_wait_ms: None,
-                });
-            invocation
-        };
-        // The ticket fetch's answer deadline dropped the live client. PeerDid
-        // resolves the peer id, so these calls start once that route is back.
-        wait_for_verified_peer_route(&local_invoker, &local_node.endpoint, &slow.addr).await;
-        let response = local_registry
-            .invoke_provider(by_did(
-                "import_exact",
-                serde_json::json!({"op":"import_exact","cid":"bafyfixture"}),
-                ProviderTransfer::Json,
-            ))
-            .await
-            .unwrap();
-        assert_eq!(
-            response["data"]["receipt"], "effect-completed",
-            "{response}"
-        );
-        let started = std::time::Instant::now();
-        local_registry
-            .invoke_provider(by_did(
-                "fetch",
-                serde_json::json!({"op":"fetch","cid":"bafyfixture","path":"weights.gguf",
-                    "local_only":true,"bounded_read":true,"range":{"start":0,"end":3},
-                    "transfer":"bytes"}),
-                ProviderTransfer::Bytes,
-            ))
-            .await
-            .unwrap_err();
-        let cut_after = started.elapsed();
-        assert!(
-            cut_after >= std::time::Duration::from_secs(1)
-                && cut_after < std::time::Duration::from_millis(2_400),
-            "peer-DID bounded fetch is cut at its budget: {cut_after:?}"
-        );
-
         local_registry
             .remember_carrier_peer_ticket(&slow.did, &slow.ticket)
             .await
             .unwrap();
-        let mut bounded_with_longer_reply_wait = by_did(
+        let mut bounded_with_longer_reply_wait = route(
             "fetch",
             serde_json::json!({"op":"fetch","cid":"bafyfixture","path":"weights.gguf",
                 "local_only":true,"bounded_read":true,"range":{"start":0,"end":3},
@@ -16176,7 +16523,7 @@ pub(crate) mod tests {
     }
     #[cfg(unix)]
     #[tokio::test]
-    async fn test_connect_ticket_self_route_uses_carrier_admission_without_network_connect() {
+    async fn test_connect_ticket_self_route_returns_the_named_refusal() {
         let fixture = peer_did_route_fixture(93, 94).await;
         let local_did = public_key_to_did(&fixture.local_node.endpoint.id())
             .expect("test endpoint must encode as DID");
@@ -16197,28 +16544,23 @@ pub(crate) mod tests {
         shutdown_test_carrier_node(fixture.remote_node).await;
         shutdown_test_carrier_node(fixture.local_node).await;
 
-        let response = fixture
+        // The connect-ticket arm refuses even for the invoker's own endpoint;
+        // the peer-DID route keeps the loopback property above.
+        let error = fixture
             .local_registry
             .invoke_provider(connect_ticket_invocation(local_addr, &local_did))
             .await
-            .expect("same-endpoint ticket must loop through Carrier admission");
+            .expect_err("the connect-ticket arm must refuse closed");
 
-        assert_eq!(response["status"], "ok");
+        assert!(error
+            .to_string()
+            .ends_with(CONNECT_TICKET_ROUTE_UNAVAILABLE));
+        assert!(local_requests.lock().unwrap().is_empty());
         assert!(fixture.remote_requests.lock().unwrap().is_empty());
-        let requests = local_requests.lock().unwrap().clone();
-        assert_eq!(requests.len(), 1);
-        assert_eq!(
-            requests[0]["_runtime_invocation"]["transport"],
-            "carrier-provider-plane"
-        );
-        assert_eq!(
-            requests[0]["_runtime_invocation"]["carrier"]["source_endpoint_did"],
-            local_did
-        );
     }
     #[cfg(unix)]
     #[tokio::test]
-    async fn test_connect_ticket_self_route_rejects_mismatched_peer_before_provider_effect() {
+    async fn test_connect_ticket_route_refuses_before_the_peer_did_check() {
         let fixture = peer_did_route_fixture(95, 96).await;
         let mut local_watch = fixture.local_node.endpoint.watch_addr();
         let local_addr = local_watch.get();
@@ -16234,15 +16576,17 @@ pub(crate) mod tests {
             .await
             .unwrap();
 
+        // A peer_did that does not match the ticket would have failed the
+        // ticket checks; the arm refuses before reaching them.
         let error = fixture
             .local_registry
             .invoke_provider(connect_ticket_invocation(local_addr, &fixture.remote_did))
             .await
-            .expect_err("mismatched peer_did and ticket must fail closed");
+            .expect_err("the connect-ticket arm must refuse closed");
 
         assert!(error
             .to_string()
-            .contains("peer_did does not match connect_ticket"));
+            .ends_with(CONNECT_TICKET_ROUTE_UNAVAILABLE));
         assert!(local_requests.lock().unwrap().is_empty());
         assert!(fixture.remote_requests.lock().unwrap().is_empty());
 
@@ -16313,16 +16657,13 @@ pub(crate) mod tests {
     }
     #[cfg(unix)]
     #[tokio::test]
-    async fn test_connect_ticket_route_reuses_runtime_endpoint_identity() {
+    async fn test_peer_did_route_reuses_runtime_endpoint_identity() {
         let fixture = peer_did_route_fixture(72, 73).await;
 
         for expected in 1..=2usize {
             let response = fixture
                 .local_registry
-                .invoke_provider(connect_ticket_invocation(
-                    fixture.remote_addr.clone(),
-                    &fixture.remote_did,
-                ))
+                .invoke_provider(peer_did_invocation(&fixture.remote_did))
                 .await
                 .unwrap();
 
@@ -16342,7 +16683,7 @@ pub(crate) mod tests {
     }
     #[cfg(unix)]
     #[tokio::test]
-    async fn test_connect_ticket_route_retains_one_peer_connection_across_invokes() {
+    async fn test_peer_did_route_retains_one_peer_connection_across_invokes() {
         let fixture = peer_did_route_fixture(80, 81).await;
         let invoker = Arc::new(CarrierProviderInvoker::with_carrier_endpoint_and_registry(
             fixture.local_node.endpoint.clone(),
@@ -16356,43 +16697,13 @@ pub(crate) mod tests {
         for expected in 1..=2usize {
             let response = fixture
                 .local_registry
-                .invoke_provider(connect_ticket_invocation(
-                    fixture.remote_addr.clone(),
-                    &fixture.remote_did,
-                ))
+                .invoke_provider(peer_did_invocation(&fixture.remote_did))
                 .await
                 .unwrap();
             assert_eq!(response["status"], "ok");
             assert_eq!(fixture.remote_requests.lock().unwrap().len(), expected);
         }
         assert_eq!(invoker.retained_peer_count().await, 1);
-
-        shutdown_test_carrier_node(fixture.remote_node).await;
-        shutdown_test_carrier_node(fixture.local_node).await;
-    }
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn test_connect_ticket_route_without_runtime_endpoint_fails_before_provider_effect() {
-        let fixture = peer_did_route_fixture(74, 75).await;
-        fixture
-            .local_registry
-            .set_carrier_invoker(Arc::new(CarrierProviderInvoker::new()))
-            .await;
-
-        let err = fixture
-            .local_registry
-            .invoke_provider(connect_ticket_invocation(
-                fixture.remote_addr.clone(),
-                &fixture.remote_did,
-            ))
-            .await
-            .expect_err("ticket route without the Runtime endpoint must fail closed");
-
-        assert!(
-            matches!(err, ProviderError::Unavailable(_)),
-            "expected typed peer-unavailable, got {err:?}"
-        );
-        assert!(fixture.remote_requests.lock().unwrap().is_empty());
 
         shutdown_test_carrier_node(fixture.remote_node).await;
         shutdown_test_carrier_node(fixture.local_node).await;
@@ -16426,6 +16737,72 @@ pub(crate) mod tests {
 
         shutdown_test_carrier_node(fixture.remote_node).await;
         shutdown_test_carrier_node(fixture.local_node).await;
+    }
+
+    /// The one dialling route is PeerDid. The connect-ticket arm refuses with
+    /// the named error before any dial, on every OS: the invoker owns a live
+    /// endpoint and the ticket carries the holder's direct address, so a
+    /// restored dial would reach the holder's accept loop and move its count.
+    #[tokio::test]
+    async fn connect_ticket_route_returns_named_unavailable_without_dialling() {
+        let bind = || async {
+            Endpoint::builder(iroh::endpoint::presets::Minimal)
+                .clear_ip_transports()
+                .portmapper_config(iroh::endpoint::PortmapperConfig::Disabled)
+                .alpns(vec![CARRIER_ALPN.to_vec()])
+                .bind_addr("127.0.0.1:0".parse::<std::net::SocketAddr>().unwrap())
+                .unwrap()
+                .bind()
+                .await
+                .unwrap()
+        };
+        let holder = bind().await;
+        let consumer = bind().await;
+        let holder_address = wait_for_direct_endpoint_addr(&holder).await;
+        let invoker = CarrierProviderInvoker::with_carrier_endpoint(consumer.clone());
+        let accepts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let listener = holder.clone();
+        let counted = accepts.clone();
+        let serving = tokio::spawn(async move {
+            while let Some(incoming) = listener.accept().await {
+                counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let _ = incoming.await;
+            }
+        });
+        let route = ProviderCarrierRoute::ConnectTicket {
+            connect_ticket: encode_ticket_for(holder_address),
+            peer_did: None,
+            timeout_ms: Some(5_000),
+        };
+        let request = serde_json::json!({"op":"fetch","cid":FIXTURE_CID});
+        let invocation = ProviderInvocation {
+            source: "carrier-refusal".into(),
+            target: "content".into(),
+            op: "fetch".into(),
+            request: request.clone(),
+            transfer: ProviderTransfer::Json,
+            range: None,
+            progress: None,
+            transport: ProviderInvocationTransport::Carrier(route.clone()),
+        };
+        let error = invoker
+            .invoke_carrier_provider(&route, &invocation, request)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&error, ProviderError::Unavailable(message)
+                if message == CONNECT_TICKET_ROUTE_UNAVAILABLE),
+            "connect-ticket route must return the named refusal: {error:?}"
+        );
+        // No dial: the holder's accept loop counted no connection attempt.
+        assert_eq!(
+            accepts.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "connect-ticket route must not dial the ticket endpoints"
+        );
+        holder.close().await;
+        consumer.close().await;
+        serving.abort();
     }
     #[cfg(unix)]
     #[tokio::test]
@@ -21202,12 +21579,20 @@ pub(crate) mod tests {
             conn.closed().await;
         });
         let invoker = CarrierProviderInvoker::with_carrier_endpoint(consumer.clone());
+        // The peer-DID route is the one dialling route; remembering the
+        // holder's ticket gives it the endpoints the retired ticket route
+        // decoded, so the invalid answer below reaches the same reader.
+        let holder_did = public_key_to_did(&holder.id()).unwrap();
+        invoker
+            .remember_peer_ticket(&holder_did, &encode_ticket_for(address))
+            .await
+            .unwrap();
         let request = serde_json::json!({"op":"fetch", "cid":"bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi",
             "path":"weights.gguf", "bounded_read":true, "range":{"start":0,"end":3}});
-        let route = ProviderCarrierRoute::ConnectTicket {
-            connect_ticket: encode_ticket_for(address),
-            peer_did: None,
+        let route = ProviderCarrierRoute::PeerDid {
+            peer_did: holder_did.clone(),
             timeout_ms: Some(5_000),
+            reply_wait_ms: None,
         };
         let invocation = ProviderInvocation {
             source: "carrier-availability".into(),
@@ -21958,6 +22343,7 @@ pub(crate) mod tests {
             nonce: 99,
             signature: None,
             sender_session_id: None,
+            signed_author: None,
         };
         let msg_bytes = serde_json::to_vec(&msg).unwrap();
         sender2.broadcast(msg_bytes.into()).await.unwrap();
@@ -21991,6 +22377,7 @@ pub(crate) mod tests {
             nonce: 100,
             signature: None,
             sender_session_id: None,
+            signed_author: None,
         };
         let near_max_bytes = serialize_gossip_wire_message(&near_max).unwrap();
         assert!(
@@ -22258,17 +22645,28 @@ pub(crate) mod tests {
         let oversized = gossip_test_message_with_encoded_len(1, GOSSIP_WIRE_MESSAGE_MAX_BYTES + 1);
         let oversized_bytes = serde_json::to_vec(&oversized).unwrap();
         assert_eq!(oversized_bytes.len(), GOSSIP_WIRE_MESSAGE_MAX_BYTES + 1);
+        // The send path does not copy a caller sender_id, so the bound is the
+        // frame it actually builds.
+        let mut send_bound = cursor_test_message(1);
+        send_bound.sender_id.clear();
+        send_bound.content.clear();
+        let send_base = gossip_message_encoded_len(&send_bound);
+        send_bound.content = "x".repeat(GOSSIP_WIRE_MESSAGE_MAX_BYTES + 1 - send_base);
+        assert_eq!(
+            gossip_message_encoded_len(&send_bound),
+            GOSSIP_WIRE_MESSAGE_MAX_BYTES + 1
+        );
         let rejected_send = provider
             .send_raw(&serde_json::json!({
                 "op":"gossip_send",
                 "topic":topic,
-                "message":oversized.content.clone(),
-                "sender":oversized.sender_nick.clone(),
-                "sender_id":oversized.sender_id.clone(),
-                "ts":oversized.ts,
-                "nonce":oversized.nonce,
-                "signature":oversized.signature.clone(),
-                "sender_session_id":oversized.sender_session_id.clone(),
+                "message":send_bound.content.clone(),
+                "sender":send_bound.sender_nick.clone(),
+                "sender_id":"did:key:forged-sender",
+                "ts":send_bound.ts,
+                "nonce":send_bound.nonce,
+                "signature":send_bound.signature.clone(),
+                "sender_session_id":send_bound.sender_session_id.clone(),
             }))
             .await
             .unwrap();
@@ -22481,6 +22879,7 @@ pub(crate) mod tests {
             nonce: index + 1,
             signature: Some(format!("untrusted-signature-{index}")),
             sender_session_id: Some(format!("untrusted-session-{index}")),
+            signed_author: None,
         }
     }
 
@@ -22533,9 +22932,17 @@ pub(crate) mod tests {
         assert_eq!(first["data"]["cursor"], 0);
         assert_eq!(first["data"]["next_cursor"], 1);
         assert_eq!(first["data"]["scanned"], 1);
-        assert_eq!(
-            first["data"]["messages"][0]["sender_id"],
-            "transport-sender-0"
+        assert!(
+            first["data"]["messages"][0].get("sender_id").is_none(),
+            "peek must not show a payload sender_id: {}",
+            first["data"]["messages"][0]
+        );
+        assert!(
+            !first["data"]["messages"][0]
+                .to_string()
+                .contains("transport-sender-0"),
+            "{}",
+            first["data"]["messages"][0]
         );
         assert_eq!(
             first["data"]["messages"][0]["sender_session_id"], "untrusted-session-0",
@@ -22789,14 +23196,9 @@ pub(crate) mod tests {
 
         {
             let state = node.gossip_state.lock().await;
-            state
-                .buffers
-                .lock()
-                .await
-                .get_mut(topic)
-                .unwrap()
-                .messages
-                .push_back(cursor_test_message(0));
+            let buffer = state.buffers.lock().await;
+            let mut buffers = buffer;
+            push_gossip_buffer_message(buffers.get_mut(topic).unwrap(), cursor_test_message(0));
         }
         let appended = provider.send_raw(&peek_request).await.unwrap();
         assert_eq!(appended["data"]["cursor"], 0);
@@ -23054,6 +23456,7 @@ pub(crate) mod tests {
                 nonce: 1,
                 signature: Some("sig_alice".to_string()),
                 sender_session_id: None,
+                signed_author: None,
             };
             push_gossip_buffer_message(buf, message);
         }
@@ -23106,6 +23509,7 @@ pub(crate) mod tests {
                 nonce: 2,
                 signature: Some("sig_bob".to_string()),
                 sender_session_id: None,
+                signed_author: None,
             };
             push_gossip_buffer_message(buf, message);
         }
@@ -23142,6 +23546,7 @@ pub(crate) mod tests {
             nonce: 1,
             signature: Some("sig_alice".to_string()),
             sender_session_id: None,
+            signed_author: None,
         };
         assert!(push_gossip_buffer_message(&mut buffer, message.clone()));
 
@@ -23611,5 +24016,1021 @@ pub(crate) mod tests {
             let network = community(true, &[(1, 2), (3, 4), (6, 7)]);
             assert_every_home_keeps_the_hub(&network);
         }
+    }
+}
+
+#[cfg(unix)]
+#[cfg(test)]
+mod two_home_did_message_test {
+    use std::sync::Arc;
+
+    use elastos_runtime::provider::{ProviderCarrierInvoker, ProviderError, ProviderRegistry};
+
+    use super::tests::{
+        encode_ticket_for, shutdown_test_carrier_node, wait_for_direct_endpoint_addr,
+    };
+    use super::{
+        public_key_to_did, send_did_message, start_isolated_carrier_node_with_registry,
+        CarrierProviderInvoker, DID_MESSAGE_SELF,
+    };
+
+    #[tokio::test]
+    async fn two_home_did_message() {
+        let remote_requests_dir = tempfile::tempdir().unwrap();
+        let remote_registry = Arc::new(ProviderRegistry::new());
+        let (remote_key, remote_did) = elastos_identity::derive_did(&[0xD1; 32]);
+        let remote_node = start_isolated_carrier_node_with_registry(
+            &remote_key,
+            &remote_did,
+            remote_requests_dir.path().to_path_buf(),
+            Some(Arc::downgrade(&remote_registry)),
+        )
+        .await
+        .unwrap();
+        let remote_addr = wait_for_direct_endpoint_addr(&remote_node.endpoint).await;
+
+        // A learns B only through the operator peer store, the same write as
+        // `elastos node peer add --did ... --ticket ...`.
+        let local_dir = tempfile::tempdir().unwrap();
+        crate::operator_control::upsert_peer(
+            local_dir.path(),
+            crate::operator_control::OperatorPeer {
+                did: remote_did.clone(),
+                label: String::new(),
+                connect_ticket: encode_ticket_for(remote_addr),
+                allow: Vec::new(),
+            },
+        )
+        .unwrap();
+
+        let local_registry = Arc::new(ProviderRegistry::new());
+        let (local_key, local_did) = elastos_identity::derive_did(&[0xD2; 32]);
+        let local_node = start_isolated_carrier_node_with_registry(
+            &local_key,
+            &local_did,
+            local_dir.path().to_path_buf(),
+            Some(Arc::downgrade(&local_registry)),
+        )
+        .await
+        .unwrap();
+        let invoker = Arc::new(CarrierProviderInvoker::with_carrier_endpoint_and_registry(
+            local_node.endpoint.clone(),
+            Arc::downgrade(&local_registry),
+        ));
+        local_registry.set_carrier_invoker(invoker.clone()).await;
+        let transport_did = public_key_to_did(&local_node.endpoint.id()).unwrap();
+        assert_eq!(transport_did, local_did);
+
+        let forged = elastos_identity::derive_did(&[0xD3; 32]).1;
+        let bytes = format!("sender_id={forged}").into_bytes();
+        let answer = send_did_message(&local_registry, &remote_did, &bytes)
+            .await
+            .unwrap();
+        let inbox = remote_node.gossip_state.lock().await.did_messages.clone();
+        let recorded = inbox.lock().expect("DID message inbox").clone();
+        assert_eq!(recorded.len(), 1);
+        assert_eq!(recorded[0].bytes, bytes);
+        assert_eq!(recorded[0].source_endpoint_did, transport_did);
+        assert_ne!(recorded[0].source_endpoint_did, forged);
+        assert_eq!(
+            answer["data"]["sender_did"],
+            recorded[0].source_endpoint_did
+        );
+
+        // 0xD4 (212) is a live receiver in carrier_contract_tests; under the
+        // parallel test runner that Home answers, so this DID must be unused.
+        let unknown = elastos_identity::derive_did(&[0xE9; 32]).1;
+        let refused = send_did_message(&local_registry, &unknown, b"no-delivery")
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(refused, ProviderError::Unavailable(_)),
+            "{refused}"
+        );
+        assert_eq!(inbox.lock().expect("DID message inbox").len(), 1);
+
+        // A ticket whose endpoint id is not B, offered under B's DID, is
+        // refused before a provider request is written.
+        let foreign = iroh::SecretKey::from_bytes(&[0xD5; 32]);
+        let ticket = encode_ticket_for(iroh::EndpointAddr::from(foreign.public()));
+        let mismatch = invoker
+            .remember_peer_ticket(&remote_did, &ticket)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(mismatch, ProviderError::Provider(ref message) if message.contains("does not match")),
+            "{mismatch}"
+        );
+        assert_eq!(inbox.lock().expect("DID message inbox").len(), 1);
+
+        // A send to this Home is a typed refusal and is not stored.
+        let self_refused = send_did_message(&local_registry, &local_did, b"self")
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                self_refused,
+                ProviderError::Provider(ref message) if message.contains(DID_MESSAGE_SELF)
+            ),
+            "{self_refused}"
+        );
+        let local_inbox = local_node.gossip_state.lock().await.did_messages.clone();
+        assert!(
+            local_inbox.lock().expect("DID message inbox").is_empty(),
+            "a message to this Home is not stored"
+        );
+        assert_eq!(inbox.lock().expect("DID message inbox").len(), 1);
+
+        shutdown_test_carrier_node(remote_node).await;
+        shutdown_test_carrier_node(local_node).await;
+    }
+}
+
+#[cfg(unix)]
+#[cfg(test)]
+mod gossip_visible_sender {
+    use ed25519_dalek::{Signer, Verifier};
+    use elastos_runtime::provider::Provider;
+
+    use super::tests::shutdown_test_carrier_node;
+    use super::{
+        gossip_checked_sender, handle_gossip_event, public_key_to_did, start_carrier_node,
+        CarrierGossipProvider, GossipMessage,
+    };
+
+    fn forged_frame(forged: &str, content: &str) -> GossipMessage {
+        GossipMessage {
+            sender_id: forged.to_string(),
+            sender_nick: "claimed".to_string(),
+            content: content.to_string(),
+            ts: 1_700_000_000,
+            nonce: 7,
+            signature: None,
+            sender_session_id: None,
+            signed_author: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn gossip_visible_sender_is_transport_or_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let (signing_key, did) = elastos_identity::derive_did(&[0x61; 32]);
+        let node = start_carrier_node(&signing_key, &did, dir.path().to_path_buf())
+            .await
+            .unwrap();
+        let provider = CarrierGossipProvider::new(node.gossip_state.clone());
+        let topic = "__test/gossip-visible-sender";
+        assert_eq!(
+            provider
+                .send_raw(&serde_json::json!({
+                    "op": "gossip_join",
+                    "topic": topic,
+                    "mode": "direct"
+                }))
+                .await
+                .unwrap()["status"],
+            "ok"
+        );
+
+        let forged = elastos_identity::derive_did(&[0x62; 32]).1;
+        let (transport_key, transport_did) = elastos_identity::derive_did(&[0x63; 32]);
+        let delivered_from = iroh::SecretKey::from_bytes(&transport_key.to_bytes()).public();
+        assert_eq!(public_key_to_did(&delivered_from).unwrap(), transport_did);
+        assert_ne!(forged, transport_did);
+
+        let local = provider
+            .send_raw(&serde_json::json!({
+                "op": "gossip_send",
+                "topic": topic,
+                "message": "local-frame",
+                "sender_id": forged,
+            }))
+            .await
+            .unwrap();
+        assert_eq!(local["status"], "ok", "{local}");
+
+        let (buffers, peers, topic_peers) = {
+            let state = node.gossip_state.lock().await;
+            (
+                state.buffers.clone(),
+                state.peers.clone(),
+                state.topic_peers.clone(),
+            )
+        };
+        let direct = forged_frame(&forged, "direct-frame");
+        handle_gossip_event(
+            iroh_gossip::api::Event::Received(iroh_gossip::api::Message {
+                content: serde_json::to_vec(&direct).unwrap().into(),
+                scope: iroh_gossip::proto::DeliveryScope::Neighbors,
+                delivered_from,
+            }),
+            &buffers,
+            &peers,
+            &topic_peers,
+            topic,
+        )
+        .await;
+        let forwarded_scope: iroh_gossip::proto::DeliveryScope =
+            serde_json::from_str(r#"{"Swarm":1}"#).unwrap();
+        assert!(!forwarded_scope.is_direct());
+        assert!(gossip_checked_sender(forwarded_scope, &delivered_from).is_none());
+        let forwarded = forged_frame(&forged, "forwarded-frame");
+        handle_gossip_event(
+            iroh_gossip::api::Event::Received(iroh_gossip::api::Message {
+                content: serde_json::to_vec(&forwarded).unwrap().into(),
+                scope: forwarded_scope,
+                delivered_from,
+            }),
+            &buffers,
+            &peers,
+            &topic_peers,
+            topic,
+        )
+        .await;
+
+        let recv = provider
+            .send_raw(&serde_json::json!({
+                "op": "gossip_recv",
+                "topic": topic,
+                "consumer_id": "visible-sender",
+                "limit": 10,
+            }))
+            .await
+            .unwrap();
+        let messages = recv["data"]["messages"].as_array().unwrap();
+        assert_eq!(messages.len(), 3, "{recv}");
+        assert_eq!(messages[0]["content"], "local-frame");
+        assert!(messages[0].get("sender_id").is_none(), "{}", messages[0]);
+        assert!(!messages[0].to_string().contains(&forged));
+        assert_eq!(messages[1]["content"], "direct-frame");
+        assert_eq!(messages[1]["sender_id"], transport_did);
+        assert_ne!(messages[1]["sender_id"], forged);
+        assert_eq!(messages[2]["content"], "forwarded-frame");
+        assert!(messages[2].get("sender_id").is_none(), "{}", messages[2]);
+        assert!(!messages[2].to_string().contains(&forged));
+
+        let skipped = provider
+            .send_raw(&serde_json::json!({
+                "op": "gossip_recv",
+                "topic": topic,
+                "consumer_id": "skip-forged",
+                "skip_sender_id": forged,
+                "limit": 10,
+            }))
+            .await
+            .unwrap();
+        assert_eq!(skipped["data"]["messages"].as_array().unwrap().len(), 3);
+        let skipped_home = provider
+            .send_raw(&serde_json::json!({
+                "op": "gossip_recv",
+                "topic": topic,
+                "consumer_id": "skip-home",
+                "skip_sender_id": transport_did,
+                "limit": 10,
+            }))
+            .await
+            .unwrap();
+        let kept = skipped_home["data"]["messages"].as_array().unwrap();
+        assert_eq!(kept.len(), 2, "{skipped_home}");
+        assert!(kept
+            .iter()
+            .all(|message| message["content"] != "direct-frame"));
+
+        let transport_hex = delivered_from.to_string();
+        assert_ne!(transport_hex, transport_did);
+        let skipped_hex = provider
+            .send_raw(&serde_json::json!({
+                "op": "gossip_recv",
+                "topic": topic,
+                "consumer_id": "skip-hex",
+                "skip_sender_id": transport_hex,
+                "limit": 10,
+            }))
+            .await
+            .unwrap();
+        let kept_hex = skipped_hex["data"]["messages"].as_array().unwrap();
+        assert_eq!(kept_hex.len(), 2, "{skipped_hex}");
+        assert!(kept_hex
+            .iter()
+            .all(|message| message["content"] != "direct-frame"));
+
+        let skipped_local = provider
+            .send_raw(&serde_json::json!({
+                "op": "gossip_recv",
+                "topic": topic,
+                "consumer_id": "skip-local",
+                "skip_sender_id": did,
+                "limit": 10,
+            }))
+            .await
+            .unwrap();
+        let kept_local = skipped_local["data"]["messages"].as_array().unwrap();
+        assert_eq!(kept_local.len(), 2, "{skipped_local}");
+        assert!(kept_local
+            .iter()
+            .all(|message| message["content"] != "local-frame"));
+
+        shutdown_test_carrier_node(node).await;
+    }
+
+    fn chat_signature(
+        key: &ed25519_dalek::SigningKey,
+        did: &str,
+        ts: u64,
+        content: &str,
+    ) -> String {
+        let payload_hex = elastos_common::chat_protocol::signing_payload_hex(did, ts, content);
+        let payload = hex::decode(payload_hex).unwrap();
+        hex::encode(key.sign(&payload).to_bytes())
+    }
+
+    fn chat_signature_ok(did: &str, ts: u64, content: &str, signature: &str) -> bool {
+        let payload_hex = elastos_common::chat_protocol::signing_payload_hex(did, ts, content);
+        let Ok(payload) = hex::decode(payload_hex) else {
+            return false;
+        };
+        let Ok(verifying_key) = elastos_identity::decode_did_key(did) else {
+            return false;
+        };
+        let Ok(bytes) = hex::decode(signature) else {
+            return false;
+        };
+        let Ok(signature) = ed25519_dalek::Signature::from_slice(&bytes) else {
+            return false;
+        };
+        verifying_key.verify(&payload, &signature).is_ok()
+    }
+
+    fn gossip_frame(
+        sender_id: &str,
+        signed_author: Option<&str>,
+        content: &str,
+        ts: u64,
+        nonce: u64,
+        signature: Option<&str>,
+    ) -> GossipMessage {
+        GossipMessage {
+            sender_id: sender_id.to_string(),
+            sender_nick: "ada".to_string(),
+            content: content.to_string(),
+            ts,
+            nonce,
+            signature: signature.map(str::to_string),
+            sender_session_id: Some("session-a".to_string()),
+            signed_author: signed_author.map(str::to_string),
+        }
+    }
+
+    async fn deliver_frame(
+        buffers: &std::sync::Arc<
+            tokio::sync::Mutex<std::collections::HashMap<String, super::TopicBuffer>>,
+        >,
+        peers: &std::sync::Arc<tokio::sync::Mutex<Vec<String>>>,
+        topic_peers: &std::sync::Arc<
+            tokio::sync::Mutex<
+                std::collections::HashMap<String, std::collections::HashSet<String>>,
+            >,
+        >,
+        topic: &str,
+        frame: &GossipMessage,
+        scope: iroh_gossip::proto::DeliveryScope,
+        delivered_from: iroh::EndpointId,
+    ) {
+        handle_gossip_event(
+            iroh_gossip::api::Event::Received(iroh_gossip::api::Message {
+                content: serde_json::to_vec(frame).unwrap().into(),
+                scope,
+                delivered_from,
+            }),
+            buffers,
+            peers,
+            topic_peers,
+            topic,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn service_decision_accepted_direct_and_forwarded_forged_signer_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let (signing_key, did) = elastos_identity::load_or_create_did(dir.path()).unwrap();
+        let node = start_carrier_node(&signing_key, &did, dir.path().to_path_buf())
+            .await
+            .unwrap();
+        let provider = CarrierGossipProvider::new(node.gossip_state.clone());
+        let topic = "__test/service-decision";
+        assert_eq!(
+            provider
+                .send_raw(&serde_json::json!({
+                    "op": "gossip_join",
+                    "topic": topic,
+                    "mode": "direct"
+                }))
+                .await
+                .unwrap()["status"],
+            "ok"
+        );
+        let peer = super::did_to_public_key(&did).unwrap().to_string();
+        let mut payload = serde_json::json!({
+            "schema": "elastos.service-access-decision/v1",
+            "kind": "service_access_decision",
+            "request_id": "req-1",
+            "provider_peer_id": peer,
+            "decision": "approved",
+            "service_kind": "exit",
+            "created_at": 1_700_000_000u64,
+        });
+        super::sign_service_message(dir.path(), &mut payload).unwrap();
+        let mut bad = payload.clone();
+        bad["signature"] = serde_json::json!("00");
+        let forged = elastos_identity::derive_did(&[0x91; 32]).1;
+        let (other_key, other_did) = elastos_identity::derive_did(&[0x92; 32]);
+        assert_ne!(forged, did);
+        assert_ne!(other_did, did);
+        let signer_from = iroh::SecretKey::from_bytes(&signing_key.to_bytes()).public();
+        let other_from = iroh::SecretKey::from_bytes(&other_key.to_bytes()).public();
+        assert_eq!(public_key_to_did(&signer_from).unwrap(), did);
+        let forwarded_scope: iroh_gossip::proto::DeliveryScope =
+            serde_json::from_str(r#"{"Swarm":1}"#).unwrap();
+        let (buffers, peers, topic_peers) = {
+            let state = node.gossip_state.lock().await;
+            (
+                state.buffers.clone(),
+                state.peers.clone(),
+                state.topic_peers.clone(),
+            )
+        };
+        let direct = gossip_frame(&forged, None, &payload.to_string(), 1, 1, None);
+        let forwarded = gossip_frame(&forged, None, &payload.to_string(), 2, 2, None);
+        let wrong_home = gossip_frame(&forged, None, &payload.to_string(), 3, 3, None);
+        let bad_signature = gossip_frame(&forged, None, &bad.to_string(), 4, 4, None);
+        deliver_frame(
+            &buffers,
+            &peers,
+            &topic_peers,
+            topic,
+            &direct,
+            iroh_gossip::proto::DeliveryScope::Neighbors,
+            signer_from,
+        )
+        .await;
+        deliver_frame(
+            &buffers,
+            &peers,
+            &topic_peers,
+            topic,
+            &forwarded,
+            forwarded_scope,
+            other_from,
+        )
+        .await;
+        deliver_frame(
+            &buffers,
+            &peers,
+            &topic_peers,
+            topic,
+            &wrong_home,
+            iroh_gossip::proto::DeliveryScope::Neighbors,
+            other_from,
+        )
+        .await;
+        deliver_frame(
+            &buffers,
+            &peers,
+            &topic_peers,
+            topic,
+            &bad_signature,
+            forwarded_scope,
+            other_from,
+        )
+        .await;
+
+        let recv = provider
+            .send_raw(&serde_json::json!({
+                "op": "gossip_recv",
+                "topic": topic,
+                "consumer_id": "service-decisions",
+                "limit": 10,
+            }))
+            .await
+            .unwrap();
+        let messages = recv["data"]["messages"].as_array().unwrap();
+        assert_eq!(messages.len(), 4, "{recv}");
+        let mut accepted = 0;
+        for message in messages {
+            assert!(
+                !message.to_string().contains(&forged),
+                "body sender must not survive recv: {message}"
+            );
+            let result = super::verify_service_message(message, "provider_peer_id");
+            match message["ts"].as_u64() {
+                Some(1) => {
+                    assert_eq!(message["sender_id"], did);
+                    let decision = result.expect("direct decision");
+                    assert_eq!(decision["kind"], "service_access_decision");
+                    assert_eq!(decision["decision"], "approved");
+                    accepted += 1;
+                }
+                Some(2) => {
+                    assert!(message.get("sender_id").is_none(), "{message}");
+                    let decision = result.expect("forwarded decision");
+                    assert_eq!(decision["decision"], "approved");
+                    accepted += 1;
+                }
+                Some(3) => {
+                    assert_eq!(message["sender_id"], other_did);
+                    assert!(result.is_err(), "forged direct signer must be refused");
+                }
+                Some(4) => {
+                    assert!(message.get("sender_id").is_none(), "{message}");
+                    assert!(result.is_err(), "bad signature must be refused");
+                }
+                other => panic!("unexpected frame ts {other:?}"),
+            }
+        }
+        assert_eq!(accepted, 2);
+        shutdown_test_carrier_node(node).await;
+    }
+
+    #[tokio::test]
+    async fn forwarded_chat_and_presence_deliver_signed_author() {
+        let dir = tempfile::tempdir().unwrap();
+        let (signing_key, did) = elastos_identity::derive_did(&[0x71; 32]);
+        let node = start_carrier_node(&signing_key, &did, dir.path().to_path_buf())
+            .await
+            .unwrap();
+        let provider = CarrierGossipProvider::new(node.gossip_state.clone());
+        let topic = "__test/forwarded-chat";
+        assert_eq!(
+            provider
+                .send_raw(&serde_json::json!({
+                    "op": "gossip_join",
+                    "topic": topic,
+                    "mode": "direct"
+                }))
+                .await
+                .unwrap()["status"],
+            "ok"
+        );
+        let forged = elastos_identity::derive_did(&[0x72; 32]).1;
+        let (other_key, other_did) = elastos_identity::derive_did(&[0x73; 32]);
+        let signer_from = iroh::SecretKey::from_bytes(&signing_key.to_bytes()).public();
+        let other_from = iroh::SecretKey::from_bytes(&other_key.to_bytes()).public();
+        let forwarded_scope: iroh_gossip::proto::DeliveryScope =
+            serde_json::from_str(r#"{"Swarm":1}"#).unwrap();
+        let chat_ts = 1_700_000_100u64;
+        let chat = "hello from the other home";
+        let chat_sig = chat_signature(&signing_key, &did, chat_ts, chat);
+        assert!(chat_signature_ok(&did, chat_ts, chat, &chat_sig));
+        let sent = provider
+            .send_raw(&serde_json::json!({
+                "op": "gossip_send",
+                "topic": topic,
+                "message": chat,
+                "sender": "ada",
+                "sender_id": did,
+                "ts": chat_ts,
+                "signature": chat_sig,
+                "sender_session_id": "session-a",
+                "nonce": 10,
+            }))
+            .await
+            .unwrap();
+        assert_eq!(sent["status"], "ok", "{sent}");
+        let (buffers, peers, topic_peers) = {
+            let state = node.gossip_state.lock().await;
+            (
+                state.buffers.clone(),
+                state.peers.clone(),
+                state.topic_peers.clone(),
+            )
+        };
+        let forwarded_chat = gossip_frame(&forged, Some(&did), chat, chat_ts, 11, Some(&chat_sig));
+        let direct_chat = gossip_frame(
+            &forged,
+            Some(&did),
+            chat,
+            chat_ts + 1,
+            12,
+            Some(&chat_signature(&signing_key, &did, chat_ts + 1, chat)),
+        );
+        let mismatched = gossip_frame(
+            &forged,
+            Some(&did),
+            chat,
+            chat_ts + 2,
+            13,
+            Some(&chat_signature(&signing_key, &did, chat_ts + 2, chat)),
+        );
+        let forged_author_sig = chat_signature(&signing_key, &did, chat_ts + 3, chat);
+        let forged_author = gossip_frame(
+            &forged,
+            Some(&other_did),
+            chat,
+            chat_ts + 3,
+            14,
+            Some(&forged_author_sig),
+        );
+        let presence = serde_json::json!({
+            "kind": "chat_presence_v1",
+            "room": "#general",
+            "did": did,
+            "nick": "ada",
+            "ticket": "ticket",
+            "ts": 50u64,
+        });
+        let presence_text = presence.to_string();
+        let presence_sig = chat_signature(&signing_key, &did, 50, &presence_text);
+        let forwarded_presence =
+            gossip_frame(&forged, None, &presence_text, 50, 15, Some(&presence_sig));
+        let direct_presence = gossip_frame(
+            &forged,
+            Some(&did),
+            &presence_text,
+            51,
+            16,
+            Some(&chat_signature(&signing_key, &did, 51, &presence_text)),
+        );
+        let mismatched_presence = gossip_frame(
+            &forged,
+            Some(&did),
+            &presence_text,
+            52,
+            17,
+            Some(&chat_signature(&signing_key, &did, 52, &presence_text)),
+        );
+        for (frame, scope, from) in [
+            (&forwarded_chat, forwarded_scope, other_from),
+            (
+                &direct_chat,
+                iroh_gossip::proto::DeliveryScope::Neighbors,
+                signer_from,
+            ),
+            (
+                &mismatched,
+                iroh_gossip::proto::DeliveryScope::Neighbors,
+                other_from,
+            ),
+            (&forged_author, forwarded_scope, other_from),
+            (&forwarded_presence, forwarded_scope, other_from),
+            (
+                &direct_presence,
+                iroh_gossip::proto::DeliveryScope::Neighbors,
+                signer_from,
+            ),
+            (
+                &mismatched_presence,
+                iroh_gossip::proto::DeliveryScope::Neighbors,
+                other_from,
+            ),
+        ] {
+            deliver_frame(&buffers, &peers, &topic_peers, topic, frame, scope, from).await;
+        }
+
+        let recv = provider
+            .send_raw(&serde_json::json!({
+                "op": "gossip_recv",
+                "topic": topic,
+                "consumer_id": "chat",
+                "limit": 20,
+            }))
+            .await
+            .unwrap();
+        let messages = recv["data"]["messages"].as_array().unwrap();
+        assert_eq!(messages.len(), 8, "{recv}");
+        let local = messages
+            .iter()
+            .find(|message| message["nonce"] == 10)
+            .unwrap();
+        assert_eq!(local["content"], chat);
+        assert!(local.get("sender_id").is_none(), "{local}");
+        assert_eq!(local["signed_author"], did);
+        assert!(!local.to_string().contains(&forged));
+        let local_author = elastos_common::chat_protocol::chat_line_author(local).unwrap();
+        assert_eq!(local_author, did);
+        assert!(chat_signature_ok(
+            local_author,
+            chat_ts,
+            chat,
+            local["signature"].as_str().unwrap()
+        ));
+        assert_eq!(
+            elastos_common::chat_protocol::chat_delivery(local, true),
+            Some(elastos_common::chat_protocol::ChatDelivery {
+                author: did.as_str(),
+                transport_sender: None,
+            })
+        );
+
+        let forwarded = messages
+            .iter()
+            .find(|message| message["nonce"] == 11)
+            .unwrap();
+        assert!(forwarded.get("sender_id").is_none(), "{forwarded}");
+        assert!(!forwarded.to_string().contains(&forged), "{forwarded}");
+        assert_eq!(forwarded["signed_author"], did);
+        let author = elastos_common::chat_protocol::chat_line_author(forwarded).unwrap();
+        assert_eq!(author, did);
+        assert!(chat_signature_ok(
+            author,
+            chat_ts,
+            chat,
+            forwarded["signature"].as_str().unwrap()
+        ));
+        assert_eq!(
+            elastos_common::chat_protocol::chat_delivery(forwarded, true)
+                .unwrap()
+                .transport_sender,
+            None
+        );
+
+        let direct = messages
+            .iter()
+            .find(|message| message["nonce"] == 12)
+            .unwrap();
+        assert_eq!(direct["sender_id"], did);
+        assert!(!direct.to_string().contains(&forged), "{direct}");
+        assert_eq!(
+            elastos_common::chat_protocol::chat_delivery(direct, true),
+            Some(elastos_common::chat_protocol::ChatDelivery {
+                author: did.as_str(),
+                transport_sender: Some(did.as_str()),
+            })
+        );
+
+        let mismatch = messages
+            .iter()
+            .find(|message| message["nonce"] == 13)
+            .unwrap();
+        assert_eq!(mismatch["sender_id"], other_did);
+        assert!(elastos_common::chat_protocol::chat_line_author(mismatch).is_none());
+        assert!(elastos_common::chat_protocol::chat_delivery(mismatch, true).is_none());
+
+        let forged_line = messages
+            .iter()
+            .find(|message| message["nonce"] == 14)
+            .unwrap();
+        assert_eq!(
+            elastos_common::chat_protocol::chat_line_author(forged_line),
+            Some(other_did.as_str())
+        );
+        assert!(!chat_signature_ok(
+            other_did.as_str(),
+            chat_ts + 3,
+            chat,
+            forged_line["signature"].as_str().unwrap()
+        ));
+        assert!(elastos_common::chat_protocol::chat_delivery(forged_line, false).is_none());
+
+        let presence_forwarded = messages
+            .iter()
+            .find(|message| message["nonce"] == 15)
+            .unwrap();
+        assert!(
+            presence_forwarded.get("sender_id").is_none(),
+            "{presence_forwarded}"
+        );
+        assert!(!presence_forwarded.to_string().contains(&forged));
+        let presence_author =
+            elastos_common::chat_protocol::presence_author(presence_forwarded, &did).unwrap();
+        assert_eq!(presence_author, did);
+        assert!(chat_signature_ok(
+            presence_author,
+            50,
+            presence_forwarded["content"].as_str().unwrap(),
+            presence_forwarded["signature"].as_str().unwrap()
+        ));
+
+        let presence_direct = messages
+            .iter()
+            .find(|message| message["nonce"] == 16)
+            .unwrap();
+        assert_eq!(presence_direct["sender_id"], did);
+        assert_eq!(
+            elastos_common::chat_protocol::presence_author(presence_direct, &did),
+            Some(did.as_str())
+        );
+
+        let presence_mismatch = messages
+            .iter()
+            .find(|message| message["nonce"] == 17)
+            .unwrap();
+        assert_eq!(presence_mismatch["sender_id"], other_did);
+        assert!(elastos_common::chat_protocol::presence_author(presence_mismatch, &did).is_none());
+
+        shutdown_test_carrier_node(node).await;
+    }
+
+    #[tokio::test]
+    async fn gossip_peek_hides_payload_sender_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let (signing_key, did) = elastos_identity::derive_did(&[0x81; 32]);
+        let node = start_carrier_node(&signing_key, &did, dir.path().to_path_buf())
+            .await
+            .unwrap();
+        let provider = CarrierGossipProvider::new(node.gossip_state.clone());
+        let topic = "__test/peek-hides-sender";
+        assert_eq!(
+            provider
+                .send_raw(&serde_json::json!({
+                    "op": "gossip_join",
+                    "topic": topic,
+                    "mode": "direct"
+                }))
+                .await
+                .unwrap()["status"],
+            "ok"
+        );
+        let forged = elastos_identity::derive_did(&[0x82; 32]).1;
+        let (transport_key, transport_did) = elastos_identity::derive_did(&[0x83; 32]);
+        let delivered_from = iroh::SecretKey::from_bytes(&transport_key.to_bytes()).public();
+        assert_eq!(public_key_to_did(&delivered_from).unwrap(), transport_did);
+        let forwarded_scope: iroh_gossip::proto::DeliveryScope =
+            serde_json::from_str(r#"{"Swarm":1}"#).unwrap();
+        let (buffers, peers, topic_peers) = {
+            let state = node.gossip_state.lock().await;
+            (
+                state.buffers.clone(),
+                state.peers.clone(),
+                state.topic_peers.clone(),
+            )
+        };
+        let mut direct = forged_frame(&forged, "peek-direct");
+        direct.sender_session_id = Some("keep-session".to_string());
+        direct.nonce = 1;
+        let mut forwarded = forged_frame(&forged, "peek-forwarded");
+        forwarded.nonce = 2;
+        deliver_frame(
+            &buffers,
+            &peers,
+            &topic_peers,
+            topic,
+            &direct,
+            iroh_gossip::proto::DeliveryScope::Neighbors,
+            delivered_from,
+        )
+        .await;
+        deliver_frame(
+            &buffers,
+            &peers,
+            &topic_peers,
+            topic,
+            &forwarded,
+            forwarded_scope,
+            delivered_from,
+        )
+        .await;
+        let peek = provider
+            .send_raw(&serde_json::json!({
+                "op": "gossip_peek",
+                "topic": topic,
+                "consumer_id": "peek-hides-sender",
+                "limit": 10,
+            }))
+            .await
+            .unwrap();
+        let messages = peek["data"]["messages"].as_array().unwrap();
+        assert_eq!(messages.len(), 2, "{peek}");
+        assert_eq!(messages[0]["sender_id"], transport_did);
+        assert_ne!(messages[0]["sender_id"], forged);
+        assert!(
+            !messages[0].to_string().contains(&forged),
+            "{}",
+            messages[0]
+        );
+        assert_eq!(messages[0]["sender_session_id"], "keep-session");
+        assert_eq!(messages[0]["content"], "peek-direct");
+        assert!(messages[1].get("sender_id").is_none(), "{}", messages[1]);
+        assert!(
+            !messages[1].to_string().contains(&forged),
+            "{}",
+            messages[1]
+        );
+        assert_eq!(messages[1]["content"], "peek-forwarded");
+        shutdown_test_carrier_node(node).await;
+    }
+
+    #[test]
+    fn same_home_identity_matches_did_and_hex() {
+        let (key, did) = elastos_identity::derive_did(&[0x44; 32]);
+        let hex_id = iroh::SecretKey::from_bytes(&key.to_bytes())
+            .public()
+            .to_string();
+        assert_ne!(hex_id, did);
+        assert!(super::same_home_identity(&did, &hex_id));
+        assert!(super::same_home_identity(&hex_id, &did));
+        assert!(super::same_home_identity(&did, &did));
+        let (_, other) = elastos_identity::derive_did(&[0x45; 32]);
+        assert!(!super::same_home_identity(&did, &other));
+        assert!(!super::same_home_identity(&hex_id, &other));
+        assert!(!super::same_home_identity(&did, ""));
+        assert!(!super::same_home_identity("", &did));
+        assert!(!super::same_home_identity("not-a-home", &hex_id));
+    }
+}
+
+#[cfg(test)]
+mod did_message_bounds {
+    use base64::Engine as _;
+
+    use super::{
+        carrier_provider_invoke_result, deliver_did_message, CarrierProviderDecision,
+        CarrierTransportObservation, DidMessageRecord, DID_MESSAGE_INBOX_FULL,
+        DID_MESSAGE_INBOX_MAX_MESSAGES, DID_MESSAGE_MAX_BYTES, DID_MESSAGE_SELF,
+        DID_MESSAGE_TOO_LARGE,
+    };
+
+    fn request(bytes: &[u8]) -> serde_json::Value {
+        serde_json::json!({
+            "op": "deliver",
+            "body": base64::engine::general_purpose::STANDARD.encode(bytes),
+        })
+    }
+
+    fn connected_inbox() -> (
+        std::sync::Arc<std::sync::Mutex<Vec<DidMessageRecord>>>,
+        CarrierTransportObservation,
+    ) {
+        let inbox = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let transport = CarrierTransportObservation {
+            sending_runtime_did: "did:key:zSender".into(),
+            did_messages: Some(inbox.clone()),
+        };
+        (inbox, transport)
+    }
+
+    fn assert_sender_hears(answer: &serde_json::Value, code: &str, error: &str) {
+        assert_eq!(answer["ok"], false, "{answer}");
+        assert_eq!(answer["code"], code, "{answer}");
+        assert_eq!(answer["error"], error, "{answer}");
+        let err = carrier_provider_invoke_result(answer.clone()).unwrap_err();
+        assert_eq!(
+            err.downcast_ref::<CarrierProviderDecision>()
+                .expect("refusal is a Carrier decision")
+                .code,
+            code
+        );
+    }
+
+    #[test]
+    fn did_message_inbox_refuses_past_did_message_inbox_max_messages() {
+        let (inbox, transport) = connected_inbox();
+        let first = b"first-kept".to_vec();
+        for index in 0..DID_MESSAGE_INBOX_MAX_MESSAGES {
+            let bytes = if index == 0 {
+                first.clone()
+            } else {
+                format!("kept-{index}").into_bytes()
+            };
+            let answer = deliver_did_message(&transport, &request(&bytes)).unwrap();
+            assert_eq!(answer["ok"], true, "{answer}");
+        }
+        let refused = deliver_did_message(&transport, &request(b"refused-when-full")).unwrap();
+        assert_sender_hears(
+            &refused,
+            DID_MESSAGE_INBOX_FULL,
+            "DID message inbox is full",
+        );
+        let stored = inbox.lock().expect("DID message inbox");
+        assert_eq!(stored.len(), DID_MESSAGE_INBOX_MAX_MESSAGES);
+        assert_eq!(stored[0].bytes, first);
+        assert_eq!(
+            stored.last().expect("inbox holds the cap").bytes,
+            format!("kept-{}", DID_MESSAGE_INBOX_MAX_MESSAGES - 1).into_bytes()
+        );
+        assert!(stored
+            .iter()
+            .all(|record| record.bytes != b"refused-when-full"));
+    }
+
+    #[test]
+    fn did_message_inbox_refuses_past_did_message_max_bytes() {
+        let (inbox, transport) = connected_inbox();
+        let fits = vec![0xABu8; DID_MESSAGE_MAX_BYTES];
+        let accepted = deliver_did_message(&transport, &request(&fits)).unwrap();
+        assert_eq!(accepted["ok"], true, "{accepted}");
+        let over = vec![0xCDu8; DID_MESSAGE_MAX_BYTES + 1];
+        let refused = deliver_did_message(&transport, &request(&over)).unwrap();
+        assert_sender_hears(
+            &refused,
+            DID_MESSAGE_TOO_LARGE,
+            "DID message is larger than the byte cap",
+        );
+        let stored = inbox.lock().expect("DID message inbox");
+        assert_eq!(stored.len(), 1);
+        assert_eq!(stored[0].bytes, fits);
+    }
+
+    #[test]
+    fn did_message_self_send_is_a_typed_refusal() {
+        let (_key, did) = elastos_identity::derive_did(&[0xE1; 32]);
+        let transport = CarrierTransportObservation::checked_sender_runtime_did(did).unwrap();
+        assert!(transport.did_messages.is_none());
+        let refused = deliver_did_message(&transport, &request(b"self")).unwrap();
+        assert_sender_hears(
+            &refused,
+            DID_MESSAGE_SELF,
+            "DID message to this Home is refused",
+        );
     }
 }

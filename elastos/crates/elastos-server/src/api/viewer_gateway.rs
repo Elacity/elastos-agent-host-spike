@@ -1195,8 +1195,11 @@ pub(super) fn viewer_error_response(err: anyhow::Error) -> Response {
 #[cfg(test)]
 mod r4_root_tests {
     use super::*;
+    #[cfg(unix)]
     use crate::api::gateway::r3_stored_root_tests::verified_parent_device_context;
+    #[cfg(unix)]
     use crate::auth::r4_fixture::{store, AGENT_ID, AGENT_ROOT, HUMAN_ROOT, ID};
+    #[cfg(unix)]
     use crate::auth::PrincipalKind;
 
     fn active_viewer(data_dir: &FsPath) {
@@ -1456,6 +1459,7 @@ mod r4_root_tests {
 #[cfg(test)]
 mod r8d_passkey_rows {
     use super::*;
+    #[cfg(unix)]
     use crate::api::gateway::gateway_tests::r8d_passkey_rows::{
         kept_elsewhere_refusal, passkey_person, KEPT_ELSEWHERE, ROOT,
     };

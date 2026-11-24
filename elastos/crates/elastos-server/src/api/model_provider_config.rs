@@ -850,6 +850,7 @@ struct StagedHostedKey {
     key: String,
 }
 
+#[cfg(unix)]
 pub(crate) fn staged_hosted_connections(data_dir: &Path) -> anyhow::Result<Vec<(String, String)>> {
     let dir = model_provider_secrets_dir(data_dir);
     if !dir.exists() {
@@ -1915,9 +1916,13 @@ mod hosted_decision_write_fault_tests {
 #[cfg(test)]
 mod hosted_hint_tests {
     use super::{
-        hosted_hint_from_offers, hosted_model_share_cards, hosted_offer,
-        materialize_provider_offer, seed_model_provider_operator_offers_for_test,
-        set_hosted_offer_share, status_from_offers, HostedAiProvider,
+        hosted_hint_from_offers, hosted_offer, materialize_provider_offer, status_from_offers,
+        HostedAiProvider,
+    };
+    #[cfg(unix)]
+    use super::{
+        hosted_model_share_cards, seed_model_provider_operator_offers_for_test,
+        set_hosted_offer_share,
     };
     use serde_json::json;
 
