@@ -1468,7 +1468,7 @@ fn frame_slot() -> &'static tokio::sync::Mutex<FrameSlot> {
     SLOT.get_or_init(|| {
         tokio::sync::Mutex::new(FrameSlot {
             client: reqwest::Client::builder()
-                .timeout(Duration::from_secs(2))
+                .timeout(elastos_compute::providers::V2_FRAME_ROUTE_DEADLINE)
                 .build()
                 .unwrap_or_else(|_| reqwest::Client::new()),
             shells: Vec::new(),

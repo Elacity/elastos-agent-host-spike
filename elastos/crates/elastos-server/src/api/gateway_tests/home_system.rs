@@ -95,8 +95,27 @@ async fn home_frame_comes_from_the_managed_runtime() {
         crate::auth::RuntimePrincipalRole::Guest,
     );
     let provider = Arc::new(elastos_compute::providers::ComponentProvider::new());
+    let bytes = wat::parse_str(include_str!(
+        "../../../../../tests/fixtures/components/v2-resident.wat"
+    ))
+    .unwrap();
+    let manifest_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tests/fixtures/components/bus-v1/capsule.json");
+    let mut manifest: elastos_common::CapsuleManifest =
+        serde_json::from_slice(&std::fs::read(manifest_path).unwrap()).unwrap();
+    manifest.bus_contract = Some(elastos_common::ELASTOS_BUS_V2_CONTRACT.into());
+    manifest.wit_world_sha256 = Some(elastos_common::elastos_bus_v2_wit_sha256());
+    let handle = provider.load_admitted(bytes, manifest).await.unwrap();
+    provider
+        .testing_hold_grant(&handle.id, "grant-frame", "localhost://photo", "read")
+        .await;
+    ComputeProvider::start(provider.as_ref(), &handle)
+        .await
+        .unwrap();
+    let app_id = handle.id.0.clone();
+    let app_query = format!("app={app_id}");
     provider.testing_store_v2_frame(
-        "app-frame",
+        &app_id,
         Some(owner.principal_id.as_str()),
         vec![
             elastos_compute::providers::bus2_ui::FrameNode::Text(
@@ -120,7 +139,7 @@ async fn home_frame_comes_from_the_managed_runtime() {
     write_frame_coords(dir.path(), &api_url, secret);
     let app = gateway_router(test_state(dir.path()));
 
-    let (status, body) = frame_body(&app, &owner.home_token, "app=app-frame").await;
+    let (status, body) = frame_body(&app, &owner.home_token, &app_query).await;
     assert_eq!(status, StatusCode::OK, "{body}");
     let owner_frame: serde_json::Value = serde_json::from_str(&body).unwrap();
     assert_eq!(owner_frame["nodes"][0]["text"], "<script>alert(1)</script>");
@@ -128,7 +147,7 @@ async fn home_frame_comes_from_the_managed_runtime() {
     assert!(owner_frame.get("grant").is_none());
     assert!(owner_frame["nodes"][1].get("grant").is_none());
 
-    let (other_status, other_body) = frame_body(&app, &other.home_token, "app=app-frame").await;
+    let (other_status, other_body) = frame_body(&app, &other.home_token, &app_query).await;
     assert_eq!(other_status, StatusCode::OK, "{other_body}");
     assert_eq!(
         serde_json::from_str::<serde_json::Value>(&other_body).unwrap()["nodes"]
@@ -141,7 +160,7 @@ async fn home_frame_comes_from_the_managed_runtime() {
     let (ignored_status, ignored) = frame_body(
         &app,
         &owner.home_token,
-        &format!("app=app-frame&principal={}", other.principal_id),
+        &format!("app={app_id}&principal={}", other.principal_id),
     )
     .await;
     assert_eq!(ignored_status, StatusCode::OK, "{ignored}");
@@ -176,7 +195,7 @@ async fn home_frame_comes_from_the_managed_runtime() {
     );
     let named = reqwest::Client::new()
         .get(format!(
-            "{api_url}/api/residents/frame?app=app-frame&principal={}",
+            "{api_url}/api/residents/frame?app={app_id}&principal={}",
             other.principal_id
         ))
         .header(AUTHORIZATION, format!("Bearer {}", owner_shells[0]))
@@ -193,7 +212,7 @@ async fn home_frame_comes_from_the_managed_runtime() {
         "the query principal is not the frame, got {named_body}"
     );
     provider.testing_store_v2_frame(
-        "app-frame",
+        &app_id,
         Some(other.principal_id.as_str()),
         vec![elastos_compute::providers::bus2_ui::FrameNode::Text(
             "other-home".into(),
@@ -201,7 +220,7 @@ async fn home_frame_comes_from_the_managed_runtime() {
     );
     let stolen = reqwest::Client::new()
         .get(format!(
-            "{api_url}/api/residents/frame?app=app-frame&principal={}",
+            "{api_url}/api/residents/frame?app={app_id}&principal={}",
             other.principal_id
         ))
         .header(AUTHORIZATION, format!("Bearer {}", owner_shells[0]))
@@ -214,7 +233,7 @@ async fn home_frame_comes_from_the_managed_runtime() {
         "this row proves only that the query principal is ignored, got {stolen_body}"
     );
 
-    let (guest_status, guest_body) = frame_body(&app, &guest.home_token, "app=app-frame").await;
+    let (guest_status, guest_body) = frame_body(&app, &guest.home_token, &app_query).await;
     assert_eq!(guest_status, StatusCode::FORBIDDEN, "{guest_body}");
     assert!(
         guest_body.contains("guest session"),
@@ -227,9 +246,9 @@ async fn home_frame_comes_from_the_managed_runtime() {
     assert!(refusal.contains("Home app session"), "{refusal}");
 
     let _ = provider
-        .deliver_grant_revoked(&elastos_common::CapsuleId::new("app-frame"), "grant-frame")
+        .deliver_grant_revoked(&handle.id, "grant-frame")
         .await;
-    let (_, revoked) = frame_body(&app, &owner.home_token, "app=app-frame").await;
+    let (_, revoked) = frame_body(&app, &owner.home_token, &app_query).await;
     assert_eq!(
         serde_json::from_str::<serde_json::Value>(&revoked).unwrap()["nodes"]
             .as_array()
@@ -239,47 +258,25 @@ async fn home_frame_comes_from_the_managed_runtime() {
     );
 
     provider.testing_store_v2_frame(
-        "app-frame",
+        &app_id,
         Some(owner.principal_id.as_str()),
         vec![elastos_compute::providers::bus2_ui::FrameNode::Text(
             "still here".into(),
         )],
     );
-    let manifest: elastos_common::CapsuleManifest = serde_json::from_str(
-        &std::fs::read_to_string(
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("../../tests/fixtures/components/bus-v1/capsule.json"),
-        )
-        .unwrap(),
-    )
-    .unwrap();
-    ComputeProvider::stop(
-        provider.as_ref(),
-        &elastos_compute::CapsuleHandle {
-            id: elastos_common::CapsuleId::new("app-frame"),
-            manifest,
-            args: Vec::new(),
-        },
-    )
-    .await
-    .unwrap();
-    let (_, stopped) = frame_body(&app, &owner.home_token, "app=app-frame").await;
-    assert_eq!(
-        serde_json::from_str::<serde_json::Value>(&stopped).unwrap()["nodes"]
-            .as_array()
-            .map(Vec::len),
-        Some(0),
-        "stop clears the node list, got {stopped}"
+    let (_, still) = frame_body(&app, &owner.home_token, &app_query).await;
+    assert!(
+        still.contains("still here"),
+        "a live guest still answers text, got {still}"
     );
-
     provider.testing_store_v2_frame(
-        "app-frame",
+        &app_id,
         Some(owner.principal_id.as_str()),
         vec![elastos_compute::providers::bus2_ui::FrameNode::Text(
             "x".repeat(crate::component::V2_FRAME_ANSWER_MAX),
         )],
     );
-    let (_, huge) = frame_body(&app, &owner.home_token, "app=app-frame").await;
+    let (_, huge) = frame_body(&app, &owner.home_token, &app_query).await;
     assert_eq!(
         serde_json::from_str::<serde_json::Value>(&huge).unwrap()["nodes"]
             .as_array()
@@ -288,10 +285,21 @@ async fn home_frame_comes_from_the_managed_runtime() {
         "an answer over the bound stays empty, got {} bytes",
         huge.len()
     );
+    ComputeProvider::stop(provider.as_ref(), &handle)
+        .await
+        .unwrap();
+    let (_, stopped) = frame_body(&app, &owner.home_token, &app_query).await;
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&stopped).unwrap()["nodes"]
+            .as_array()
+            .map(Vec::len),
+        Some(0),
+        "stop clears the node list, got {stopped}"
+    );
 
     let bad_url = spawn_bad_frame_runtime().await;
     write_frame_coords(dir.path(), &bad_url, "bad-attach");
-    let (_, malformed) = frame_body(&app, &owner.home_token, "app=app-frame").await;
+    let (_, malformed) = frame_body(&app, &owner.home_token, &app_query).await;
     assert_eq!(
         serde_json::from_str::<serde_json::Value>(&malformed).unwrap()["nodes"]
             .as_array()
@@ -303,7 +311,7 @@ async fn home_frame_comes_from_the_managed_runtime() {
     runtime_task.abort();
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     write_frame_coords(dir.path(), &api_url, secret);
-    let (_, down) = frame_body(&app, &owner.home_token, "app=app-frame").await;
+    let (_, down) = frame_body(&app, &owner.home_token, &app_query).await;
     assert_eq!(
         serde_json::from_str::<serde_json::Value>(&down).unwrap()["nodes"]
             .as_array()

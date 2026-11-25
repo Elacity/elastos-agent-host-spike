@@ -12,6 +12,7 @@ use std::sync::Arc;
 
 pub use component::{
     ActivationOutcome, ComponentProvider, ResidentActivation, SEALED_BRIDGE, STOPPED_BEFORE_RUN,
+    V2_FRAME_ROUTE_DEADLINE,
 };
 
 /// Synchronous request/response bridge from a Component into the Runtime Bus.

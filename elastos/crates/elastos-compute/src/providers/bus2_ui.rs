@@ -329,7 +329,7 @@ pub struct GrantBook {
     /// Ids no longer held: pushed out of `revoked`, or evicted from `grants`.
     dropped: Vec<String>,
     /// Set by [`GrantBook::clear`]. A later read or present stays denied.
-    closed: bool,
+    pub(crate) closed: bool,
     /// Bumped when every held grant is revoked together. An in-flight request
     /// captured the previous value and will not record its token.
     epoch: u64,
@@ -356,6 +356,13 @@ impl GrantBook {
     /// revoked, is refused: a late hold must not undo that revoke.
     pub fn hold(&mut self, id: &str, resource: &str, action: &str) -> bool {
         self.hold_limited(id, resource, action, None, None)
+    }
+
+    #[cfg(test)]
+    pub fn testing_expire(&mut self, id: &str) {
+        if let Some(held) = self.grants.iter_mut().find(|grant| grant.id == id) {
+            held.expires_at_ms = Some(1);
+        }
     }
 
     /// `uses_left` is the grant's remaining uses. `None` does not run out.

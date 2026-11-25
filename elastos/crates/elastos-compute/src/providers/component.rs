@@ -76,6 +76,9 @@ const V2_STOP_GRACE: Duration = Duration::from_millis(20);
 /// The guest waits this long, then the call is a timeout. A stop joins within
 /// this too.
 const V2_HOST_DEADLINE: Duration = Duration::from_secs(2);
+/// How long the frame route's client waits. A frame read that cannot check
+/// the book in this time answers empty, never the stored frame.
+pub const V2_FRAME_ROUTE_DEADLINE: Duration = Duration::from_secs(2);
 /// A person's approval. The bridge polls the shell for 30 s; this is that
 /// same limit, so an answer inside it still reaches the guest.
 const V2_APPROVAL_DEADLINE: Duration = Duration::from_secs(30);
@@ -341,6 +344,9 @@ pub struct ComponentProvider {
     revoke_gate: Mutex<Option<Arc<TestGate>>>,
     bridge_principals: Arc<RwLock<HashMap<CapsuleId, Option<String>>>>,
     frames: Arc<Mutex<HashMap<String, StoredFrame>>>,
+    /// Test only: a frame read waits this long instead of the route deadline.
+    #[cfg(test)]
+    frame_read_bound: Mutex<Option<Duration>>,
     read_budget: Arc<super::bus2_stream::ReadBudget>,
     compile_slot: Arc<Semaphore>,
     /// Test only: holds the next compile job just after its worker has taken
@@ -366,6 +372,8 @@ impl ComponentProvider {
             revoke_gate: Mutex::new(None),
             bridge_principals: Arc::new(RwLock::new(HashMap::new())),
             frames: Arc::new(Mutex::new(HashMap::new())),
+            #[cfg(test)]
+            frame_read_bound: Mutex::new(None),
             read_budget: super::bus2_stream::ReadBudget::new(),
             // One compile at a time: a burst of loads queues instead of
             // starting competing compiler jobs.
@@ -430,14 +438,43 @@ impl ComponentProvider {
         }
     }
 
-    /// The frame stored for `id` when `caller` is the principal who presented
-    /// it. A different person or app gets nothing. `None` matches a guest that
-    /// ran with no principal.
-    pub fn read_v2_frame(
+    /// The frame for `id` when `caller` presented it and the guest's book
+    /// still allows it. The wait is [`V2_FRAME_ROUTE_DEADLINE`], the frame
+    /// route's own deadline. On that deadline the answer is empty, never the
+    /// stored frame. A closed book answers nothing, text included. A frame
+    /// stored with no guest is not returned: the route calls this, and only
+    /// a live guest has a book to check.
+    pub async fn read_v2_frame(
         &self,
         caller: Option<&str>,
         id: &str,
     ) -> Option<crate::providers::bus2_ui::Frame> {
+        let bound = {
+            #[cfg(test)]
+            {
+                self.frame_read_bound
+                    .lock()
+                    .expect("frame bound")
+                    .unwrap_or(V2_FRAME_ROUTE_DEADLINE)
+            }
+            #[cfg(not(test))]
+            {
+                V2_FRAME_ROUTE_DEADLINE
+            }
+        };
+        let book = tokio::time::timeout(bound, self.instances.read())
+            .await
+            .ok()
+            .and_then(|instances| {
+                instances
+                    .get(&elastos_common::CapsuleId::new(id))
+                    .map(|instance| instance.grants.clone())
+            })?;
+        // Book, then frames: the same order as stop, forget, and the exit task.
+        let book = book.lock().expect("grant book");
+        if book.closed {
+            return None;
+        }
         let stored = {
             let frames = self.frames.lock().expect("frames");
             let stored = frames.get(id)?;
@@ -446,15 +483,6 @@ impl ComponentProvider {
             }
             stored.frame.clone()
         };
-        // No live guest: a test frame, or one already dropped with its book.
-        let Some(book) = self.instances.try_read().ok().and_then(|instances| {
-            instances
-                .get(&elastos_common::CapsuleId::new(id))
-                .map(|instance| instance.grants.clone())
-        }) else {
-            return Some(stored);
-        };
-        let book = book.lock().expect("grant book");
         Some(crate::providers::bus2_ui::Frame {
             nodes: stored
                 .nodes
@@ -472,8 +500,9 @@ impl ComponentProvider {
         })
     }
 
-    /// Stores one frame so a same-process Home test can read it back.
-    /// A guest present is the production writer.
+    /// Stores one frame so a same-process test can read it back through a
+    /// live guest. A guest present is the production writer. This store does
+    /// not answer a read: [`Self::read_v2_frame`] requires that guest's book.
     pub fn testing_store_v2_frame(
         &self,
         id: &str,
@@ -561,6 +590,7 @@ impl ComponentProvider {
                 return;
             };
             instance.grants.lock().expect("grant book").clear();
+            self.frames.lock().expect("frames").remove(&capsule_id.0);
             raise_flag(&instance.stop_requested, &instance.wake);
             drop(instance.events.take());
             let join = begin_v2_join(instance);
@@ -588,16 +618,6 @@ impl ComponentProvider {
         } else {
             tracing::error!(capsule_id = %id, "forget left a guest thread running");
         }
-    }
-
-    /// Sets the fuel a v2 resident starts with. A caller does this before start.
-    pub async fn set_v2_fuel(&self, id: &CapsuleId, fuel: u64) -> Result<()> {
-        let mut instances = self.instances.write().await;
-        let instance = instances
-            .get_mut(id)
-            .ok_or_else(|| ElastosError::CapsuleNotFound(id.0.clone()))?;
-        instance.v2_fuel = fuel;
-        Ok(())
     }
 
     /// The one engine every v1 component in this process compiles and runs on.
@@ -1060,6 +1080,10 @@ impl ComponentProvider {
                             .as_ref()
                             .is_none_or(|join| !join.was_started()) =>
                     {
+                        // The book and the frame go before the join wait, so a
+                        // read during that wait does not answer the old frame.
+                        instance.grants.lock().expect("grant book").clear();
+                        frames_for_end.lock().expect("frames").remove(&id_for_end.0);
                         (begin_v2_join(instance), true)
                     }
                     _ => (None, false),
@@ -1069,12 +1093,7 @@ impl ComponentProvider {
                 let _ = tokio::task::spawn_blocking(move || join.wait_finished()).await;
             }
             if exit_owns_slot {
-                let mut held = instances.write().await;
-                if let Some(instance) = held.remove(&id_for_end) {
-                    instance.grants.lock().expect("grant book").clear();
-                }
-                drop(held);
-                frames_for_end.lock().expect("frames").remove(&id_for_end.0);
+                instances.write().await.remove(&id_for_end);
             }
             #[cfg(test)]
             endings.write().await.insert(id_for_end, ending);
@@ -2015,6 +2034,7 @@ impl ComputeProvider for ComponentProvider {
         }
         raise_flag(&instance.stop_requested, &instance.wake);
         instance.grants.lock().expect("grant book").clear();
+        self.frames.lock().expect("frames").remove(&id.0);
         drop(instance.events.take());
         let bound = instance.join_bound;
         let join = begin_v2_join(instance);
@@ -2341,8 +2361,18 @@ impl ComponentState {
             .ok_or_else(|| {
                 V2BusError::Denied("resource invoke requires a capability grant".into())
             })?;
-        if self.grants.lock().expect("grant book").blocks_read(&grant) {
-            return Err(V2BusError::Denied("the grant is closed".into()));
+        {
+            let book = self.grants.lock().expect("grant book");
+            if book.blocks_read(&grant) {
+                // Spent is the one refusal that still holds the grant. A
+                // revoke, an eviction, an expiry, or a closed book is closed.
+                let why = if book.blocks_presented_image(&grant) {
+                    "closed"
+                } else {
+                    "spent"
+                };
+                return Err(V2BusError::Denied(format!("the grant is {why}")));
+            }
         }
         let hold = super::bus2_stream::ReadHold::try_reserve(&self.reads, cap)
             .ok_or_else(|| V2BusError::Unavailable("the host read cap is already in use".into()))?;
@@ -2920,9 +2950,7 @@ impl v2::elastos::bus::providers::HostWithStore<ComponentState> for HasSelf<Comp
         accessor
             .with(|mut access| {
                 let stop = Arc::new(move || {
-                    stop_requested.load(Ordering::Acquire)
-                        || cancel_requested.load(Ordering::Acquire)
-                        || grants.lock().expect("grant book").blocks_read(&grant_id)
+                    v2_read_stopped(&stop_requested, &cancel_requested, &grants, &grant_id)
                 });
                 let stream = StreamReader::new(
                     &mut access,
@@ -2965,6 +2993,23 @@ fn present_error(err: crate::providers::bus2_ui::PresentError) -> V2BusError {
         crate::providers::bus2_ui::PresentError::Invalid(message) => V2BusError::Invalid(message),
         crate::providers::bus2_ui::PresentError::Denied(message) => V2BusError::Denied(message),
     }
+}
+
+/// The product stop for a v2 read stream. A spent use still delivers its
+/// bytes. Revoke, eviction, expiry, a closed book, a guest stop, or a
+/// cancelled call ends the stream.
+pub(crate) fn v2_read_stopped(
+    stop_requested: &AtomicBool,
+    cancel_requested: &AtomicBool,
+    grants: &Mutex<crate::providers::bus2_ui::GrantBook>,
+    grant: &str,
+) -> bool {
+    stop_requested.load(Ordering::Acquire)
+        || cancel_requested.load(Ordering::Acquire)
+        || grants
+            .lock()
+            .expect("grant book")
+            .blocks_presented_image(grant)
 }
 
 /// A delivered `grant-revoked` marks that grant and drops the host's stored
@@ -3527,8 +3572,9 @@ mod tests {
         }
     }
 
-    /// A worker that joins after both stop windows still holds its slot and
-    /// its frame. The next launch removes both, so a new guest fits the cap.
+    /// A worker that joins after both stop windows still holds its slot.
+    /// The frame and the book are already gone. The next launch removes the
+    /// slot, so a new guest fits the cap.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn v2_a_late_join_then_launch_fits_the_cap() {
         let provider = Arc::new(ComponentProvider::new());
@@ -3600,8 +3646,9 @@ mod tests {
                 .frames
                 .lock()
                 .expect("frames")
-                .contains_key(&first.id.0),
-            "both stop windows left the frame"
+                .get(&first.id.0)
+                .is_none(),
+            "the frame is cleared before the join wait"
         );
         {
             let (lock, cv) = &*release;
@@ -3635,8 +3682,9 @@ mod tests {
                 .frames
                 .lock()
                 .expect("frames")
-                .contains_key(&first.id.0),
-            "the frame stays with that entry"
+                .get(&first.id.0)
+                .is_none(),
+            "the frame stays gone while the slot waits for the next launch"
         );
         let third = load_v2_fixture(&provider, resident).await;
         provider
@@ -4364,6 +4412,93 @@ mod tests {
         assert!(format!("{err:?}").contains("expired"), "{err:?}");
     }
 
+    /// The last use is spent when the read finishes. The product stop still
+    /// sends every byte and an ok trailer. The next read is spent. A revoke
+    /// in the middle of a stream ends it with an error trailer.
+    #[test]
+    fn a_once_grant_delivers_its_bytes_and_a_revoke_ends_the_stream() {
+        let mut state = ComponentState::new(None, "capsule".into(), None);
+        let pending = one_read_grant(&mut state);
+        let grant = state
+            .finish_grant(pending, Ok(token_line("once", r#","max_uses":1"#)))
+            .expect("once grant");
+        let mut request = v2::elastos::bus::types::InvokeRequest {
+            resource: "localhost://Local/a".into(),
+            operation: "read".into(),
+            grant: Some(grant.id.clone()),
+            params: br#"{"max_bytes":8}"#.to_vec(),
+        };
+        let read = state.begin_read(&request, false).expect("begin read");
+        let prepared = state
+            .finish_read(read, Ok(ok_text_read("hi")))
+            .expect("the one read");
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let stop_requested = state.stop_requested.clone();
+        let cancel_requested = state.cancel_requested.clone();
+        let grants = state.grants.clone();
+        let grant_id = grant.id.clone();
+        let mut stream =
+            crate::providers::bus2_stream::WindowRead::new(prepared.bytes, tx, prepared.hold)
+                .stop_when(Arc::new(move || {
+                    v2_read_stopped(&stop_requested, &cancel_requested, &grants, &grant_id)
+                }));
+        let mut got = Vec::new();
+        while let Some(chunk) = stream.pull(usize::MAX) {
+            got.extend(chunk);
+        }
+        assert_eq!(got, b"hi");
+        assert!(rx.blocking_recv().expect("trailer").is_ok());
+        let err = match state.begin_read(&request, false) {
+            Err(err) => err,
+            Ok(_) => panic!("a second read was accepted"),
+        };
+        let message = format!("{err:?}");
+        assert!(message.contains("the grant is spent"), "{message}");
+
+        let pending = one_read_grant(&mut state);
+        let grant = state
+            .finish_grant(pending, Ok(token_line("mid", r#","max_uses":1"#)))
+            .expect("a second once grant");
+        request.grant = Some(grant.id.clone());
+        request.params = br#"{"max_bytes":64}"#.to_vec();
+        let read = state
+            .begin_read(&request, false)
+            .expect("begin the mid read");
+        let prepared = state
+            .finish_read(read, Ok(ok_text_read("abcdefghij")))
+            .expect("finish the mid read");
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let stop_requested = state.stop_requested.clone();
+        let cancel_requested = state.cancel_requested.clone();
+        let grants = state.grants.clone();
+        let grant_id = grant.id.clone();
+        let mut stream =
+            crate::providers::bus2_stream::WindowRead::new(prepared.bytes, tx, prepared.hold)
+                .stop_when(Arc::new(move || {
+                    v2_read_stopped(&stop_requested, &cancel_requested, &grants, &grant_id)
+                }));
+        assert_eq!(stream.pull(1).as_deref(), Some(&b"a"[..]));
+        state.grants.lock().expect("grant book").revoke("mid");
+        assert!(stream.pull(8).is_none(), "a revoke ends the stream");
+        let trailer = rx.blocking_recv().expect("error trailer");
+        assert!(trailer.is_err(), "{trailer:?}");
+    }
+
+    fn ok_text_read(content: &str) -> String {
+        serde_json::json!({
+            "id": 1,
+            "response": {
+                "type": "resource_result",
+                "result": {
+                    "status": "ok",
+                    "data": { "content": content, "size": content.len() },
+                    "audit": "read-1"
+                }
+            }
+        })
+        .to_string()
+    }
+
     async fn presented_image(
         provider: &ComponentProvider,
         id: &str,
@@ -4418,6 +4553,7 @@ mod tests {
         for _ in 0..2 {
             let frame = provider
                 .read_v2_frame(None, handle.id.as_str())
+                .await
                 .expect("frame");
             assert_eq!(image_count(&frame), 1, "a spent present stays");
             assert!(matches!(
@@ -4431,7 +4567,10 @@ mod tests {
             .await
             .expect("revoke");
         assert!(
-            provider.read_v2_frame(None, handle.id.as_str()).is_none(),
+            provider
+                .read_v2_frame(None, handle.id.as_str())
+                .await
+                .is_none(),
             "revoke removes the stored frame"
         );
     }
@@ -4452,13 +4591,19 @@ mod tests {
         presented_image(&provider, handle.id.as_str(), "pic", None, Some(expires)).await;
         let shown = provider
             .read_v2_frame(None, handle.id.as_str())
+            .await
             .expect("frame");
         assert_eq!(image_count(&shown), 1);
         tokio::time::sleep(Duration::from_millis(400)).await;
         let later = provider
             .read_v2_frame(None, handle.id.as_str())
+            .await
             .expect("frame");
         assert_eq!(image_count(&later), 0);
+        assert!(matches!(
+            later.nodes.first(),
+            Some(crate::providers::bus2_ui::FrameNode::Text(text)) if text == "kept"
+        ));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -4482,8 +4627,163 @@ mod tests {
         }
         let frame = provider
             .read_v2_frame(None, handle.id.as_str())
+            .await
             .expect("frame");
         assert_eq!(image_count(&frame), 0);
+        assert!(matches!(
+            frame.nodes.first(),
+            Some(crate::providers::bus2_ui::FrameNode::Text(text)) if text == "kept"
+        ));
+    }
+
+    /// A read that cannot take the instances lock answers empty. It does not
+    /// return the stored frame. After the lock, expiry and eviction leave the
+    /// text and drop the image. A closed book answers nothing, text included.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_frame_read_answers_empty_until_it_can_check_the_book() {
+        let provider = Arc::new(ComponentProvider::new());
+        let bytes = wat::parse_str(include_str!(
+            "../../../../tests/fixtures/components/v2-resident.wat"
+        ))
+        .unwrap();
+        let handle = load_v2_fixture(&provider, bytes).await;
+        provider
+            .testing_hold_grant(&handle.id, "pic", "localhost://photo", "read")
+            .await;
+        let nodes = vec![
+            crate::providers::bus2_ui::FrameNode::Text("kept".into()),
+            crate::providers::bus2_ui::FrameNode::Image {
+                grant: "pic".into(),
+                resource: "localhost://photo".into(),
+            },
+        ];
+        provider.testing_store_v2_frame(handle.id.as_str(), None, nodes);
+        *provider.frame_read_bound.lock().expect("bound") = Some(Duration::from_millis(40));
+        let hold = provider.instances.write().await;
+        let reading = {
+            let provider = provider.clone();
+            let id = handle.id.0.clone();
+            tokio::spawn(async move { provider.read_v2_frame(None, &id).await })
+        };
+        let answer = tokio::time::timeout(Duration::from_secs(1), reading)
+            .await
+            .expect("the read ends on the route deadline")
+            .expect("read task");
+        assert!(
+            answer.is_none(),
+            "a blocked book check answers empty, not the stored frame: {answer:?}"
+        );
+        assert!(provider
+            .frames
+            .lock()
+            .expect("frames")
+            .get(&handle.id.0)
+            .is_some_and(|stored| {
+                stored.frame.nodes.iter().any(|node| {
+                    matches!(node, crate::providers::bus2_ui::FrameNode::Text(text) if text == "kept")
+                })
+            }));
+        drop(hold);
+        let live = provider
+            .read_v2_frame(None, handle.id.as_str())
+            .await
+            .expect("the book is open");
+        assert_eq!(image_count(&live), 1);
+
+        let hold = provider.instances.write().await;
+        hold[&handle.id]
+            .grants
+            .lock()
+            .expect("grant book")
+            .testing_expire("pic");
+        let reading = {
+            let provider = provider.clone();
+            let id = handle.id.0.clone();
+            tokio::spawn(async move { provider.read_v2_frame(None, &id).await })
+        };
+        let answer = tokio::time::timeout(Duration::from_secs(1), reading)
+            .await
+            .expect("expiry does not return the stored frame")
+            .expect("read task");
+        assert!(answer.is_none(), "{answer:?}");
+        drop(hold);
+        let expired = provider
+            .read_v2_frame(None, handle.id.as_str())
+            .await
+            .expect("text stays after expiry");
+        assert_eq!(image_count(&expired), 0);
+        assert!(matches!(
+            expired.nodes.first(),
+            Some(crate::providers::bus2_ui::FrameNode::Text(text)) if text == "kept"
+        ));
+
+        provider.instances.read().await[&handle.id]
+            .grants
+            .lock()
+            .expect("grant book")
+            .hold("evict", "localhost://photo", "read");
+        provider.testing_store_v2_frame(
+            handle.id.as_str(),
+            None,
+            vec![
+                crate::providers::bus2_ui::FrameNode::Text("kept".into()),
+                crate::providers::bus2_ui::FrameNode::Image {
+                    grant: "evict".into(),
+                    resource: "localhost://photo".into(),
+                },
+            ],
+        );
+        let hold = provider.instances.write().await;
+        let book = hold[&handle.id].grants.clone();
+        for n in 0..32 {
+            book.lock().expect("grant book").hold_limited(
+                &format!("newer-{n}"),
+                "localhost://Users/self/Pictures/a.png",
+                "read",
+                None,
+                None,
+            );
+        }
+        let reading = {
+            let provider = provider.clone();
+            let id = handle.id.0.clone();
+            tokio::spawn(async move { provider.read_v2_frame(None, &id).await })
+        };
+        let answer = tokio::time::timeout(Duration::from_secs(1), reading)
+            .await
+            .expect("eviction does not return the stored frame")
+            .expect("read task");
+        assert!(answer.is_none(), "{answer:?}");
+        drop(hold);
+        let evicted = provider
+            .read_v2_frame(None, handle.id.as_str())
+            .await
+            .expect("text stays after eviction");
+        assert_eq!(image_count(&evicted), 0);
+        assert!(matches!(
+            evicted.nodes.first(),
+            Some(crate::providers::bus2_ui::FrameNode::Text(text)) if text == "kept"
+        ));
+
+        provider.instances.read().await[&handle.id]
+            .grants
+            .lock()
+            .expect("grant book")
+            .clear();
+        assert!(provider
+            .read_v2_frame(None, handle.id.as_str())
+            .await
+            .is_none());
+        assert!(provider
+            .frames
+            .lock()
+            .expect("frames")
+            .get(&handle.id.0)
+            .is_some_and(|stored| {
+                stored.frame.nodes.iter().any(|node| {
+                    matches!(node, crate::providers::bus2_ui::FrameNode::Text(text) if text == "kept")
+                })
+            }));
     }
 
     fn quiet_v2_engine() -> Engine {
@@ -4651,10 +4951,10 @@ mod tests {
             },
         );
         provider.start(&handle).await.unwrap();
-        assert!(provider.read_v2_frame(None, &handle.id.0).is_some());
+        assert!(provider.read_v2_frame(None, &handle.id.0).await.is_some());
         provider.stop(&handle).await.unwrap();
         assert!(book.lock().unwrap().is_empty());
-        assert!(provider.read_v2_frame(None, &handle.id.0).is_none());
+        assert!(provider.read_v2_frame(None, &handle.id.0).await.is_none());
     }
 
     /// Forgetting a guest drops the book and the frame. A delivered
@@ -4687,6 +4987,7 @@ mod tests {
         assert!(book.lock().unwrap().is_empty());
         assert!(provider
             .read_v2_frame(Some("person:local:a"), &forgotten.id.0)
+            .await
             .is_none());
 
         let handle = load_v2_fixture(&provider, bytes).await;
@@ -4708,6 +5009,7 @@ mod tests {
         assert_eq!(
             provider
                 .read_v2_frame(None, &handle.id.0)
+                .await
                 .expect("a text frame stays")
                 .nodes,
             vec![crate::providers::bus2_ui::FrameNode::Text("stay".into())]
@@ -4730,7 +5032,7 @@ mod tests {
             .unwrap();
         tokio::time::timeout(Duration::from_secs(2), async {
             loop {
-                if provider.read_v2_frame(None, &handle.id.0).is_none() {
+                if provider.read_v2_frame(None, &handle.id.0).await.is_none() {
                     break;
                 }
                 tokio::time::sleep(Duration::from_millis(10)).await;
@@ -7468,6 +7770,45 @@ mod tests {
         );
     }
 
+    /// A fuel end clears the stored frame, text included, on the same exit
+    /// path a trap uses.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_fuel_end_clears_the_stored_frame() {
+        let provider = ComponentProvider::new();
+        let bytes = v2_variant(&[(
+            "call $new global.set $set\n      call $next)",
+            "call $new global.set $set\n      (loop $spin br $spin) i32.const 0)",
+        )]);
+        let handle = load_v2_fixture(&provider, bytes).await;
+        provider
+            .instances
+            .write()
+            .await
+            .get_mut(&handle.id)
+            .unwrap()
+            .v2_fuel = 1_000;
+        provider.testing_store_v2_frame(
+            handle.id.as_str(),
+            None,
+            vec![crate::providers::bus2_ui::FrameNode::Text("kept".into())],
+        );
+        provider.start(&handle).await.unwrap();
+        let ending = tokio::time::timeout(Duration::from_secs(5), v2_ending(&provider, &handle))
+            .await
+            .expect("the fuel end finishes");
+        assert!(ending.contains(ENDING_EXECUTION_BOUND), "{ending}");
+        assert!(provider
+            .frames
+            .lock()
+            .expect("frames")
+            .get(&handle.id.0)
+            .is_none());
+        assert!(provider
+            .read_v2_frame(None, handle.id.as_str())
+            .await
+            .is_none());
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_natural_exit_joins_the_worker_before_the_slot_is_freed() {
         let provider = ComponentProvider::new();
@@ -7506,6 +7847,74 @@ mod tests {
         })
         .await
         .expect("the worker is joined");
+    }
+
+    /// The frame, text included, is gone while the slot is still held for the join.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_natural_end_clears_the_frame_before_the_join() {
+        let provider = ComponentProvider::new();
+        let bytes = v2_variant(&[(
+            "call $new global.set $set\n      call $next)",
+            "call $new global.set $set\n      i32.const 0 i32.const 0 i32.const 0 i32.const 0 call $done\n      i32.const 0)",
+        )]);
+        let handle = load_v2_fixture(&provider, bytes).await;
+        provider.testing_store_v2_frame(
+            handle.id.as_str(),
+            None,
+            vec![
+                crate::providers::bus2_ui::FrameNode::Text("kept".into()),
+                crate::providers::bus2_ui::FrameNode::Image {
+                    grant: "pic".into(),
+                    resource: "localhost://photo".into(),
+                },
+            ],
+        );
+        let gate = TestGate::new();
+        // A failed poll still releases the worker, so the harness can exit.
+        struct Release(Arc<TestGate>);
+        impl Drop for Release {
+            fn drop(&mut self) {
+                self.0.open();
+            }
+        }
+        let _release = Release(gate.clone());
+        provider
+            .instances
+            .write()
+            .await
+            .get_mut(&handle.id)
+            .unwrap()
+            .exit_gate = Some(gate.clone());
+        provider.start(&handle).await.expect("start");
+        tokio::task::spawn_blocking({
+            let gate = gate.clone();
+            move || gate.entered()
+        })
+        .await
+        .expect("entered");
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let gone = provider
+                    .frames
+                    .lock()
+                    .expect("frames")
+                    .get(&handle.id.0)
+                    .is_none()
+                    && provider
+                        .read_v2_frame(None, handle.id.as_str())
+                        .await
+                        .is_none();
+                let slot = provider.instances.read().await.contains_key(&handle.id);
+                if gone && slot {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the frame stays until the worker is joined");
+        gate.open();
+        assert_eq!(v2_ending(&provider, &handle).await, "returned");
     }
 
     /// Stop arrives after the natural-exit task has taken the worker. Both

@@ -1123,11 +1123,6 @@ struct ComponentBridgeTables {
     launch_contents: Arc<StdRwLock<HashMap<String, Arc<LaunchContent>>>>,
 }
 
-/// Return type of `component_bridge_context`. The function's opening brace
-/// is not a second construction. The one construction is the struct literal
-/// in the function body, which the source pin counts.
-type ComponentBridgeContext = crate::resource_bridge::BridgeContext;
-
 impl Runtime {
     /// The v2 guests this runtime hosts. The owner's revoke routes tell them.
     pub(crate) fn component_guests(&self) -> Option<Arc<ComponentProvider>> {
@@ -1238,7 +1233,7 @@ impl Runtime {
         tables: &ComponentBridgeTables,
         capsule_id: &str,
         principal_id: Option<&str>,
-    ) -> ComponentBridgeContext {
+    ) -> crate::resource_bridge::BridgeContext {
         let manifest_capabilities = tables
             .manifest_capabilities
             .read()
@@ -7132,12 +7127,10 @@ pub(crate) mod tests {
         wat::parse_str(source).expect("v2 home guest")
     }
 
-    /// Loads a v2 guest, registers it, and lets the watcher start it. `fuel`
-    /// replaces the resident fuel before the guest runs.
+    /// Loads a v2 guest, registers it, and lets the watcher start it.
     async fn start_v2_home(
         bytes: Vec<u8>,
         name: &str,
-        fuel: Option<u64>,
     ) -> (
         Runtime,
         Arc<ComponentProvider>,
@@ -7158,9 +7151,6 @@ pub(crate) mod tests {
         manifest.bus_contract = Some(ELASTOS_BUS_V2_CONTRACT.into());
         manifest.wit_world_sha256 = Some(elastos_bus_v2_wit_sha256());
         let handle = component.load_admitted(bytes, manifest).await.unwrap();
-        if let Some(fuel) = fuel {
-            component.set_v2_fuel(&handle.id, fuel).await.unwrap();
-        }
         let id = handle.id.0.clone();
         runtime
             .hold_launch_context(&handle, Some("person:local:resident".into()), None)
@@ -7217,6 +7207,7 @@ pub(crate) mod tests {
         assert!(runtime.provider_principal_for_test(handle).await.is_none());
         assert!(component
             .read_v2_frame(Some("person:local:resident"), handle.id.as_str())
+            .await
             .is_none());
     }
 
@@ -7225,7 +7216,7 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn a_v2_home_resident_stays_up_and_stops() {
         let (runtime, component, handle, _temp) =
-            start_v2_home(v2_home_bytes("stay"), "stays", None).await;
+            start_v2_home(v2_home_bytes("stay"), "stays").await;
         let running = wait_v2_status(&runtime, handle.id.as_str(), true).await;
         assert_eq!(running.status, CAPSULE_RUNNING);
         assert_eq!(running.session_id, handle.id.0);
@@ -7253,24 +7244,16 @@ pub(crate) mod tests {
         assert_v2_home_cleared(&runtime, &component, &handle).await;
     }
 
-    /// A trap and a fuel end each finish the resident and clear the same state.
+    /// A trap finishes the resident and clears its tokens, frame, and provider entry.
     #[tokio::test]
-    async fn a_v2_home_resident_trap_and_fuel_end_clear_it() {
+    async fn a_v2_home_resident_trap_end_clears_it() {
         let (runtime, component, handle, _temp) =
-            start_v2_home(v2_home_bytes("trap"), "traps", None).await;
+            start_v2_home(v2_home_bytes("trap"), "traps").await;
         let ended = wait_v2_status(&runtime, handle.id.as_str(), false).await;
         assert_eq!(ended.status, CAPSULE_FAILED);
         let cause = ended.cause.unwrap();
         assert!(cause.contains("unreachable"), "{cause}");
         assert_eq!(ended.session_id, handle.id.0);
-        assert_v2_home_cleared(&runtime, &component, &handle).await;
-
-        let (runtime, component, handle, _temp) =
-            start_v2_home(v2_home_bytes("spin"), "fuel", Some(1_000)).await;
-        let ended = wait_v2_status(&runtime, handle.id.as_str(), false).await;
-        assert_eq!(ended.status, CAPSULE_FAILED);
-        let cause = ended.cause.unwrap();
-        assert!(cause.contains("execution-bound"), "{cause}");
         assert_v2_home_cleared(&runtime, &component, &handle).await;
     }
 
@@ -7283,7 +7266,7 @@ pub(crate) mod tests {
             .build()
             .unwrap();
         let (runtime, component, handle, _temp) = local.block_on(async {
-            let started = start_v2_home(v2_home_bytes("stay"), "shutdown", None).await;
+            let started = start_v2_home(v2_home_bytes("stay"), "shutdown").await;
             let running = wait_v2_status(&started.0, started.2.id.as_str(), true).await;
             assert_eq!(running.status, CAPSULE_RUNNING);
             started

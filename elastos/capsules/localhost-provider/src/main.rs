@@ -914,10 +914,11 @@ fn window_of(bytes: &[u8], start: u64, window: u64) -> Vec<u8> {
     bytes[start..end].to_vec()
 }
 
-/// A v2 read. The file is refused before its body is read when it is larger
-/// than the window. An encrypted file is judged by its plaintext, not the
-/// hex envelope. The body is read once. A change of length or mtime during
-/// that read is `revision_conflict`.
+/// A v2 read. A plaintext file larger than the window is refused before its
+/// body is read. An encrypted file is judged by a lower bound first: that
+/// bound can pass a plaintext up to 16 bytes over the window, and the
+/// decrypted body is then refused. The body is read once. A change of length
+/// or mtime during that read is `revision_conflict`.
 fn read_v2_window(
     provider: &LocalProvider,
     path: &str,

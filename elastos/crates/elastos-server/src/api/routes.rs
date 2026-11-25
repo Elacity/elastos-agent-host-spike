@@ -107,7 +107,7 @@ pub(crate) async fn resident_frame(
         if session.is_shell() {
             if let Some(principal) = shells.frame_principal(&token) {
                 let _query_names = query.principal.as_str();
-                return resident_frame_body(&runtime, &query.app, &principal);
+                return resident_frame_body(&runtime, &query.app, &principal).await;
             }
             if shells.evicted(&token) {
                 // 401, so the frame poll drops this shell and attaches once more.
@@ -151,14 +151,18 @@ fn home_app_session_token(token: &str) -> bool {
         == Some("elastos.home.launch-token/v4")
 }
 
-fn resident_frame_body(runtime: &Runtime, app: &str, principal: &str) -> axum::response::Response {
+async fn resident_frame_body(
+    runtime: &Runtime,
+    app: &str,
+    principal: &str,
+) -> axum::response::Response {
     if app.is_empty() || app.len() > 128 || principal.is_empty() || principal.len() > 256 {
         return Json(serde_json::json!({ "nodes": [] })).into_response();
     }
     let Some(provider) = runtime.component_guests() else {
         return Json(serde_json::json!({ "nodes": [] })).into_response();
     };
-    match crate::component::v2_frame_answer(provider.as_ref(), principal, app) {
+    match crate::component::v2_frame_answer(provider.as_ref(), principal, app).await {
         Ok(bytes) => (
             StatusCode::OK,
             [(axum::http::header::CONTENT_TYPE, "application/json")],

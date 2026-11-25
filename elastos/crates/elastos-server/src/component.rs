@@ -138,24 +138,29 @@ thread_local! {
 
 /// The stored nodes of one resident when `caller` presented that frame.
 /// An image node still carries its grant id. The frame route's JSON leaves that out.
-pub fn read_v2_frame_for_home(
+pub(crate) async fn read_v2_frame_for_home(
     provider: &elastos_compute::providers::ComponentProvider,
     caller: Option<&str>,
     id: &str,
 ) -> Option<Vec<elastos_compute::providers::bus2_ui::FrameNode>> {
-    provider.read_v2_frame(caller, id).map(|frame| frame.nodes)
+    provider
+        .read_v2_frame(caller, id)
+        .await
+        .map(|frame| frame.nodes)
 }
 
 /// A legal stored frame fits under this. A larger answer is refused.
 pub const V2_FRAME_ANSWER_MAX: usize = 48 * 1024;
 
 /// JSON nodes for one principal's resident. No grant id and no image bytes.
-pub fn v2_frame_answer(
+pub async fn v2_frame_answer(
     provider: &elastos_compute::providers::ComponentProvider,
     principal: &str,
     app: &str,
 ) -> std::result::Result<Vec<u8>, &'static str> {
-    let nodes = read_v2_frame_for_home(provider, Some(principal), app).unwrap_or_default();
+    let nodes = read_v2_frame_for_home(provider, Some(principal), app)
+        .await
+        .unwrap_or_default();
     let nodes: Vec<serde_json::Value> = nodes
         .into_iter()
         .map(|node| match node {
@@ -374,8 +379,8 @@ mod tests {
         ComponentTypeSection, InstanceType, PrimitiveValType,
     };
 
-    #[test]
-    fn v2_frame_read_returns_nodes_and_grant_ids() {
+    #[tokio::test]
+    async fn v2_frame_read_returns_nodes_and_grant_ids() {
         use elastos_compute::providers::bus2_ui::{
             present_frame, FrameNode, GrantBook, UI_MEDIA_TYPE,
         };
@@ -402,7 +407,9 @@ mod tests {
             ]
         );
         let provider = ComponentProvider::new();
-        assert!(super::read_v2_frame_for_home(&provider, None, "other").is_none());
+        assert!(super::read_v2_frame_for_home(&provider, None, "other")
+            .await
+            .is_none());
     }
 
     /// A guest reads an object it holds and calls ui.present. Home's frame
@@ -504,7 +511,7 @@ mod tests {
             async move {
                 tokio::time::timeout(Duration::from_secs(3), async {
                     loop {
-                        if let Some(nodes) = read_v2_frame_for_home(provider, caller, &id) {
+                        if let Some(nodes) = read_v2_frame_for_home(provider, caller, &id).await {
                             return nodes;
                         }
                         tokio::time::sleep(Duration::from_millis(10)).await;
@@ -519,15 +526,21 @@ mod tests {
         assert_eq!(nodes_a, vec![FrameNode::Text("A".into())]);
         assert_eq!(nodes_b, vec![FrameNode::Text("B".into())]);
         assert_eq!(
-            read_v2_frame_for_home(&provider, Some("person:local:a"), first.id.as_str()),
+            read_v2_frame_for_home(&provider, Some("person:local:a"), first.id.as_str()).await,
             Some(vec![FrameNode::Text("A".into())]),
             "the second guest does not replace the first frame"
         );
-        assert!(read_v2_frame_for_home(&provider, None, first.id.as_str()).is_none());
+        assert!(read_v2_frame_for_home(&provider, None, first.id.as_str())
+            .await
+            .is_none());
         assert!(
-            read_v2_frame_for_home(&provider, Some("person:local:a"), second.id.as_str()).is_none()
+            read_v2_frame_for_home(&provider, Some("person:local:a"), second.id.as_str())
+                .await
+                .is_none()
         );
-        assert!(read_v2_frame_for_home(&provider, None, "other-guest").is_none());
+        assert!(read_v2_frame_for_home(&provider, None, "other-guest")
+            .await
+            .is_none());
 
         let seen = lines.lock().expect("lines").clone();
         assert_eq!(seen.len(), 2, "each guest reads its object once: {seen:?}");
@@ -552,9 +565,13 @@ mod tests {
         provider.stop(&first).await.unwrap();
         provider.stop(&second).await.unwrap();
         assert!(
-            read_v2_frame_for_home(&provider, Some("person:local:a"), first.id.as_str()).is_none()
+            read_v2_frame_for_home(&provider, Some("person:local:a"), first.id.as_str())
+                .await
+                .is_none()
         );
-        assert!(read_v2_frame_for_home(&provider, None, second.id.as_str()).is_none());
+        assert!(read_v2_frame_for_home(&provider, None, second.id.as_str())
+            .await
+            .is_none());
     }
 
     /// A v2 guest asks on the real bridge. The owner grants that pending
@@ -1009,7 +1026,8 @@ mod tests {
 
         let started = Instant::now();
         let nodes = loop {
-            if let Some(nodes) = read_v2_frame_for_home(provider.as_ref(), None, handle.id.as_str())
+            if let Some(nodes) =
+                read_v2_frame_for_home(provider.as_ref(), None, handle.id.as_str()).await
             {
                 break nodes;
             }
@@ -1076,7 +1094,9 @@ mod tests {
             .expect("the revoke route answers");
         assert_eq!(revoked.status(), axum::http::StatusCode::OK);
         assert!(
-            read_v2_frame_for_home(provider.as_ref(), None, handle.id.as_str()).is_none(),
+            read_v2_frame_for_home(provider.as_ref(), None, handle.id.as_str())
+                .await
+                .is_none(),
             "the route drops the frame that names the grant"
         );
         let outcome = tokio::time::timeout(Duration::from_secs(8), resident.ended())

@@ -1485,6 +1485,17 @@ fn protected_principal_root_resource_response(
                 Ok(bytes) => bytes,
                 Err(err) => return Some(provider_error_result("read_failed", &err.to_string())),
             };
+            // `length` is one past the guest's cap. The pre-check let the tag
+            // and a byte of padding through. The plaintext stops at the cap.
+            if let Some(asked) = length.filter(|_| check_revision) {
+                let cap = offset.unwrap_or(0).saturating_add(asked.saturating_sub(1));
+                if (bytes.len() as u64) > cap {
+                    return Some(provider_error_result(
+                        "invalid",
+                        "object is over the read cap",
+                    ));
+                }
+            }
             let revision =
                 crate::auth::principal_root_object_revision(principal_id, &rooted, &bytes);
             // A v2 read sets this. The object is read again. A change between
@@ -4304,6 +4315,92 @@ pub(crate) mod tests {
         found
     }
 
+    /// `BridgeContext {` where it builds a value. A return type
+    /// (`-> path::BridgeContext {`) is not a construction.
+    fn bridge_context_construction_counts() -> Vec<(String, usize)> {
+        let crates = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+        let mut files = Vec::new();
+        production_files(crates, &mut files);
+        let mut found = Vec::new();
+        for file in files {
+            let text = production_text(&std::fs::read_to_string(&file).unwrap());
+            let count = text
+                .lines()
+                .filter(|line| {
+                    let trimmed = line.trim_start();
+                    !(trimmed.starts_with("struct ")
+                        || trimmed.starts_with("pub struct ")
+                        || trimmed.starts_with("pub(crate) struct "))
+                })
+                .map(|line| {
+                    line.match_indices("BridgeContext {")
+                        .filter(|(start, _)| {
+                            let before = line[..*start].chars().next_back();
+                            let ident =
+                                before.is_some_and(|ch| ch.is_ascii_alphanumeric() || ch == '_');
+                            !ident && !return_type_before(line, *start)
+                        })
+                        .count()
+                })
+                .sum();
+            if count > 0 {
+                let name = file
+                    .strip_prefix(crates)
+                    .unwrap()
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                found.push((name, count));
+            }
+        }
+        found.sort();
+        found
+    }
+
+    /// True when `->` introduces the type that ends at `start`.
+    fn return_type_before(line: &str, start: usize) -> bool {
+        let before = line[..start].trim_end();
+        let before = before
+            .trim_end_matches(|ch: char| ch.is_ascii_alphanumeric() || ch == '_' || ch == ':');
+        before.trim_end().ends_with("->")
+    }
+
+    /// A `type` alias or a `use ... as` alias of `BridgeContext`.
+    fn bridge_context_alias_lines() -> Vec<String> {
+        let crates = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+        let mut files = Vec::new();
+        production_files(crates, &mut files);
+        let mut found = Vec::new();
+        for file in files {
+            let text = production_text(&std::fs::read_to_string(&file).unwrap());
+            for line in text.lines() {
+                if !bridge_context_alias_line(line) {
+                    continue;
+                }
+                let name = file
+                    .strip_prefix(crates)
+                    .unwrap()
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                found.push(format!("{name}: {line}"));
+            }
+        }
+        found.sort();
+        found
+    }
+
+    fn bridge_context_alias_line(line: &str) -> bool {
+        let trimmed = line.trim_start();
+        let rest = trimmed
+            .strip_prefix("pub(crate) ")
+            .or_else(|| trimmed.strip_prefix("pub(super) "))
+            .or_else(|| trimmed.strip_prefix("pub "))
+            .unwrap_or(trimmed);
+        if rest.starts_with("type ") && rest.contains("BridgeContext") {
+            return true;
+        }
+        rest.starts_with("use ") && rest.contains("BridgeContext") && rest.contains(" as ")
+    }
+
     /// The end (exclusive) of the item a preceding `#[cfg(test)]` applies to.
     /// Scans to the matching block end or to a statement-ending semicolon,
     /// skipping string literals.
@@ -4593,15 +4690,21 @@ pub(crate) mod tests {
             ]),
             "into_bridge_principal_string uses"
         );
-        // The bridge field stays a String and is filled at exactly two
-        // production literals; `BridgeContext`'s definition is not one.
+        // Constructions, not a return type whose brace shares the line.
+        // A type alias or a `use ... as` alias of BridgeContext is refused:
+        // either one could construct the struct under another name.
+        assert!(
+            bridge_context_alias_lines().is_empty(),
+            "BridgeContext alias: {:?}",
+            bridge_context_alias_lines()
+        );
         assert_eq!(
-            production_counts("BridgeContext {"),
+            bridge_context_construction_counts(),
             expected_counts(&[
                 ("elastos-server/src/runtime.rs", 1),
                 ("elastos-server/src/supervisor.rs", 1),
             ]),
-            "BridgeContext literals"
+            "BridgeContext constructions"
         );
     }
 
@@ -6822,6 +6925,106 @@ pub(crate) mod tests {
             v2["response"]["result"]["message"],
             "object is over the read cap"
         );
+    }
+
+    /// Exact plaintext at 64 KiB and at 16 MiB is read. One byte over is refused.
+    /// Users/self and UsersAI/self both. An older, non-canonical head keeps
+    /// the three-quarter ceiling.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_protected_read_allows_the_exact_cap_and_refuses_one_byte_over() {
+        const KIB: usize = 1024;
+        let caps = [64 * KIB, 16 * KIB * KIB];
+        let human = "person:local:exact-cap";
+        let agent = crate::auth::valid_agent::ID;
+        for (principal, root_of, alias) in [
+            (
+                human,
+                crate::auth::principal_localhost_root(human),
+                "localhost://Users/self",
+            ),
+            (
+                agent,
+                crate::auth::valid_agent::ROOT.to_string(),
+                "localhost://UsersAI/self",
+            ),
+        ] {
+            let temp = tempfile::tempdir().unwrap();
+            if principal == agent {
+                crate::auth::valid_agent::plant(temp.path());
+                crate::auth::store_test_principal_root_protection_for(
+                    temp.path(),
+                    principal,
+                    &root_of,
+                );
+            } else {
+                crate::auth::store_test_principal_root_protection(temp.path(), principal);
+                crate::auth::store_test_human_principal(temp.path(), principal);
+            }
+            let mut ctx = bridge_context();
+            ctx.principal_id = Some(principal.to_string());
+            ctx.data_dir = Some(temp.path().to_path_buf());
+            ctx.manifest_capabilities = any_action(vec![format!("{root_of}/*")]);
+            for cap in caps {
+                let name = format!("Documents/cap-{cap}.bin");
+                let object = format!("{root_of}/{name}");
+                let alias_uri = format!("{alias}/{name}");
+                let path = rooted_localhost_fs_path(temp.path(), &object).unwrap();
+                let exact = vec![b'a'; cap];
+                crate::auth::write_principal_root_object(
+                    temp.path(),
+                    principal,
+                    &root_of,
+                    &object,
+                    &path,
+                    &exact,
+                )
+                .unwrap();
+                let token = bridge_token(&ctx, &object, Action::Read);
+                let read = handle_request(
+                    &journal_window_line(90, &alias_uri, token.clone(), true, cap as u64 + 1),
+                    &Some(ctx.clone()),
+                )
+                .await
+                .unwrap();
+                assert_eq!(
+                    read["response"]["result"]["status"], "ok",
+                    "{alias} {cap}: {read}"
+                );
+                let b64 = read["response"]["result"]["data"]["content"]["b64"]
+                    .as_str()
+                    .unwrap();
+                let got = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, b64)
+                    .unwrap();
+                assert_eq!(got.len(), cap, "{alias}");
+                assert_eq!(got[0], b'a');
+                assert_eq!(got[cap - 1], b'a');
+                let over = vec![b'b'; cap + 1];
+                crate::auth::write_principal_root_object(
+                    temp.path(),
+                    principal,
+                    &root_of,
+                    &object,
+                    &path,
+                    &over,
+                )
+                .unwrap();
+                let refused = handle_request(
+                    &journal_window_line(91, &alias_uri, token, true, cap as u64 + 1),
+                    &Some(ctx.clone()),
+                )
+                .await
+                .unwrap();
+                assert_eq!(
+                    refused["response"]["result"]["code"], "invalid",
+                    "{refused}"
+                );
+                assert_eq!(
+                    refused["response"]["result"]["message"],
+                    "object is over the read cap"
+                );
+            }
+        }
     }
 
     #[cfg(unix)]

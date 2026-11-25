@@ -81,13 +81,6 @@ impl AttachShells {
         })
     }
 
-    pub fn holds(&self, token: &str) -> bool {
-        self.inner.lock().is_ok_and(|set| {
-            set.held.iter().any(|kept| kept == token)
-                || set.frame.iter().any(|(kept, _)| kept == token)
-        })
-    }
-
     pub fn evicted(&self, token: &str) -> bool {
         self.inner
             .lock()
