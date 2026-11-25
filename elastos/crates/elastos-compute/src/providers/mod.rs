@@ -6,6 +6,8 @@ mod component;
 mod fuel_bucket;
 
 use std::cell::Cell;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 
 pub use component::{
@@ -15,6 +17,17 @@ pub use component::{
 /// Synchronous request/response bridge from a Component into the Runtime Bus.
 pub type BridgeHostcall =
     Arc<dyn Fn(&str, &str, Option<&str>) -> std::result::Result<String, String> + Send + Sync>;
+
+/// v2 awaits this on the guest runtime. Dropping the future is the timeout.
+pub type BridgeHostcallAsync = Arc<
+    dyn Fn(
+            &str,
+            &str,
+            Option<&str>,
+        ) -> Pin<Box<dyn Future<Output = std::result::Result<String, String>> + Send>>
+        + Send
+        + Sync,
+>;
 
 /// Which thread drives one bridge future. The caller chooses. A `spawn_blocking`
 /// worker has a runtime handle entered, so this is not read from
