@@ -30,7 +30,10 @@
 //! folder and both finish on that same file key. A helper already running in
 //! the other process is not stopped. A new inode keeps a mode that is a subset
 //! of `0600`, else `0600`, and drops ACLs and extended attributes. Plaintext is
-//! zeroized.
+//! zeroized. The inode is checked again after the temporary file is synced and
+//! before `rename`. After that check returns and before `rename` returns, a
+//! same-user swap can still replace the file. This platform has no
+//! inode-conditional rename.
 
 use std::path::Path;
 
@@ -71,6 +74,8 @@ thread_local! {
     static WRITE_ERROR: std::cell::Cell<Option<i32>> = const { std::cell::Cell::new(None) };
     static BEFORE_REPLACE: std::cell::RefCell<Option<MigrationReplaceHook>> =
         std::cell::RefCell::new(None);
+    static BEFORE_RENAME: std::cell::RefCell<Option<MigrationReplaceHook>> =
+        std::cell::RefCell::new(None);
 }
 
 /// Stops the walk after this many migration writes. `None` writes normally.
@@ -91,6 +96,12 @@ pub(crate) fn set_localhost_migration_write_error(code: Option<i32>) {
 #[cfg(all(unix, test))]
 pub(crate) fn set_localhost_migration_before_replace(hook: Option<MigrationReplaceHook>) {
     BEFORE_REPLACE.with(|slot| *slot.borrow_mut() = hook);
+}
+
+/// Runs after the temporary file is synced and before `rename`.
+#[cfg(all(unix, test))]
+pub(crate) fn set_localhost_migration_before_rename(hook: Option<MigrationReplaceHook>) {
+    BEFORE_RENAME.with(|slot| *slot.borrow_mut() = hook);
 }
 
 #[cfg(all(unix, test))]
@@ -130,6 +141,18 @@ fn run_before_replace(path: &Path) {
 
 #[cfg(all(unix, not(test)))]
 fn run_before_replace(_path: &Path) {}
+
+#[cfg(all(unix, test))]
+fn run_before_rename(path: &Path) {
+    let hook = BEFORE_RENAME.with(|slot| slot.borrow_mut().take());
+    if let Some(hook) = hook {
+        hook(path);
+        BEFORE_RENAME.with(|slot| *slot.borrow_mut() = Some(hook));
+    }
+}
+
+#[cfg(all(unix, not(test)))]
+fn run_before_rename(_path: &Path) {}
 
 #[cfg(all(unix, test))]
 fn note_migration_lock_wait() {
@@ -288,7 +311,12 @@ pub(crate) fn hold_localhost_migration_lock(
 }
 
 #[cfg(unix)]
-fn replace_file_fsync_rename(path: &Path, bytes: &[u8], mode: u32) -> std::io::Result<()> {
+fn replace_file_fsync_rename(
+    path: &Path,
+    bytes: &[u8],
+    mode: u32,
+    opened: Option<(&std::fs::File, u64)>,
+) -> std::io::Result<()> {
     use std::io::Write;
     use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
@@ -333,6 +361,16 @@ fn replace_file_fsync_rename(path: &Path, bytes: &[u8], mode: u32) -> std::io::R
         return Err(err);
     }
     drop(file);
+    run_before_rename(path);
+    // The check and rename are not one operation. After this check returns
+    // and before rename returns, a same-user swap can still replace the file.
+    // This platform has no inode-conditional rename.
+    if let Some((opened, read_len)) = opened {
+        if let Err(err) = opened_file_still_matches(path, opened, read_len) {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(refusal_io(err));
+        }
+    }
     charge_migration_write().map_err(io_error)?;
     if let Err(err) = std::fs::rename(&tmp, path) {
         let _ = std::fs::remove_file(&tmp);
@@ -349,6 +387,11 @@ fn replace_file_fsync_rename(path: &Path, bytes: &[u8], mode: u32) -> std::io::R
 #[cfg(unix)]
 fn io_error(err: anyhow::Error) -> std::io::Error {
     std::io::Error::other(err)
+}
+
+#[cfg(unix)]
+fn refusal_io(err: anyhow::Error) -> std::io::Error {
+    std::io::Error::other(format!("localhost-refusal\n{err}"))
 }
 
 #[cfg(unix)]
@@ -490,8 +533,13 @@ fn migrate_localhost_envelope(
         plaintext.zeroize();
         let sealed = sealed.with_context(|| localhost_refused(path, "cannot be sealed"))?;
         opened_file_still_matches(path, &file, bytes.len() as u64)?;
-        replace_file_fsync_rename(path, &sealed, kept_mode(meta.mode()))
-            .map_err(|err| migration_io(path, "cannot be replaced", err))?;
+        replace_file_fsync_rename(
+            path,
+            &sealed,
+            kept_mode(meta.mode()),
+            Some((&file, bytes.len() as u64)),
+        )
+        .map_err(|err| migration_io(path, "cannot be replaced", err))?;
         return Ok(());
     }
     if let Ok(mut plaintext) = localhost_provider::decrypt_bytes(file_key, &bytes) {
@@ -703,7 +751,7 @@ fn write_localhost_marker(marker: &Path, record: &[u8]) -> anyhow::Result<()> {
         anyhow::anyhow!("identity/localhost-file-key-v1 is not readable. {RECOVERY}")
     })?;
     ensure_identity_dir(identity)?;
-    replace_file_fsync_rename(marker, record, 0o600)
+    replace_file_fsync_rename(marker, record, 0o600, None)
         .map_err(|err| migration_io(marker, "cannot be replaced", err))?;
     Ok(())
 }

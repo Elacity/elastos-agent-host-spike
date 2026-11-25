@@ -2524,8 +2524,9 @@ mod tests {
     use super::*;
     use crate::localhost_file_migration::{
         hold_localhost_migration_lock, localhost_bringup, localhost_file_key,
-        localhost_provider_bridge_config, set_localhost_migration_before_replace,
-        set_localhost_migration_write_budget, set_localhost_migration_write_error,
+        localhost_provider_bridge_config, set_localhost_migration_before_rename,
+        set_localhost_migration_before_replace, set_localhost_migration_write_budget,
+        set_localhost_migration_write_error,
         LocalhostBringup,
     };
     #[cfg(unix)]
@@ -4965,6 +4966,7 @@ mod tests {
             set_localhost_migration_write_budget(None);
             set_localhost_migration_write_error(None);
             set_localhost_migration_before_replace(None);
+            set_localhost_migration_before_rename(None);
         }
     }
 
@@ -5543,6 +5545,38 @@ mod tests {
         );
         assert!(localhost_provider::decrypt_bytes(&device_key, &fs::read(&beta).unwrap()).is_err());
         assert_current_marker(root, &device_key);
+        assert_no_localhost_rewrite_temps(root);
+    }
+
+    #[test]
+    fn file_swapped_after_the_temp_sync_keeps_the_new_bytes() {
+        let _clear = ClearLocalhostMigrationFaults;
+        let device_key = [0x78; 32];
+        let temp = TempDir::new().unwrap();
+        let root = temp.path();
+        let note = root.join("Users/late.bin");
+        let original = plant_device_envelope(&note, &device_key, b"before");
+        set_localhost_migration_before_rename(Some(Box::new(move |path: &std::path::Path| {
+            if path.file_name().and_then(|name| name.to_str()) != Some("late.bin") {
+                return;
+            }
+            let sealed = localhost_provider::encrypt_bytes(&device_key, b"after-sync").unwrap();
+            let swap = path.with_file_name(".late.bin.swap");
+            fs::write(&swap, &sealed).unwrap();
+            fs::rename(&swap, path).unwrap();
+        })));
+        let err = localhost_provider_bridge_config(root, &device_key).unwrap_err();
+        set_localhost_migration_before_rename(None);
+        let text = err.to_string();
+        assert!(text.contains("changed while read"), "{text}");
+        assert!(text.contains("Users/late.bin"), "{text}");
+        assert!(!text.contains("could not be written"), "{text}");
+        assert_ne!(fs::read(&note).unwrap(), original);
+        assert_eq!(
+            localhost_provider::decrypt_bytes(&device_key, &fs::read(&note).unwrap()).unwrap(),
+            b"after-sync"
+        );
+        assert!(!root.join("identity/localhost-file-key-v1").exists());
         assert_no_localhost_rewrite_temps(root);
     }
 
