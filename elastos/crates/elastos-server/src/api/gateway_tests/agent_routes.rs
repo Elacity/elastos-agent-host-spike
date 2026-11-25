@@ -112,6 +112,145 @@ mod off {
         assert_eq!(std::fs::read(agent_file(dir.path())).unwrap(), written);
         assert_eq!(audit_len(dir.path()), events);
     }
+
+    struct OwnerHome {
+        dir: tempfile::TempDir,
+        state: crate::api::gateway::GatewayState,
+        home_token: String,
+        proof_binding_id: String,
+        principal_id: String,
+        localhost_root: String,
+    }
+
+    fn owner_home() -> OwnerHome {
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_state(dir.path());
+        let owner = protected_owner(dir.path());
+        let principal =
+            crate::auth::load_principal_for_proof_binding(dir.path(), &owner.proof_binding_id)
+                .unwrap();
+        OwnerHome {
+            dir,
+            state,
+            home_token: owner.home_token,
+            proof_binding_id: owner.proof_binding_id,
+            principal_id: principal.principal_id,
+            localhost_root: principal.localhost_root,
+        }
+    }
+
+    fn different_key(home: &OwnerHome) -> elastos_runtime::auth::RecoveryKitV1 {
+        let current = crate::auth::load_principal_root_protection(
+            home.dir.path(),
+            &home.principal_id,
+            &home.localhost_root,
+        )
+        .unwrap()
+        .unwrap();
+        let replacement =
+            crate::auth::store_test_principal_root_protection(home.dir.path(), &home.principal_id);
+        let kit = crate::auth::recovery_kit_from_archive(
+            home.dir.path(),
+            replacement.protectors[0].archive.as_ref().unwrap(),
+        )
+        .unwrap();
+        assert_ne!(kit.data_key_id, current.data_key_id);
+        crate::auth::store_principal_root_protection(home.dir.path(), current).unwrap();
+        kit
+    }
+
+    async fn import_kit(
+        home: &OwnerHome,
+        kit: elastos_runtime::auth::RecoveryKitV1,
+    ) -> anyhow::Result<crate::api::auth_gateway::RecoveryKitImportResponse> {
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert("x-elastos-home-token", home.home_token.parse().unwrap());
+        headers.insert("host", "localhost:61180".parse().unwrap());
+        headers.insert("origin", "http://localhost:61180".parse().unwrap());
+        crate::api::auth_gateway::recovery_kit_import_inner(
+            &home.state,
+            &headers,
+            crate::api::auth_gateway::RecoveryKitMaterialImport {
+                principal_id: home.principal_id.clone(),
+                localhost_root: home.localhost_root.clone(),
+                reassign_to_current_principal: false,
+                kit,
+                did_recovery_proof: None,
+            },
+        )
+        .await
+    }
+
+    fn auth_bytes(dir: &std::path::Path) -> Vec<u8> {
+        std::fs::read(crate::auth::auth_state_path(dir).unwrap()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn root_key_change_refuses_when_the_file_holds_an_opening_agent() {
+        let home = owner_home();
+        crate::agents::tests::plant_enabled_home_with_one_agent(
+            home.dir.path(),
+            &home.principal_id,
+            &home.proof_binding_id,
+        );
+        let kit = different_key(&home);
+        let auth = auth_bytes(home.dir.path());
+        let agents = std::fs::read(agent_file(home.dir.path())).unwrap();
+        let err = import_kit(&home, kit)
+            .await
+            .expect_err("a root-key change must be refused while an agent's data opens")
+            .to_string();
+        assert_eq!(err, crate::agents::agents_would_stop_opening(1));
+        assert_eq!(auth_bytes(home.dir.path()), auth);
+        assert_eq!(std::fs::read(agent_file(home.dir.path())).unwrap(), agents);
+    }
+
+    #[tokio::test]
+    async fn root_key_change_with_no_agents_file_stores_the_kit() {
+        let home = owner_home();
+        let kit = different_key(&home);
+        let new_key = kit.data_key_id.clone();
+        assert!(
+            std::fs::symlink_metadata(agent_file(home.dir.path()))
+                .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound),
+            "this owner has no agents file"
+        );
+        let response = import_kit(&home, kit)
+            .await
+            .expect("an owner with no agents file imports as before");
+        assert_eq!(response.status, "imported");
+        let stored = crate::auth::load_principal_root_protection(
+            home.dir.path(),
+            &home.principal_id,
+            &home.localhost_root,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(stored.data_key_id, new_key);
+        assert!(
+            std::fs::symlink_metadata(agent_file(home.dir.path()))
+                .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound),
+            "the import does not create an agents file"
+        );
+    }
+
+    #[tokio::test]
+    async fn root_key_change_names_an_agents_file_this_build_cannot_read() {
+        let home = owner_home();
+        std::fs::write(agent_file(home.dir.path()), b"not an agent file").unwrap();
+        let kit = different_key(&home);
+        let auth = auth_bytes(home.dir.path());
+        let err = import_kit(&home, kit)
+            .await
+            .expect_err("an unreadable agents file refuses the root-key change")
+            .to_string();
+        assert_eq!(err, crate::agents::AGENTS_FILE_UNREADABLE);
+        assert_eq!(auth_bytes(home.dir.path()), auth);
+        assert_eq!(
+            std::fs::read(agent_file(home.dir.path())).unwrap(),
+            b"not an agent file"
+        );
+    }
 }
 
 #[cfg(feature = "prototype-agents")]

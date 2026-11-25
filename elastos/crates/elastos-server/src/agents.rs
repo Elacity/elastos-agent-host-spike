@@ -16,7 +16,9 @@
 //! The rules this module keeps:
 //!
 //! - `build_allows` is the only place the cargo feature is read. With the
-//!   feature off every operation refuses by name, whatever is on disk.
+//!   feature off, create, list, rename, retire, launch and stop refuse by
+//!   name. A root-key change still reads the agent file, and refuses when
+//!   this owner has agents whose data would stop opening.
 //! - A load takes no lock and writes nothing. A missing file means no agents.
 //!   A file that fails any rule makes agents unavailable, with a named
 //!   reason; it is never rewritten or deleted, and the owner's own sign-in
@@ -34,7 +36,7 @@
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
-#[cfg(test)]
+#[cfg(all(test, feature = "prototype-agents"))]
 use std::sync::Condvar;
 use std::sync::{Mutex, MutexGuard};
 
@@ -64,6 +66,9 @@ const AGENT_RECORDS_FILE: &str = "agent-records.json";
 
 /// The refusal every operation gives in a build without the feature.
 pub(crate) const FEATURE_OFF: &str = "agents are not built into this Runtime";
+/// A root-key change in a build that cannot read the agent file it found.
+pub(crate) const AGENTS_FILE_UNREADABLE: &str =
+    "This Home has an agents file this build cannot read, so a root-key change is refused.";
 
 /// How the agent's data key is wrapped: under a key derived with HKDF-SHA256.
 const OWNER_ROOT_KDF: &str = "hkdf-sha256";
@@ -873,7 +878,7 @@ fn create_in_any_build(
     }
     // The wrap reads the owner's key. A root-key change holds this same lock
     // until its store returns, so the key read here is the key that store left.
-    #[cfg(test)]
+    #[cfg(all(test, feature = "prototype-agents"))]
     pause_agent_writer(data_dir, PAUSE_BEFORE_WRAP);
     let id = crate::auth::fresh_agent_id();
     let root = crate::auth::principal_kind_localhost_root(&id, PrincipalKind::Agent);
@@ -943,16 +948,9 @@ fn list_in_any_build(data_dir: &Path, caller: &Caller<'_>) -> anyhow::Result<Vec
 }
 
 pub(crate) fn opening_agent_count(data_dir: &Path, owner_id: &str) -> anyhow::Result<usize> {
-    if !build_allows() {
+    let Some(opened) = open_for_root_change(data_dir)? else {
         return Ok(0);
-    }
-    let path = agent_file_path(data_dir)?;
-    if std::fs::symlink_metadata(&path)
-        .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
-    {
-        return Ok(0);
-    }
-    let opened = open(data_dir, false)?;
+    };
     let Some(owner) = opened
         .owner_file
         .iter()
@@ -972,8 +970,31 @@ pub(crate) fn opening_agent_count(data_dir: &Path, owner_id: &str) -> anyhow::Re
     Ok(count)
 }
 
+/// The agent file for a root-key decision. `None` is a Home with no file.
+/// A build without the feature names a file it finds and cannot read.
+fn open_for_root_change(data_dir: &Path) -> anyhow::Result<Option<Opened>> {
+    let path = agent_file_path(data_dir)?;
+    if std::fs::symlink_metadata(&path)
+        .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+    {
+        return Ok(None);
+    }
+    match open(data_dir, false) {
+        Ok(opened) => Ok(Some(opened)),
+        Err(_) if !build_allows() => Err(Refused(AGENTS_FILE_UNREADABLE.to_string()).into()),
+        Err(err) => Err(err),
+    }
+}
+
 fn data_key_opens(data_dir: &Path, protection: &PrincipalRootProtectionV1) -> anyhow::Result<bool> {
-    match crate::auth::open_agent_root_data_key(data_dir, protection) {
+    let opened = if build_allows_for_home(data_dir) {
+        crate::auth::open_agent_root_data_key(data_dir, protection).map(|_| ())
+    } else {
+        // stored_wrap stops without the feature. This read uses the same
+        // sentences, so a key that does not open counts as closed.
+        open_wrapped_agent_key(data_dir, protection)
+    };
+    match opened {
         Ok(_) => Ok(true),
         Err(err) => {
             let text = err.to_string();
@@ -1019,17 +1040,17 @@ pub(crate) fn hold_agent_writer_for_root_change(
     if count > 0 {
         return Err(Refused(agents_would_stop_opening(count)).into());
     }
-    #[cfg(test)]
+    #[cfg(all(test, feature = "prototype-agents"))]
     pause_agent_writer(data_dir, PAUSE_BEFORE_STORE);
     Ok(AgentWriterGuard { _lock: lock })
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "prototype-agents"))]
 pub(crate) const PAUSE_BEFORE_STORE: &str = "before-store";
-#[cfg(test)]
+#[cfg(all(test, feature = "prototype-agents"))]
 pub(crate) const PAUSE_BEFORE_WRAP: &str = "before-wrap";
 
-#[cfg(test)]
+#[cfg(all(test, feature = "prototype-agents"))]
 struct WriterPause {
     data_dir: PathBuf,
     point: &'static str,
@@ -1037,22 +1058,22 @@ struct WriterPause {
     release: bool,
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "prototype-agents"))]
 static WRITER_PAUSE: Mutex<Option<WriterPause>> = Mutex::new(None);
-#[cfg(test)]
+#[cfg(all(test, feature = "prototype-agents"))]
 static WRITER_PAUSE_CV: Condvar = Condvar::new();
 
-#[cfg(test)]
+#[cfg(all(test, feature = "prototype-agents"))]
 pub(crate) struct AgentWriterPauseGuard;
 
-#[cfg(test)]
+#[cfg(all(test, feature = "prototype-agents"))]
 impl Drop for AgentWriterPauseGuard {
     fn drop(&mut self) {
         release_agent_writer_pause();
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "prototype-agents"))]
 fn writer_pause_lock() -> MutexGuard<'static, Option<WriterPause>> {
     WRITER_PAUSE
         .lock()
@@ -1060,7 +1081,7 @@ fn writer_pause_lock() -> MutexGuard<'static, Option<WriterPause>> {
 }
 
 /// Arms one pause. Dropping the guard lets the waiter continue.
-#[cfg(test)]
+#[cfg(all(test, feature = "prototype-agents"))]
 pub(crate) fn arm_agent_writer_pause(
     data_dir: &Path,
     point: &'static str,
@@ -1074,7 +1095,7 @@ pub(crate) fn arm_agent_writer_pause(
     AgentWriterPauseGuard
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "prototype-agents"))]
 pub(crate) fn wait_until_agent_writer_paused() -> bool {
     let mut guard = writer_pause_lock();
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
@@ -1094,7 +1115,7 @@ pub(crate) fn wait_until_agent_writer_paused() -> bool {
     true
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "prototype-agents"))]
 pub(crate) fn release_agent_writer_pause() {
     if let Some(pause) = writer_pause_lock().as_mut() {
         pause.release = true;
@@ -1102,7 +1123,7 @@ pub(crate) fn release_agent_writer_pause() {
     WRITER_PAUSE_CV.notify_all();
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "prototype-agents"))]
 fn pause_agent_writer(data_dir: &Path, point: &str) {
     let mut guard = writer_pause_lock();
     loop {
@@ -1403,6 +1424,15 @@ pub(crate) fn stored_wrap(
     if !build_allows_for_home(data_dir) {
         anyhow::bail!("agent file holds no record for this principal root");
     }
+    wrap_parts(data_dir, protection)
+}
+
+/// The owner and the raw wrap, with no feature gate. The sentences match
+/// `stored_wrap` so a caller can tell a closed key from a broken file.
+fn wrap_parts(
+    data_dir: &Path,
+    protection: &PrincipalRootProtectionV1,
+) -> anyhow::Result<(String, [u8; 12], Vec<u8>)> {
     let opened = open(data_dir, false)?;
     let Some(agent) = opened.file.agents.iter().find(|agent| {
         agent.record.principal_id == protection.principal_id
@@ -1430,6 +1460,31 @@ pub(crate) fn stored_wrap(
         nonce,
         crate::auth::b64_url_decode(&envelope.wrapped_data_key)?,
     ))
+}
+
+/// Whether this protection's wrap opens, in a build that does not serve agents.
+/// The sentences are `open_agent_root_data_key`'s, so `data_key_opens` keeps
+/// one closed list.
+fn open_wrapped_agent_key(
+    data_dir: &Path,
+    protection: &PrincipalRootProtectionV1,
+) -> anyhow::Result<()> {
+    let (owner_id, nonce, wrapped) = wrap_parts(data_dir, protection)?;
+    let owner_root = crate::auth::principal_stored_localhost_root(Some(data_dir), &owner_id)
+        .map_err(anyhow::Error::msg)?;
+    let wrap_key = crate::auth::owner_root_wrap_key(data_dir, &owner_id, &owner_root, protection)?
+        .ok_or_else(|| anyhow::anyhow!("agent's owner holds no storage protection"))?;
+    let key = zeroize::Zeroizing::new(
+        crate::auth::decrypt_aes256_gcm_bytes(wrap_key.as_slice(), &nonce, &wrapped)
+            .map_err(|_| anyhow::anyhow!("principal-root decrypt failed"))?,
+    );
+    if crate::auth::principal_data_key_id(key.as_slice()) != protection.data_key_id {
+        anyhow::bail!("agent data key does not match its protection");
+    }
+    if key.len() != 32 {
+        anyhow::bail!("agent data key has the wrong length");
+    }
+    Ok(())
 }
 
 /// Adds the agent file's records to what the sign-in file's loader returns,
