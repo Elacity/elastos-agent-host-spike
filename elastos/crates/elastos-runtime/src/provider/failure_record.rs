@@ -597,7 +597,7 @@ mod tests {
             }
         }
         let text = std::fs::read_to_string(format!("/proc/{pid}/status")).unwrap_or_default();
-        let reason = super::super::landlock_plan::child_confinement_refusal(&text);
+        let reason = landlock_plan::child_confinement_refusal(&text);
         unsafe { libc::kill(pid, libc::SIGKILL) };
         let mut status = 0;
         while unsafe { libc::waitpid(pid, &mut status, 0) } < 0 {
