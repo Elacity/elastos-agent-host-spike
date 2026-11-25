@@ -2550,7 +2550,7 @@ mod tests {
     use super::*;
     use crate::localhost_file_migration::{
         hold_localhost_migration_lock, localhost_bringup, localhost_file_key,
-        localhost_provider_bridge_config, set_localhost_migration_before_rename,
+        localhost_provider_bridge_config, rewrite_temp_path, set_localhost_migration_before_rename,
         set_localhost_migration_before_replace, set_localhost_migration_create_error,
         set_localhost_migration_progress_clock, set_localhost_migration_write_budget,
         set_localhost_migration_write_error, take_localhost_migration_bytes_read,
@@ -5077,10 +5077,6 @@ mod tests {
                         &fs::read(&beta_path).unwrap()
                     )
                     .is_err());
-                } else {
-                    let temp_dir = root.join("identity/localhost-file-key-v1.tmpd");
-                    fs::create_dir_all(&temp_dir).unwrap();
-                    fs::write(temp_dir.join("partial.tmp"), b"partial").unwrap();
                 }
 
                 localhost_provider_bridge_config(root, &device_key).unwrap();
@@ -7184,13 +7180,8 @@ mod tests {
         fs::write(&temp_name, b"temp").unwrap();
         let note = users.join("note.bin");
         plant_device_envelope(&note, &device_key, b"stay");
-        let owned_dir = leftover.path().join("identity/localhost-file-key-v1.tmpd");
-        fs::create_dir_all(&owned_dir).unwrap();
-        let owned = owned_dir.join("crash.tmp");
-        fs::write(&owned, b"crash").unwrap();
         localhost_provider_bridge_config(leftover.path(), &device_key).unwrap();
         assert_eq!(fs::read(&temp_name).unwrap(), b"temp");
-        assert!(!owned.exists());
         assert_envelope_opens_with_exactly_one_key(
             &note,
             b"stay",
@@ -7336,27 +7327,200 @@ mod tests {
     }
 
     #[test]
-    fn a_marker_temp_from_a_crash_is_removed_on_the_next_walk() {
+    fn a_crash_temp_of_the_marker_and_the_seen_file_is_removed_at_start() {
         let device_key = [0x23; 32];
         let temp = TempDir::new().unwrap();
         let note = temp.path().join("Users/note.bin");
         plant_device_envelope(&note, &device_key, b"kept");
         localhost_provider_bridge_config(temp.path(), &device_key).unwrap();
-        let marker = fs::read(temp.path().join("identity/localhost-file-key-v1")).unwrap();
-        let stale = temp
-            .path()
-            .join("identity/.localhost-file-key-v1.elastos-localhost-file-key-v1.tmp");
-        fs::write(&stale, b"stale").unwrap();
-        let owned_dir = temp.path().join("identity/localhost-file-key-v1.tmpd");
-        fs::create_dir_all(&owned_dir).unwrap();
-        let owned = owned_dir.join("crash.tmp");
-        fs::write(&owned, b"crash").unwrap();
+        let identity = temp.path().join("identity");
+        let marker = identity.join("localhost-file-key-v1");
+        let seen = identity.join("localhost-file-key-v1.seen");
+        let marker_bytes = fs::read(&marker).unwrap();
+        let seen_bytes = fs::read(&seen).unwrap();
+        let marker_temp = rewrite_temp_path(&marker).unwrap();
+        let seen_temp = rewrite_temp_path(&seen).unwrap();
+        fs::write(&marker_temp, b"marker-temp").unwrap();
+        fs::write(&seen_temp, b"seen-temp").unwrap();
+        let mut near = marker_temp
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        let flipped = if near.as_bytes()[1] == b'0' {
+            b'1'
+        } else {
+            b'0'
+        };
+        near.replace_range(1..2, std::str::from_utf8(&[flipped]).unwrap());
+        let near = identity.join(near);
+        fs::write(&near, b"near").unwrap();
         localhost_provider_bridge_config(temp.path(), &device_key).unwrap();
-        assert_eq!(fs::read(&stale).unwrap(), b"stale");
-        assert!(!owned.exists());
+        assert!(!marker_temp.exists());
+        assert!(!seen_temp.exists());
+        assert_eq!(fs::read(&near).unwrap(), b"near");
+        assert_eq!(fs::read(&marker).unwrap(), marker_bytes);
+        assert_eq!(fs::read(&seen).unwrap(), seen_bytes);
+
+        let keeper = temp.path().join("keeper.bin");
+        fs::write(&keeper, b"keep-me").unwrap();
+        std::os::unix::fs::symlink(&keeper, &marker_temp).unwrap();
+        localhost_provider_bridge_config(temp.path(), &device_key).unwrap();
+        assert!(fs::symlink_metadata(&marker_temp)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(fs::read(&keeper).unwrap(), b"keep-me");
+        assert_eq!(fs::read(&near).unwrap(), b"near");
+        assert_eq!(fs::read(&marker).unwrap(), marker_bytes);
+    }
+
+    #[test]
+    fn a_plain_json_record_over_32_mib_and_1_gib_is_not_read_whole() {
+        let _guard = LocalAppsGuard::lock();
+        let device_key = [0x47; 32];
+        let root = TempDir::new().unwrap();
+        let mid = root.path().join("Users/mid.json");
+        let big = root.path().join("Users/big.json");
+        fs::create_dir_all(mid.parent().unwrap()).unwrap();
+        for (path, len) in [
+            (&mid, 40 * 1024 * 1024),
+            (&big, localhost_provider::SEALED_READ_HARD_LIMIT + 1),
+        ] {
+            fs::write(path, br#"{"records":["#).unwrap();
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open(path)
+                .unwrap()
+                .set_len(len)
+                .unwrap();
+        }
+        let _ = take_localhost_migration_bytes_read();
+        let _ = take_localhost_migration_opens();
+        match localhost_bringup(root.path(), &device_key) {
+            LocalhostBringup::Start(_) => {}
+            LocalhostBringup::Refuse(got) => panic!("plain JSON turned local apps off: {got}"),
+        }
+        assert_eq!(take_localhost_migration_bytes_read(), 128);
+        assert_eq!(take_localhost_migration_opens(), 2);
+        home_is_up(root.path());
+        for (path, len) in [
+            (&mid, 40 * 1024 * 1024),
+            (&big, localhost_provider::SEALED_READ_HARD_LIMIT + 1),
+        ] {
+            assert_eq!(fs::metadata(path).unwrap().len(), len);
+            let mut head = [0u8; 10];
+            std::io::Read::read_exact(&mut fs::File::open(path).unwrap(), &mut head).unwrap();
+            assert_eq!(&head, br#"{"records""#);
+        }
+    }
+
+    #[test]
+    fn a_refused_prepare_keeps_the_write_error_and_does_not_make_roots() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _guard = LocalAppsGuard::lock();
+        let old_key = [0xb7; 32];
+        let new_key = [0xb8; 32];
+        let root = TempDir::new().unwrap();
+        let identity = root.path().join("identity");
+        plant_device_key(root.path(), &new_key);
+        fs::set_permissions(
+            identity.join("device.key"),
+            fs::Permissions::from_mode(0o600),
+        )
+        .unwrap();
+        elastos_identity::load_or_create_device_key(root.path()).unwrap();
+        let marker = identity.join("localhost-file-key-v1");
+        let marker_bytes = crate::localhost_file_migration::localhost_marker_record(
+            &expected_localhost_file_key(&old_key),
+        );
+        fs::write(&marker, &marker_bytes).unwrap();
+        struct RestoreMode(std::path::PathBuf);
+        impl Drop for RestoreMode {
+            fn drop(&mut self) {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = fs::set_permissions(&self.0, fs::Permissions::from_mode(0o755));
+            }
+        }
+        let _restore = RestoreMode(identity.clone());
+        fs::set_permissions(&identity, fs::Permissions::from_mode(0o500)).unwrap();
+        let err =
+            crate::localhost_file_migration::prepare_localhost_files(root.path()).unwrap_err();
+        let text = err.to_string();
+        assert!(text.contains("could not be written"), "{text}");
+        assert!(text.contains("Permission denied"), "{text}");
+        assert!(!text.contains("does not match this Home"), "{text}");
+        for name in ["AppCapsules", "ElastOS", "Local", "Users", "UsersAI"] {
+            assert!(!root.path().join(name).exists(), "{name} was created");
+        }
+        assert_eq!(fs::read(&marker).unwrap(), marker_bytes);
         assert_eq!(
-            fs::read(temp.path().join("identity/localhost-file-key-v1")).unwrap(),
-            marker
+            elastos_server::local_apps::local_apps_refusal(root.path()).as_deref(),
+            Some(text.as_str())
+        );
+        let setup = include_str!("server_infra.rs");
+        let prep = setup
+            .find("prepare_localhost_files(&data_dir)?;")
+            .expect("prepare");
+        let made = setup
+            .find("ensure_file_backed_roots(&data_dir)")
+            .expect("roots");
+        assert!(prep < made, "roots are created after a prepare refusal");
+        fs::create_dir(root.path().join("Users")).unwrap();
+        match localhost_bringup(root.path(), &new_key) {
+            LocalhostBringup::Refuse(got) => assert_eq!(got, text),
+            LocalhostBringup::Start(_) => panic!("the second bring-up cleared the write error"),
+        }
+        assert_eq!(
+            elastos_server::local_apps::local_apps_refusal(root.path()).as_deref(),
+            Some(text.as_str())
+        );
+        fs::remove_dir(root.path().join("Users")).unwrap();
+        fs::set_permissions(&identity, fs::Permissions::from_mode(0o700)).unwrap();
+        crate::localhost_file_migration::prepare_localhost_files(root.path()).unwrap();
+        match localhost_bringup(root.path(), &new_key) {
+            LocalhostBringup::Start(_) => {}
+            LocalhostBringup::Refuse(got) => panic!("after chmod: {got}"),
+        }
+        home_is_up(root.path());
+        assert_current_marker(root.path(), &new_key);
+    }
+
+    #[test]
+    fn a_long_over_hard_path_is_named_and_shortened_in_the_middle() {
+        let _guard = LocalAppsGuard::lock();
+        let device_key = [0x48; 32];
+        let root = TempDir::new().unwrap();
+        let mut dir = root.path().join("Users");
+        fs::create_dir(&dir).unwrap();
+        for _ in 0..3 {
+            dir.push("d".repeat(200));
+            fs::create_dir(&dir).unwrap();
+        }
+        let huge = dir.join("huge.bin");
+        fs::write(&huge, b"{over").unwrap();
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&huge)
+            .unwrap()
+            .set_len(localhost_provider::SEALED_READ_HARD_LIMIT + 1)
+            .unwrap();
+        let got = match localhost_bringup(root.path(), &device_key) {
+            LocalhostBringup::Refuse(got) => got,
+            LocalhostBringup::Start(_) => panic!("a file past the hard limit started local apps"),
+        };
+        assert!(got.len() <= 512, "sentence is {} bytes: {got}", got.len());
+        assert!(got.contains("..."), "{got}");
+        assert!(got.contains("Users/"), "{got}");
+        assert!(got.contains("huge.bin"), "{got}");
+        assert!(
+            got.contains("is larger than this process can read"),
+            "{got}"
+        );
+        assert!(
+            !got.contains("more files are larger"),
+            "the only path was omitted: {got}"
         );
     }
 

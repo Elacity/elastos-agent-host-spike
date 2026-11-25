@@ -18,7 +18,7 @@
 //! calls it before `ensure_file_backed_roots`. When any of the five is already
 //! present, that call does not walk. An empty root that
 //! is still present is not moved aside. A matching marker still walks, so an
-//! older build's later device-key file is rewritten. A new-format header is settled unread. A later
+//! older build's later device-key file is rewritten. A new-format header and a plain file are settled unread. A later
 //! start uses the size and time stored beside the marker and does not open a file
 //! that still matches. The walk logs a count every few seconds. A waiter on
 //! `identity/localhost-file-key.lock` logs that. The walk runs from
@@ -52,8 +52,9 @@
 //! including nanoseconds, are checked again after the temporary file is synced
 //! and before `rename`. After that check returns and before `rename` returns, a
 //! same-user swap can still replace the file. This platform has no
-//! inode-conditional rename. A temporary marker file left by a crash is removed
-//! at the start of every walk.
+//! inode-conditional rename. At the start of a walk, identity/ loses the
+//! marker and seen temporary files when each is a regular file this Home
+//! owns. A symlink stays, with its target, and any other name stays.
 
 use std::path::Path;
 
@@ -72,8 +73,6 @@ const LOCALHOST_MIGRATION_LOCK: &str = "localhost-file-key.lock";
 const LOCALHOST_MIGRATION_RECORD: &[u8] = b"elastos-localhost-file-v1\n";
 #[cfg(unix)]
 const LOCALHOST_REWRITE_SUFFIX: &str = ".elastos-localhost-file-key-v1.tmp";
-#[cfg(unix)]
-const LOCALHOST_TEMP_DIR: &str = "localhost-file-key-v1.tmpd";
 #[cfg(unix)]
 const LOCALHOST_SEEN: &str = "localhost-file-key-v1.seen";
 #[cfg(unix)]
@@ -467,7 +466,7 @@ fn is_owned_rewrite_temp(name: &std::ffi::OsStr) -> bool {
 }
 
 #[cfg(unix)]
-fn rewrite_temp_path(path: &Path) -> std::io::Result<std::path::PathBuf> {
+pub(crate) fn rewrite_temp_path(path: &Path) -> std::io::Result<std::path::PathBuf> {
     use sha2::Digest;
 
     let parent = path
@@ -713,6 +712,24 @@ fn write_seen(
 }
 
 #[cfg(unix)]
+fn short_middle(name: &str, max: usize) -> String {
+    if name.len() <= max {
+        return name.to_string();
+    }
+    let max = max.max(5);
+    let tail = (max - 3) / 2;
+    let head = (0..=max - 3 - tail)
+        .rev()
+        .find(|&n| name.is_char_boundary(n))
+        .unwrap_or(0);
+    let from = name.len() - tail;
+    let tail_at = (from..=name.len())
+        .find(|&n| name.is_char_boundary(n))
+        .unwrap_or(name.len());
+    format!("{}...{}", &name[..head], &name[tail_at..])
+}
+
+#[cfg(unix)]
 fn over_hard_sentence(names: &[String]) -> String {
     let mut text = String::new();
     let mut put = |line: String| -> bool {
@@ -732,6 +749,13 @@ fn over_hard_sentence(names: &[String]) -> String {
             "{name} is larger than this process can read. Move it out of the folder, then restart."
         );
         if !put(line) {
+            if named == 0 {
+                let fixed = " is larger than this process can read. Move it out of the folder, then restart.";
+                let short = short_middle(name, 512usize.saturating_sub(fixed.len()));
+                if put(format!("{short}{fixed}")) {
+                    named = 1;
+                }
+            }
             break;
         }
         named += 1;
@@ -809,7 +833,7 @@ fn migrate_localhost_envelope(
     if localhost_provider::header_is_file_key_envelope(&header[..read]) {
         return Ok(MigratedFile::Settled);
     }
-    if localhost_provider::header_rules_out_envelope(&header[..read]) {
+    if localhost_provider::reads_as_plain_bytes(&header[..read], opened.len) {
         return Ok(MigratedFile::Settled);
     }
     if opened.len > localhost_provider::SEALED_READ_HARD_LIMIT {
@@ -1137,35 +1161,22 @@ fn acquire_migration_lock(data_dir: &Path) -> anyhow::Result<LocalhostMigrationL
 }
 
 #[cfg(unix)]
-fn sweep_owned_temp_dir(data_dir: &Path) -> anyhow::Result<()> {
-    let dir = data_dir.join("identity").join(LOCALHOST_TEMP_DIR);
-    let meta = match std::fs::symlink_metadata(&dir) {
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(err) => return Err(err).with_context(|| localhost_refused(&dir, "cannot be read")),
-        Ok(meta) => meta,
-    };
-    if meta.file_type().is_symlink() {
-        return Err(localhost_refused(&dir, "is a directory link"));
+fn sweep_identity_temps(identity: &Path) -> anyhow::Result<()> {
+    let home = std::fs::symlink_metadata(identity)
+        .map_err(|_| localhost_refused(identity, "cannot be read"))?;
+    if home.file_type().is_symlink() || !home.is_dir() {
+        return Ok(());
     }
-    if !meta.is_dir() {
-        return Err(localhost_refused(&dir, "is not a directory"));
-    }
-    for entry in
-        std::fs::read_dir(&dir).with_context(|| localhost_refused(&dir, "cannot be read"))?
-    {
-        let entry = entry.with_context(|| localhost_refused(&dir, "cannot be read"))?;
-        let path = entry.path();
-        let meta = std::fs::symlink_metadata(&path)
-            .with_context(|| localhost_refused(&path, "cannot be read"))?;
-        if meta.file_type().is_symlink() {
-            return Err(localhost_refused(&path, "is a link"));
+    let owner = std::os::unix::fs::MetadataExt::uid(&home);
+    for name in [LOCALHOST_MIGRATION_MARKER, LOCALHOST_SEEN] {
+        let path = rewrite_temp_path(&identity.join(name))?;
+        let Ok(meta) = std::fs::symlink_metadata(&path) else {
+            continue;
+        };
+        if meta.file_type().is_file() && std::os::unix::fs::MetadataExt::uid(&meta) == owner {
+            std::fs::remove_file(&path)
+                .map_err(|err| localhost_write_refused(&path, &err.to_string()))?;
         }
-        if !meta.is_file() || std::os::unix::fs::MetadataExt::nlink(&meta) > 1 {
-            return Err(localhost_refused(&path, "is not a regular file"));
-        }
-        charge_migration_write()?;
-        std::fs::remove_file(&path)
-            .map_err(|err| localhost_write_refused(&path, &err.to_string()))?;
     }
     Ok(())
 }
@@ -1196,7 +1207,7 @@ fn migrate_localhost_files_to_file_key(
     plan_for_this_home(data_dir, &marker, &file_key)?;
     let _lock = acquire_migration_lock(data_dir)?;
     let plan = plan_for_this_home(data_dir, &marker, &file_key)?;
-    sweep_owned_temp_dir(data_dir)?;
+    sweep_identity_temps(&identity)?;
     let seen_path = identity.join(LOCALHOST_SEEN);
     let seen = if matches!(plan, MarkerPlan::Keep) {
         read_seen(&seen_path)?
@@ -1289,9 +1300,13 @@ pub(crate) fn localhost_bringup(data_dir: &Path, device_key: &[u8; 32]) -> Local
             LocalhostBringup::Start(config)
         }
         Err(err) => {
-            let sentence = err.to_string();
-            elastos_server::local_apps::set_local_apps_refusal(data_dir, Some(sentence.clone()));
-            LocalhostBringup::Refuse(sentence)
+            let fresh = err.to_string();
+            if elastos_server::local_apps::local_apps_refusal(data_dir).is_none() {
+                elastos_server::local_apps::set_local_apps_refusal(data_dir, Some(fresh.clone()));
+            }
+            LocalhostBringup::Refuse(
+                elastos_server::local_apps::local_apps_refusal(data_dir).unwrap_or(fresh),
+            )
         }
     }
 }
@@ -1302,7 +1317,8 @@ pub(crate) fn localhost_bringup(data_dir: &Path, device_key: &[u8; 32]) -> Local
 /// present, this returns without a walk. The later bringup walks once.
 /// When all five are absent, this rewrites the marker for this device key
 /// before gateway creates `ElastOS/System/Auth` or serve creates the roots.
-/// An empty root the person left in place is still present.
+/// An empty root the person left in place is still present. A refusal is
+/// returned and kept, so startup does not create the roots after it.
 pub(crate) fn prepare_localhost_files(data_dir: &Path) -> anyhow::Result<()> {
     #[cfg(unix)]
     {
@@ -1310,7 +1326,9 @@ pub(crate) fn prepare_localhost_files(data_dir: &Path) -> anyhow::Result<()> {
             return Ok(());
         }
         let device_key = elastos_identity::load_or_create_device_key(data_dir)?;
-        let _ = localhost_bringup(data_dir, &device_key);
+        if let LocalhostBringup::Refuse(sentence) = localhost_bringup(data_dir, &device_key) {
+            return Err(anyhow::anyhow!(sentence));
+        }
     }
     #[cfg(not(unix))]
     {
