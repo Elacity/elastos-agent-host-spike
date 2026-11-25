@@ -11,8 +11,10 @@
 //! changed device key). A matching marker still walks, so an older build's
 //! later device-key file is rewritten. A file is an envelope only when
 //! `is_encrypted_envelope` accepts it, in any field order. The walk does not
-//! skip on a fixed prefix. Above 32 MiB is refused by name. The walk logs a
-//! count every few seconds. A waiter on
+//! skip on a fixed prefix. A file larger than 32 MiB is read only for a short
+//! header. If that header cannot start an envelope, the file is left alone,
+//! whatever its size. If it can, the file is refused by name and its body is
+//! not read. The cap is for envelopes. The walk logs a count every few seconds. A waiter on
 //! `identity/localhost-file-key.lock` logs that. `elastos serve` and
 //! `elastos gateway`, including `elastos home --browser`, take `host_lock.rs`
 //! `acquire_host_process_lock` before setup (`serve_cmd.rs` `run_serve`,
@@ -43,6 +45,8 @@ const LOCALHOST_MIGRATION_RECORD: &[u8] = b"elastos-localhost-file-v1\n";
 const LOCALHOST_REWRITE_SUFFIX: &str = ".elastos-localhost-file-key-v1.tmp";
 #[cfg(unix)]
 const LOCALHOST_ENVELOPE_LIMIT: u64 = 32 * 1024 * 1024;
+#[cfg(unix)]
+const ENVELOPE_HEADER: usize = 64;
 #[cfg(unix)]
 const RECOVERY: &str = "Make it readable or move it out of the folder, then restart.";
 #[cfg(unix)]
@@ -372,6 +376,20 @@ fn opened_file_still_matches(
     Ok(())
 }
 
+/// A header rules an envelope out only when it cannot be the start of one.
+/// All whitespace, or `{`, can still be an envelope. Any other first byte cannot.
+#[cfg(unix)]
+fn header_rules_out_envelope(header: &[u8]) -> bool {
+    let start = header
+        .iter()
+        .position(|byte| !byte.is_ascii_whitespace())
+        .unwrap_or(header.len());
+    match header.get(start) {
+        None | Some(b'{') => false,
+        Some(_) => true,
+    }
+}
+
 #[cfg(unix)]
 fn migrate_localhost_envelope(
     path: &Path,
@@ -404,6 +422,13 @@ fn migrate_localhost_envelope(
         return Err(localhost_refused(path, "is linked from another path"));
     }
     if meta.len() > LOCALHOST_ENVELOPE_LIMIT {
+        let mut header = [0u8; ENVELOPE_HEADER];
+        let read = file
+            .read(&mut header)
+            .with_context(|| localhost_refused(path, "cannot be read"))?;
+        if header_rules_out_envelope(&header[..read]) {
+            return Ok(());
+        }
         return Err(localhost_refused(path, "larger than 32 MiB"));
     }
     let mut bytes = Vec::new();

@@ -5827,25 +5827,38 @@ mod tests {
         let huge = TempDir::new().unwrap();
         let big = huge.path().join("Users/big.bin");
         fs::create_dir_all(big.parent().unwrap()).unwrap();
+        fs::write(&big, b"plain-video").unwrap();
         std::fs::OpenOptions::new()
             .write(true)
-            .create(true)
-            .truncate(true)
             .open(&big)
+            .unwrap()
+            .set_len(32 * 1024 * 1024 + 1)
+            .unwrap();
+        migrate_again(huge.path(), &device_key);
+        assert!(fs::read(&big).unwrap().starts_with(b"plain-video"));
+        assert_eq!(fs::metadata(&big).unwrap().len(), 32 * 1024 * 1024 + 1);
+        let over = huge.path().join("Users/over.bin");
+        let envelope = localhost_provider::encrypt_bytes(&device_key, b"too-big").unwrap();
+        fs::write(&over, &envelope).unwrap();
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&over)
             .unwrap()
             .set_len(32 * 1024 * 1024 + 1)
             .unwrap();
         expect_refusal(
             huge.path(),
             &device_key,
-            &sentence("Users/big.bin", "larger than 32 MiB"),
-            true,
+            &sentence("Users/over.bin", "larger than 32 MiB"),
+            false,
         );
-        assert_eq!(fs::metadata(&big).unwrap().len(), 32 * 1024 * 1024 + 1);
-        fs::remove_file(&big).unwrap();
-        plant_device_envelope(&big, &device_key, b"small");
+        assert_eq!(fs::metadata(&over).unwrap().len(), 32 * 1024 * 1024 + 1);
+        fs::remove_file(&over).unwrap();
+        let small = huge.path().join("Users/small.bin");
+        plant_device_envelope(&small, &device_key, b"small");
         migrate_again(huge.path(), &device_key);
-        assert_envelope_opens_with_exactly_one_key(&big, b"small", &device_key, &file_key);
+        assert_envelope_opens_with_exactly_one_key(&small, b"small", &device_key, &file_key);
+        assert!(fs::read(&big).unwrap().starts_with(b"plain-video"));
 
         let fifo_root = TempDir::new().unwrap();
         let pipe = fifo_root.path().join("Users/pipe");
@@ -6007,6 +6020,69 @@ mod tests {
         assert_ne!(fs::read(&path).unwrap(), bytes);
         assert_envelope_opens_with_exactly_one_key(&path, b"reordered", &device_key, &file_key);
         assert_current_marker(root, &device_key);
+    }
+
+    #[test]
+    fn a_large_plain_file_is_left_alone_and_an_over_cap_envelope_is_refused() {
+        let device_key = [0x94; 32];
+        let file_key = expected_localhost_file_key(&device_key);
+        let temp = TempDir::new().unwrap();
+        let root = temp.path();
+        let plain = root.join("Users/video.bin");
+        fs::create_dir_all(plain.parent().unwrap()).unwrap();
+        fs::write(&plain, b"ftyp").unwrap();
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&plain)
+            .unwrap()
+            .set_len(32 * 1024 * 1024 + 1)
+            .unwrap();
+        localhost_provider_bridge_config(root, &device_key).unwrap();
+        let mut head = [0u8; 4];
+        std::io::Read::read_exact(&mut std::fs::File::open(&plain).unwrap(), &mut head).unwrap();
+        assert_eq!(&head, b"ftyp");
+        assert_eq!(fs::metadata(&plain).unwrap().len(), 32 * 1024 * 1024 + 1);
+        assert_current_marker(root, &device_key);
+
+        let brace = root.join("Users/brace.bin");
+        fs::write(&brace, b"{not-an-envelope").unwrap();
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&brace)
+            .unwrap()
+            .set_len(32 * 1024 * 1024 + 1)
+            .unwrap();
+        let err = localhost_provider_bridge_config(root, &device_key).unwrap_err();
+        assert!(
+            err.to_string().contains("Users/brace.bin"),
+            "{}",
+            err
+        );
+        assert!(err.to_string().contains("larger than 32 MiB"), "{err}");
+        fs::remove_file(&brace).unwrap();
+
+        let over = root.join("Users/over.bin");
+        let envelope = localhost_provider::encrypt_bytes(&device_key, b"too-big").unwrap();
+        fs::write(&over, &envelope).unwrap();
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&over)
+            .unwrap()
+            .set_len(32 * 1024 * 1024 + 1)
+            .unwrap();
+        let err = localhost_provider_bridge_config(root, &device_key).unwrap_err();
+        let text = err.to_string();
+        assert!(text.contains("Users/over.bin"), "{text}");
+        assert!(text.contains("larger than 32 MiB"), "{text}");
+        assert_eq!(fs::metadata(&over).unwrap().len(), 32 * 1024 * 1024 + 1);
+        let mut prefix = vec![0u8; envelope.len()];
+        std::io::Read::read_exact(&mut std::fs::File::open(&over).unwrap(), &mut prefix).unwrap();
+        assert_eq!(prefix, envelope);
+        fs::remove_file(&over).unwrap();
+        let small = root.join("Users/small.bin");
+        plant_device_envelope(&small, &device_key, b"small");
+        localhost_provider_bridge_config(root, &device_key).unwrap();
+        assert_envelope_opens_with_exactly_one_key(&small, b"small", &device_key, &file_key);
     }
 
     #[test]
@@ -6203,9 +6279,10 @@ mod tests {
         for n in 0..20_000 {
             fs::write(dir.join(format!("{n:05}")), b"x").unwrap();
         }
+        eprintln!("SL_R5_LOAD_START={}", load_average());
         let started = Instant::now();
         localhost_provider_bridge_config(many.path(), &device_key).unwrap();
-        eprintln!("SL_R4_20K_MS={}", started.elapsed().as_millis());
+        eprintln!("SL_R5_20K_MS={}", started.elapsed().as_millis());
 
         let large = TempDir::new().unwrap();
         let big = large.path().join("Users/huge.bin");
@@ -6220,17 +6297,30 @@ mod tests {
             .unwrap();
         let before = resident_peak();
         let started = Instant::now();
-        let err = localhost_provider_bridge_config(large.path(), &device_key).unwrap_err();
+        localhost_provider_bridge_config(large.path(), &device_key).unwrap();
+        let after = resident_peak();
         eprintln!(
-            "SL_R4_1GB_MS={} RSS_BEFORE={} RSS_AFTER={}",
+            "SL_R5_1GB_MS={} RSS_BEFORE={} RSS_AFTER={} LOAD={}",
             started.elapsed().as_millis(),
             before,
-            resident_peak()
+            after,
+            load_average()
         );
-        assert!(err.to_string().contains("Users/huge.bin"));
-        assert!(err.to_string().contains("larger than 32 MiB"));
-        let delta = resident_peak().saturating_sub(before);
+        assert_eq!(fs::metadata(&big).unwrap().len(), 1 << 30);
+        let mut head = [0u8; 4];
+        std::io::Read::read_exact(&mut std::fs::File::open(&big).unwrap(), &mut head).unwrap();
+        assert_eq!(head, [0, 0, 0, 0]);
+        let delta = after.saturating_sub(before);
         assert!(delta < 256 * 1024 * 1024, "held the large file: {delta}");
+    }
+
+    fn load_average() -> String {
+        let mut load = [0f64; 3];
+        let count = unsafe { libc::getloadavg(load.as_mut_ptr(), 3) };
+        if count < 3 {
+            return "unavailable".to_string();
+        }
+        format!("{:.2} {:.2} {:.2}", load[0], load[1], load[2])
     }
 
     fn resident_peak() -> i64 {
