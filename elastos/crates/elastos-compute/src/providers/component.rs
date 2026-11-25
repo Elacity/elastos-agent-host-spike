@@ -2823,13 +2823,12 @@ mod tests {
         ))
         .unwrap();
         let handle = load_v2_fixture(&provider, bytes).await;
-        provider
-            .instances
-            .write()
-            .await
-            .get_mut(&handle.id)
-            .unwrap()
-            .join_bound = Duration::from_millis(40);
+        {
+            let mut entries = provider.instances.write().await;
+            let instance = entries.get_mut(&handle.id).unwrap();
+            instance.join_bound = Duration::from_millis(40);
+            hold_note_grant(&instance.grants);
+        }
         provider.start(&handle).await.unwrap();
         entered_rx
             .recv_timeout(Duration::from_secs(2))
@@ -2931,13 +2930,12 @@ mod tests {
         ))
         .unwrap();
         let first = load_v2_fixture(&provider, blocked).await;
-        provider
-            .instances
-            .write()
-            .await
-            .get_mut(&first.id)
-            .unwrap()
-            .join_bound = Duration::from_millis(40);
+        {
+            let mut entries = provider.instances.write().await;
+            let instance = entries.get_mut(&first.id).unwrap();
+            instance.join_bound = Duration::from_millis(40);
+            hold_note_grant(&instance.grants);
+        }
         provider.start(&first).await.unwrap();
         entered_rx
             .recv_timeout(Duration::from_secs(2))
@@ -3879,6 +3877,16 @@ mod tests {
         }
     }
 
+    /// The read rows name `grant-token`. A read is refused unless that id is
+    /// still a held grant, so a row that reaches the bridge holds it first.
+    fn hold_note_grant(book: &Mutex<crate::providers::bus2_ui::GrantBook>) {
+        book.lock().expect("grant book").hold(
+            "grant-token",
+            "localhost://Users/self/Documents/note.bin",
+            "read",
+        );
+    }
+
     /// The bridge answers one window. `calls` records each `length`.
     /// Each call has its own budget. Guests of one provider use [`state_on`].
     fn state_for(object: Vec<u8>, calls: Arc<Mutex<Vec<u64>>>) -> ComponentState {
@@ -4215,6 +4223,7 @@ mod tests {
             "capsule-1".into(),
             Some("person:local:test".into()),
         );
+        hold_note_grant(&state.grants);
         let err = state
             .windowed_read(&read_request(8), false)
             .expect_err("a change during the read must not end ok");
@@ -4420,6 +4429,15 @@ mod tests {
         ))
         .unwrap();
         let handle = load_v2_fixture(&provider, bytes).await;
+        hold_note_grant(
+            &provider
+                .instances
+                .read()
+                .await
+                .get(&handle.id)
+                .unwrap()
+                .grants,
+        );
         tokio::time::timeout(Duration::from_secs(2), provider.start(&handle))
             .await
             .expect("guest start completes")
