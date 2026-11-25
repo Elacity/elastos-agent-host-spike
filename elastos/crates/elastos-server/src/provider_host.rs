@@ -598,6 +598,47 @@ mod tests {
         assert!(closed.contains("close inherited descriptors"), "{closed}");
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_custody_line_is_driven_by_a_real_chain_refusal() {
+        use sha2::Digest as _;
+        let temp = tempfile::tempdir().unwrap();
+        let program = temp.path().join("chain-provider-bin");
+        std::fs::write(&program, b"#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let digest = hex::encode(sha2::Sha256::digest(std::fs::read(&program).unwrap()));
+        let checked = elastos_runtime::provider::CheckedExecutable::pinned(
+            &program,
+            &format!("sha256:{digest}"),
+        )
+        .unwrap();
+        std::os::unix::fs::symlink("missing-target", temp.path().join("chain-provider")).unwrap();
+        let manifest_path = format!(
+            "{}/../../../capsules/chain-provider/capsule.json",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        let manifest: elastos_common::CapsuleManifest =
+            serde_json::from_str(&std::fs::read_to_string(manifest_path).unwrap()).unwrap();
+        let error = elastos_runtime::provider::ProviderBridge::spawn_path_allow(
+            "chain-provider",
+            &manifest.authority.unwrap(),
+            &checked,
+            temp.path(),
+            elastos_runtime::provider::BridgeProviderConfig::default(),
+        )
+        .await
+        .expect_err("a symlinked chain directory is refused");
+        let composed = format!("failed to spawn chain-provider: {error}");
+        let line = custody_fence_refusal_line(&composed).unwrap_or_else(|| panic!("{composed}"));
+        assert_eq!(line.lines().count(), 1, "{line}");
+        assert!(line.contains("chain-provider"), "{line}");
+        assert!(line.contains("provider start is refused"), "{line}");
+        let source = include_str!("provider_host.rs");
+        let run_fn = source.split("pub(crate) async fn run(").nth(1).unwrap();
+        assert!(run_fn.contains("custody_fence_refusal_line"));
+        assert!(run_fn.contains("std::process::exit(1)"));
+    }
+
     #[test]
     fn provider_names_resolve_to_planes_and_registry_targets() {
         for plane in ProviderPlane::ALL {
