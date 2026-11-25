@@ -2526,8 +2526,7 @@ mod tests {
         hold_localhost_migration_lock, localhost_bringup, localhost_file_key,
         localhost_provider_bridge_config, set_localhost_migration_before_rename,
         set_localhost_migration_before_replace, set_localhost_migration_write_budget,
-        set_localhost_migration_write_error,
-        LocalhostBringup,
+        set_localhost_migration_write_error, LocalhostBringup,
     };
     #[cfg(unix)]
     use std::ffi::CString;
@@ -5022,10 +5021,7 @@ mod tests {
             set_localhost_migration_write_budget(None);
             if let Err(err) = first {
                 saw_fault = true;
-                assert!(
-                    err.to_string().contains("local apps stayed off"),
-                    "{err}"
-                );
+                assert!(err.to_string().contains("local apps stayed off"), "{err}");
                 assert_envelope_opens_with_exactly_one_key(
                     &alpha_path,
                     alpha,
@@ -6113,11 +6109,7 @@ mod tests {
             .set_len(32 * 1024 * 1024 + 1)
             .unwrap();
         let err = localhost_provider_bridge_config(root, &device_key).unwrap_err();
-        assert!(
-            err.to_string().contains("Users/brace.bin"),
-            "{}",
-            err
-        );
+        assert!(err.to_string().contains("Users/brace.bin"), "{}", err);
         assert!(err.to_string().contains("larger than 32 MiB"), "{err}");
         fs::remove_file(&brace).unwrap();
 
@@ -6158,7 +6150,10 @@ mod tests {
         set_localhost_migration_write_error(Some(libc::ENOSPC));
         let err = localhost_provider_bridge_config(full.path(), &device_key).unwrap_err();
         let text = err.to_string();
-        assert!(text.contains("Users/full.bin could not be written"), "{text}");
+        assert!(
+            text.contains("Users/full.bin could not be written"),
+            "{text}"
+        );
         assert!(text.contains("No space left on device"), "{text}");
         assert!(
             text.contains("Free space, or the folder's permissions, then restart."),
