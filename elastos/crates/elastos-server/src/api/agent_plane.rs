@@ -268,6 +268,9 @@ pub(crate) async fn ensure_running(
     if owner.as_ref().map(|info| info.pid) != Some(std::process::id()) {
         return Ok(());
     }
+    // A retiring plane is this Home's previous runtime. Release it when it
+    // is idle. A start while it is still busy is refused by name.
+    release_or_refuse(data_dir).await?;
     let plane = start(data_dir, providers).await?;
     if let Ok(mut held) = planes().lock() {
         held.insert(data_dir.to_path_buf(), plane);
@@ -334,19 +337,63 @@ pub(crate) fn plane_runtime(data_dir: &Path) -> Option<Arc<crate::runtime::Runti
         .or_else(|| retiring_runtime(data_dir))
 }
 
+/// The live plane and the retiring plane for this Home. Another Home's planes
+/// are not in the list: the maps are keyed by the data folder.
+pub(crate) fn watched_runtimes(data_dir: &Path) -> Vec<Arc<crate::runtime::Runtime>> {
+    let mut found = Vec::new();
+    if let Some(live) = planes()
+        .lock()
+        .ok()
+        .and_then(|held| held.get(data_dir).map(|plane| Arc::clone(&plane.runtime)))
+    {
+        found.push(live);
+    }
+    if let Some(old) = retiring_runtime(data_dir) {
+        found.push(old);
+    }
+    found
+}
+
+async fn release_or_refuse(data_dir: &Path) -> anyhow::Result<()> {
+    release_idle_retiring(data_dir).await;
+    if retiring_runtime(data_dir).is_some() {
+        return Err(
+            crate::agents::Refused("the previous agent runtime is still stopping".into()).into(),
+        );
+    }
+    Ok(())
+}
+
 /// Whether a `stopping` row may be closed. No plane in this process means the
 /// session is not running here: a Home that just restarted, or a plane that
-/// has already shut down. A live plane confirms the session only when its
-/// capsule has ended and no plan effect is still in flight.
+/// has already shut down. The live plane and the retiring plane both have to
+/// show the capsule ended and no plan effect in flight.
 pub(crate) async fn stopping_session_has_ended(data_dir: &Path, session_id: &str) -> bool {
-    let Some(runtime) = plane_runtime(data_dir) else {
+    let watched = watched_runtimes(data_dir);
+    if watched.is_empty() {
         return true;
-    };
-    let still_running = runtime
-        .get_capsule(session_id)
-        .await
-        .is_some_and(|info| info.ended_at.is_none());
-    !still_running && !runtime.plan_effect_inflight(session_id)
+    }
+    for runtime in &watched {
+        let still_running = runtime
+            .get_capsule(session_id)
+            .await
+            .is_some_and(|info| info.ended_at.is_none());
+        if still_running || runtime.plan_effect_inflight(session_id) {
+            return false;
+        }
+    }
+    true
+}
+
+#[cfg(test)]
+#[allow(
+    dead_code,
+    reason = "called by the agent plane rows, which are compiled with the agents feature"
+)]
+pub(crate) fn plant_retiring_runtime(data_dir: &Path, runtime: Arc<crate::runtime::Runtime>) {
+    if let Ok(mut held) = retiring().lock() {
+        held.insert(data_dir.to_path_buf(), runtime);
+    }
 }
 
 /// Stop the agent Runtime for this Home. Live guests end first, inside
@@ -384,6 +431,12 @@ async fn grant_if_asker_is_live(
     Extension(data_dir): Extension<Option<PathBuf>>,
     Json(input): Json<crate::api::handlers::GrantRequestInput>,
 ) -> Response {
+    #[cfg(test)]
+    if let Some(dir) = data_dir.as_deref() {
+        if crate::api::gateway::gateway_tests::seams::take_grant_kind(dir, "timeout") {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+    }
     if let Some(request) = state.pending_store.get_request(&input.request_id).await {
         let live = runtime
             .get_capsule(request.session_id.as_str())
@@ -610,6 +663,7 @@ async fn start_owned(
     if owner.as_ref().map(|info| info.pid) != Some(std::process::id()) {
         anyhow::bail!("agent runtime starts for the owner of this data folder");
     }
+    release_or_refuse(&data_dir).await?;
     sweep_coord_temps(&data_dir);
     let path = coords_path(&data_dir);
     match std::fs::symlink_metadata(&path) {

@@ -156,6 +156,7 @@ pub(crate) struct AgentRecordsFile {
     /// The operation this sequence wrote, and whether its audit row landed.
     /// Absent on a file written before this field. A lost append repairs this
     /// operation once; it does not pick another agent.
+    /// This field is one-way: an older build refuses a file that carries it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     last_audit: Option<LastAudit>,
 }

@@ -149,6 +149,9 @@ fn agent_plan_step(plan: &Value) -> anyhow::Result<Value> {
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .ok_or_else(|| anyhow::anyhow!("agent plan step requires operation"))?;
+    if operation == "submit_agent_plan" {
+        anyhow::bail!("a plan step cannot submit_agent_plan");
+    }
     let body = step.get("request").cloned().unwrap_or_else(|| json!({}));
     if !body.is_object() {
         anyhow::bail!("agent plan step request must be a JSON object");

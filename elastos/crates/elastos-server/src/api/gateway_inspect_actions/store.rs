@@ -301,8 +301,8 @@ fn inspect_action_path(data_dir: &Path, request_id: &str) -> anyhow::Result<Path
     Ok(inspect_actions_root(data_dir).join(format!("{request_id}.json")))
 }
 
-/// Reads every record, skipping one unreadable file with a log line that
-/// names the file and not its bytes. The strict loader is unchanged.
+/// Reads every record. An unreadable file and a corrupt JSON file are skipped
+/// with a log line that names the file. Both scans use this read.
 fn load_inspect_action_records_skipping_unreadable(
     data_dir: &Path,
 ) -> anyhow::Result<Vec<(PathBuf, InspectActionRequestRecord)>> {
@@ -338,10 +338,7 @@ fn load_inspect_action_records_skipping_unreadable(
             continue;
         };
         let Ok(record) = serde_json::from_str::<InspectActionRequestRecord>(&data) else {
-            eprintln!(
-                "[gateway] skipped unreadable inspect action record {}",
-                path.display()
-            );
+            eprintln!("[gateway] skipped corrupt JSON {}", path.display());
             continue;
         };
         records.push((path, record));
@@ -402,25 +399,10 @@ pub(super) fn set_agent_plan_status(
 }
 
 fn load_inspect_action_records(data_dir: &Path) -> anyhow::Result<Vec<InspectActionRequestRecord>> {
-    let root = inspect_actions_root(data_dir);
-    let Ok(entries) = std::fs::read_dir(root) else {
-        return Ok(Vec::new());
-    };
-    let mut records = Vec::new();
-    for entry in entries {
-        let entry = entry?;
-        if !entry.file_type()?.is_file() {
-            continue;
-        }
-        let path = entry.path();
-        if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
-            continue;
-        }
-        let data = std::fs::read_to_string(path)?;
-        let record: InspectActionRequestRecord = serde_json::from_str(&data)?;
-        records.push(record);
-    }
-    Ok(records)
+    Ok(load_inspect_action_records_skipping_unreadable(data_dir)?
+        .into_iter()
+        .map(|(_, record)| record)
+        .collect())
 }
 
 fn write_inspect_action_at_path(
@@ -540,6 +522,22 @@ mod tests {
     }
 
     #[test]
+    fn corrupt_json_is_skipped_by_both_scans() {
+        let dir = tempfile::tempdir().unwrap();
+        write_inspect_action_record(dir.path(), &pending_record("inspect-good")).unwrap();
+        std::fs::write(dir.path().join("inspect-actions/bad.json"), b"{").unwrap();
+        let first = load_inspect_action_records(dir.path()).unwrap();
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].request_id, "inspect-good");
+        settle_agent_plans_lost_before_start(dir.path(), 2).unwrap();
+        let second = load_inspect_action_records_skipping_unreadable(dir.path()).unwrap();
+        assert_eq!(second.len(), 1);
+        assert_eq!(second[0].1.request_id, "inspect-good");
+        let pending = pending_inspect_action_requests(dir.path(), "person:test").unwrap();
+        assert_eq!(pending.len(), 1);
+    }
+
+    #[test]
     fn only_one_caller_can_claim_a_pending_action() {
         let dir = tempfile::tempdir().unwrap();
         let request_id = "inspect-action-test";
@@ -620,8 +618,8 @@ mod tests {
         assert_eq!(claimed.status, "denied");
     }
 
-    /// A leftover file the loader cannot read must not stop settling, and the
-    /// inbox list still fails on that same file.
+    /// Corrupt JSON is skipped by the list and by the startup settle. The
+    /// good plan still becomes unresolved, and the bad file stays.
     #[test]
     fn an_unreadable_record_does_not_stop_settling_the_rest() {
         let dir = tempfile::tempdir().unwrap();
@@ -633,10 +631,7 @@ mod tests {
         std::fs::write(&bad, b"not json").unwrap();
 
         let listed = pending_inspect_action_requests(dir.path(), "person:test");
-        assert!(
-            listed.is_err(),
-            "the inbox list still fails on a bad file: {listed:?}"
-        );
+        assert!(listed.is_ok(), "corrupt JSON stopped the list: {listed:?}");
         settle_agent_plans_lost_before_start(dir.path(), 9).unwrap();
         let stored = read_inspect_action_record(dir.path(), "agent-plan-good").unwrap();
         assert_eq!(stored.status, "unresolved");

@@ -1115,46 +1115,107 @@ async fn answer_agent_ask(
         anyhow::bail!("{}", not_owner(caller, &agent.name));
     }
     if let Err(error) = crate::agents::stored_agent(data_dir, caller, &ask.agent_id) {
-        let _ = sign_agent_grant(data_dir, caller, ask, request_id, "denied");
+        let _ = sign_agent_grant(data_dir, caller, ask, request_id, "denied", "denied");
         let _ = decide_capability(&coords, request_id, false).await;
         return Err(error);
     }
     if ask.resource.starts_with("localhost://") && own_rest(&ask.resource, &agent.root).is_none() {
-        sign_agent_grant(data_dir, caller, ask, request_id, "denied")?;
+        sign_agent_grant(data_dir, caller, ask, request_id, "denied", "denied")?;
         decide_capability(&coords, request_id, false).await?;
         anyhow::bail!("a path outside the agent's own folder is not pending");
     }
     // One answer at a time, so two approvals of one ask mint one grant.
     let _gate = grant_answer_gate().lock().await;
     if !approve {
-        sign_agent_grant(data_dir, caller, ask, request_id, "denied")?;
+        sign_agent_grant(data_dir, caller, ask, request_id, "denied", "denied")?;
         return decide_capability(&coords, request_id, false).await;
     }
     let again = read_pending(&coords).await?;
     let Some(row) = again.iter().find(|item| item.request_id == request_id) else {
         anyhow::bail!("that request is no longer pending");
     };
-    // The signed approval exists before the mint. A crash here leaves the
-    // row and no grant; the next start settles that row by name.
-    sign_agent_grant(data_dir, caller, row, request_id, "approved")?;
+    // The signed approval exists before the mint. A crash before the send
+    // leaves that row and no grant. `sent` is the marker that the request
+    // left this process. After that marker, a crash, a timeout, or a failed
+    // minted row is unresolved. `not_granted` is only a refusal the plane
+    // answered before any mint.
+    sign_agent_grant(data_dir, caller, row, request_id, "approved", "approved")?;
     #[cfg(test)]
-    if super::gateway_tests::seams::take_grant_fault(data_dir, true) {
-        anyhow::bail!("crash before the mint");
+    if super::gateway_tests::seams::take_grant_kind(data_dir, "before-send") {
+        anyhow::bail!("crash before the send");
     }
-    // `minted` closes the approval. The next start settles an approval that
-    // never got that row: the crash was before the mint, or the mint failed
-    // and its not-granted row did not land.
-    let minted = match decide_capability(&coords, request_id, true).await {
-        Ok(answered) => {
-            sign_agent_grant(data_dir, caller, row, request_id, "minted").map(|()| answered)
-        }
-        Err(error) => Err(error),
-    };
-    match minted {
-        Ok(answered) => Ok(answered),
-        Err(error) => {
+    sign_agent_grant(data_dir, caller, row, request_id, "sent", "sent")?;
+    #[cfg(test)]
+    if super::gateway_tests::seams::grant_kind_is(data_dir, "timeout") {
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(3))
+            .build()?;
+        let shell = cached_shell(&client, &coords).await?;
+        let hurried = reqwest::Client::builder()
+            .timeout(Duration::from_millis(40))
+            .build()?;
+        let _ = hurried
+            .post(format!("{}/api/capability/grant", coords.api_url))
+            .header(AUTHORIZATION, format!("Bearer {shell}"))
+            .json(&serde_json::json!({
+                "request_id": request_id,
+                "duration": "session",
+                "rationale": "Approved in Inbox",
+            }))
+            .send()
+            .await;
+        let _ = sign_agent_grant(
+            data_dir,
+            caller,
+            row,
+            request_id,
+            "unresolved",
+            "the plane timed out",
+        );
+        anyhow::bail!("the plane timed out");
+    }
+    match decide_capability(&coords, request_id, true).await {
+        Err(error) if plane_refused(&error) => {
             revoke_capability(&coords, request_id).await;
-            let _ = sign_agent_grant(data_dir, caller, row, request_id, "not_granted");
+            let _ = sign_agent_grant(
+                data_dir,
+                caller,
+                row,
+                request_id,
+                "not_granted",
+                "not_granted",
+            );
+            Err(error)
+        }
+        Ok(answered) => {
+            #[cfg(test)]
+            if super::gateway_tests::seams::take_grant_kind(data_dir, "after-mint") {
+                anyhow::bail!("crash after the mint");
+            }
+            match sign_agent_grant(data_dir, caller, row, request_id, "minted", "minted") {
+                Ok(()) => Ok(answered),
+                Err(error) => {
+                    let _ = sign_agent_grant(
+                        data_dir,
+                        caller,
+                        row,
+                        request_id,
+                        "unresolved",
+                        "the minted row failed",
+                    );
+                    Err(error)
+                }
+            }
+        }
+        Err(error) => {
+            let _ = sign_agent_grant(
+                data_dir,
+                caller,
+                row,
+                request_id,
+                "unresolved",
+                "the request was sent and the mint was not recorded",
+            );
             Err(error)
         }
     }
@@ -1172,13 +1233,36 @@ fn plane_conflict(error: &anyhow::Error) -> bool {
         .is_some_and(|status| status.code == 409)
 }
 
+fn plane_refused(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<PlaneStatus>()
+        .is_some_and(|status| (400..500).contains(&status.code))
+}
+
+fn grant_reason(caller: &str, ask: &RuntimeCapabilityPendingRequest, cause: &str) -> String {
+    serde_json::json!({
+        "cause": cause,
+        "principal": caller,
+        "session": ask.session_id,
+        "agent": ask.agent_id,
+        "capsule": ask.agent_id,
+        "resource": ask.resource,
+    })
+    .to_string()
+}
+
 fn sign_agent_grant(
     data_dir: &std::path::Path,
     caller: &str,
     ask: &RuntimeCapabilityPendingRequest,
     request_id: &str,
     kind: &str,
+    cause: &str,
 ) -> anyhow::Result<()> {
+    #[cfg(test)]
+    if kind == "minted" && super::gateway_tests::seams::take_grant_kind(data_dir, "minted-row") {
+        anyhow::bail!("the minted row failed");
+    }
     #[cfg(test)]
     if super::gateway_tests::seams::take_grant_fault(data_dir, false) {
         anyhow::bail!("injected agent grant audit failure");
@@ -1191,11 +1275,11 @@ fn sign_agent_grant(
             event_type: format!("agent.grant.{kind}"),
             principal_id: Some(caller.to_string()),
             proof_binding_id: None,
-            session_id: Some(ask.agent_id.clone()),
+            session_id: Some(ask.session_id.clone()),
             challenge_id: Some(request_id.to_string()),
             capsule_id: Some(ask.agent_id.clone()),
             result: kind.to_string(),
-            reason: format!("{kind} {}", ask.resource),
+            reason: grant_reason(caller, ask, cause),
             occurred_at: now_ts(),
             signer_did: None,
             signature: None,
@@ -1221,30 +1305,114 @@ async fn revoke_capability(coords: &crate::runtime_control::RuntimeCoords, reque
         .await;
 }
 
-/// An approved row with no later minted or not-granted row is settled once, by name.
+fn copied_grant(
+    event: &elastos_runtime::auth::RuntimeAuditEventV1,
+) -> (String, RuntimeCapabilityPendingRequest) {
+    let mut principal = event.principal_id.clone().unwrap_or_default();
+    let mut ask = RuntimeCapabilityPendingRequest {
+        request_id: event.challenge_id.clone().unwrap_or_default(),
+        agent_id: event.capsule_id.clone().unwrap_or_default(),
+        session_id: event.session_id.clone().unwrap_or_default(),
+        resource: String::new(),
+        ..Default::default()
+    };
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(&event.reason) {
+        let text = |key: &str| {
+            value
+                .get(key)
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("")
+                .to_string()
+        };
+        if !text("principal").is_empty() {
+            principal = text("principal");
+        }
+        if !text("session").is_empty() {
+            ask.session_id = text("session");
+        }
+        if !text("agent").is_empty() {
+            ask.agent_id = text("agent");
+        }
+        if ask.agent_id.is_empty() && !text("capsule").is_empty() {
+            ask.agent_id = text("capsule");
+        }
+        if !text("resource").is_empty() {
+            ask.resource = text("resource");
+        }
+    }
+    if ask.resource.is_empty() {
+        ask.resource = event.reason.clone();
+    }
+    (principal, ask)
+}
+
+async fn grant_was_minted(data_dir: &std::path::Path, request_id: &str) -> bool {
+    let Some(runtime) = crate::api::agent_plane::plane_runtime(data_dir) else {
+        return false;
+    };
+    let Some((store, _, _)) = runtime.instance_authority_plane() else {
+        return false;
+    };
+    store
+        .get_request(request_id)
+        .await
+        .is_some_and(|request| request.is_granted())
+}
+
+/// An approved row with no later close is settled once. No `sent` marker means
+/// the request never left, so the close is `not_sent`. A `sent` marker means
+/// the request left: `crash after the mint` when the grant is still live, and
+/// otherwise that the mint was not recorded. The close copies the approved
+/// row's principal, session, agent, capsule, and resource.
 pub(crate) async fn settle_unminted_agent_grants(data_dir: &std::path::Path) -> anyhow::Result<()> {
     let state = crate::auth::load_auth_state(data_dir)?;
     let mut open = Vec::new();
+    let mut sent = std::collections::HashSet::new();
     for event in &state.audit {
         let Some(id) = event.challenge_id.clone() else {
             continue;
         };
         match event.event_type.as_str() {
-            "agent.grant.not_granted" | "agent.grant.minted" => {
-                open.retain(|row: &String| row != &id);
+            "agent.grant.not_granted"
+            | "agent.grant.minted"
+            | "agent.grant.unresolved"
+            | "agent.grant.not_sent" => {
+                open.retain(|row: &elastos_runtime::auth::RuntimeAuditEventV1| {
+                    row.challenge_id.as_deref() != Some(id.as_str())
+                });
+                sent.remove(&id);
             }
-            "agent.grant.approved" if !open.contains(&id) => open.push(id),
+            "agent.grant.sent" => {
+                sent.insert(id);
+            }
+            "agent.grant.approved"
+                if open
+                    .iter()
+                    .all(|row| row.challenge_id.as_deref() != Some(id.as_str())) =>
+            {
+                open.push(event.clone());
+            }
             _ => {}
         }
     }
-    if let Some(coords) = crate::api::agent_plane::live_coords(data_dir).await {
-        for id in &open {
-            revoke_capability(&coords, id).await;
+    for event in &open {
+        let id = event.challenge_id.clone().unwrap_or_default();
+        let (principal, ask) = copied_grant(event);
+        let (kind, cause) = if sent.contains(&id) {
+            if grant_was_minted(data_dir, &id).await {
+                ("unresolved", "crash after the mint")
+            } else {
+                (
+                    "unresolved",
+                    "the request was sent and the mint was not recorded",
+                )
+            }
+        } else {
+            ("not_sent", "crash before the send")
+        };
+        if let Err(error) = sign_agent_grant(data_dir, &principal, &ask, &id, kind, cause) {
+            eprintln!("[gateway] grant settle skipped for {id}: {error:#}");
         }
-    }
-    for id in &open {
-        let ask = RuntimeCapabilityPendingRequest::default();
-        sign_agent_grant(data_dir, "", &ask, id, "not_granted")?;
     }
     Ok(())
 }
@@ -1266,6 +1434,7 @@ mod tests {
         RuntimeCapabilityPendingRequest {
             request_id: "req-1".into(),
             agent_id: "agent-1".into(),
+            session_id: "session-1".into(),
             resource: resource.into(),
             action: action.into(),
             requested_at: 1,
@@ -1401,6 +1570,7 @@ mod tests {
             vec![RuntimeCapabilityPendingRequest {
                 request_id: "cap-1".into(),
                 agent_id: String::new(),
+                session_id: String::new(),
                 resource: "elastos://content".into(),
                 action: "read".into(),
                 requested_at: 1,
@@ -1435,6 +1605,7 @@ mod tests {
             &ask("elastos://inspect/submit_agent_plan", "write"),
             "req-1",
             "approved",
+            "approved",
         )
         .expect_err("the injected failure refuses the grant row");
         assert_eq!(error.to_string(), "injected agent grant audit failure");
@@ -1443,6 +1614,7 @@ mod tests {
             "person:owner",
             &ask("elastos://inspect/submit_agent_plan", "write"),
             "req-1",
+            "approved",
             "approved",
         )
         .expect_err("the failure is used once");

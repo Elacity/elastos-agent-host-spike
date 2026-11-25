@@ -576,6 +576,8 @@ struct RuntimeCapabilityPendingRequest {
     request_id: String,
     #[serde(default)]
     agent_id: String,
+    #[serde(default)]
+    session_id: String,
     resource: String,
     action: String,
     requested_at: u64,

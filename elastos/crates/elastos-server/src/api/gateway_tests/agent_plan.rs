@@ -2687,35 +2687,35 @@ async fn stop_capsule_says_stopping_while_an_effect_is_in_flight() {
     assert!(crate::runtime::Runtime::try_enter_plan_effect(&book, session, agent, "").is_err());
 }
 
-/// A nested submit is an effect. Closing the instance in the admit hold writes
-/// no second plan and raises no approval card.
+/// A plan step cannot submit another plan. The refusal is the step itself,
+/// before any record exists.
 #[cfg(unix)]
 #[tokio::test]
-async fn a_nested_submit_after_the_end_writes_no_plan() {
-    let plant = plant_approved(1, true, |_, _| {
-        json!({"steps": [{"scheme": "inspect", "operation": "submit_agent_plan", "request": {
-            "steps": [{"scheme": "availability", "operation": "status", "request": {}}]
-        }}]})
-    })
-    .await;
-    crate::runtime::arm_plan_decision_hook(&plant.session, {
-        let session = plant.session.clone();
-        move |book| book.close_for_test(&session)
-    });
-    dispatch_planted(&plant).await.unwrap();
-    crate::runtime::disarm_plan_decision_hook(&plant.session);
-    let record = read_record(plant.dir.path(), &plant.id);
-    assert_eq!(record["status"], "refused", "{record}");
-    assert_eq!(record["result"]["code"], "instance ended", "{record}");
-    let files: Vec<_> = std::fs::read_dir(plant.dir.path().join("inspect-actions"))
-        .unwrap()
-        .map(|entry| entry.unwrap().file_name())
-        .collect();
-    assert_eq!(
-        files,
-        vec![std::ffi::OsString::from(format!("{}.json", plant.id))],
-        "a nested submit wrote a plan after the end: {files:?}"
+async fn a_plan_step_cannot_submit_agent_plan() {
+    let dir = tempfile::tempdir().unwrap();
+    let error = crate::api::gateway::submit_pending_agent_plan(
+        dir.path(),
+        "person:owner",
+        "agent-1",
+        "capsule-1",
+        "session-1",
+        &json!({
+            "steps": [{
+                "scheme": "inspect",
+                "operation": "submit_agent_plan",
+                "request": {}
+            }]
+        }),
+        1,
+    )
+    .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("a plan step cannot submit_agent_plan"),
+        "{error}"
     );
+    assert!(!dir.path().join("inspect-actions").exists());
 }
 
 /// A refusal after the one-use token is registered revokes it and leaves no

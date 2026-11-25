@@ -13,6 +13,8 @@ static RECORD_AUDIT: LazyLock<Mutex<HashSet<PathBuf>>> =
     LazyLock::new(|| Mutex::new(HashSet::new()));
 static GRANT_FAULTS: LazyLock<Mutex<HashSet<(PathBuf, bool)>>> =
     LazyLock::new(|| Mutex::new(HashSet::new()));
+static GRANT_KINDS: LazyLock<Mutex<HashMap<PathBuf, String>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 static PARK_MS: LazyLock<Mutex<HashMap<PathBuf, u64>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
@@ -32,6 +34,27 @@ pub(crate) fn arm_grant_fault(data_dir: &Path, crash: bool) {
 
 pub(crate) fn take_grant_fault(data_dir: &Path, crash: bool) -> bool {
     guard(&GRANT_FAULTS).remove(&(data_dir.to_path_buf(), crash))
+}
+
+/// One named fault for this Home: `before-send`, `after-mint`, `minted-row`, or `timeout`.
+#[cfg(feature = "prototype-agents")]
+pub(crate) fn arm_grant_kind(data_dir: &Path, kind: &str) {
+    guard(&GRANT_KINDS).insert(data_dir.to_path_buf(), kind.to_string());
+}
+
+pub(crate) fn grant_kind_is(data_dir: &Path, kind: &str) -> bool {
+    guard(&GRANT_KINDS)
+        .get(data_dir)
+        .is_some_and(|held| held == kind)
+}
+
+pub(crate) fn take_grant_kind(data_dir: &Path, kind: &str) -> bool {
+    let mut kinds = guard(&GRANT_KINDS);
+    if kinds.get(data_dir).is_some_and(|held| held == kind) {
+        kinds.remove(data_dir);
+        return true;
+    }
+    false
 }
 
 /// One test millisecond stands for one second of this Home's plan park.

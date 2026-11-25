@@ -97,27 +97,27 @@ fn append_agent_lifecycle_audit(
 }
 
 /// A `stopping` row is confirmed once the owner and the build have already
-/// been checked. `ok` is written when this process's agent plane says the
-/// session ended and no plan effect is in flight, or when this process has
-/// no plane, which is a Home that restarted. A session that is still running
-/// stays `stopping`.
+/// been checked. `ok` is written when the live plane and the retiring plane
+/// both say the session ended and no plan effect is in flight, or when this
+/// process has neither plane, which is a Home that restarted. A session that
+/// is still running on either plane stays `stopping`.
 pub(in crate::api) async fn confirm_stopping_rows(
     data_dir: &std::path::Path,
 ) -> anyhow::Result<()> {
     crate::api::agent_plane::release_idle_retiring(data_dir).await;
     let open = crate::agent_record_audit::open_stopping_sessions(data_dir)?;
+    let watched = crate::api::agent_plane::watched_runtimes(data_dir);
     let mut ended = std::collections::HashSet::new();
     for session in open {
         if crate::api::agent_plane::stopping_session_has_ended(data_dir, &session).await {
             ended.insert(session);
         }
     }
-    let runtime = crate::api::agent_plane::plane_runtime(data_dir);
     crate::agent_record_audit::confirm_stopping_rows(data_dir, |session| {
         ended.contains(session)
-            && runtime
-                .as_ref()
-                .is_none_or(|runtime| !runtime.plan_effect_inflight(session))
+            && watched
+                .iter()
+                .all(|runtime| !runtime.plan_effect_inflight(session))
     })
 }
 

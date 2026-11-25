@@ -4454,8 +4454,8 @@ impl Runtime {
     }
 
     /// The plane's own pending store and capability manager, when the
-    /// authority was installed.
-    #[cfg(test)]
+    /// authority was installed. Startup uses this to see whether a sent
+    /// grant is still live.
     pub(crate) fn instance_authority_plane(
         &self,
     ) -> Option<(

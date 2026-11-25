@@ -1627,6 +1627,38 @@ async fn http_approve(addr: &str, token: &str, request_id: &str) -> (u16, String
     (status, text)
 }
 
+fn grant_events(data: &Path, request_id: &str) -> Vec<elastos_runtime::auth::RuntimeAuditEventV1> {
+    crate::auth::load_auth_state(data)
+        .unwrap()
+        .audit
+        .into_iter()
+        .filter(|event| {
+            event.challenge_id.as_deref() == Some(request_id)
+                && event.event_type.starts_with("agent.grant.")
+        })
+        .collect()
+}
+
+fn assert_copied(
+    event: &elastos_runtime::auth::RuntimeAuditEventV1,
+    owner: &str,
+    session: &str,
+    agent: &str,
+) {
+    assert_eq!(event.principal_id.as_deref(), Some(owner));
+    assert_eq!(event.session_id.as_deref(), Some(session));
+    assert_eq!(event.capsule_id.as_deref(), Some(agent));
+    let reason: serde_json::Value = serde_json::from_str(&event.reason).unwrap();
+    for key in ["principal", "session", "agent", "capsule", "resource"] {
+        let text = reason[key].as_str().unwrap_or("");
+        assert!(!text.is_empty(), "{key} is blank in {}", event.reason);
+    }
+    assert_eq!(reason["principal"], owner);
+    assert_eq!(reason["session"], session);
+    assert_eq!(reason["agent"], agent);
+    assert_eq!(reason["capsule"], agent);
+}
+
 fn grant_audit(data: &Path, request_id: &str) -> Vec<(String, String)> {
     crate::auth::load_auth_state(data)
         .unwrap()
@@ -1711,16 +1743,16 @@ async fn an_audit_failure_on_the_inbox_mints_nothing() {
 }
 
 #[tokio::test]
-async fn a_crash_between_the_row_and_the_mint_leaves_no_grant() {
+async fn a_crash_before_the_send_is_not_sent() {
     let home = Home::open();
     let agent = home.create_agent("Notes", "bafkreicrashmint");
     let gateway = Gateway::start(&home.data).await;
     let request_id = plant_pending(&home, "capsule:crash-mint", &agent).await;
     let token = inbox_token(&home.data, &home.owner, &home.proof);
-    super::seams::arm_grant_fault(&home.data, true);
+    super::seams::arm_grant_kind(&home.data, "before-send");
     let (status, body) = http_approve(&gateway.addr, &token, &request_id).await;
     assert_ne!(status, 200, "{body}");
-    assert!(body.contains("crash before the mint"), "{body}");
+    assert!(body.contains("crash before the send"), "{body}");
     let rows = grant_audit(&home.data, &request_id);
     assert_eq!(
         rows,
@@ -1731,23 +1763,25 @@ async fn a_crash_between_the_row_and_the_mint_leaves_no_grant() {
     super::super::gateway_inbox::settle_unminted_agent_grants(&home.data)
         .await
         .unwrap();
-    let rows = grant_audit(&home.data, &request_id);
+    let closed = grant_events(&home.data, &request_id);
+    let settled = closed
+        .iter()
+        .find(|event| event.result == "not_sent")
+        .expect("crash before the send");
     assert!(
-        rows.iter().any(|row| row.0 == "agent.grant.not_granted"),
-        "{rows:?}"
+        closed.iter().all(|event| event.result != "not_granted"),
+        "{closed:?}"
     );
-    assert!(!usable_grant(&home.data, &request_id).await);
+    assert_copied(settled, &home.owner, "capsule:crash-mint", &agent);
     super::super::gateway_inbox::settle_unminted_agent_grants(&home.data)
         .await
         .unwrap();
-    let again = grant_audit(&home.data, &request_id);
     assert_eq!(
-        again
+        grant_events(&home.data, &request_id)
             .iter()
-            .filter(|row| row.0 == "agent.grant.not_granted")
+            .filter(|event| event.result == "not_sent")
             .count(),
-        1,
-        "{again:?}"
+        1
     );
     gateway.shutdown().await;
 }
@@ -1818,8 +1852,10 @@ async fn two_inbox_approvals_mint_one_grant() {
         "{kept:?}"
     );
     assert!(
-        !kept.iter().any(|row| row.1 == "not_granted"),
-        "a minted grant was settled as not granted: {kept:?}"
+        !kept
+            .iter()
+            .any(|row| row.1 == "not_granted" || row.1 == "unresolved" || row.1 == "not_sent"),
+        "a minted grant was settled again: {kept:?}"
     );
     restarted.shutdown().await;
 }
@@ -1835,11 +1871,19 @@ async fn a_restart_settles_an_approved_grant_that_was_never_minted() {
             event_type: "agent.grant.approved".to_string(),
             principal_id: Some(home.owner.clone()),
             proof_binding_id: None,
-            session_id: Some("agent-plant".to_string()),
+            session_id: Some("session-plant".to_string()),
             challenge_id: Some("req-unminted".to_string()),
             capsule_id: Some("agent-plant".to_string()),
             result: "approved".to_string(),
-            reason: "approved before the mint".to_string(),
+            reason: serde_json::json!({
+                "cause": "approved",
+                "principal": home.owner,
+                "session": "session-plant",
+                "agent": "agent-plant",
+                "capsule": "agent-plant",
+                "resource": "localhost://UsersAI/notes/journal",
+            })
+            .to_string(),
             occurred_at: 1,
             signer_did: None,
             signature: None,
@@ -1847,12 +1891,13 @@ async fn a_restart_settles_an_approved_grant_that_was_never_minted() {
     )
     .unwrap();
     let gateway = Gateway::start(&home.data).await;
-    let rows = grant_audit(&home.data, "req-unminted");
-    assert_eq!(
-        rows.iter().filter(|row| row.1 == "not_granted").count(),
-        1,
-        "{rows:?}"
-    );
+    let rows = grant_events(&home.data, "req-unminted");
+    let settled = rows
+        .iter()
+        .find(|event| event.result == "not_sent")
+        .expect("an approved row that was never sent");
+    assert!(rows.iter().all(|event| event.result != "not_granted"));
+    assert_copied(settled, &home.owner, "session-plant", "agent-plant");
     gateway.shutdown().await;
 }
 
@@ -1920,4 +1965,430 @@ async fn an_effect_held_across_turn_off_is_not_signed_ok() {
         .unwrap();
     assert_eq!(oks(&home.data), 1);
     assert!(crate::api::agent_plane::plane_runtime(&home.data).is_none());
+}
+
+fn stopped_ok_count(data: &Path, session: &str) -> usize {
+    crate::auth::load_auth_state(data)
+        .unwrap()
+        .audit
+        .into_iter()
+        .filter(|event| {
+            event.event_type == "agent.stopped"
+                && event.result == "ok"
+                && event.session_id.as_deref() == Some(session)
+        })
+        .count()
+}
+
+fn system_token(home: &Home) -> String {
+    let proof = home.context.proof_binding_id().unwrap().to_string();
+    let mut state = crate::auth::load_auth_state(&home.data).unwrap();
+    let owner = state
+        .principals
+        .iter_mut()
+        .find(|principal| principal.principal_id == home.owner)
+        .expect("owner");
+    owner.proof_binding_id = proof;
+    owner.role = crate::auth::RuntimePrincipalRole::Admin;
+    crate::auth::save_auth_state(&home.data, &state, None).unwrap();
+    super::super::gateway_home_token::issue_home_projection_launch_token_with_context(
+        &home.data,
+        "system",
+        "system",
+        &home.context,
+    )
+    .unwrap()
+}
+
+async fn home_http(addr: &str, token: &str, method: reqwest::Method, path: &str) -> (u16, String) {
+    let mut request = reqwest::Client::new()
+        .request(method.clone(), format!("http://{addr}{path}"))
+        .header("host", addr)
+        .header("origin", "null")
+        .header("x-elastos-home-token", token);
+    if method != reqwest::Method::GET {
+        request = request
+            .header("content-type", "application/json")
+            .body("{}");
+    }
+    let response = request.send().await.unwrap();
+    let status = response.status().as_u16();
+    (status, response.text().await.unwrap())
+}
+
+fn cause_of(data: &Path, request_id: &str, result: &str) -> String {
+    let event = grant_events(data, request_id)
+        .into_iter()
+        .find(|event| event.result == result)
+        .unwrap_or_else(|| panic!("no {result} row"));
+    serde_json::from_str::<serde_json::Value>(&event.reason).unwrap()["cause"]
+        .as_str()
+        .unwrap_or("")
+        .to_string()
+}
+
+#[tokio::test]
+async fn a_crash_after_the_mint_is_unresolved_and_the_guest_file_stays() {
+    let home = Home::open();
+    let dir = home._temp.path().join("probe");
+    let cid = sign_probe(&dir);
+    let agent = home.create_agent("Notes", &cid);
+    let gateway = Gateway::start(&home.data).await;
+    let session = home.launch(&agent, &dir).await;
+    let request_id = plant_pending(&home, &session, &agent).await;
+    let token = inbox_token(&home.data, &home.owner, &home.proof);
+    super::seams::arm_grant_kind(&home.data, "after-mint");
+    let (status, body) = http_approve(&gateway.addr, &token, &request_id).await;
+    assert_ne!(status, 200, "{body}");
+    assert!(body.contains("crash after the mint"), "{body}");
+    assert!(usable_grant(&home.data, &request_id).await);
+    let root = crate::auth::stored_principal_record(&home.data, &agent)
+        .unwrap()
+        .unwrap()
+        .localhost_root;
+    let target = format!("{root}/Documents/guest.txt");
+    let path = elastos_common::localhost::rooted_localhost_fs_path(&home.data, &target).unwrap();
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    crate::auth::write_principal_root_object(&home.data, &agent, &root, &target, &path, b"guest")
+        .unwrap();
+    super::super::gateway_inbox::settle_unminted_agent_grants(&home.data)
+        .await
+        .unwrap();
+    let rows = grant_events(&home.data, &request_id);
+    let settled = rows
+        .iter()
+        .find(|event| event.result == "unresolved")
+        .expect("unresolved");
+    assert_eq!(
+        cause_of(&home.data, &request_id, "unresolved"),
+        "crash after the mint"
+    );
+    assert!(rows.iter().all(|event| event.result != "not_granted"));
+    assert_copied(settled, &home.owner, &session, &agent);
+    assert!(path.is_file());
+    assert!(!std::fs::read(&path).unwrap().is_empty());
+    assert_eq!(
+        crate::auth::read_principal_root_object(&home.data, &agent, &root, &target, &path).unwrap(),
+        b"guest"
+    );
+    assert!(usable_grant(&home.data, &request_id).await);
+    gateway.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_failed_minted_row_is_unresolved_and_the_grant_stays() {
+    let home = Home::open();
+    let dir = home._temp.path().join("probe");
+    let cid = sign_probe(&dir);
+    let agent = home.create_agent("Notes", &cid);
+    let gateway = Gateway::start(&home.data).await;
+    let session = home.launch(&agent, &dir).await;
+    let request_id = plant_pending(&home, &session, &agent).await;
+    let token = inbox_token(&home.data, &home.owner, &home.proof);
+    super::seams::arm_grant_kind(&home.data, "minted-row");
+    let (status, body) = http_approve(&gateway.addr, &token, &request_id).await;
+    assert_ne!(status, 200, "{body}");
+    assert!(body.contains("the minted row failed"), "{body}");
+    let rows = grant_audit(&home.data, &request_id);
+    assert!(
+        !rows
+            .iter()
+            .any(|row| row.1 == "minted" || row.1 == "not_granted"),
+        "{rows:?}"
+    );
+    assert_eq!(
+        cause_of(&home.data, &request_id, "unresolved"),
+        "the minted row failed"
+    );
+    assert!(usable_grant(&home.data, &request_id).await);
+    let copied = grant_events(&home.data, &request_id)
+        .into_iter()
+        .find(|event| event.result == "unresolved")
+        .unwrap();
+    assert_copied(&copied, &home.owner, &session, &agent);
+    super::super::gateway_inbox::settle_unminted_agent_grants(&home.data)
+        .await
+        .unwrap();
+    assert_eq!(
+        grant_events(&home.data, &request_id)
+            .iter()
+            .filter(|event| event.result == "unresolved")
+            .count(),
+        1
+    );
+    gateway.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_plane_timeout_is_unresolved() {
+    let home = Home::open();
+    let agent = home.create_agent("Notes", "bafkreitimeout");
+    let gateway = Gateway::start(&home.data).await;
+    let request_id = plant_pending(&home, "capsule:timeout", &agent).await;
+    let token = inbox_token(&home.data, &home.owner, &home.proof);
+    super::seams::arm_grant_kind(&home.data, "timeout");
+    let (status, body) = http_approve(&gateway.addr, &token, &request_id).await;
+    assert_ne!(status, 200, "{body}");
+    assert!(body.contains("the plane timed out"), "{body}");
+    let rows = grant_audit(&home.data, &request_id);
+    assert!(rows.iter().any(|row| row.1 == "sent"), "{rows:?}");
+    assert!(!rows.iter().any(|row| row.1 == "not_granted"), "{rows:?}");
+    assert_eq!(
+        cause_of(&home.data, &request_id, "unresolved"),
+        "the plane timed out"
+    );
+    let copied = grant_events(&home.data, &request_id)
+        .into_iter()
+        .find(|event| event.result == "unresolved")
+        .unwrap();
+    assert_copied(&copied, &home.owner, "capsule:timeout", &agent);
+    gateway.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_failed_grant_settle_does_not_refuse_the_home() {
+    let home = Home::open();
+    crate::auth::append_audit_event(
+        &home.data,
+        elastos_runtime::auth::RuntimeAuditEventV1 {
+            schema: elastos_runtime::auth::RuntimeAuditEventV1::SCHEMA.to_string(),
+            event_id: "audit:plant-settle-fail".to_string(),
+            event_type: "agent.grant.approved".to_string(),
+            principal_id: Some(home.owner.clone()),
+            proof_binding_id: None,
+            session_id: Some("session-settle".to_string()),
+            challenge_id: Some("req-settle-fail".to_string()),
+            capsule_id: Some("agent-settle".to_string()),
+            result: "approved".to_string(),
+            reason: serde_json::json!({
+                "cause": "approved",
+                "principal": home.owner,
+                "session": "session-settle",
+                "agent": "agent-settle",
+                "capsule": "agent-settle",
+                "resource": "localhost://UsersAI/notes/journal",
+            })
+            .to_string(),
+            occurred_at: 1,
+            signer_did: None,
+            signature: None,
+        },
+    )
+    .unwrap();
+    super::seams::arm_grant_fault(&home.data, false);
+    let gateway = Gateway::start(&home.data).await;
+    gateway.health().await;
+    assert!(grant_events(&home.data, "req-settle-fail")
+        .iter()
+        .all(|event| event.result != "not_sent" && event.result != "not_granted"));
+    gateway.shutdown().await;
+    let again = Gateway::start(&home.data).await;
+    let settled = grant_events(&home.data, "req-settle-fail")
+        .into_iter()
+        .find(|event| event.result == "not_sent")
+        .expect("the next start settles the open row");
+    assert_copied(&settled, &home.owner, "session-settle", "agent-settle");
+    again.shutdown().await;
+}
+
+struct IdleCompute;
+
+#[async_trait::async_trait]
+impl elastos_compute::ComputeProvider for IdleCompute {
+    async fn load(
+        &self,
+        _: &std::path::Path,
+        _: elastos_common::CapsuleManifest,
+    ) -> elastos_common::Result<elastos_compute::CapsuleHandle> {
+        Err(elastos_common::ElastosError::InvalidManifest("idle".into()))
+    }
+
+    async fn start(&self, _: &elastos_compute::CapsuleHandle) -> elastos_common::Result<()> {
+        Err(elastos_common::ElastosError::InvalidManifest("idle".into()))
+    }
+
+    async fn stop(&self, _: &elastos_compute::CapsuleHandle) -> elastos_common::Result<()> {
+        Err(elastos_common::ElastosError::InvalidManifest("idle".into()))
+    }
+
+    async fn status(
+        &self,
+        _: &elastos_compute::CapsuleHandle,
+    ) -> elastos_common::Result<elastos_common::CapsuleStatus> {
+        Err(elastos_common::ElastosError::InvalidManifest("idle".into()))
+    }
+
+    async fn info(
+        &self,
+        _: &elastos_compute::CapsuleHandle,
+    ) -> elastos_common::Result<elastos_compute::CapsuleInfo> {
+        Err(elastos_common::ElastosError::InvalidManifest("idle".into()))
+    }
+
+    fn supports(&self, _: &elastos_common::CapsuleType) -> bool {
+        false
+    }
+}
+
+#[tokio::test]
+async fn off_then_on_waits_until_the_old_plane_is_idle() {
+    let home = Home::open();
+    let dir = home._temp.path().join("probe");
+    let cid = sign_probe(&dir);
+    let agent = home.create_agent("Live", &cid);
+    let gateway = Gateway::start(&home.data).await;
+    let session = home.launch(&agent, &dir).await;
+    let runtime = crate::api::agent_plane::plane_runtime(&home.data).unwrap();
+    runtime.bind_plan_instance(&session, &agent);
+    let guard = crate::runtime::Runtime::try_enter_plan_effect(
+        &runtime.plan_book(),
+        &session,
+        &agent,
+        "step-held",
+    )
+    .expect("effect hold");
+    let token = system_token(&home);
+    let (off, off_body) = home_http(
+        &gateway.addr,
+        &token,
+        reqwest::Method::POST,
+        "/api/apps/system/agents/disable",
+    )
+    .await;
+    assert_eq!(off, 200, "{off_body}");
+    let (on, on_body) = home_http(
+        &gateway.addr,
+        &token,
+        reqwest::Method::POST,
+        "/api/apps/system/agents/enable",
+    )
+    .await;
+    assert_eq!(on, 409, "{on_body}");
+    assert!(
+        on_body.contains("the previous agent runtime is still stopping"),
+        "{on_body}"
+    );
+    let started = crate::api::agent_plane::start(&home.data, None).await;
+    let error = started.expect_err("start while the old plane is busy");
+    assert!(
+        error
+            .to_string()
+            .contains("the previous agent runtime is still stopping"),
+        "{error}"
+    );
+    let _ = home_http(
+        &gateway.addr,
+        &token,
+        reqwest::Method::GET,
+        "/api/apps/system/agents",
+    )
+    .await;
+    assert_eq!(stopped_ok_count(&home.data, &session), 0);
+    let other = Home::open();
+    let other_gateway = Gateway::start(&other.data).await;
+    let mine = crate::api::agent_plane::watched_runtimes(&home.data);
+    let theirs = crate::api::agent_plane::watched_runtimes(&other.data);
+    assert!(!mine.is_empty() && !theirs.is_empty());
+    assert!(mine.iter().all(|runtime| {
+        theirs
+            .iter()
+            .all(|other_runtime| !Arc::ptr_eq(runtime, other_runtime))
+    }));
+    assert_eq!(stopped_ok_count(&home.data, &session), 0);
+    guard.release();
+    let (again, again_body) = home_http(
+        &gateway.addr,
+        &token,
+        reqwest::Method::POST,
+        "/api/apps/system/agents/enable",
+    )
+    .await;
+    assert_eq!(again, 200, "{again_body}");
+    let _ = home_http(
+        &gateway.addr,
+        &token,
+        reqwest::Method::GET,
+        "/api/apps/system/agents",
+    )
+    .await;
+    assert_eq!(stopped_ok_count(&home.data, &session), 1);
+    crate::api::agent_plane::stop_running(&home.data).await;
+    gateway.shutdown().await;
+    other_gateway.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_live_plane_does_not_hide_a_retiring_effect_or_stop() {
+    let home = Home::open();
+    let plane = home.plane().await;
+    let storage = home.data.join("shadow-storage");
+    std::fs::create_dir_all(&storage).unwrap();
+    let retiring = Arc::new(crate::runtime::Runtime::new(
+        Arc::new(
+            elastos_storage::providers::LocalFSProvider::new(storage)
+                .await
+                .unwrap(),
+        ),
+        Arc::new(IdleCompute),
+    ));
+    let session = "shadow-session";
+    retiring.bind_plan_instance(session, "agent-shadow");
+    let guard = crate::runtime::Runtime::try_enter_plan_effect(
+        &retiring.plan_book(),
+        session,
+        "agent-shadow",
+        "step-shadow",
+    )
+    .expect("effect hold");
+    retiring
+        .register_capsule(crate::runtime::RunningCapsuleInfo {
+            id: session.to_string(),
+            name: "shadow".to_string(),
+            status: crate::runtime::CAPSULE_RUNNING.to_string(),
+            capsule_type: elastos_common::CapsuleType::Wasm,
+            handle: None,
+            session_id: session.to_string(),
+            principal: Some("agent-shadow".to_string()),
+            cause: None,
+            ended_at: None,
+        })
+        .await;
+    crate::api::agent_plane::plant_retiring_runtime(&home.data, Arc::clone(&retiring));
+    crate::auth::append_audit_event(
+        &home.data,
+        elastos_runtime::auth::RuntimeAuditEventV1 {
+            schema: elastos_runtime::auth::RuntimeAuditEventV1::SCHEMA.to_string(),
+            event_id: "audit:shadow-stopping".to_string(),
+            event_type: "agent.stopped".to_string(),
+            principal_id: Some(home.owner.clone()),
+            proof_binding_id: None,
+            session_id: Some(session.to_string()),
+            challenge_id: None,
+            capsule_id: None,
+            result: "stopping".to_string(),
+            reason: "both halves".to_string(),
+            occurred_at: 1,
+            signer_did: None,
+            signature: None,
+        },
+    )
+    .unwrap();
+    super::super::gateway_agents::confirm_stopping_rows(&home.data)
+        .await
+        .unwrap();
+    assert_eq!(stopped_ok_count(&home.data, session), 0, "effect half");
+    guard.release();
+    super::super::gateway_agents::confirm_stopping_rows(&home.data)
+        .await
+        .unwrap();
+    assert_eq!(stopped_ok_count(&home.data, session), 0, "stop half");
+    retiring.unregister_capsule(session).await;
+    super::super::gateway_agents::confirm_stopping_rows(&home.data)
+        .await
+        .unwrap();
+    assert_eq!(stopped_ok_count(&home.data, session), 1);
+    assert!(crate::api::agent_plane::watched_runtimes(&home.data)
+        .iter()
+        .all(|runtime| !Arc::ptr_eq(runtime, &retiring)));
+    plane.shutdown().await;
 }
