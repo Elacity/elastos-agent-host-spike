@@ -2156,6 +2156,7 @@ struct PlantedEffect {
     agent: String,
     session: String,
     id: String,
+    manager: Arc<elastos_runtime::capability::CapabilityManager>,
     store: Arc<elastos_runtime::capability::pending::PendingRequestStore>,
     path: std::path::PathBuf,
     before: Vec<u8>,
@@ -2233,7 +2234,7 @@ async fn plant_approved(
     let id = created["request_id"].as_str().unwrap().to_string();
     let ctx = crate::resource_bridge::BridgeContext {
         provider_registry: state.provider_registry.clone().unwrap(),
-        capability_manager: manager,
+        capability_manager: manager.clone(),
         pending_store: store.clone(),
         capsule_id: session.clone(),
         session_id: session.clone(),
@@ -2277,6 +2278,7 @@ async fn plant_approved(
         agent,
         session,
         id,
+        manager,
         store,
         path,
         before,
@@ -2308,14 +2310,14 @@ async fn the_end_and_the_effect_share_one_lock() {
         move |book| book.close_for_test(&session)
     });
     assert!(
-        crate::runtime::Runtime::try_enter_plan_effect(&book, session, agent).is_err(),
+        crate::runtime::Runtime::try_enter_plan_effect(&book, session, agent, "").is_err(),
         "the end inside the same hold let the effect in"
     );
     assert!(!runtime.plan_effect_inflight(session));
     crate::runtime::disarm_plan_decision_hook(session);
 
     runtime.bind_plan_instance(session, agent);
-    let guard = crate::runtime::Runtime::try_enter_plan_effect(&book, session, agent)
+    let guard = crate::runtime::Runtime::try_enter_plan_effect(&book, session, agent, "")
         .expect("an open instance enters");
     runtime.note_plan_instance_ended(session);
     assert!(
@@ -2328,7 +2330,7 @@ async fn the_end_and_the_effect_share_one_lock() {
     );
     guard.release();
     assert!(!runtime.plan_effect_inflight(session));
-    assert!(crate::runtime::Runtime::try_enter_plan_effect(&book, session, agent).is_err());
+    assert!(crate::runtime::Runtime::try_enter_plan_effect(&book, session, agent, "").is_err());
 }
 
 /// Two effects of one session are two marks. The first to finish leaves the second.
@@ -2341,8 +2343,8 @@ async fn two_effects_of_one_session_are_counted_apart() {
     let agent = "agent-two";
     runtime.bind_plan_instance(session, agent);
     let book = runtime.plan_book();
-    let first = crate::runtime::Runtime::try_enter_plan_effect(&book, session, agent).unwrap();
-    let second = crate::runtime::Runtime::try_enter_plan_effect(&book, session, agent).unwrap();
+    let first = crate::runtime::Runtime::try_enter_plan_effect(&book, session, agent, "").unwrap();
+    let second = crate::runtime::Runtime::try_enter_plan_effect(&book, session, agent, "").unwrap();
     assert!(runtime.plan_effect_inflight(session));
     first.release();
     assert!(
@@ -2367,8 +2369,10 @@ async fn one_runtime_does_not_end_another_runtimes_plan() {
     left.note_plan_instance_ended(session);
     let left_book = left.plan_book();
     let right_book = right.plan_book();
-    assert!(crate::runtime::Runtime::try_enter_plan_effect(&left_book, session, agent).is_err());
-    let guard = crate::runtime::Runtime::try_enter_plan_effect(&right_book, session, agent)
+    assert!(
+        crate::runtime::Runtime::try_enter_plan_effect(&left_book, session, agent, "").is_err()
+    );
+    let guard = crate::runtime::Runtime::try_enter_plan_effect(&right_book, session, agent, "")
         .expect("the other Runtime's session is still open");
     assert!(right.plan_effect_inflight(session));
     assert!(!left.plan_effect_inflight(session));
@@ -2481,7 +2485,7 @@ async fn stop_capsule_says_stopping_while_an_effect_is_in_flight() {
         })
         .await;
     let book = runtime.plan_book();
-    let guard = crate::runtime::Runtime::try_enter_plan_effect(&book, session, agent).unwrap();
+    let guard = crate::runtime::Runtime::try_enter_plan_effect(&book, session, agent, "").unwrap();
     let response = crate::api::routes::stop_capsule(
         axum::Extension(runtime.clone()),
         axum::extract::Path(session.to_string()),
@@ -2497,13 +2501,13 @@ async fn stop_capsule_says_stopping_while_an_effect_is_in_flight() {
     assert_eq!(body["status"], "stopping", "{body}");
     assert_ne!(body["status"], "stopped", "{body}");
     assert!(
-        crate::runtime::Runtime::try_enter_plan_effect(&book, session, agent).is_err(),
+        crate::runtime::Runtime::try_enter_plan_effect(&book, session, agent, "").is_err(),
         "Stop answered without closing the instance"
     );
     assert!(runtime.plan_effect_inflight(session));
     guard.release();
     assert!(!runtime.plan_effect_inflight(session));
-    assert!(crate::runtime::Runtime::try_enter_plan_effect(&book, session, agent).is_err());
+    assert!(crate::runtime::Runtime::try_enter_plan_effect(&book, session, agent, "").is_err());
 }
 
 /// A nested submit is an effect. Closing the instance in the admit hold writes
@@ -2561,8 +2565,8 @@ async fn a_refusal_after_the_token_is_registered_revokes_it() {
     assert_plan_grant_closed(&plant.id, &plant.store).await;
 }
 
-/// The dropped dispatch future does not clear the mark. Stop keeps saying
-/// stopping, and the record says unknown, until the process ends.
+/// A timed-out dispatch records unknown and resolves the flight. Stop answers
+/// stopped and names the step. The record stays unknown.
 #[cfg(unix)]
 #[tokio::test]
 async fn a_timed_out_effect_stays_unresolved() {
@@ -2602,22 +2606,32 @@ async fn a_timed_out_effect_stays_unresolved() {
     let record = read_record(plant.dir.path(), &plant.id);
     assert_eq!(record["status"], "unknown", "{record}");
     assert_eq!(record["result"]["code"], "provider_timeout", "{record}");
+    assert_ne!(record["status"], "completed");
+    assert_ne!(record["status"], "refused");
     assert_eq!(std::fs::read(&plant.path).unwrap(), plant.before);
     assert_plan_grant_closed(&plant.id, &plant.store).await;
     assert!(
-        plant.runtime.plan_effect_inflight(&plant.session),
-        "the timeout cleared the mark while the outcome is unknown"
+        !plant.runtime.plan_effect_inflight(&plant.session),
+        "unknown left the flight holding the instance"
     );
     let (status, body) = stop_plan_agent(plant.runtime.clone(), &plant.agent).await;
-    assert_eq!(status, StatusCode::ACCEPTED, "{body}");
-    assert!(body["stopped"]
-        .as_array()
-        .is_some_and(|rows| rows.is_empty()));
-    assert_eq!(body["stopping"][0]["status"], "stopping", "{body}");
-    assert!(body.get("already").is_none(), "{body}");
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["stopped"][0]["status"], "stopped", "{body}");
+    assert!(
+        body["stopping"]
+            .as_array()
+            .is_none_or(|rows| rows.is_empty()),
+        "{body}"
+    );
+    assert_eq!(body["unknown"][0]["request_id"], plant.id, "{body}");
+    assert_eq!(body["unknown"][0]["outcome"], "unknown", "{body}");
+    assert_ne!(body["unknown"][0]["outcome"], "done");
+    assert_ne!(body["unknown"][0]["outcome"], "refused");
+    let again = read_record(plant.dir.path(), &plant.id);
+    assert_eq!(again["status"], "unknown", "{again}");
 }
 
-/// A panic after the mark still writes a terminal status, and the mark stays.
+/// A panic after the mark records unknown and resolves the flight.
 #[cfg(unix)]
 #[tokio::test]
 async fn a_panic_in_dispatch_records_unknown() {
@@ -2634,11 +2648,262 @@ async fn a_panic_in_dispatch_records_unknown() {
     let record = read_record(plant.dir.path(), &plant.id);
     assert_eq!(record["status"], "unknown", "{record}");
     assert_eq!(record["result"]["code"], "dispatch_panic", "{record}");
+    assert_ne!(record["status"], "completed");
+    assert_ne!(record["status"], "refused");
     assert_eq!(std::fs::read(&plant.path).unwrap(), plant.before);
     assert_plan_grant_closed(&plant.id, &plant.store).await;
     assert!(
-        plant.runtime.plan_effect_inflight(&plant.session),
-        "the panic cleared the mark"
+        !plant.runtime.plan_effect_inflight(&plant.session),
+        "the panic left the flight holding the instance"
+    );
+    plant.runtime.note_plan_instance_ended(&plant.session);
+    let named = plant.runtime.take_unknown_plan_steps(&plant.agent);
+    assert_eq!(named.len(), 1);
+    assert_eq!(named[0].request_id, plant.id);
+    assert!(plant.runtime.plan_book_is_empty());
+}
+
+/// A late store after unknown is the same effect. The record stays unknown,
+/// and a journal write still loses a stale revision.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_late_landing_after_unknown_is_not_a_new_action() {
+    let plant = plant_approved(41, false, |_, target| {
+        json!({"steps": [{"scheme": "localhost", "operation": "write", "request": {
+            "path": target, "content": [112, 108, 97, 110]
+        }}]})
+    })
+    .await;
+    super::gateway_inspect_actions::set_plan_dispatch_wait_for_test(
+        &plant.id,
+        std::time::Duration::from_secs(8),
+    );
+    let pause = crate::resource_bridge::arm_plan_dispatch_hold(
+        &plant.id,
+        crate::resource_bridge::PlanDispatchPoint::InEffect,
+    );
+    let state = plant.state.clone();
+    let owner = plant.owner.clone();
+    let id = plant.id.clone();
+    let task = tokio::spawn(async move {
+        super::gateway_inspect_actions::dispatch_approved_agent_plan(
+            &state,
+            &dispatch_context(&owner),
+            &id,
+        )
+        .await
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(15), pause.entered.notified())
+        .await
+        .expect("the effect did not reach its hold");
+    tokio::time::timeout(std::time::Duration::from_secs(15), task)
+        .await
+        .expect("the short wait did not settle")
+        .unwrap()
+        .unwrap();
+    super::gateway_inspect_actions::clear_plan_dispatch_wait_for_test(&plant.id);
+    std::fs::write(&plant.path, b"late bytes").unwrap();
+    assert_eq!(std::fs::read(&plant.path).unwrap(), b"late bytes");
+    let settled = super::gateway_inspect_actions::resettle_plan_for_test(
+        plant.dir.path(),
+        &plant.id,
+        "completed",
+    )
+    .unwrap();
+    assert!(settled.contains("unknown"), "{settled}");
+    let record = read_record(plant.dir.path(), &plant.id);
+    assert_eq!(record["status"], "unknown", "{record}");
+    assert_ne!(record["status"], "completed");
+    assert_ne!(record["status"], "refused");
+    assert_ne!(record["status"], "done");
+    let files: Vec<_> = std::fs::read_dir(plant.dir.path().join("inspect-actions"))
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect();
+    assert_eq!(
+        files.len(),
+        1,
+        "a late landing wrote a new action: {files:?}"
+    );
+    let root =
+        crate::auth::principal_stored_localhost_root(Some(plant.dir.path()), &plant.agent).unwrap();
+    let journal = format!("{root}/.AppData/Agents/demo/tasks/t/journal");
+    let journal_path =
+        elastos_common::localhost::rooted_localhost_fs_path(plant.dir.path(), &journal).unwrap();
+    let write_journal = |bytes: &[u8], precondition| {
+        crate::auth::write_principal_root_object_if_revision(
+            plant.dir.path(),
+            &plant.agent,
+            &root,
+            &journal,
+            &journal_path,
+            bytes,
+            precondition,
+        )
+    };
+    write_journal(
+        b"journal v1",
+        crate::auth::PrincipalRootObjectPrecondition::Absent,
+    )
+    .expect("the journal's first revision is stored");
+    let revision =
+        crate::auth::principal_root_object_revision(&plant.agent, &journal, b"journal v1");
+    write_journal(
+        b"journal v2",
+        crate::auth::PrincipalRootObjectPrecondition::Revision(&revision),
+    )
+    .expect("the current journal revision is accepted");
+    let stale = write_journal(
+        b"journal v3",
+        crate::auth::PrincipalRootObjectPrecondition::Revision(&revision),
+    );
+    let err = stale.expect_err("a stale journal revision was stored");
+    assert!(
+        err.is::<crate::auth::PrincipalRootObjectWriteConflict>(),
+        "the journal refusal is the revision check, not another error: {err:#}"
+    );
+    assert_eq!(
+        crate::auth::read_principal_root_object(
+            plant.dir.path(),
+            &plant.agent,
+            &root,
+            &journal,
+            &journal_path,
+        )
+        .unwrap(),
+        b"journal v2"
+    );
+    plant.runtime.note_plan_instance_ended(&plant.session);
+    let _ = plant.runtime.take_unknown_plan_steps(&plant.agent);
+    assert!(plant.runtime.plan_book_is_empty());
+}
+
+/// One hundred timed-out effects leave no flight and no instance.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_hundred_timeouts_leave_no_flight_and_no_instance() {
+    let plant = plant_approved(42, false, |_, target| {
+        json!({"steps": [{"scheme": "localhost", "operation": "write", "request": {
+            "path": target, "content": [112, 108, 97, 110]
+        }}]})
+    })
+    .await;
+    for n in 0..100u64 {
+        let session = format!("session-hundred-{n}");
+        plant
+            .runtime
+            .register_capsule(crate::runtime::RunningCapsuleInfo {
+                id: session.clone(),
+                name: "planted".to_string(),
+                status: crate::runtime::CAPSULE_RUNNING.to_string(),
+                capsule_type: elastos_common::CapsuleType::Wasm,
+                handle: None,
+                session_id: session.clone(),
+                principal: Some(plant.agent.clone()),
+                cause: None,
+                ended_at: None,
+            })
+            .await;
+        plant
+            .runtime
+            .insert_agent_session_for_test(crate::runtime::AgentSessionRecord {
+                agent_id: plant.agent.clone(),
+                owner: plant.owner.clone(),
+                host_cid: "cid".to_string(),
+                launch_id: format!("launch:{session}"),
+                session_id: session.clone(),
+            })
+            .await;
+        plant.runtime.bind_plan_instance(&session, &plant.agent);
+        let root =
+            crate::auth::principal_stored_localhost_root(Some(plant.dir.path()), &plant.agent)
+                .unwrap();
+        let target = format!("{root}/Documents/plan.md");
+        let created = crate::api::gateway::submit_pending_agent_plan(
+            plant.dir.path(),
+            &plant.owner,
+            &plant.agent,
+            &session,
+            &session,
+            &json!({"steps": [{"scheme": "localhost", "operation": "write", "request": {
+                "path": target, "content": [112, 108, 97, 110]
+            }}]}),
+            2_000 + n,
+        )
+        .unwrap();
+        let id = created["request_id"].as_str().unwrap().to_string();
+        let ctx = crate::resource_bridge::BridgeContext {
+            provider_registry: plant.state.provider_registry.clone().unwrap(),
+            capability_manager: plant.manager.clone(),
+            pending_store: plant.store.clone(),
+            capsule_id: session.clone(),
+            session_id: session.clone(),
+            principal_id: Some(plant.agent.clone()),
+            manifest_capabilities: [
+                "elastos://availability/*",
+                "localhost://UsersAI/*",
+                "localhost://Users/*",
+            ]
+            .into_iter()
+            .map(|resource| elastos_common::AuthorityBound {
+                resource: resource.to_string(),
+                actions: None,
+            })
+            .collect(),
+            data_dir: Some(plant.dir.path().to_path_buf()),
+            launch: None,
+            model_token_ceiling: Some(16),
+            model_budget: None,
+            stop: None,
+            plan_book: Some(plant.runtime.plan_book()),
+        };
+        crate::resource_bridge::retain_agent_plan_dispatch_authority(
+            &id,
+            &plant.owner,
+            &ctx,
+            &created["request"],
+        )
+        .unwrap();
+        set_approved(plant.dir.path(), &id);
+        super::gateway_inspect_actions::set_plan_dispatch_wait_for_test(
+            &id,
+            std::time::Duration::from_secs(2),
+        );
+        let pause = crate::resource_bridge::arm_plan_dispatch_hold(
+            &id,
+            crate::resource_bridge::PlanDispatchPoint::InEffect,
+        );
+        let state = plant.state.clone();
+        let owner = plant.owner.clone();
+        let request_id = id.clone();
+        let task = tokio::spawn(async move {
+            super::gateway_inspect_actions::dispatch_approved_agent_plan(
+                &state,
+                &dispatch_context(&owner),
+                &request_id,
+            )
+            .await
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(15), pause.entered.notified())
+            .await
+            .unwrap_or_else(|_| panic!("timeout {n} did not reach its effect"));
+        tokio::time::timeout(std::time::Duration::from_secs(15), task)
+            .await
+            .unwrap_or_else(|_| panic!("timeout {n} did not settle"))
+            .unwrap()
+            .unwrap();
+        super::gateway_inspect_actions::clear_plan_dispatch_wait_for_test(&id);
+        let record = read_record(plant.dir.path(), &id);
+        assert_eq!(record["status"], "unknown", "{n} {record}");
+        assert!(!plant.runtime.plan_effect_inflight(&session), "{n}");
+        plant.runtime.note_plan_instance_ended(&session);
+        let _ = plant.runtime.take_unknown_plan_steps(&plant.agent);
+    }
+    plant.runtime.note_plan_instance_ended(&plant.session);
+    let _ = plant.runtime.take_unknown_plan_steps(&plant.agent);
+    assert!(
+        plant.runtime.plan_book_is_empty(),
+        "a hundred timeouts left a flight or an instance"
     );
 }
 

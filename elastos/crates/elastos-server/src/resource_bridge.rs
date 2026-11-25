@@ -504,7 +504,6 @@ const PLAN_INSTANCE_ENDED: &str = "instance ended";
 
 #[derive(Clone)]
 struct PlanStep {
-    #[cfg(test)]
     request_id: String,
     owner_id: String,
     requester_id: String,
@@ -744,7 +743,7 @@ fn plan_effect_succeeded(response: &serde_json::Value) -> bool {
 
 /// One check-and-mark for every effect of an approved step. A step that is
 /// not a plan takes an idle guard. The mark stays until [`PlanEffectGuard::release`]
-/// or, when the future is dropped first, until the Runtime ends.
+/// or, when the future is dropped first, until settlement records unknown.
 async fn admit_plan_effect(
 ) -> Result<(crate::runtime::PlanEffectGuard, AdmittedEffect), serde_json::Value> {
     let Some(step) = current_plan_step() else {
@@ -769,6 +768,7 @@ async fn admit_plan_effect(
         &book,
         &step.capsule_id,
         &step.requester_id,
+        &step.request_id,
     ) {
         Ok(guard) => guard,
         Err(()) => return Err(instance_ended_response()),
@@ -966,7 +966,6 @@ pub(crate) async fn dispatch_agent_plan_step(
         "token": encode_bridge_capability_token(&token),
     });
     let step = PlanStep {
-        #[cfg(test)]
         request_id: request_id.to_string(),
         owner_id: owner_id.to_string(),
         requester_id: requester_id.to_string(),

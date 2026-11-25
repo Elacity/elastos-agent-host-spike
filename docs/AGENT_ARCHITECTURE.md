@@ -386,7 +386,12 @@ on `the_wrap_key_binds_each_input` names the same tests.
 Each running instance gets fresh, limited access to its agent's storage, and
 that access ends when the instance stops. A step whose dispatch hasn't reached
 its effect is refused; an effect already begun is tracked, and Stop says
-stopping until it ends.
+stopping until it ends. When settlement records that effect as unknown, the
+effect is resolved for Stop: the instance is reaped, Stop answers stopped and
+names the step, and the record stays unknown. A late landing can still store
+the bytes that effect had already begun. That store is the same effect, not a
+new action, and the record is not changed to done or refused. A journal write
+still has to pass its revision check.
 
 This document does not freeze the exact path layout below `Users/...` or
 `UsersAI/...`. Those paths require their own versioned object contract before

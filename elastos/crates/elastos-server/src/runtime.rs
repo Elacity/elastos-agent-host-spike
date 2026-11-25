@@ -320,6 +320,9 @@ pub(crate) struct PlanBook {
     /// Effect id to the session it is working for. Two effects of one session
     /// are two entries, so the first to finish does not clear the second.
     inflight: HashMap<u64, PlanFlight>,
+    /// Effects whose record is unknown. Stop names these and then drops them,
+    /// so a run of timeouts does not keep a flight or an instance.
+    unknown: Vec<UnknownPlanStep>,
     next: u64,
 }
 
@@ -332,13 +335,26 @@ struct PlanInstance {
 struct PlanFlight {
     session_id: String,
     agent_id: String,
+    request_id: String,
+}
+
+struct UnknownPlanStep {
+    session_id: String,
+    agent_id: String,
+    request_id: String,
+}
+
+/// One step Stop can name after its record was stored as unknown.
+pub(crate) struct NamedUnknownStep {
+    pub(crate) session_id: String,
+    pub(crate) request_id: String,
 }
 
 pub(crate) struct PlanEffectGuard {
     book: Option<Arc<StdMutex<PlanBook>>>,
     id: u64,
     /// The outcome is known. `Drop` then removes this effect and no other.
-    /// A drop before that leaves the mark: the outcome is still unknown.
+    /// A drop before that leaves the mark until settlement records unknown.
     release: bool,
 }
 
@@ -366,10 +382,7 @@ impl Drop for PlanEffectGuard {
             return;
         }
         let mut book = plan_book(book);
-        let Some(flight) = book.inflight.remove(&self.id) else {
-            return;
-        };
-        reap(&mut book, &flight.session_id);
+        finish_flight(&mut book, self.id, false);
     }
 }
 
@@ -377,8 +390,75 @@ fn new_plan_book() -> Arc<StdMutex<PlanBook>> {
     Arc::new(StdMutex::new(PlanBook {
         instances: HashMap::new(),
         inflight: HashMap::new(),
+        unknown: Vec::new(),
         next: 1,
     }))
+}
+
+/// Request id to the book that holds its flight. Settlement of `unknown`
+/// resolves that flight without holding the book across the dispatch.
+fn open_effects() -> &'static StdMutex<HashMap<String, Arc<StdMutex<PlanBook>>>> {
+    static OPEN: std::sync::OnceLock<StdMutex<HashMap<String, Arc<StdMutex<PlanBook>>>>> =
+        std::sync::OnceLock::new();
+    OPEN.get_or_init(|| StdMutex::new(HashMap::new()))
+}
+
+fn track_open_effect(request_id: &str, book: &Arc<StdMutex<PlanBook>>) {
+    if request_id.is_empty() {
+        return;
+    }
+    open_effects()
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+        .insert(request_id.to_string(), Arc::clone(book));
+}
+
+fn forget_open_effect(request_id: &str) {
+    if request_id.is_empty() {
+        return;
+    }
+    open_effects()
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+        .remove(request_id);
+}
+
+fn finish_flight(book: &mut PlanBook, id: u64, as_unknown: bool) {
+    let Some(flight) = book.inflight.remove(&id) else {
+        return;
+    };
+    forget_open_effect(&flight.request_id);
+    let session_id = flight.session_id.clone();
+    if as_unknown {
+        book.unknown.push(UnknownPlanStep {
+            session_id: flight.session_id,
+            agent_id: flight.agent_id,
+            request_id: flight.request_id,
+        });
+    }
+    reap(book, &session_id);
+}
+
+/// The record now says unknown. This effect no longer holds its instance.
+/// Stop can answer stopped and name the step. The record is left unknown.
+pub(crate) fn resolve_unknown_plan_effect(request_id: &str) {
+    let book = open_effects()
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+        .get(request_id)
+        .cloned();
+    let Some(book) = book else {
+        return;
+    };
+    let mut locked = plan_book(&book);
+    let id = locked
+        .inflight
+        .iter()
+        .find(|(_, flight)| flight.request_id == request_id)
+        .map(|(id, _)| *id);
+    if let Some(id) = id {
+        finish_flight(&mut locked, id, true);
+    }
 }
 
 fn plan_book(book: &StdMutex<PlanBook>) -> std::sync::MutexGuard<'_, PlanBook> {
@@ -1597,6 +1677,7 @@ impl Runtime {
         book: &Arc<StdMutex<PlanBook>>,
         session_id: &str,
         agent_id: &str,
+        request_id: &str,
     ) -> std::result::Result<PlanEffectGuard, ()> {
         let mut locked = plan_book(book);
         #[cfg(test)]
@@ -1613,14 +1694,53 @@ impl Runtime {
             PlanFlight {
                 session_id: session_id.to_string(),
                 agent_id: agent_id.to_string(),
+                request_id: request_id.to_string(),
             },
         );
         drop(locked);
+        track_open_effect(request_id, book);
         Ok(PlanEffectGuard {
             book: Some(Arc::clone(book)),
             id,
             release: false,
         })
+    }
+
+    /// Steps whose record is unknown, for this agent. The book drops them.
+    pub(crate) fn take_unknown_plan_steps(&self, agent_id: &str) -> Vec<NamedUnknownStep> {
+        let mut book = plan_book(&self.plan_book);
+        let mut taken = Vec::new();
+        book.unknown.retain(|step| {
+            if step.agent_id != agent_id {
+                return true;
+            }
+            taken.push(NamedUnknownStep {
+                session_id: step.session_id.clone(),
+                request_id: step.request_id.clone(),
+            });
+            false
+        });
+        taken
+    }
+
+    /// Request ids whose record is unknown, for this session. The book drops them.
+    pub(crate) fn take_unknown_plan_steps_for_session(&self, session_id: &str) -> Vec<String> {
+        let mut book = plan_book(&self.plan_book);
+        let mut taken = Vec::new();
+        book.unknown.retain(|step| {
+            if step.session_id != session_id {
+                return true;
+            }
+            taken.push(step.request_id.clone());
+            false
+        });
+        taken
+    }
+
+    #[cfg(test)]
+    pub(crate) fn plan_book_is_empty(&self) -> bool {
+        let book = plan_book(&self.plan_book);
+        book.instances.is_empty() && book.inflight.is_empty() && book.unknown.is_empty()
     }
 
     pub(crate) fn plan_effect_inflight(&self, session_id: &str) -> bool {

@@ -48,6 +48,9 @@ pub struct CapsuleInfoResponse {
     session_id: String,
     /// Why the activation ended, once it has.
     cause: Option<String>,
+    /// Plan steps whose record is unknown. Empty unless this stop resolved one.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    unknown_steps: Vec<String>,
 }
 
 /// Every registered activation, sorted by id. A component launch answers
@@ -65,6 +68,7 @@ pub async fn list_capsules(
             status: info.status,
             session_id: info.session_id,
             cause: info.cause,
+            unknown_steps: Vec::new(),
         })
         .collect();
 
@@ -418,9 +422,12 @@ pub async fn stop_capsule(
     match runtime.stop_capsule_with_reason(&id, &reason).await {
         Ok(Some(info)) => {
             // An effect already begun keeps this answer at stopping. The row's
-            // own end is not said while that effect can still land.
+            // own end is not said while that effect can still land. A record
+            // of unknown resolves that effect: the answer is stopped and names
+            // the step. The record itself stays unknown.
+            let unknown_steps = runtime.take_unknown_plan_steps_for_session(&id);
             let effect_open = runtime.plan_effect_inflight(&id);
-            let status = if effect_open || info.ended_at.is_none() {
+            let status = if effect_open || (info.ended_at.is_none() && unknown_steps.is_empty()) {
                 StatusCode::ACCEPTED
             } else {
                 StatusCode::OK
@@ -430,11 +437,14 @@ pub async fn stop_capsule(
                 name: info.name,
                 status: if effect_open {
                     "stopping".to_string()
+                } else if !unknown_steps.is_empty() {
+                    "stopped".to_string()
                 } else {
                     info.status
                 },
                 session_id: info.session_id,
                 cause: info.cause,
+                unknown_steps,
             };
             (status, Json(answer)).into_response()
         }
@@ -463,14 +473,52 @@ struct StoppedAgentBody {
 }
 
 #[derive(Serialize)]
+struct UnknownPlanStepBody {
+    session_id: String,
+    request_id: String,
+    /// Always `unknown`. The record uses the same word. This is not done
+    /// and it is not refused.
+    outcome: String,
+}
+
+#[derive(Serialize)]
 struct StopAgentResponse {
     stopped: Vec<StoppedAgentBody>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     stopping: Vec<StoppedAgentBody>,
+    /// Steps whose record is unknown. Stop names them and does not call them
+    /// done or refused.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    unknown: Vec<UnknownPlanStepBody>,
     /// `stopped` when this call found the sessions already ended and did not
     /// stop a further row.
     #[serde(skip_serializing_if = "Option::is_none")]
     already: Option<String>,
+}
+
+fn unknown_step_bodies(runtime: &Runtime, agent_id: &str) -> Vec<UnknownPlanStepBody> {
+    runtime
+        .take_unknown_plan_steps(agent_id)
+        .into_iter()
+        .map(|step| UnknownPlanStepBody {
+            session_id: step.session_id,
+            request_id: step.request_id,
+            outcome: "unknown".to_string(),
+        })
+        .collect()
+}
+
+fn stopped_rows_for_unknown(unknown: &[UnknownPlanStepBody]) -> Vec<StoppedAgentBody> {
+    let mut sessions: Vec<String> = unknown.iter().map(|step| step.session_id.clone()).collect();
+    sessions.sort();
+    sessions.dedup();
+    sessions
+        .into_iter()
+        .map(|session_id| StoppedAgentBody {
+            session_id,
+            status: "stopped".to_string(),
+        })
+        .collect()
 }
 
 /// Stops every live row whose principal is this agent. The start record is
@@ -516,8 +564,23 @@ pub async fn stop_agent_session(
 /// `stopped` is not said for that session.
 fn plan_write_still_open(runtime: &Runtime, agent_id: &str) -> Option<axum::response::Response> {
     let sessions = runtime.inflight_plan_sessions(agent_id);
-    if sessions.is_empty() {
+    let unknown = unknown_step_bodies(runtime, agent_id);
+    if sessions.is_empty() && unknown.is_empty() {
         return None;
+    }
+    if sessions.is_empty() {
+        return Some(
+            (
+                StatusCode::OK,
+                Json(StopAgentResponse {
+                    stopped: stopped_rows_for_unknown(&unknown),
+                    stopping: Vec::new(),
+                    unknown,
+                    already: None,
+                }),
+            )
+                .into_response(),
+        );
     }
     Some(
         (
@@ -531,6 +594,7 @@ fn plan_write_still_open(runtime: &Runtime, agent_id: &str) -> Option<axum::resp
                         status: "stopping".to_string(),
                     })
                     .collect(),
+                unknown,
                 already: None,
             }),
         )
@@ -582,6 +646,7 @@ async fn stop_collected_agent_rows(runtime: &Runtime, agent_id: &str) -> axum::r
             Json(StopAgentResponse {
                 stopped: Vec::new(),
                 stopping: Vec::new(),
+                unknown: Vec::new(),
                 already: Some("stopped".to_string()),
             }),
         )
@@ -627,7 +692,12 @@ async fn stop_collected_agent_rows(runtime: &Runtime, agent_id: &str) -> axum::r
             });
         }
     }
-    let already = (stopped.is_empty() && stopping.is_empty()).then(|| "stopped".to_string());
+    let unknown = unknown_step_bodies(runtime, agent_id);
+    if stopped.is_empty() {
+        stopped = stopped_rows_for_unknown(&unknown);
+    }
+    let already = (stopped.is_empty() && stopping.is_empty() && unknown.is_empty())
+        .then(|| "stopped".to_string());
     let status = if stopping.is_empty() {
         StatusCode::OK
     } else {
@@ -638,6 +708,7 @@ async fn stop_collected_agent_rows(runtime: &Runtime, agent_id: &str) -> axum::r
         Json(StopAgentResponse {
             stopped,
             stopping,
+            unknown,
             already,
         }),
     )

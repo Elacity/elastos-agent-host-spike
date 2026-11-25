@@ -509,8 +509,8 @@ pub(super) async fn dispatch_approved_agent_plan(
                 serde_json::json!({"status": "refused", "code": response["code"].as_str().unwrap_or("authority_refused")}),
             ),
             Err(_) => {
-                // The dispatch future is gone. Its effect mark stays. The
-                // one-use grant does not.
+                // The dispatch future is gone. The one-use grant does not stay.
+                // The flight stays until this settlement records unknown.
                 crate::resource_bridge::revoke_abandoned_plan_grant(&request_id).await;
                 (
                     "unknown",
@@ -518,7 +518,11 @@ pub(super) async fn dispatch_approved_agent_plan(
                 )
             }
         };
-        settle_agent_plan_dispatch(&data_dir, record, status, result)
+        let settled = settle_agent_plan_dispatch(&data_dir, record, status, result);
+        if settled.is_ok() && status == "unknown" {
+            crate::runtime::resolve_unknown_plan_effect(&request_id);
+        }
+        settled
     });
     match task.await {
         Ok(settled) => settled,
@@ -529,50 +533,57 @@ pub(super) async fn dispatch_approved_agent_plan(
             } else {
                 "dispatch_panic"
             };
-            settle_agent_plan_dispatch(
+            let settled = settle_agent_plan_dispatch(
                 &data_dir_if_lost,
-                record_if_lost,
+                record_if_lost.clone(),
                 "unknown",
                 serde_json::json!({"status": "unknown", "code": code}),
-            )
+            );
+            if settled.is_ok() {
+                crate::runtime::resolve_unknown_plan_effect(&record_if_lost.request_id);
+            }
+            settled
         }
     }
 }
 
+#[cfg(test)]
+fn plan_dispatch_waits(
+) -> &'static std::sync::Mutex<std::collections::HashMap<String, std::time::Duration>> {
+    static WAITS: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<String, std::time::Duration>>,
+    > = std::sync::OnceLock::new();
+    WAITS.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
 fn plan_dispatch_wait(request_id: &str) -> std::time::Duration {
     #[cfg(test)]
-    if let Some((id, wait)) = PLAN_DISPATCH_WAIT
+    if let Some(wait) = plan_dispatch_waits()
         .lock()
         .unwrap_or_else(|err| err.into_inner())
-        .as_ref()
+        .get(request_id)
+        .copied()
     {
-        if id == request_id {
-            return *wait;
-        }
+        return wait;
     }
     let _ = request_id;
     std::time::Duration::from_secs(120)
 }
 
 #[cfg(test)]
-static PLAN_DISPATCH_WAIT: std::sync::Mutex<Option<(String, std::time::Duration)>> =
-    std::sync::Mutex::new(None);
-
-#[cfg(test)]
 pub(crate) fn set_plan_dispatch_wait_for_test(request_id: &str, wait: std::time::Duration) {
-    *PLAN_DISPATCH_WAIT
+    plan_dispatch_waits()
         .lock()
-        .unwrap_or_else(|err| err.into_inner()) = Some((request_id.to_string(), wait));
+        .unwrap_or_else(|err| err.into_inner())
+        .insert(request_id.to_string(), wait);
 }
 
 #[cfg(test)]
 pub(crate) fn clear_plan_dispatch_wait_for_test(request_id: &str) {
-    let mut wait = PLAN_DISPATCH_WAIT
+    plan_dispatch_waits()
         .lock()
-        .unwrap_or_else(|err| err.into_inner());
-    if wait.as_ref().is_some_and(|(id, _)| id == request_id) {
-        wait.take();
-    }
+        .unwrap_or_else(|err| err.into_inner())
+        .remove(request_id);
 }
 
 fn settle_agent_plan_dispatch(
@@ -581,12 +592,35 @@ fn settle_agent_plan_dispatch(
     status: &str,
     result: serde_json::Value,
 ) -> anyhow::Result<String> {
+    // A late landing does not become a new action. The stored unknown stays
+    // unknown: nothing here calls it done, completed, or refused.
+    if let Ok(stored) = read_inspect_action_record(data_dir, &record.request_id) {
+        if stored.status == "unknown" && status != "unknown" {
+            return Ok("Agent plan dispatch unknown.".to_string());
+        }
+    }
     record.status = status.to_string();
     record.result = Some(result);
     record.updated_at = now_ts();
     write_inspect_action_record(data_dir, &record)?;
     append_agent_plan_dispatch_audit(data_dir, &record, status)?;
     Ok(format!("Agent plan dispatch {status}."))
+}
+
+/// A second settlement after unknown. The stored record stays unknown.
+#[cfg(test)]
+pub(crate) fn resettle_plan_for_test(
+    data_dir: &FsPath,
+    request_id: &str,
+    status: &str,
+) -> anyhow::Result<String> {
+    let record = read_inspect_action_record(data_dir, request_id)?;
+    settle_agent_plan_dispatch(
+        data_dir,
+        record,
+        status,
+        serde_json::json!({"status": status, "code": "late"}),
+    )
 }
 
 fn append_agent_plan_dispatch_audit(
