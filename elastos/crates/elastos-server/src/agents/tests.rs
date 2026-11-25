@@ -1420,6 +1420,102 @@ fn a_lock_that_keeps_changing_is_refused_by_name() {
     );
 }
 
+fn plain_bytes(value: &Value) -> Vec<u8> {
+    serde_json::to_vec(value).unwrap()
+}
+
+fn assert_plain_unreadable(bytes: &[u8]) {
+    assert_eq!(owners_in_plain_json(bytes), Err(DOES_NOT_PARSE));
+    let home = Home::new();
+    let path = home.agent_file();
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, bytes).unwrap();
+    set_mode(&path, 0o600);
+    let error = plain_owner_names(home.path()).expect_err("an unreadable agents file");
+    assert_eq!(error.to_string(), AGENTS_FILE_UNREADABLE);
+}
+
+fn plain_record(owner: &str, retired_at: Option<Value>) -> Value {
+    let mut record = json!({ "owner": owner });
+    if let Some(retired_at) = retired_at {
+        record["retired_at"] = retired_at;
+    }
+    json!({
+        "schema": AGENT_RECORDS_SCHEMA,
+        "agents": [{ "record": record }]
+    })
+}
+
+#[test]
+fn a_plain_file_from_a_newer_home_is_unreadable() {
+    let newer = plain_bytes(&json!({
+        "schema": "elastos.agent.records/v2",
+        "agents": [{ "record": { "owner": OWNER_ID } }]
+    }));
+    assert_plain_unreadable(&newer);
+    let missing = plain_bytes(&json!({
+        "agents": [{ "record": { "owner": OWNER_ID } }]
+    }));
+    assert_plain_unreadable(&missing);
+}
+
+#[test]
+fn a_plain_entry_without_a_record_is_unreadable() {
+    assert_plain_unreadable(&plain_bytes(&json!({
+        "schema": AGENT_RECORDS_SCHEMA,
+        "agents": [{ "owner": OWNER_ID }]
+    })));
+}
+
+#[test]
+fn a_plain_entry_without_an_owner_string_is_unreadable() {
+    assert_plain_unreadable(&plain_bytes(&json!({
+        "schema": AGENT_RECORDS_SCHEMA,
+        "agents": [{ "record": {} }]
+    })));
+    assert_plain_unreadable(&plain_bytes(&json!({
+        "schema": AGENT_RECORDS_SCHEMA,
+        "agents": [{ "record": { "owner": 4 } }]
+    })));
+    assert_plain_unreadable(&plain_bytes(&json!({
+        "schema": AGENT_RECORDS_SCHEMA,
+        "agents": [{ "record": { "owner": null } }]
+    })));
+}
+
+#[test]
+fn a_plain_retired_at_that_is_not_absent_null_or_unsigned_is_unreadable() {
+    for retired_at in [json!(false), json!("4"), json!(-1), json!(1.5), json!([])] {
+        assert_plain_unreadable(&plain_bytes(&plain_record(OWNER_ID, Some(retired_at))));
+    }
+}
+
+#[test]
+fn a_plain_file_of_today_still_names_its_owner() {
+    let absent = owners_in_plain_json(&plain_bytes(&plain_record(OWNER_ID, None))).unwrap();
+    assert_eq!(absent, vec![(OWNER_ID.to_string(), false)]);
+    let null_retired =
+        owners_in_plain_json(&plain_bytes(&plain_record(OWNER_ID, Some(json!(null))))).unwrap();
+    assert_eq!(null_retired, vec![(OWNER_ID.to_string(), false)]);
+    let retired =
+        owners_in_plain_json(&plain_bytes(&plain_record(OWNER_ID, Some(json!(4))))).unwrap();
+    assert_eq!(retired, vec![(OWNER_ID.to_string(), true)]);
+
+    let home = Home::new();
+    let caller = home.caller();
+    set_enabled_in_any_build(home.path(), &caller, true, 9).unwrap();
+    create_in_any_build(
+        home.path(),
+        &caller,
+        &request("request-plain-today"),
+        admit,
+        9,
+    )
+    .unwrap();
+    let owners = owners_in_plain_json(&home.agent_bytes()).expect("a file this Runtime writes");
+    assert_eq!(owners, vec![(OWNER_ID.to_string(), false)]);
+}
+
 #[test]
 fn the_refusal_names_the_count_and_what_to_do() {
     assert_eq!(

@@ -20,7 +20,10 @@
 //!   name. A root-key change reads the agent file as plain JSON, with the
 //!   same mode checks and a bounded read, and refuses when any unretired
 //!   record names this owner. That decision opens no key. An unreadable
-//!   file refuses with its own reason. A file that names only other owners,
+//!   file refuses with its own reason. That includes a schema other than
+//!   this one, an entry without a record or an owner string, and a
+//!   `retired_at` that is not absent, null, or an unsigned integer. A file
+//!   that names only other owners,
 //!   or only retired records of this owner, leaves this owner free to
 //!   change the root key.
 //! - A load takes no lock and writes nothing. A missing file means no agents.
@@ -1186,20 +1189,26 @@ fn plain_owner_names(data_dir: &Path) -> anyhow::Result<Option<Vec<(String, bool
 /// One record's owner id, and whether that record is retired.
 fn owners_in_plain_json(bytes: &[u8]) -> Result<Vec<(String, bool)>, &'static str> {
     let value: serde_json::Value = serde_json::from_slice(bytes).map_err(|_| DOES_NOT_PARSE)?;
+    if value.get("schema").and_then(|item| item.as_str()) != Some(AGENT_RECORDS_SCHEMA) {
+        return Err(DOES_NOT_PARSE);
+    }
     let Some(agents) = value.get("agents").and_then(|item| item.as_array()) else {
         return Err(DOES_NOT_PARSE);
     };
     let mut owners = Vec::new();
     for agent in agents {
         let Some(record) = agent.get("record") else {
-            continue;
+            return Err(DOES_NOT_PARSE);
         };
         let Some(owner) = record.get("owner").and_then(|owner| owner.as_str()) else {
-            continue;
+            return Err(DOES_NOT_PARSE);
         };
-        let retired = record
-            .get("retired_at")
-            .is_some_and(|retired_at| !retired_at.is_null());
+        let retired = match record.get("retired_at") {
+            None => false,
+            Some(retired_at) if retired_at.is_null() => false,
+            Some(retired_at) if retired_at.as_u64().is_some() => true,
+            Some(_) => return Err(DOES_NOT_PARSE),
+        };
         owners.push((owner.to_string(), retired));
     }
     Ok(owners)

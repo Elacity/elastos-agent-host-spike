@@ -325,6 +325,7 @@ mod off {
     async fn root_key_change_reads_a_0600_fixture_without_a_key() {
         let home = owner_home();
         let naming_owner = serde_json::to_vec(&json!({
+            "schema": crate::agents::AGENT_RECORDS_SCHEMA,
             "agents": [{ "record": { "owner": home.principal_id } }]
         }))
         .unwrap();
@@ -344,6 +345,7 @@ mod off {
 
         let home = owner_home();
         let other_owners = serde_json::to_vec(&json!({
+            "schema": crate::agents::AGENT_RECORDS_SCHEMA,
             "agents": [{ "record": { "owner": "person:local:someone-else" } }]
         }))
         .unwrap();
@@ -380,6 +382,7 @@ mod off {
 
         let home = owner_home();
         let oversized = serde_json::to_vec(&json!({
+            "schema": crate::agents::AGENT_RECORDS_SCHEMA,
             "agents": [{ "record": { "owner": home.principal_id } }],
             "pad": " ".repeat(crate::agents::MAX_AGENT_FILE_BYTES as usize)
         }))
@@ -400,6 +403,7 @@ mod off {
     async fn root_key_change_counts_unretired_records_and_creates_no_key_file() {
         let home = owner_home();
         let retired = serde_json::to_vec(&json!({
+            "schema": crate::agents::AGENT_RECORDS_SCHEMA,
             "agents": [{ "record": { "owner": home.principal_id, "retired_at": 4 } }]
         }))
         .unwrap();
@@ -413,6 +417,7 @@ mod off {
 
         let home = owner_home();
         let mixed = serde_json::to_vec(&json!({
+            "schema": crate::agents::AGENT_RECORDS_SCHEMA,
             "agents": [
                 { "record": { "owner": home.principal_id, "retired_at": 4 } },
                 { "record": { "owner": home.principal_id, "retired_at": null } }
