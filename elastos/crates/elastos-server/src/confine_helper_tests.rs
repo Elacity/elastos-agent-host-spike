@@ -5,11 +5,14 @@
 //! as macOS. The test lives in the library so it can store a signed auth
 //! record. `server_infra` is the binary crate and cannot see that helper.
 
-#[cfg(any(
-    target_os = "macos",
-    all(
-        target_os = "linux",
-        any(target_arch = "x86_64", target_arch = "aarch64")
+#[cfg(all(
+    not(elastos_unsupported_os_check),
+    any(
+        target_os = "macos",
+        all(
+            target_os = "linux",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        )
     )
 ))]
 use std::path::{Path, PathBuf};
@@ -22,11 +25,14 @@ use std::path::{Path, PathBuf};
 /// When it is unset, localhost is `target/fence-localhost-provider/debug/localhost-provider`.
 /// Object is `target/provider-fence-tests/debug/object-provider`. A missing
 /// file panics with the prepare instruction.
-#[cfg(any(
-    target_os = "macos",
-    all(
-        target_os = "linux",
-        any(target_arch = "x86_64", target_arch = "aarch64")
+#[cfg(all(
+    not(elastos_unsupported_os_check),
+    any(
+        target_os = "macos",
+        all(
+            target_os = "linux",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        )
     )
 ))]
 fn provider_binary(name: &str) -> PathBuf {
@@ -57,11 +63,14 @@ fn provider_binary(name: &str) -> PathBuf {
 
 /// A name `just prepare-providers` does not build has no binary. The panic
 /// names that command. The tests do not run Cargo to fill the gap.
-#[cfg(any(
-    target_os = "macos",
-    all(
-        target_os = "linux",
-        any(target_arch = "x86_64", target_arch = "aarch64")
+#[cfg(all(
+    not(elastos_unsupported_os_check),
+    any(
+        target_os = "macos",
+        all(
+            target_os = "linux",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        )
     )
 ))]
 #[test]
@@ -88,11 +97,14 @@ fn a_missing_helper_binary_names_prepare_providers() {
 /// Object init decides by open on Linux and by open plus lstat on macOS. A
 /// successful init means that check passed. The parent then checks the key
 /// bytes are unchanged.
-#[cfg(any(
-    target_os = "macos",
-    all(
-        target_os = "linux",
-        any(target_arch = "x86_64", target_arch = "aarch64")
+#[cfg(all(
+    not(elastos_unsupported_os_check),
+    any(
+        target_os = "macos",
+        all(
+            target_os = "linux",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        )
     )
 ))]
 #[tokio::test]
@@ -324,11 +336,14 @@ async fn localhost_and_object_providers_work_inside_their_fences() {
 /// An old data directory has no helper capsule.json. The helpers still start
 /// from the manifest in the binary, and a file that was already there stays
 /// readable with the same mode and owner.
-#[cfg(any(
-    target_os = "macos",
-    all(
-        target_os = "linux",
-        any(target_arch = "x86_64", target_arch = "aarch64")
+#[cfg(all(
+    not(elastos_unsupported_os_check),
+    any(
+        target_os = "macos",
+        all(
+            target_os = "linux",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        )
     )
 ))]
 #[tokio::test]
@@ -362,8 +377,9 @@ async fn an_updated_home_reads_existing_files_through_the_fence() {
             .exists());
         elastos_common::localhost::ensure_file_backed_roots(&data).unwrap();
         let chain = data.join("chain-provider");
+        // The old helper created this directory with create_dir_all and did
+        // not force 0700. The start tightens the opened handle.
         std::fs::create_dir_all(&chain).unwrap();
-        std::fs::set_permissions(&chain, std::fs::Permissions::from_mode(0o700)).unwrap();
         let chain_file = chain.join("kept.txt");
         std::fs::write(&chain_file, b"kept-from-the-old-home").unwrap();
         std::fs::set_permissions(&chain_file, std::fs::Permissions::from_mode(0o640)).unwrap();

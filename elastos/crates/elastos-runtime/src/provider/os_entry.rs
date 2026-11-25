@@ -1030,6 +1030,16 @@ mod tests {
         }
     }
 
+    #[cfg(all(
+        not(elastos_unsupported_os_check),
+        any(
+            target_os = "macos",
+            all(
+                target_os = "linux",
+                any(target_arch = "x86_64", target_arch = "aarch64")
+            )
+        )
+    ))]
     #[test]
     fn a_signed_right_narrows_the_helper_file_and_exec_grant() {
         fn authority_with(id: &str) -> ProviderAuthority {

@@ -991,8 +991,8 @@ impl Drop for ForkChild {
 
 /// A provider that was confined at launch and answered `Init`.
 ///
-/// The field is private and `spawn_confined` is the only constructor. There is
-/// no `From<ProviderBridge>`, so a plain spawn cannot be dressed as confined.
+/// The field is private. `spawn_confined` and `spawn_path_allow` construct it.
+/// There is no `From<ProviderBridge>`, so a plain spawn cannot be dressed as confined.
 pub struct Confined {
     bridge: Arc<ProviderBridge>,
 }
@@ -1817,9 +1817,12 @@ impl ProviderBridge {
     /// `chain-provider/` must be a real directory this user owns before the
     /// path allow-list renders. Create it at mode 0700 when it is missing.
     /// A directory that already existed, and one that appears in the create
-    /// race, are accepted only through an opened handle: `O_DIRECTORY |
-    /// O_NOFOLLOW`, then `fstat` on that handle. The mode check is the full
-    /// permission word, `0o7777`, so set-id and sticky bits are refused.
+    /// race, are accepted through an opened handle: `O_DIRECTORY |
+    /// O_NOFOLLOW`, owner check, then `fchmod` to 0700 on that handle. An
+    /// older helper created the directory with `create_dir_all` (0755 under
+    /// umask 022). A setgid parent stores 02700. Those directories are
+    /// tightened and the start continues. A symlink or a non-directory is
+    /// refused.
     fn ensure_chain_provider_root(data_dir: &Path) -> Result<(), BridgeError> {
         let root = data_dir.join("chain-provider");
         match Self::accept_chain_provider_root(&root) {
@@ -1839,7 +1842,7 @@ impl ProviderBridge {
         let mut builder = std::fs::DirBuilder::new();
         builder.mode(0o700);
         match builder.create(root) {
-            Ok(()) => Ok(()),
+            Ok(()) => Self::accept_chain_provider_root(root),
             Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
                 Self::accept_chain_provider_root(root)
             }
@@ -1847,11 +1850,13 @@ impl ProviderBridge {
         }
     }
 
-    /// Open `root` with `O_DIRECTORY | O_NOFOLLOW` and require the owner and
-    /// the full mode `0700`. `NotFound` stays an I/O error so the create path
-    /// can run. Every other open failure, and a handle whose mode is not
-    /// exactly `0700`, is the same refusal.
+    /// Open `root` with `O_DIRECTORY | O_NOFOLLOW`. The owner is checked on
+    /// that handle. A directory this user owns is then `fchmod`'d to 0700 and
+    /// `fsync`'d, the same calls `create_storage_root` uses, and the start
+    /// continues. `NotFound` stays an I/O error so the create path can run.
+    /// A symlink or a non-directory never reaches `fchmod`.
     fn accept_chain_provider_root(root: &Path) -> Result<(), BridgeError> {
+        use std::os::fd::AsRawFd;
         use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
         let refused = BridgeError::Refused("provider start is refused: chain-provider is not a directory this user owns with mode 0700. Replace it with a directory you own, then start Home again.".into());
         let dir = match std::fs::OpenOptions::new()
@@ -1866,11 +1871,15 @@ impl ProviderBridge {
             Err(_) => return Err(refused),
         };
         let meta = dir.metadata().map_err(BridgeError::Io)?;
-        if meta.uid() == unsafe { libc::geteuid() } && meta.mode() & 0o7777 == 0o700 {
-            Ok(())
-        } else {
-            Err(refused)
+        if meta.uid() != unsafe { libc::geteuid() } {
+            return Err(refused);
         }
+        if unsafe { libc::fchmod(dir.as_raw_fd(), 0o700) } < 0
+            || unsafe { libc::fsync(dir.as_raw_fd()) } < 0
+        {
+            return Err(BridgeError::Io(std::io::Error::last_os_error()));
+        }
+        Ok(())
     }
 
     /// Start localhost, object, or chain on that provider's path allow-list.
@@ -3133,7 +3142,7 @@ impl CapsuleProvider {
     }
 
     /// Create a CapsuleProvider from a provider the confined entry launched.
-    /// Only `spawn_confined` can produce `Confined`.
+    /// `spawn_confined` and `spawn_path_allow` produce `Confined`.
     pub fn from_confined(confined: Confined, scheme: impl Into<String>) -> Self {
         Self::with_scheme(confined.bridge, scheme)
     }
@@ -6438,20 +6447,19 @@ int main(void) {
         assert!(text.contains("0700"), "{text}");
 
         fs::remove_file(&root).unwrap();
-        fs::create_dir(&root).unwrap();
-        fs::set_permissions(&root, fs::Permissions::from_mode(0o755)).unwrap();
-        let text = ProviderBridge::create_chain_provider_root(&root)
-            .unwrap_err()
-            .to_string();
-        assert!(text.contains("0700"), "{text}");
-        let text = ProviderBridge::ensure_chain_provider_root(temp.path())
-            .unwrap_err()
-            .to_string();
-        assert!(text.contains("0700"), "{text}");
+        // The old helper used create_dir_all and left the umask mode. This
+        // row does not force 0700 before the accept.
+        fs::create_dir_all(&root).unwrap();
+        let created = fs::symlink_metadata(&root).unwrap().permissions().mode() & 0o7777;
+        assert_eq!(
+            created, 0o755,
+            "umask 022 leaves the old helper directory at 0755"
+        );
+        ProviderBridge::ensure_chain_provider_root(temp.path()).unwrap();
         assert_eq!(
             fs::symlink_metadata(&root).unwrap().permissions().mode() & 0o7777,
-            0o755,
-            "a refused directory keeps the mode it had"
+            0o700,
+            "an older 0755 directory is tightened on the opened handle"
         );
 
         fs::set_permissions(&root, fs::Permissions::from_mode(0o2700)).unwrap();
@@ -6460,13 +6468,13 @@ int main(void) {
             planted, 0o2700,
             "the setgid bit has to be stored to prove the full mode word"
         );
-        for refused in [
-            ProviderBridge::ensure_chain_provider_root(temp.path()),
-            ProviderBridge::create_chain_provider_root(&root),
-        ] {
-            let text = refused.unwrap_err().to_string();
-            assert!(text.contains("0700"), "{text}");
-        }
+        ProviderBridge::ensure_chain_provider_root(temp.path()).unwrap();
+        ProviderBridge::create_chain_provider_root(&root).unwrap();
+        assert_eq!(
+            fs::symlink_metadata(&root).unwrap().permissions().mode() & 0o7777,
+            0o700,
+            "a setgid directory is tightened to 0700"
+        );
 
         fs::remove_dir(&root).unwrap();
         let good = temp.path().join("good-chain-root");
