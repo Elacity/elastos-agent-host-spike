@@ -1304,6 +1304,7 @@ pub(in crate::api) fn principal_root_recovery_status_for_verified_principal(
         }
         status.objects_needing_attention = objects_needing_attention;
         status.objects_needing_attention_count = objects_needing_attention_count;
+        status.agents_built = crate::agents::build_allows();
         return Ok(status);
     };
     // Header-level only: contents are authenticated when each file is opened.
@@ -1338,6 +1339,7 @@ pub(in crate::api) fn principal_root_recovery_status_for_verified_principal(
         recovery_configured,
         recovery_download_available,
         protection_configured,
+        agents_built: crate::agents::build_allows(),
         required_actions,
         crypto: protection.crypto,
         objects_needing_attention,
@@ -3159,10 +3161,11 @@ pub(crate) async fn recovery_kit_import_inner(
         },
         None => None,
     };
-    // The agent writer create uses, from this decision until the store below
-    // returns. The DID provider wait above is finished, so the lock is not
-    // held across it. Every import takes the writer. Whether the key changes
-    // is read under that lock.
+    // Every import that stores a protection takes the writer first. The
+    // stored protection is loaded inside that writer, and the writer is held
+    // until the store below returns. A same-owner import still stores, so it
+    // is not a no-op that can skip the writer. The DID provider wait above
+    // is finished, so the writer is not held across it.
     let next_owner_id = if input.reassign_to_current_principal {
         kit.principal_id.as_str()
     } else {

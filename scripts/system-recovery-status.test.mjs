@@ -129,7 +129,10 @@ test("recovery text says agents stay on the Home where they were created", async
   assert.equal(on.refusal({ message: `request failed: 409 ${orphan}` }), orphan);
   const orphans = "2 agents on this Home would belong to nobody. This recovery changes the owner id their records name.";
   assert.equal(on.refusal({ message: `request failed: 409 ${orphans}` }), orphans);
-  assert.equal(await on.builds(() => Promise.resolve({ agents: [] })), true);
+  const unreadable = "This Home has an agents file this build cannot read, so a root-key change is refused.";
+  assert.equal(on.refusal({ message: `request failed: 409 ${unreadable}` }), unreadable);
+  assert.equal(await on.builds(() => Promise.resolve({ agents_built: true })), true);
+  assert.equal(await on.builds(() => Promise.resolve({ agents: [] })), false);
   assert.equal(
     await off.builds(() => Promise.reject(new Error("request failed: 409 agents are not built into this Runtime"))),
     false,
@@ -154,7 +157,7 @@ test("the agents sentence is shown only for a confirmed agents answer", async ()
   assert.equal(page.pendingText(plan).includes(STAY), false);
   assert.equal(page.success({}).includes(STAY), false);
   const confirmed = recoveryPage(true);
-  assert.equal(await confirmed.builds(() => Promise.resolve({ agents: [] })), true);
+  assert.equal(await confirmed.builds(() => Promise.resolve({ agents_built: true })), true);
   assert.equal(confirmed.pendingText(plan).endsWith(STAY), true);
   assert.equal(confirmed.success({}).endsWith(STAY), true);
 });
@@ -165,7 +168,7 @@ const flowSource = source.slice(
 );
 const FEATURE_OFF = "request failed: 409 agents are not built into this Runtime";
 
-function recoveryFlow() {
+function recoveryFlow(options = {}) {
   const calls = [];
   const pending = { hidden: true, textContent: "" };
   const note = { hidden: true, textContent: "", dataset: {} };
@@ -176,17 +179,19 @@ function recoveryFlow() {
     classList: { toggle() {} },
   };
   const button = { textContent: "", disabled: false };
+  const agentsError = options.agentsError || FEATURE_OFF;
   const context = vm.createContext({
     hasShellAccess: () => true,
     fetchJson: async (url) => {
       calls.push(String(url));
       if (String(url).includes("/api/apps/system/agents")) {
-        throw new Error(FEATURE_OFF);
+        throw new Error(agentsError);
       }
       if (String(url).includes("/api/auth/recovery/status")) {
         return {
           principal_id: "person:current",
           localhost_root: "localhost://Users/current",
+          agents_built: options.agentsBuilt === true,
         };
       }
       if (String(url).includes("/api/auth/recovery/full-import")) {
@@ -232,23 +237,62 @@ function kitFile(principalId, root) {
   };
 }
 
-test("onRecoveryImport asks the agents probe before the pending sentence", async () => {
-  const page = recoveryFlow();
-  const file = kitFile("person:other", "localhost://Users/other");
-  await page.context.onRecoveryImport({ target: { files: [file] } });
-  assert.equal(page.calls.includes("/api/apps/system/agents"), true);
-  assert.equal(page.pending.textContent.includes(STAY), false);
-  assert.equal(page.pending.textContent.includes("another Home account"), true);
+test("a 409 that agents are not turned on and a 403 do not mean agents are not built", async () => {
+  const page = recoveryPage(false);
+  const notTurnedOn = await page.builds((url) => {
+    if (String(url).includes("/api/apps/system/agents")) {
+      return Promise.reject(new Error("request failed: 409 agents are not turned on for this Home"));
+    }
+    return Promise.resolve({ agents_built: true });
+  });
+  assert.equal(notTurnedOn, true);
+  const forbidden = await page.builds((url) => {
+    if (String(url).includes("/api/apps/system/agents")) {
+      return Promise.reject(new Error("request failed: 403 admin passkey required"));
+    }
+    return Promise.resolve({ agents_built: true });
+  });
+  assert.equal(forbidden, true);
 });
 
-test("submitRecoveryImport asks the agents probe before the success sentence", async () => {
-  const page = recoveryFlow();
-  await page.context.submitRecoveryImport({
+test("onRecoveryImport reads agents_built and does not decide from a 409", async () => {
+  const hidden = recoveryFlow();
+  await hidden.context.onRecoveryImport({
+    target: { files: [kitFile("person:other", "localhost://Users/other")] },
+  });
+  assert.equal(hidden.calls.includes("/api/apps/system/agents"), false);
+  assert.equal(hidden.pending.textContent.includes(STAY), false);
+  assert.equal(hidden.pending.textContent.includes("another Home account"), true);
+
+  const shown = recoveryFlow({
+    agentsBuilt: true,
+    agentsError: "request failed: 409 agents are not turned on for this Home",
+  });
+  await shown.context.onRecoveryImport({
+    target: { files: [kitFile("person:other", "localhost://Users/other")] },
+  });
+  assert.equal(shown.calls.includes("/api/apps/system/agents"), false);
+  assert.equal(shown.pending.textContent.includes(STAY), true);
+});
+
+test("submitRecoveryImport reads agents_built and does not decide from a 403", async () => {
+  const hidden = recoveryFlow();
+  await hidden.context.submitRecoveryImport({
     schema: "elastos.full-recovery-bundle.import.request/v1",
   });
-  assert.equal(page.calls.includes("/api/apps/system/agents"), true);
-  assert.equal(page.note.textContent.includes(STAY), false);
-  assert.equal(page.note.textContent, "Recovery Kit imported.");
+  assert.equal(hidden.calls.includes("/api/apps/system/agents"), false);
+  assert.equal(hidden.note.textContent.includes(STAY), false);
+  assert.equal(hidden.note.textContent, "Recovery Kit imported.");
+
+  const shown = recoveryFlow({
+    agentsBuilt: true,
+    agentsError: "request failed: 403 admin passkey required",
+  });
+  await shown.context.submitRecoveryImport({
+    schema: "elastos.full-recovery-bundle.import.request/v1",
+  });
+  assert.equal(shown.calls.includes("/api/apps/system/agents"), false);
+  assert.equal(shown.note.textContent.endsWith(STAY), true);
 });
 
 test("a Home whose Profile needs backup still sees files needing attention", () => {

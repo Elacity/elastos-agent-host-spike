@@ -2542,6 +2542,7 @@ fn recovery_status_reports_pending_journal_and_damage() {
             "recovery_configured",
             "recovery_download_available",
             "protection_configured",
+            "agents_built",
             "required_actions",
             "crypto",
         ]
