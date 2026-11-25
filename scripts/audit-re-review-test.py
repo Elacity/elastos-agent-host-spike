@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""The re-review date check names an advisory whose date has passed."""
+"""The re-review date check names an advisory whose date has passed.
+
+Today in these tests is the fixed day below. It is not the clock, and it is
+not the re-review date written in elastos/.cargo/audit.toml.
+"""
 
 import os
 import subprocess
@@ -10,6 +14,9 @@ from pathlib import Path
 
 sys.dont_write_bytecode = True
 SCRIPT = Path(__file__).with_name("audit-re-review.py")
+REAL = SCRIPT.resolve().parents[1] / "elastos/.cargo/audit.toml"
+# A fixed day. The committed audit file's own deadline is later than this.
+FIXED_TODAY = "2026-11-25"
 
 FRESH = """\
 [advisories]
@@ -19,6 +26,7 @@ ignore = [
 ]
 """
 
+# 2026-11-20 is a fixture deadline. It is not the date in elastos/.cargo/audit.toml.
 EXPIRED = """\
 [advisories]
 ignore = [
@@ -54,22 +62,32 @@ class AuditReReviewTest(unittest.TestCase):
         return result.returncode, result.stderr
 
     def test_a_future_date_passes(self):
-        status, errors = self.run_check(FRESH, "2026-11-25")
+        status, errors = self.run_check(FRESH, FIXED_TODAY)
         self.assertEqual(status, 0, errors)
         self.assertEqual(errors, "")
 
     def test_an_expired_date_fails_and_names_that_advisory(self):
-        status, errors = self.run_check(EXPIRED, "2026-11-25")
+        # The expired deadline stays 2026-11-20. It is not copied from the audit file.
+        self.assertNotIn("re-review by 2026-11-20", REAL.read_text(encoding="utf-8"))
+        status, errors = self.run_check(EXPIRED, FIXED_TODAY)
         self.assertEqual(status, 1)
         self.assertIn("RUSTSEC-2026-0387: re-review date 2026-11-20 has passed", errors)
         self.assertNotIn("RUSTSEC-2026-0381", errors)
+
+    def test_todays_file_passes_on_a_fixed_today(self):
+        text = REAL.read_text(encoding="utf-8")
+        self.assertIn("Reviewed 2026-10-23 and 2026-11-25", text)
+        self.assertIn("re-review by 2026-12-09 at the latest.", text)
+        status, errors = self.run_check(text, FIXED_TODAY)
+        self.assertEqual(status, 0, errors)
+        self.assertEqual(errors, "")
 
     def test_the_deadline_day_itself_still_passes(self):
         status, errors = self.run_check(EXPIRED, "2026-11-20")
         self.assertEqual(status, 0, errors)
 
     def test_a_missing_date_names_the_advisory(self):
-        status, errors = self.run_check(UNDATED, "2026-11-25")
+        status, errors = self.run_check(UNDATED, FIXED_TODAY)
         self.assertEqual(status, 1)
         self.assertIn("RUSTSEC-2026-0001: re-review date is missing", errors)
 
