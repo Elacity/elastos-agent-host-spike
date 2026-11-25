@@ -26,7 +26,10 @@ use super::model_provider_config::{
     read_hosted_job_bindings, read_hosted_secret, write_hosted_egress_grants,
     write_hosted_job_bindings,
 };
-use super::model_provider_egress_decision::{self, ActiveDecision, ConnectionScope, EgressScope};
+use super::model_provider_egress_decision::{
+    self, chat_url_for_offer, configuration_id_with_fixture_ca, configuration_identity,
+    offer_run_matches, ActiveDecision, ConnectionScope, EgressScope,
+};
 
 #[derive(Clone, Copy)]
 #[cfg_attr(test, allow(dead_code))]
@@ -164,122 +167,6 @@ struct Destination {
     provider: String,
     configuration_id: String,
     fixture_ca_pem: Option<String>,
-}
-
-fn configuration_id_with_fixture_ca(base: String, ca_pem: Option<&str>) -> String {
-    match ca_pem {
-        Some(pem) => hex::encode(Sha256::digest(
-            serde_json::to_vec(&(base, hex::encode(Sha256::digest(pem.as_bytes()))))
-                .expect("configuration identity is serializable"),
-        )),
-        None => base,
-    }
-}
-
-/// The effects a run can send, and the adapter kind each one runs on.
-pub(crate) fn offer_run_matches(effect: &str, kind: &str) -> bool {
-    matches!(
-        (effect, kind),
-        ("text", "open_ai_compatible_text")
-            | ("responses", "open_ai_responses_text")
-            | ("decisions", "open_router_decisions")
-            | (
-                "job_create" | "job_status" | "job_cancel",
-                "http_job_artifact"
-            )
-    )
-}
-
-fn configuration_identity(
-    adapter: &serde_json::Value,
-    credential: Option<&str>,
-    url: &Url,
-    fixture_ca_pem: Option<&str>,
-) -> anyhow::Result<String> {
-    let base = hex::encode(Sha256::digest(serde_json::to_vec(&(adapter, credential))?));
-    let ca = (url.scheme() == "https" && url.host_str() == Some("127.0.0.1"))
-        .then_some(fixture_ca_pem)
-        .flatten();
-    Ok(configuration_id_with_fixture_ca(base, ca))
-}
-
-fn chat_url_for_offer(
-    adapter: &serde_json::Value,
-    fixtures: Option<&super::model_provider_config::HostedValidateFixtures>,
-) -> anyhow::Result<String> {
-    let mut url = adapter["api_url"]
-        .as_str()
-        .ok_or_else(|| anyhow::anyhow!("hosted URL unavailable"))?
-        .to_string();
-    if let Some(fixtures) = fixtures {
-        url = match adapter["hosted"]["backend_provider_label"].as_str() {
-            Some("OpenRouter") => fixtures
-                .openrouter_chat_url
-                .as_ref()
-                .map(|value| value.as_str().to_string())
-                .unwrap_or(url),
-            Some("Venice") => fixtures
-                .venice_chat_url
-                .as_ref()
-                .map(|value| value.as_str().to_string())
-                .unwrap_or(url),
-            _ => url,
-        };
-    }
-    Ok(url)
-}
-
-/// The offer's adapter kind, and the configuration id the broker would send
-/// for each effect that kind can run. Absent when the offer cannot be read.
-pub(crate) fn current_run_configurations(
-    data_dir: &Path,
-    offer_id: &str,
-) -> Option<(String, Vec<(String, String)>)> {
-    let offers = load_model_provider_operator_offers(data_dir).ok()?;
-    let offer = offers
-        .iter()
-        .find(|offer| offer["id"] == offer_id && offer["enabled"] != false)?;
-    let adapter = &offer["adapter"];
-    let kind = adapter["kind"].as_str()?.to_string();
-    let fixtures = load_hosted_validate_fixtures(data_dir).ok()?;
-    let mut runs = Vec::new();
-    for effect in [
-        "text",
-        "responses",
-        "decisions",
-        "job_create",
-        "job_status",
-        "job_cancel",
-    ] {
-        if !offer_run_matches(effect, &kind) {
-            continue;
-        }
-        let (raw_url, credential) = if matches!(effect, "text" | "responses" | "decisions") {
-            let url = chat_url_for_offer(adapter, fixtures.as_ref()).ok()?;
-            let credential = read_hosted_secret(data_dir, offer_id).ok()?;
-            (url, credential)
-        } else {
-            let field = match effect {
-                "job_create" => "create_url",
-                "job_status" => "status_url",
-                _ => "cancel_url",
-            };
-            let url = adapter[field].as_str()?.to_string();
-            let credential = adapter["bearer_token"].as_str().map(str::to_string);
-            (url, credential)
-        };
-        let url = Url::parse(&raw_url).ok()?;
-        let ca = fixtures
-            .as_ref()
-            .and_then(|value| value.loopback_ca_pem.as_deref());
-        let configuration =
-            configuration_identity(adapter, credential.as_deref(), &url, ca).ok()?;
-        runs.push((effect.to_string(), configuration));
-    }
-    if runs.is_empty() {
-        return None;
-    }
-    Some((kind, runs))
 }
 
 #[cfg(test)]
@@ -939,14 +826,12 @@ fn connection_scope(
         .credential
         .as_deref()
         .ok_or_else(|| anyhow::anyhow!("hosted connection key unavailable"))?;
-    let revision = hex::encode(Sha256::digest(serde_json::to_vec(&(
-        // Bump when Runtime expands the hosted route/effect allowlist.
-        "hosted-connection-policy-v1:validate_models,validate_access,text,responses,decisions",
+    let revision = model_provider_egress_decision::connection_revision(
         scope.provider.as_str(),
         scope.origin.as_str(),
         credential,
         destination.fixture_ca_pem.as_deref(),
-    ))?));
+    )?;
     Ok(ConnectionScope {
         version: 1,
         offer_id: scope.offer_id.clone(),
@@ -963,56 +848,10 @@ pub(crate) fn saved_connection_state(
     if !super::model_provider_config::offer_uses_connection_authority(data_dir, offer_id)? {
         return model_provider_egress_decision::offer_state(data_dir, offer_id);
     }
-    let offers = load_model_provider_operator_offers(data_dir)?;
-    let offer = offers
-        .iter()
-        .find(|offer| offer["id"] == offer_id)
-        .ok_or_else(|| anyhow::anyhow!("hosted offer unavailable"))?;
-    let adapter = &offer["adapter"];
-    let mut raw = adapter["api_url"]
-        .as_str()
-        .ok_or_else(|| anyhow::anyhow!("hosted URL unavailable"))?
-        .to_string();
-    let fixtures = load_hosted_validate_fixtures(data_dir)?;
-    if adapter["kind"] == "open_ai_compatible_text" {
-        if let Some(fixtures) = fixtures.as_ref() {
-            let fixture_url = match adapter["hosted"]["backend_provider_label"].as_str() {
-                Some("OpenRouter") => fixtures.openrouter_chat_url.as_ref(),
-                Some("Venice") => fixtures.venice_chat_url.as_ref(),
-                _ => None,
-            };
-            if let Some(fixture_url) = fixture_url {
-                raw = fixture_url.as_str().to_string();
-            }
-        }
-    }
-    let url = Url::parse(&raw)?;
-    let fixture_ca_pem = if url.scheme() == "https" && url.host_str() == Some("127.0.0.1") {
-        fixtures
-            .as_ref()
-            .and_then(|fixture| fixture.loopback_ca_pem.clone())
-    } else {
-        None
-    };
-    let credential = read_hosted_secret(data_dir, offer_id)?;
-    let destination = Destination {
-        url,
-        grant_url: raw,
-        credential,
-        job_backend_id: None,
-        provider: adapter["hosted"]["backend_provider_label"]
-            .as_str()
-            .ok_or_else(|| anyhow::anyhow!("hosted provider unavailable"))?
-            .to_string(),
-        configuration_id: hex::encode(Sha256::digest(serde_json::to_vec(adapter)?)),
-        fixture_ca_pem,
-    };
-    let scope = egress_scope(offer_id, "text", "POST", &destination)?;
-    model_provider_egress_decision::connection_state(
-        data_dir,
-        &scope,
-        &connection_scope(&scope, &destination)?,
-    )
+    let (scope, connection) =
+        model_provider_egress_decision::broker_text_connection(data_dir, offer_id)
+            .ok_or_else(|| anyhow::anyhow!("hosted connection unavailable"))?;
+    model_provider_egress_decision::connection_state(data_dir, &scope, &connection)
 }
 
 fn uses_connection_authority(

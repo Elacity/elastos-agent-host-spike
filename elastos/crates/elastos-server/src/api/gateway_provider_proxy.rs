@@ -4109,7 +4109,10 @@ pub(crate) fn agent_owner_approved(
     }
     #[cfg(not(unix))]
     {
-        let _ = (owners, owner_id, offer_id);
+        let _ = (owners, owner_id);
+        let _ =
+            crate::api::model_provider_config::offer_uses_connection_authority(data_dir, offer_id);
+        let _ = crate::api::model_provider_config::load_hosted_validate_fixtures(data_dir);
         false
     }
 }
