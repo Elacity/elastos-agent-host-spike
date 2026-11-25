@@ -2,9 +2,9 @@
 """Decide whether a pull request must run the archive-viewer parser job.
 
 The parser job runs the guest tests and the host-test fuel gate. A pull
-request skips it only when no changed path is examples/archive-viewer or one
-of the check files below. An empty change list, one of those paths, or a
-failed `git diff` runs it.
+request skips it only when no changed path is examples/archive-viewer, one
+of the direct inputs below, or one of the check files below. An empty change
+list, one of those paths, or a failed `git diff` runs it.
 
 The archive-viewer-paths job in .github/workflows/ci.yml runs this on a pull
 request, with BASE_REF and HEAD_SHA set and the full history checked out. It
@@ -25,11 +25,28 @@ CHECK_FILES = frozenset({
     ".github/workflows/ci.yml",
     ".github/workflows/examples-nightly.yml",
 })
+# Direct inputs of the parser, outside examples/archive-viewer. The guest
+# crate, the documents model, and the fuel harness are path dependencies.
+# The component build reads the builder and the Bus v1 WIT file. A neighbour
+# whose name only starts the same way is not an input.
+DIRECT_PREFIXES = (
+    "examples/capsule-kit/guest/",
+    "examples/docs-viewer/model/",
+    "examples/capsule-kit/v1-host-test/",
+)
+DIRECT_FILES = frozenset({
+    "examples/capsule-kit/guest",
+    "examples/docs-viewer/model",
+    "examples/capsule-kit/v1-host-test",
+    "scripts/build-component-capsule.sh",
+    "elastos/wit/elastos-bus-v1.wit",
+})
 
 
 def triggers(path):
-    """True when this path is the archive viewer or one of its check files."""
-    return path == "examples/archive-viewer" or path.startswith(PREFIX) or path in CHECK_FILES
+    """True when this path is the archive viewer, a direct input, or a check file."""
+    return (path == "examples/archive-viewer" or path.startswith(PREFIX) or path in CHECK_FILES
+            or path in DIRECT_FILES or any(path.startswith(prefix) for prefix in DIRECT_PREFIXES))
 
 
 def must_run(paths):
@@ -54,7 +71,7 @@ def decide(environ, cwd=None):
     except (KeyError, OSError, subprocess.CalledProcessError) as error:
         return True, f"the changed paths could not be read ({type(error).__name__})"
     if not must_run(paths):
-        return False, f"none of {len(paths)} changed paths is the archive viewer or a check file"
+        return False, f"none of {len(paths)} changed paths is the archive viewer, a direct input, or a check file"
     hit = sorted(path for path in paths if triggers(path))
     if not hit:
         return True, "no changed path"

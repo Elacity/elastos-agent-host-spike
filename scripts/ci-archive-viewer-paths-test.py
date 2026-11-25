@@ -45,6 +45,23 @@ class RuleTest(unittest.TestCase):
 
     def test_a_name_that_only_starts_like_the_folder_skips(self):
         self.assertFalse(paths.must_run(["examples/archive-viewer-extra/src/lib.rs"]))
+        self.assertFalse(paths.must_run(["examples/capsule-kit/guest-extra/src/lib.rs"]))
+        self.assertFalse(paths.must_run(["examples/docs-viewer/model-extra/src/lib.rs"]))
+        self.assertFalse(paths.must_run(["examples/capsule-kit/v1-host-test-extra/src/lib.rs"]))
+        self.assertFalse(paths.must_run(["elastos/wit/other.wit"]))
+        self.assertFalse(paths.must_run(["scripts/build-component-capsule.sh.bak"]))
+
+    def test_each_direct_input_runs(self):
+        direct = [
+            "examples/capsule-kit/guest/src/lib.rs",
+            "examples/docs-viewer/model/src/lib.rs",
+            "examples/capsule-kit/v1-host-test/src/lib.rs",
+            "scripts/build-component-capsule.sh",
+            "elastos/wit/elastos-bus-v1.wit",
+        ]
+        for name in direct:
+            with self.subTest(name=name):
+                self.assertTrue(paths.must_run(["README.md", name]))
 
     def test_an_empty_change_list_runs(self):
         self.assertTrue(paths.must_run([]))
@@ -93,6 +110,22 @@ class DecideTest(unittest.TestCase):
     def test_a_pull_request_that_touches_the_viewer_runs(self):
         self.write({"examples/archive-viewer/src/tar.rs": "fn tar() {}\n"})
         self.assertTrue(self.decide(self.commit("tar"))[0])
+
+    def test_a_pull_request_that_touches_only_a_direct_input_runs(self):
+        base = self.git("rev-parse", "main").stdout.strip()
+        direct = [
+            "examples/capsule-kit/guest/src/lib.rs",
+            "examples/capsule-kit/v1-host-test/src/lib.rs",
+            "examples/docs-viewer/model/src/lib.rs",
+            "scripts/build-component-capsule.sh",
+            "elastos/wit/elastos-bus-v1.wit",
+        ]
+        for name in direct:
+            with self.subTest(name=name):
+                self.git("checkout", "-q", "--detach", base)
+                self.write({name: "changed\n"})
+                self.assertTrue(self.decide(self.commit(name))[0])
+        self.git("checkout", "-q", "work")
 
     def test_a_pull_request_that_changes_nothing_runs(self):
         head = self.git("rev-parse", "HEAD").stdout.strip()
