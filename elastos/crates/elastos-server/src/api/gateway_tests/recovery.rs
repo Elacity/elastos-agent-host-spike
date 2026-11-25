@@ -2666,3 +2666,36 @@ fn recovery_status_reads_headers_only() {
     // Heads only: no body is read, so nothing is decrypted.
     assert!(after.bytes_read - before.bytes_read <= 1_101 * (4 * 1024 + 3));
 }
+
+#[cfg(unix)]
+#[test]
+fn recovery_status_reports_agents_built_on_an_unprotected_root() {
+    let dir = tempfile::tempdir().unwrap();
+    let owner = passkey_authority_with_name(dir.path(), Some("unprotected"));
+    let principal =
+        crate::auth::load_principal_for_proof_binding(dir.path(), &owner.proof_binding_id).unwrap();
+    let status = crate::api::auth_gateway::principal_root_recovery_status_for_verified_principal(
+        dir.path(),
+        &principal.principal_id,
+        &principal.localhost_root,
+    )
+    .unwrap();
+    assert!(!status.protection_configured);
+    assert_eq!(status.agents_built, crate::agents::build_allows());
+}
+
+#[cfg(unix)]
+#[test]
+fn recovery_status_reports_agents_built_on_a_protected_root() {
+    let dir = tempfile::tempdir().unwrap();
+    let principal_id = "person:local:agents-built-protected";
+    let protection = crate::auth::store_test_principal_root_protection(dir.path(), principal_id);
+    let status = crate::api::auth_gateway::principal_root_recovery_status_for_verified_principal(
+        dir.path(),
+        principal_id,
+        &protection.localhost_root,
+    )
+    .unwrap();
+    assert!(status.protection_configured);
+    assert_eq!(status.agents_built, crate::agents::build_allows());
+}

@@ -162,6 +162,7 @@ mod off {
     async fn import_kit(
         home: &OwnerHome,
         kit: elastos_runtime::auth::RecoveryKitV1,
+        reassign: bool,
     ) -> anyhow::Result<crate::api::auth_gateway::RecoveryKitImportResponse> {
         let mut headers = axum::http::HeaderMap::new();
         headers.insert("x-elastos-home-token", home.home_token.parse().unwrap());
@@ -173,7 +174,7 @@ mod off {
             crate::api::auth_gateway::RecoveryKitMaterialImport {
                 principal_id: home.principal_id.clone(),
                 localhost_root: home.localhost_root.clone(),
-                reassign_to_current_principal: false,
+                reassign_to_current_principal: reassign,
                 kit,
                 did_recovery_proof: None,
             },
@@ -196,7 +197,7 @@ mod off {
         let kit = different_key(&home);
         let auth = auth_bytes(home.dir.path());
         let agents = std::fs::read(agent_file(home.dir.path())).unwrap();
-        let err = import_kit(&home, kit)
+        let err = import_kit(&home, kit, false)
             .await
             .expect_err("a root-key change must be refused while an agent's data opens")
             .to_string();
@@ -216,7 +217,7 @@ mod off {
             "this owner has no agents file"
         );
         let before = data_root_entries(home.dir.path());
-        let response = import_kit(&home, kit)
+        let response = import_kit(&home, kit, false)
             .await
             .expect("an owner with no agents file imports as before");
         assert_eq!(response.status, "imported");
@@ -245,7 +246,7 @@ mod off {
         std::fs::write(agent_file(home.dir.path()), b"not an agent file").unwrap();
         let kit = different_key(&home);
         let auth = auth_bytes(home.dir.path());
-        let err = import_kit(&home, kit)
+        let err = import_kit(&home, kit, false)
             .await
             .expect_err("an unreadable agents file refuses the root-key change")
             .to_string();
@@ -332,7 +333,7 @@ mod off {
         write_0600(&agent_file(home.dir.path()), &naming_owner);
         let kit = different_key(&home);
         let auth = auth_bytes(home.dir.path());
-        let err = import_kit(&home, kit)
+        let err = import_kit(&home, kit, false)
             .await
             .expect_err("a record that names this owner refuses the root-key change")
             .to_string();
@@ -352,7 +353,7 @@ mod off {
         write_0600(&agent_file(home.dir.path()), &other_owners);
         let kit = different_key(&home);
         let new_key = kit.data_key_id.clone();
-        let response = import_kit(&home, kit)
+        let response = import_kit(&home, kit, false)
             .await
             .expect("a file that names only other owners leaves this owner free");
         assert_eq!(response.status, "imported");
@@ -373,7 +374,7 @@ mod off {
         write_0600(&agent_file(home.dir.path()), b"not json");
         let kit = different_key(&home);
         let auth = auth_bytes(home.dir.path());
-        let err = import_kit(&home, kit)
+        let err = import_kit(&home, kit, false)
             .await
             .expect_err("an unreadable file refuses with its own reason")
             .to_string();
@@ -390,7 +391,7 @@ mod off {
         assert!(oversized.len() as u64 > crate::agents::MAX_AGENT_FILE_BYTES);
         write_0600(&agent_file(home.dir.path()), &oversized);
         let kit = different_key(&home);
-        let err = import_kit(&home, kit)
+        let err = import_kit(&home, kit, false)
             .await
             .expect_err("a file past the read bound refuses as unreadable")
             .to_string();
@@ -409,7 +410,7 @@ mod off {
         .unwrap();
         write_0600(&agent_file(home.dir.path()), &retired);
         let kit = different_key(&home);
-        let response = import_kit(&home, kit)
+        let response = import_kit(&home, kit, false)
             .await
             .expect("a retired record does not stop a root-key change");
         assert_eq!(response.status, "imported");
@@ -435,7 +436,7 @@ mod off {
             "building the kit writes the archive key, so the import can be checked for creating one"
         );
         std::fs::remove_file(&key_file).unwrap();
-        let err = import_kit(&home, kit)
+        let err = import_kit(&home, kit, false)
             .await
             .expect_err(
                 "one unretired record refuses, and the retired one does not add to the count",
@@ -447,6 +448,42 @@ mod off {
             "the decision opens no key and creates no key file"
         );
         assert_eq!(std::fs::read(agent_file(home.dir.path())).unwrap(), mixed);
+    }
+
+    /// The kit import route, with reassignment asked for. A record that names
+    /// this owner, retired or not, refuses: the recovery would leave that
+    /// agent belonging to nobody.
+    #[tokio::test]
+    async fn reassignment_refuses_when_a_record_names_this_owner() {
+        let home = owner_home();
+        crate::agents::tests::plant_enabled_home_with_one_agent(
+            home.dir.path(),
+            &home.principal_id,
+            &home.proof_binding_id,
+        );
+        let other = passkey_authority_with_name_role_credential(
+            home.dir.path(),
+            None,
+            crate::auth::RuntimePrincipalRole::Guest,
+            "feature-off-reassign",
+        );
+        let other_protection =
+            crate::auth::store_test_principal_root_protection(home.dir.path(), &other.principal_id);
+        let kit = crate::auth::recovery_kit_from_archive(
+            home.dir.path(),
+            other_protection.protectors[0].archive.as_ref().unwrap(),
+        )
+        .unwrap();
+        assert_ne!(kit.principal_id, home.principal_id);
+        let auth = auth_bytes(home.dir.path());
+        let agents = std::fs::read(agent_file(home.dir.path())).unwrap();
+        let err = import_kit(&home, kit, true)
+            .await
+            .expect_err("a reassignment that changes the owner id a record names")
+            .to_string();
+        assert_eq!(err, crate::agents::agents_would_belong_to_nobody(1));
+        assert_eq!(auth_bytes(home.dir.path()), auth);
+        assert_eq!(std::fs::read(agent_file(home.dir.path())).unwrap(), agents);
     }
 }
 
