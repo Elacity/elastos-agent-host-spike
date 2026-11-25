@@ -1678,10 +1678,11 @@ impl ModelBudgetRefusal {
 const AGENT_ACCOUNT_UNAVAILABLE: &str = "model_budget_exceeded: agent account unavailable";
 
 /// An admitted agent whose launch holds neither a ceiling nor an account.
-/// A stored person is not this refusal. A principal this Home cannot show,
-/// including one the owner file no longer carries, is refused.
+/// This applies when the build has agents. A stored person is not this
+/// refusal. A verified device principal runs as before. A principal this
+/// Home cannot show, including one the owner file no longer carries, is refused.
 fn agent_run_without_account(ctx: &BridgeContext, operation: &str) -> Option<serde_json::Value> {
-    if operation != "runs_create" {
+    if operation != "runs_create" || !crate::agents::build_allows() {
         return None;
     }
     if ctx.model_token_ceiling.is_some() || ctx.model_budget.is_some() {
@@ -1692,6 +1693,11 @@ fn agent_run_without_account(ctx: &BridgeContext, operation: &str) -> Option<ser
     else {
         return None;
     };
+    if principal_id.starts_with("device:")
+        && crate::auth::ResolvedPrincipalRoot::resolve(data_dir, data_dir, principal_id).is_ok()
+    {
+        return None;
+    }
     let stored = match crate::auth::stored_principal_record(data_dir, principal_id) {
         Ok(Some(stored)) => stored,
         Ok(None) | Err(_) => {
@@ -9241,11 +9247,39 @@ pub(crate) mod tests {
         )
         .await;
         let message = response["response"]["message"].as_str().unwrap_or("");
-        assert!(message.contains(AGENT_ACCOUNT_UNAVAILABLE), "{response}");
+        if crate::agents::build_allows() {
+            assert!(message.contains(AGENT_ACCOUNT_UNAVAILABLE), "{response}");
+        } else {
+            assert!(!message.contains("agent account unavailable"), "{response}");
+            assert_eq!(
+                response["response"]["code"], "principal_context_required",
+                "{response}"
+            );
+        }
         assert!(
             provider.requests.lock().await.is_empty(),
             "the provider was asked"
         );
+    }
+
+    /// A verified device principal runs a local model in either build.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_verified_device_principal_runs_a_local_model() {
+        let (mut ctx, provider, temp) = model_bus(Some(ALICE), "capsule-device").await;
+        let (_identity, did) = elastos_identity::load_or_create_did(temp.path()).unwrap();
+        let principal = format!("device:{did}");
+        ctx.principal_id = Some(principal.clone());
+        let response = model_invoke(&ctx, "runs_create", Action::Execute, model_create("m")).await;
+        assert_eq!(
+            response["response"]["type"], "resource_result",
+            "{response}"
+        );
+        let message = response["response"]["message"].as_str().unwrap_or("");
+        assert!(!message.contains(AGENT_ACCOUNT_UNAVAILABLE), "{response}");
+        let sent = provider.requests.lock().await.clone();
+        assert_eq!(sent.len(), 1, "{sent:?}");
+        assert_eq!(sent[0]["runtime_binding"]["principal_id"], principal);
     }
 
     /// Hosted agent rows. The body is a test file the feature reader skips.

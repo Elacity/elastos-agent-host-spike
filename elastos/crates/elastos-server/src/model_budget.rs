@@ -263,6 +263,7 @@ impl ModelBudget {
     }
 
     pub(crate) fn bind_home(&self, data_dir: PathBuf) {
+        // The managed runtime's copy of this call writes nothing.
         let _ = crate::agents::raise_spend_file_to_signed_floor(&data_dir);
         *self.home.lock().unwrap_or_else(PoisonError::into_inner) = Some(data_dir);
     }
@@ -1640,5 +1641,192 @@ mod tests {
         row_b["id"] = serde_json::Value::String("model-egress-plant-b".into());
         rows["decisions"].as_array_mut().unwrap().push(row_b);
         crate::auth::atomic_write(&decisions, &serde_json::to_vec_pretty(&rows).unwrap()).unwrap();
+    }
+
+    #[cfg(unix)]
+    fn stored_sequence(dir: &std::path::Path) -> u64 {
+        let path = crate::agents::agent_file_path(dir).unwrap();
+        let value: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        value["sequence"].as_u64().unwrap()
+    }
+
+    #[cfg(unix)]
+    fn stored_active(dir: &std::path::Path, agent: &str) -> bool {
+        let path = crate::agents::agent_file_path(dir).unwrap();
+        let value: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        value["agents"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["record"]["principal_id"] == agent)
+            .and_then(|row| row.get("active"))
+            .and_then(|flag| flag.as_bool())
+            .unwrap_or(true)
+    }
+
+    /// A crash leaves the signed spend ahead of the file. Turning the agent
+    /// off and on, then restarting by gateway and by serve, keeps that floor
+    /// for the next charge. An inactive agent is healed in the same write.
+    #[cfg(unix)]
+    #[test]
+    fn a_crash_then_on_off_and_a_host_restart_keeps_the_spend_floor() {
+        let (dir, owner, agent) = planted_agent();
+        let other = crate::agents::tests::plant_another_dispatch(dir.path(), &owner, "request-b");
+        let retired = crate::agents::tests::plant_another_dispatch(dir.path(), &owner, "request-c");
+        let (budget, key) = opened_on(dir.path(), &agent, 100);
+        budget.reserve(&key, &run_key(&agent, "first"), 40).unwrap();
+        let (other_budget, other_key) = opened_on(dir.path(), &other, 100);
+        other_budget
+            .reserve(&other_key, &run_key(&other, "other"), 30)
+            .unwrap();
+        drop(other_budget);
+        let (retired_budget, retired_key) = opened_on(dir.path(), &retired, 100);
+        retired_budget
+            .reserve(&retired_key, &run_key(&retired, "retired"), 10)
+            .unwrap();
+        drop(retired_budget);
+        crate::agents::tests::retire_for_dispatch(dir.path(), &owner, &retired);
+        let _fault = crate::agents::tests::stop_before_spend_file();
+        budget.reserve(&key, &run_key(&agent, "crash"), 40).unwrap();
+        let floor = event_spent(dir.path(), &agent);
+        drop(_fault);
+        drop(budget);
+        assert!(file_spent(dir.path(), &agent) < floor, "the file write ran");
+        crate::agents::tests::plant_stored_total(dir.path(), &other, 0, false);
+        crate::agents::tests::plant_stored_total(dir.path(), &retired, 0, false);
+        let rows = spend_rows(dir.path(), &agent) + spend_rows(dir.path(), &other);
+        let sequence = stored_sequence(dir.path());
+        crate::agents::raise_spend_file_to_signed_floor(dir.path()).unwrap();
+        assert_eq!(file_spent(dir.path(), &agent), floor);
+        assert!(stored_active(dir.path(), &agent));
+        assert_eq!(file_spent(dir.path(), &other), 30);
+        assert!(!stored_active(dir.path(), &other));
+        assert_eq!(
+            file_spent(dir.path(), &retired),
+            0,
+            "a retired agent was healed"
+        );
+        assert_eq!(stored_sequence(dir.path()), sequence + 1);
+        assert_eq!(
+            spend_rows(dir.path(), &agent) + spend_rows(dir.path(), &other),
+            rows,
+            "the heal appended a spend event"
+        );
+
+        crate::agents::tests::plant_stored_total(dir.path(), &agent, 0, true);
+        let person = crate::auth::stored_principal_record(dir.path(), &owner)
+            .unwrap()
+            .unwrap();
+        let caller = crate::agents::Caller {
+            principal_id: &owner,
+            proof_binding_id: &person.proof_binding_id,
+            session_id: "session:row",
+        };
+        crate::agents::set_active(dir.path(), &caller, &agent, false, 40).unwrap();
+        assert_eq!(file_spent(dir.path(), &agent), floor);
+        assert!(!stored_active(dir.path(), &agent));
+        assert_eq!(file_spent(dir.path(), &other), 30);
+        crate::agents::set_active(dir.path(), &caller, &agent, true, 41).unwrap();
+        assert_eq!(file_spent(dir.path(), &agent), floor);
+        assert!(stored_active(dir.path(), &agent));
+        assert_eq!(
+            spend_rows(dir.path(), &agent) + spend_rows(dir.path(), &other),
+            rows
+        );
+
+        let held =
+            crate::host_lock::start_host_for_agents(dir.path(), "gateway", "127.0.0.1:9").unwrap();
+        crate::agents::tests::plant_stored_total(dir.path(), &agent, 0, false);
+        let blocked = crate::host_lock::start_host_for_agents(dir.path(), "serve", "127.0.0.1:9");
+        assert!(blocked.is_err(), "a second host start took the lock");
+        assert_eq!(file_spent(dir.path(), &agent), 0, "the blocked start wrote");
+        drop(held);
+        crate::host_lock::start_host_for_agents(dir.path(), "serve", "127.0.0.1:9").unwrap();
+        assert_eq!(file_spent(dir.path(), &agent), floor);
+        assert!(!stored_active(dir.path(), &agent));
+        assert_eq!(
+            spend_rows(dir.path(), &agent) + spend_rows(dir.path(), &other),
+            rows
+        );
+        crate::agents::set_active(dir.path(), &caller, &agent, true, 42).unwrap();
+        assert_eq!(file_spent(dir.path(), &agent), floor);
+
+        for index in 0..600 {
+            let event = elastos_runtime::auth::RuntimeAuditEventV1 {
+                schema: elastos_runtime::auth::RuntimeAuditEventV1::SCHEMA.to_string(),
+                event_id: format!("audit:later:{index}"),
+                event_type: "home.marker".to_string(),
+                principal_id: None,
+                proof_binding_id: None,
+                session_id: None,
+                challenge_id: None,
+                capsule_id: None,
+                result: "ok".to_string(),
+                reason: "later row".to_string(),
+                occurred_at: crate::auth::now_ts(),
+                signer_did: None,
+                signature: None,
+            };
+            crate::auth::append_audit_event(dir.path(), event).unwrap();
+        }
+        assert_eq!(spend_rows(dir.path(), &agent), 0);
+        assert_eq!(spend_rows(dir.path(), &other), 0);
+        assert_eq!(file_spent(dir.path(), &agent), floor);
+        assert_eq!(file_spent(dir.path(), &other), 30);
+        assert_eq!(file_spent(dir.path(), &retired), 0);
+        for role in ["gateway", "serve", "gateway-public"] {
+            crate::host_lock::start_host_for_agents(dir.path(), role, "127.0.0.1:9").unwrap();
+            assert_eq!(file_spent(dir.path(), &agent), floor, "{role}");
+            assert_eq!(file_spent(dir.path(), &other), 30, "{role}");
+            assert_eq!(spend_rows(dir.path(), &agent), 0, "{role}");
+        }
+        let (next, key) = opened_on(dir.path(), &agent, 100);
+        next.reserve(&key, &run_key(&agent, "after"), 1).unwrap();
+        assert!(file_spent(dir.path(), &agent) > floor);
+    }
+
+    /// A run approval follows the broker: a hosted offer may carry a
+    /// connection, and the requester is this owner or unnamed.
+    #[cfg(unix)]
+    #[test]
+    fn a_run_approval_matches_the_brokers_connection_and_requester() {
+        let dir = tempfile::tempdir().unwrap();
+        crate::api::plant_offer_approval(
+            dir.path(),
+            "model:openrouter",
+            "proof-owner",
+            now_ms() + 60_000,
+        );
+        let path = dir
+            .path()
+            .join("providers")
+            .join("model-provider")
+            .join("egress-decisions.json");
+        let approved =
+            || crate::api::approved_for_owner(dir.path(), "model:openrouter", "proof-owner");
+        assert!(approved());
+        let mut file: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        file["decisions"][0]["connection"] = serde_json::json!({
+            "version": 1,
+            "offer_id": "model:openrouter",
+            "provider": "OpenRouter",
+            "origin": "https://openrouter.ai",
+            "revision": "ab"
+        });
+        crate::auth::atomic_write(&path, &serde_json::to_vec_pretty(&file).unwrap()).unwrap();
+        assert!(!approved());
+        file["decisions"][0]["connection"] = serde_json::Value::Null;
+        file["decisions"][0]["requested_by_proof"] = serde_json::json!("proof-other");
+        crate::auth::atomic_write(&path, &serde_json::to_vec_pretty(&file).unwrap()).unwrap();
+        assert!(!approved());
+        file["decisions"][0]["requested_by_proof"] = serde_json::json!("proof-owner");
+        crate::auth::atomic_write(&path, &serde_json::to_vec_pretty(&file).unwrap()).unwrap();
+        assert!(approved());
+        file["decisions"][0]["requested_by_proof"] = serde_json::Value::Null;
+        crate::auth::atomic_write(&path, &serde_json::to_vec_pretty(&file).unwrap()).unwrap();
+        assert!(approved());
     }
 }

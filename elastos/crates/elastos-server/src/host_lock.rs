@@ -78,6 +78,27 @@ struct HostProcessMeta {
     generation: String,
 }
 
+/// The managed runtime is a subordinate `elastos serve`. It does not heal
+/// agent spend and it does not run agents.
+pub(crate) fn is_subordinate_managed_runtime() -> bool {
+    std::env::var_os("ELASTOS_ALLOW_SUBORDINATE_RUNTIME_HOST").as_deref()
+        == Some(std::ffi::OsStr::new("1"))
+}
+
+/// Take the host lock, then write every non-retired agent's stored total up
+/// to its signed spend floor, before anything else appends to the audit.
+///
+/// `elastos gateway` and `elastos home --browser` (it starts this gateway)
+/// pass `gateway`. The public gateway passes `gateway-public`. Standalone
+/// `elastos serve` passes `serve`. The managed runtime does not call this.
+/// The heal holds the agent file lock. The floor is already a signed spend
+/// event, so the heal appends none.
+pub fn start_host_for_agents(data_dir: &Path, role: &str, addr: &str) -> anyhow::Result<FileLock> {
+    let lock = acquire_host_process_lock(data_dir, role, addr)?;
+    crate::agents::raise_spend_file_to_signed_floor(data_dir).map_err(anyhow::Error::msg)?;
+    Ok(lock)
+}
+
 pub fn acquire_host_process_lock(
     data_dir: &Path,
     role: &str,

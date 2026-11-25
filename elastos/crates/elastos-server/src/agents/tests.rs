@@ -180,6 +180,28 @@ pub(crate) fn spend_file_write_fails() -> bool {
     SPEND_FAULT.with(|fault| fault.get() == SpendFault::FileWriteFails)
 }
 
+thread_local! {
+    static WINDOWS_CUSTODY: Cell<bool> = const { Cell::new(false) };
+}
+
+pub(crate) struct WindowsCustodyGuard;
+
+impl Drop for WindowsCustodyGuard {
+    fn drop(&mut self) {
+        WINDOWS_CUSTODY.with(|flag| flag.set(false));
+    }
+}
+
+/// The next agent-file read is refused the way Windows refuses custody.
+pub(crate) fn plant_windows_custody() -> WindowsCustodyGuard {
+    WINDOWS_CUSTODY.with(|flag| flag.set(true));
+    WindowsCustodyGuard
+}
+
+pub(crate) fn windows_custody_is_planted() -> bool {
+    WINDOWS_CUSTODY.with(|flag| flag.get())
+}
+
 /// Retires a planted agent. The spent total stays on the record.
 pub(crate) fn retire_for_dispatch(data_dir: &Path, owner_id: &str, agent_id: &str) {
     let owner = crate::auth::stored_principal_record(data_dir, owner_id)
@@ -226,6 +248,22 @@ pub(crate) fn set_dispatch_active(data_dir: &Path, owner_id: &str, agent_id: &st
         30,
     )
     .unwrap();
+}
+
+/// Writes one agent's stored total and active flag. No audit event is appended.
+pub(crate) fn plant_stored_total(data_dir: &Path, agent_id: &str, spent: u64, active: bool) {
+    let opened = open(data_dir, true).unwrap();
+    let mut after = opened.file.clone();
+    let agent = after
+        .agents
+        .iter_mut()
+        .find(|agent| agent.record.principal_id == agent_id)
+        .unwrap();
+    agent.model_tokens_spent = spent;
+    agent.active = active;
+    after.sequence += 1;
+    let bytes = serde_json::to_vec_pretty(&after).unwrap();
+    crate::auth::atomic_write(&agent_file_path(data_dir).unwrap(), &bytes).unwrap();
 }
 
 pub(crate) fn stop_dispatch_agent(data_dir: &Path, owner_id: &str, agent_id: &str, disable: bool) {
@@ -3405,4 +3443,158 @@ fn lock_for_write_refuses_when_this_thread_already_holds_it() {
         Some(LOCK_ORDER),
         "{err}"
     );
+}
+
+fn source_from<'a>(source: &'a str, needle: &str) -> &'a str {
+    let start = source
+        .find(needle)
+        .unwrap_or_else(|| panic!("missing {needle}"));
+    &source[start..]
+}
+
+fn source_until<'a>(source: &'a str, needle: &str) -> &'a str {
+    let end = source
+        .find(needle)
+        .unwrap_or_else(|| panic!("missing {needle}"));
+    &source[..end]
+}
+
+/// Gateway, public gateway, `home --browser`, and standalone serve heal after
+/// the host lock. The managed runtime does not. A heal is one write for every
+/// non-retired agent and it is not stopped at 64.
+#[test]
+fn host_starts_heal_after_the_lock_and_skip_no_agent() {
+    let agents = include_str!("../agents.rs");
+    let raise = source_until(
+        source_from(agents, "fn raise_spend_file_to_signed_floor"),
+        "\nfn quiet_when_agents_are_unavailable",
+    );
+    let sub = raise.find("is_subordinate_managed_runtime()").unwrap();
+    let opened = raise.find("open(").unwrap();
+    assert!(sub < opened, "the managed runtime returns before any read");
+    assert!(!raise.contains("0..64"), "a heal stops after 64 agents");
+    assert!(!raise.contains("!agent.active"));
+    let copy = source_until(
+        source_from(agents, "fn raised_copy"),
+        "\npub(crate) fn charge_model_spend",
+    );
+    assert!(!copy.contains("0..64"));
+    assert!(
+        !copy.contains("!agent.active"),
+        "an inactive agent is skipped"
+    );
+
+    let start = source_until(
+        source_from(include_str!("../host_lock.rs"), "fn start_host_for_agents"),
+        "\npub fn acquire_host_process_lock",
+    );
+    let lock = start.find("acquire_host_process_lock(").unwrap();
+    let heal = start.find("raise_spend_file_to_signed_floor(").unwrap();
+    assert!(lock < heal, "host lock, then the heal");
+
+    let serve = source_from(include_str!("../serve_cmd.rs"), "pub async fn run_serve");
+    let serve = source_until(serve, "\n#[cfg");
+    assert!(!serve.contains("raise_spend_file_to_signed_floor"));
+    let branch = serve.find("if subordinate_host").unwrap();
+    let call = serve.find("start_host_for_agents(").unwrap();
+    assert!(branch < call, "the subordinate check comes first");
+    assert!(serve[branch..call].contains("} else {"));
+
+    let gateway = include_str!("../gateway_cmd.rs");
+    assert_eq!(gateway.matches("start_host_for_agents(").count(), 2);
+    assert!(gateway.contains("start_host_for_agents(&data_dir, \"gateway\", &addr)"));
+    assert!(gateway.contains("start_host_for_agents(&data_dir, \"gateway-public\", &addr)"));
+
+    let browser = source_from(
+        include_str!("../gateway_entry.rs"),
+        "pub async fn run_browser_home",
+    );
+    assert!(
+        browser.contains("run_gateway_direct_with_ready("),
+        "home --browser starts the local gateway"
+    );
+
+    let decision = source_until(
+        source_from(
+            include_str!("../api/model_provider_egress_decision.rs"),
+            "fn approved_for_owner",
+        ),
+        "\n/// Stages the pending",
+    );
+    let prefix = decision.find("model:hosted-").unwrap();
+    let contract = decision.find("offer_uses_connection_authority").unwrap();
+    assert!(prefix < contract);
+    assert!(decision.contains("connection.is_none()"));
+    assert!(decision.contains("requested_by_proof"));
+}
+
+fn fresh_agent_home() -> (tempfile::TempDir, String, String) {
+    let dir = tempfile::tempdir().unwrap();
+    let owner = "person:local:file-owner";
+    crate::auth::store_test_human_principal(dir.path(), owner);
+    let agent = plant_for_dispatch(dir.path(), owner, owner);
+    (dir, owner.to_string(), agent)
+}
+
+fn kept_bytes(dir: &Path) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
+    let agent = std::fs::read(agent_file_path(dir).unwrap()).unwrap();
+    let auth = std::fs::read(crate::auth::auth_state_path(dir).unwrap()).unwrap();
+    let lock_path = agent_file_path(dir)
+        .unwrap()
+        .with_file_name("agent-records.json.lock");
+    let lock = std::fs::read(&lock_path).unwrap_or_default();
+    (agent, auth, lock)
+}
+
+fn assert_start_refuses(dir: &Path, owner: &str, agent: &str, reason: &'static str) {
+    let before = kept_bytes(dir);
+    for role in ["gateway", "gateway-public", "serve"] {
+        crate::host_lock::start_host_for_agents(dir, role, "127.0.0.1:9").unwrap();
+        assert_eq!(
+            kept_bytes(dir),
+            before,
+            "{role} wrote before or during the heal"
+        );
+    }
+    let err = charge_model_spend(dir, owner, agent, (0, 0), 1, 64, None).unwrap_err();
+    assert!(
+        matches!(err, SpendRefusal::Name(name) if name == reason),
+        "{err:?}"
+    );
+    assert_eq!(kept_bytes(dir), before, "a refused charge wrote the file");
+}
+
+/// A damaged, newer, unreadable, or Windows agents file still lets Home start.
+/// A charge is refused by that file's name, and nothing is written.
+#[test]
+fn a_damaged_newer_unreadable_or_windows_agents_file_still_starts() {
+    use std::os::unix::fs::PermissionsExt;
+    let (dir, owner, agent) = fresh_agent_home();
+    let path = agent_file_path(dir.path()).unwrap();
+    let good = std::fs::read(&path).unwrap();
+
+    std::fs::write(&path, b"{").unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    assert_start_refuses(dir.path(), &owner, &agent, DOES_NOT_PARSE);
+
+    let mut newer: Value = serde_json::from_slice(&good).unwrap();
+    newer["later_field"] = json!(1);
+    crate::auth::atomic_write(&path, &serde_json::to_vec_pretty(&newer).unwrap()).unwrap();
+    assert_start_refuses(dir.path(), &owner, &agent, NOT_OUR_FORM);
+
+    crate::auth::atomic_write(&path, &good).unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+    assert_start_refuses(dir.path(), &owner, &agent, MODE_TOO_WIDE);
+
+    let before = kept_bytes(dir.path());
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+    crate::host_lock::start_host_for_agents(dir.path(), "serve", "127.0.0.1:9").unwrap();
+    let err = charge_model_spend(dir.path(), &owner, &agent, (0, 0), 1, 64, None).unwrap_err();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    assert!(matches!(err, SpendRefusal::Name(NOT_REGULAR)), "{err:?}");
+    assert_eq!(kept_bytes(dir.path()), before);
+
+    crate::auth::atomic_write(&path, &good).unwrap();
+    let _windows = plant_windows_custody();
+    assert_start_refuses(dir.path(), &owner, &agent, WINDOWS_AGENT_FILE);
 }

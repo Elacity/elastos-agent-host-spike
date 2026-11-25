@@ -1023,12 +1023,13 @@ pub(super) fn broker_text_connection(
 }
 
 /// The offer has an approval for this owner's proof that has not ended.
-/// A connection-v1 offer matches the connection the broker sends. Any other
-/// offer matches a run effect and that effect's current configuration.
-/// Both are read before the decision lock.
+/// A hosted connection-v1 offer matches the connection the broker sends.
+/// Any other offer matches a run effect with no connection, and that
+/// effect's current configuration. The requester is this owner or unnamed.
+/// Both reads finish before the decision lock.
 pub(crate) fn approved_for_owner(data_dir: &Path, offer_id: &str, owner_proof: &str) -> bool {
-    let uses_connection =
-        super::model_provider_config::offer_uses_connection_authority(data_dir, offer_id)
+    let uses_connection = offer_id.starts_with("model:hosted-")
+        && super::model_provider_config::offer_uses_connection_authority(data_dir, offer_id)
             .unwrap_or(false);
     let connection = uses_connection
         .then(|| broker_text_connection(data_dir, offer_id))
@@ -1049,17 +1050,23 @@ pub(crate) fn approved_for_owner(data_dir: &Path, offer_id: &str, owner_proof: &
         return false;
     };
     file.decisions.iter().any(|decision| {
+        let requester = decision
+            .requested_by_proof
+            .as_deref()
+            .is_none_or(|requested| requested == owner_proof);
         decision.scope.offer_id == offer_id
             && decision.status == DecisionStatus::Approved
             && decision.expires_at_ms > now
             && decision.owner_proof_binding_id.as_deref() == Some(owner_proof)
+            && requester
             && if let Some((_, connection)) = connection.as_ref() {
                 decision.connection.as_ref() == Some(connection)
             } else {
                 let Some((kind, runs)) = runs.as_ref() else {
                     return false;
                 };
-                offer_run_matches(&decision.scope.effect, kind)
+                decision.connection.is_none()
+                    && offer_run_matches(&decision.scope.effect, kind)
                     && runs.iter().any(|(effect, configuration)| {
                         decision.scope.effect == *effect
                             && decision.scope.configuration_id == *configuration

@@ -36,17 +36,15 @@ pub async fn run_serve(
     let _private_exec = elastos_server::host_lock::hold_running_exec_copy()?;
     crate::runtime_control::watch_gateway_owner()?;
     let data_dir = crate::default_data_dir();
-    if data_dir.is_dir() {
-        elastos_server::raise_spend_file_to_signed_floor(&data_dir).map_err(anyhow::Error::msg)?;
-    }
     let subordinate_host = std::env::var("ELASTOS_ALLOW_SUBORDINATE_RUNTIME_HOST")
         .ok()
         .as_deref()
         == Some("1");
+    // The managed runtime does not take this lock and does not heal.
     let _host_guard = if subordinate_host {
         None
     } else {
-        Some(elastos_server::host_lock::acquire_host_process_lock(
+        Some(elastos_server::host_lock::start_host_for_agents(
             &data_dir, "serve", &addr,
         )?)
     };

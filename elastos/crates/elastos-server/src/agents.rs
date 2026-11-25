@@ -25,9 +25,10 @@
 //!   A file that fails any rule makes agents unavailable, with a named
 //!   reason; it is never rewritten or deleted, and the owner's own sign-in
 //!   file is read exactly as before.
-//! - A write holds the agent lock, raises `sequence` by exactly one, replaces
-//!   the file in one step at mode 0600, and then appends one audit event to
-//!   the owner's audit chain.
+//! - A write holds the agent lock, raises `sequence` by exactly one, and
+//!   replaces the file in one step at mode 0600. It then appends one audit
+//!   event. A heal of the signed spend floor does not: that total is already
+//!   a signed spend event.
 //! - Every write is one of a closed list of operations, and each operation
 //!   may change only what `permits` lists for it.
 //! - This module never holds the owner's data key. It asks `auth` for a key
@@ -76,6 +77,7 @@ const NOT_REGULAR: &str = "agent file path is not a regular file";
 #[cfg(unix)]
 const MODE_TOO_WIDE: &str = "agent file mode is wider than 0600";
 pub(crate) const CANNOT_READ: &str = "agent file cannot be read";
+const WINDOWS_AGENT_FILE: &str = "agent file custody is unsupported on Windows";
 pub(crate) const DOES_NOT_PARSE: &str = "agent file does not parse";
 pub(crate) const CANNOT_WRITE: &str = "agent file cannot be written";
 pub(crate) const NO_OWNER: &str = "agent record names no owner";
@@ -247,12 +249,28 @@ fn load(data_dir: &Path, owner_file: &[PrincipalRecord]) -> anyhow::Result<Agent
     )
 }
 
+fn windows_agent_file_refused() -> bool {
+    #[cfg(windows)]
+    {
+        true
+    }
+    #[cfg(all(test, unix))]
+    {
+        tests::windows_custody_is_planted()
+    }
+    #[cfg(not(any(windows, all(test, unix))))]
+    {
+        false
+    }
+}
+
 /// The file's bytes, read through one handle, or `None` when there is no
 /// file. Refuses a path that is not a regular file under regular
 /// directories, and a file anyone but its owner can read or write.
 fn read_agent_file(data_dir: &Path, path: &Path) -> Result<Option<Vec<u8>>, &'static str> {
-    #[cfg(windows)]
-    Err::<(), _>("agent file custody is unsupported on Windows")?;
+    if windows_agent_file_refused() {
+        return Err(WINDOWS_AGENT_FILE);
+    }
     match std::fs::symlink_metadata(path) {
         Ok(metadata) if metadata.is_file() => {}
         Ok(_) => return Err(NOT_REGULAR),
@@ -475,6 +493,8 @@ enum Operation {
     Retire,
     SetActive,
     Charge,
+    /// Raise stored spend to the signed floor. Appends no audit event.
+    Heal,
 }
 
 impl Operation {
@@ -487,6 +507,7 @@ impl Operation {
             Self::Retire => "agent.record.retire",
             Self::SetActive => "agent.record.active",
             Self::Charge => "agent.record.spend",
+            Self::Heal => "agent.record.heal",
         }
     }
 }
@@ -500,7 +521,8 @@ impl Operation {
 /// - rename: one agent's `display_name`, and its `updated_at`;
 /// - retire: one agent's `retired_at`, set once, and its `updated_at`;
 /// - set active: one agent's `active`, and its `updated_at`;
-/// - charge: one active agent's `model_tokens_spent`, raised by one block.
+/// - charge: one active agent's `model_tokens_spent`, raised by one block;
+/// - heal: any non-retired agent's `model_tokens_spent`, raised, nothing else.
 fn permits(operation: Operation, before: &AgentRecordsFile, after: &AgentRecordsFile) -> bool {
     if after.schema != before.schema || before.sequence.checked_add(1) != Some(after.sequence) {
         return false;
@@ -520,7 +542,31 @@ fn permits(operation: Operation, before: &AgentRecordsFile, after: &AgentRecords
         Operation::Retire => one_agent(before, after, same_enabled, retires),
         Operation::SetActive => one_agent(before, after, same_enabled, sets_active),
         Operation::Charge => one_agent(before, after, same_enabled, spends),
+        Operation::Heal => {
+            same_enabled
+                && after.agents.len() == before.agents.len()
+                && before
+                    .agents
+                    .iter()
+                    .zip(&after.agents)
+                    .all(|(old, new)| spend_floor_keeps(old, new))
+                && before.agents.iter().zip(&after.agents).any(|(old, new)| {
+                    old.record.retired_at.is_none()
+                        && new.model_tokens_spent > old.model_tokens_spent
+                })
+        }
     }
+}
+
+/// A non-retired agent may keep a higher `model_tokens_spent`. A retired
+/// agent stays as it was. Nothing else moves.
+fn spend_floor_keeps(old: &StoredAgent, new: &StoredAgent) -> bool {
+    if old.record.retired_at.is_some() {
+        return old == new;
+    }
+    let mut expected = old.clone();
+    expected.model_tokens_spent = new.model_tokens_spent;
+    expected == *new && new.model_tokens_spent >= old.model_tokens_spent
 }
 
 fn one_agent(
@@ -693,83 +739,73 @@ pub(crate) fn hosted_charge_still_standing(
     Ok(())
 }
 
-/// Writes each active agent's stored total up to its signed spend floor.
-/// A file that already holds that floor is left as it is.
+/// Writes every non-retired agent's stored total up to its signed spend
+/// floor. The caller already holds the host lock, or this is a charge, or
+/// turning an agent off or on. See [`crate::host_lock::start_host_for_agents`].
+/// An unreadable agents file, including a damaged file, a newer file, and
+/// Windows, is left as it is and this returns `Ok`. The managed runtime
+/// returns `Ok` and writes nothing.
 pub fn raise_spend_file_to_signed_floor(data_dir: &Path) -> Result<(), &'static str> {
-    if !build_allows_for_home(data_dir) {
+    if !build_allows_for_home(data_dir) || crate::host_lock::is_subordinate_managed_runtime() {
         return Ok(());
     }
-    for _ in 0..64 {
-        let opened = open(data_dir, true).map_err(|err| reason_of(&err))?;
-        let Some((agent_id, owner, total)) = agent_behind_its_floor(data_dir, &opened)? else {
-            return Ok(());
-        };
-        let proof = opened
-            .owner_file
-            .iter()
-            .find(|person| person.principal_id == owner)
-            .map(|person| person.proof_binding_id.clone())
-            .ok_or(NO_OWNER)?;
-        let mut after = opened.file.clone();
-        after.sequence = after.sequence.checked_add(1).ok_or(BAD_SEQUENCE)?;
-        let slot = after
-            .agents
-            .iter_mut()
-            .find(|agent| agent.record.principal_id == agent_id)
-            .ok_or(NO_SUCH_AGENT)?;
-        slot.model_tokens_spent = total;
-        let caller = Caller {
-            principal_id: &owner,
-            proof_binding_id: &proof,
-            session_id: "",
-        };
-        let now = crate::auth::now_ts();
-        write(
-            data_dir,
-            &opened,
-            Operation::Charge,
-            &after,
-            &caller,
-            &agent_id,
-            now,
-        )
-        .map_err(|_| CANNOT_WRITE)?;
-        let checked = open(data_dir, false).map_err(|err| reason_of(&err))?;
-        let written = checked
-            .file
-            .agents
-            .iter()
-            .find(|agent| agent.record.principal_id == agent_id)
-            .map(|agent| agent.model_tokens_spent)
-            .unwrap_or(0);
-        if written < total {
-            return Err(CANNOT_WRITE);
-        }
+    let preview = match open(data_dir, false) {
+        Ok(opened) => opened,
+        Err(err) => return quiet_when_agents_are_unavailable(err),
+    };
+    if raised_copy(data_dir, &preview.file)?.is_none() {
+        return Ok(());
     }
-    Err(CANNOT_WRITE)
+    let opened = match open(data_dir, true) {
+        Ok(opened) => opened,
+        Err(err) => return quiet_when_agents_are_unavailable(err),
+    };
+    let Some(after) = raised_copy(data_dir, &opened.file)? else {
+        return Ok(());
+    };
+    let caller = Caller {
+        principal_id: "",
+        proof_binding_id: "",
+        session_id: "",
+    };
+    write(data_dir, &opened, Operation::Heal, &after, &caller, "", 0).map_err(|_| CANNOT_WRITE)
 }
 
-fn agent_behind_its_floor(
+fn quiet_when_agents_are_unavailable(err: anyhow::Error) -> Result<(), &'static str> {
+    match err.downcast_ref::<Named>() {
+        Some(Named(LOCK_ORDER)) => Err(LOCK_ORDER),
+        Some(_) => Ok(()),
+        None => Err(reason_of(&err)),
+    }
+}
+
+/// One file with every non-retired total raised to its signed floor.
+/// Retired agents stay as they were. `None` when nothing is behind.
+fn raised_copy(
     data_dir: &Path,
-    opened: &Opened,
-) -> Result<Option<(String, String, u64)>, &'static str> {
-    for agent in &opened.file.agents {
-        if !agent.active || agent.record.retired_at.is_some() {
+    file: &AgentRecordsFile,
+) -> Result<Option<AgentRecordsFile>, &'static str> {
+    let mut after = file.clone();
+    let mut raised = false;
+    for agent in &mut after.agents {
+        if agent.record.retired_at.is_some() {
             continue;
         }
-        let Some(owner) = agent.record.owner.clone().filter(|id| !id.is_empty()) else {
-            continue;
-        };
         let floor = crate::model_budget::signed_spend_floor(
             data_dir,
             &agent.record.principal_id,
             agent.model_tokens_spent,
         )?;
         if floor > agent.model_tokens_spent {
-            return Ok(Some((agent.record.principal_id.clone(), owner, floor)));
+            agent.model_tokens_spent = floor;
+            raised = true;
         }
     }
-    Ok(None)
+    if !raised {
+        return Ok(None);
+    }
+    after.sequence = after.sequence.checked_add(1).ok_or(BAD_SEQUENCE)?;
+    Ok(Some(after))
 }
 
 pub(crate) fn charge_model_spend(
@@ -853,6 +889,10 @@ fn write(
         anyhow::bail!("agent file change refused: {reason}");
     }
     let bytes = serde_json::to_vec_pretty(after)?;
+    if operation == Operation::Heal {
+        crate::auth::atomic_write(&agent_file_path(data_dir)?, &bytes)?;
+        return Ok(());
+    }
     let digest = hex::encode(Sha256::digest(&bytes));
     // Spend names the agent. append_audit_event needs no proof binding.
     // The owner is only `owner=` in the reason. A charge appends that
@@ -1366,7 +1406,10 @@ pub(crate) fn set_active(
     active: bool,
     now: u64,
 ) -> anyhow::Result<AgentView> {
-    require_build()?;
+    if !build_allows_for_home(data_dir) {
+        return refused(FEATURE_OFF);
+    }
+    raise_spend_file_to_signed_floor(data_dir).map_err(Named)?;
     let opened = open(data_dir, true)?;
     if opened.file.enabled.is_none() {
         return refused(NOT_ENABLED);
