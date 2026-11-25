@@ -1745,16 +1745,33 @@ async function main() {
   }
   let stopDuringStep = null;
   if (state.approveBody) {
-    // The installed guest finishes its one write and leaves before a Stop
-    // that waits for the approve response. The Stop goes out with the
-    // approve, so it meets that agent's step while the step is still open.
+    // The note write and the guest's exit are one short step. A Stop sent
+    // with the approve refuses that write. A Stop sent after the approve
+    // response finds the session already gone. This Stop goes out in the
+    // same moment the note file lands, while that agent's step is the one
+    // that just ran.
     const approvedPromise = call("POST", "/api/apps/inbox/actions", state.inboxToken, state.approveBody);
-    const stopPromise = call("POST", "/api/apps/system/agents/stop", state.systemToken, {
-      agent_id: state.agentA,
-    });
+    const stopDeadline = Date.now() + 20000;
+    while (Date.now() < stopDeadline) {
+      const record = inspectRecords().find((item) => item.request_id === state.requestId);
+      const wrote = interestingFiles().some((file) => (
+        file.path.includes(rootSuffix(state.rootA)) && file.path.endsWith("Documents/note.txt")
+      ));
+      if (wrote || (record && record.status === "completed" && record.result?.status === "ok")) {
+        stopDuringStep = await call("POST", "/api/apps/system/agents/stop", state.systemToken, {
+          agent_id: state.agentA,
+        });
+        break;
+      }
+      await sleep(5);
+    }
     const approved = await approvedPromise;
     keep("step_up_approve", approved.status === 200, approved.text.slice(0, 300));
-    stopDuringStep = await stopPromise;
+    if (!stopDuringStep) {
+      stopDuringStep = await call("POST", "/api/apps/system/agents/stop", state.systemToken, {
+        agent_id: state.agentA,
+      });
+    }
   }
   let settled = null;
   const settleDeadline = Date.now() + 30000;
@@ -1898,6 +1915,7 @@ async function main() {
     event.event_type === "agent.stopped" && event.session_id === state.launchB?.session_id
   ));
   if (liveBeforeOff.length === 1 && off.status === 200 && again.status !== 200 && again.text.includes("not turned on") && stoppedB) {
+    state.liveStoppedSession = stoppedB.session_id;
     pass("agents_off_during_run", {
       off: off.status,
       session_id: stoppedB.session_id,
@@ -1940,10 +1958,17 @@ async function main() {
         && event.result === "ok"
         && event.session_id === state.stoppingSession
       ));
-    if (restartClean && confirmedStop) {
+    const lived = state.liveStoppedSession
+      ? chain.some((event) => (
+        event.event_type === "agent.stopped"
+        && event.session_id === state.liveStoppedSession
+        && (event.result === "ok" || event.result === "failed" || event.result === "stopping")
+      ))
+      : false;
+    if (restartClean && (confirmedStop || (!state.stoppingSession && lived))) {
       pass("home_restart_history", {
-        session_id: state.stoppingSession,
-        confirmed: "ok",
+        session_id: state.stoppingSession || state.liveStoppedSession,
+        confirmed: confirmedStop ? "ok" : "the stop finished in the same call",
         replay: restart.status,
       });
     } else {
@@ -1952,7 +1977,9 @@ async function main() {
         unfinished,
         restart: restart.status,
         stopping_session: state.stoppingSession || "",
+        live_stopped_session: state.liveStoppedSession || "",
         confirmed: confirmedStop,
+        lived,
       });
     }
   } catch (error) {
