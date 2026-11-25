@@ -437,9 +437,6 @@ impl GrantBook {
     }
 
     pub fn revoke(&mut self, id: &str) {
-        // Every revoke moves the epoch, including one that finds nothing.
-        // An in-flight grant captured the previous value and will not record.
-        self.epoch = self.epoch.wrapping_add(1);
         let held = self.grants.iter().position(|grant| grant.id == id);
         if held.is_none()
             && (self.revoked.iter().any(|kept| kept == id)
@@ -447,6 +444,9 @@ impl GrantBook {
         {
             return;
         }
+        // A change moves the epoch. A repeated revoke does not, so a late
+        // event cannot refuse a grant requested after the real change.
+        self.epoch = self.epoch.wrapping_add(1);
         if let Some(pos) = held {
             self.grants.remove(pos);
         }
@@ -659,6 +659,37 @@ mod tests {
         let err =
             check_document(UI_MEDIA_TYPE, br#"{"grant":"y","frame":[{"text":"x"}]}"#).unwrap_err();
         assert!(err.contains("other keys"), "{err}");
+    }
+
+    #[test]
+    fn a_repeat_revoke_does_not_move_the_epoch() {
+        let mut book = GrantBook::default();
+        book.hold("g1", "localhost://Local/a", "read");
+        book.revoke("g1");
+        let epoch = book.epoch();
+        book.revoke("g1");
+        book.revoke("g1");
+        assert_eq!(book.epoch(), epoch, "a repeated revoke changes nothing");
+        book.hold("g2", "localhost://Local/b", "read");
+        book.revoke("g2");
+        assert_ne!(book.epoch(), epoch, "a held grant still moves the epoch");
+        let again = book.epoch();
+        book.revoke("never-held");
+        assert_ne!(book.epoch(), again, "a new id is a change");
+        let parked = book.epoch();
+        book.revoke("never-held");
+        assert_eq!(book.epoch(), parked);
+        book.revoke("drop-0");
+        for n in 1..=32 {
+            book.revoke(&format!("drop-{n}"));
+        }
+        let parked = book.epoch();
+        book.revoke("drop-0");
+        assert_eq!(
+            book.epoch(),
+            parked,
+            "an id already in the dropped ring is not a change"
+        );
     }
 
     #[test]
