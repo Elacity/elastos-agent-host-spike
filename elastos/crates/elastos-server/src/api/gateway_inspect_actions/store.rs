@@ -41,6 +41,11 @@ pub(super) struct InspectActionRequestRecord {
     pub(super) result: Option<serde_json::Value>,
     #[serde(default)]
     pub(super) error: Option<String>,
+    /// Whether the signed row for this status is in the chain. A crash after
+    /// the file write and before the append leaves this false, and the next
+    /// start appends that row once.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub(super) audit_recorded: bool,
 }
 
 pub(super) fn pending_inspect_action_requests(
@@ -446,20 +451,28 @@ fn settle_records_in_place(
 ) {
     let reason = "a dispatch cannot survive a restart";
     for (path, mut record) in records {
-        if record.kind != AGENT_PLAN_KIND
-            || !matches!(record.status.as_str(), "approved" | "dispatching")
-        {
+        let lost = matches!(record.status.as_str(), "approved" | "dispatching");
+        let owed = record.status == "unresolved" && !record.audit_recorded;
+        if record.kind != AGENT_PLAN_KIND || (!lost && !owed) {
             continue;
         }
-        record.status = "unresolved".into();
-        record.error = Some(reason.into());
-        record.result = Some(serde_json::json!({ "status": "unresolved", "reason": reason }));
-        record.updated_at = updated_at;
-        if let Err(error) = write_inspect_action_at_path(&path, &record) {
-            eprintln!(
-                "[gateway] skipped inspect action record {}: {error}",
-                path.display()
-            );
+        if lost {
+            record.status = "unresolved".into();
+            record.error = Some(reason.into());
+            record.result = Some(serde_json::json!({ "status": "unresolved", "reason": reason }));
+            record.updated_at = updated_at;
+            record.audit_recorded = false;
+            if let Err(error) = write_inspect_action_at_path(&path, &record) {
+                eprintln!(
+                    "[gateway] skipped inspect action record {}: {error}",
+                    path.display()
+                );
+                continue;
+            }
+        }
+        if unresolved_audit_landed(data_dir, &record.request_id) {
+            record.audit_recorded = true;
+            let _ = write_inspect_action_at_path(&path, &record);
             continue;
         }
         if let Err(error) = super::append_agent_plan_decision_audit(
@@ -472,8 +485,22 @@ fn settle_records_in_place(
                 "[gateway] unresolved plan {} has no signed row: {error}",
                 record.request_id
             );
+            continue;
         }
+        record.audit_recorded = true;
+        let _ = write_inspect_action_at_path(&path, &record);
     }
+}
+
+fn unresolved_audit_landed(data_dir: &Path, request_id: &str) -> bool {
+    crate::auth::load_auth_state(data_dir)
+        .map(|state| {
+            state.audit.iter().any(|event| {
+                event.event_type == "agent_plan.dispatch.unresolved"
+                    && event.challenge_id.as_deref() == Some(request_id)
+            })
+        })
+        .unwrap_or(false)
 }
 
 #[cfg(test)]
@@ -500,6 +527,7 @@ mod tests {
             updated_at: 1,
             result: None,
             error: None,
+            audit_recorded: false,
         }
     }
 
@@ -783,5 +811,78 @@ mod tests {
         assert_eq!(unresolved(dir.path()), 1);
         super::settle_agent_plans_lost_before_start(dir.path(), 5).unwrap();
         assert_eq!(unresolved(dir.path()), 1, "the row is appended once");
+    }
+
+    /// The file was written `unresolved` and the process died before the
+    /// append. The next start writes that row once. A later start that finds
+    /// the row and a missing flag does not write it again.
+    #[test]
+    fn a_crash_between_the_unresolved_file_and_its_row_is_repaired_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let owner = "person:owner";
+        let plan = serde_json::json!({
+            "steps": [{ "scheme": "availability", "operation": "status", "request": {} }]
+        });
+        let created = super::super::submit_pending_agent_plan(
+            dir.path(),
+            owner,
+            "agent:v2:0123456789abcdef0123456789abcdef",
+            "capsule:agent-host",
+            "session:agent-1",
+            &plan,
+            1,
+        )
+        .unwrap();
+        let request_id = created["request_id"].as_str().unwrap().to_string();
+        let binding = created["request_binding"].clone();
+        super::claim_pending_agent_plan_for_owner(
+            dir.path(),
+            &request_id,
+            owner,
+            true,
+            &binding,
+            2,
+            |_| Ok(()),
+        )
+        .unwrap();
+        super::claim_approved_agent_plan_for_dispatch(dir.path(), &request_id, owner, 3).unwrap();
+        let mut record = super::read_inspect_action_record(dir.path(), &request_id).unwrap();
+        record.status = "unresolved".to_string();
+        record.audit_recorded = false;
+        record.error = Some("a dispatch cannot survive a restart".to_string());
+        super::write_inspect_action_record(dir.path(), &record).unwrap();
+        let rows = |path: &std::path::Path| {
+            crate::auth::load_auth_state(path)
+                .unwrap()
+                .audit
+                .into_iter()
+                .filter(|event| {
+                    event.event_type == "agent_plan.dispatch.unresolved"
+                        && event.challenge_id.as_deref() == Some(request_id.as_str())
+                })
+                .count()
+        };
+        assert_eq!(rows(dir.path()), 0, "the crash left no signed row");
+        super::settle_agent_plans_lost_before_start(dir.path(), 4).unwrap();
+        assert_eq!(rows(dir.path()), 1);
+        assert!(
+            super::read_inspect_action_record(dir.path(), &request_id)
+                .unwrap()
+                .audit_recorded
+        );
+        let mut again = super::read_inspect_action_record(dir.path(), &request_id).unwrap();
+        again.audit_recorded = false;
+        super::write_inspect_action_record(dir.path(), &again).unwrap();
+        super::settle_agent_plans_lost_before_start(dir.path(), 5).unwrap();
+        assert_eq!(
+            rows(dir.path()),
+            1,
+            "the row that already landed is not repeated"
+        );
+        assert!(
+            super::read_inspect_action_record(dir.path(), &request_id)
+                .unwrap()
+                .audit_recorded
+        );
     }
 }

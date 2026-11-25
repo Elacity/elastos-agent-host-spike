@@ -92,6 +92,7 @@ pub(super) fn create_pending_agent_plan_record(
         updated_at: now,
         result: None,
         error: None,
+        audit_recorded: false,
     };
     let request_binding = agent_plan_request_binding(&record)
         .ok_or_else(|| anyhow::anyhow!("agent plan requires a requester"))?;

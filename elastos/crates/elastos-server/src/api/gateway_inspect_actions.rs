@@ -1375,6 +1375,7 @@ async fn create_inspect_action_request(
         updated_at: now,
         result: None,
         error: None,
+        audit_recorded: false,
     };
     write_inspect_action_record(&state.data_dir, &record)?;
     append_provider_effect_audit(
