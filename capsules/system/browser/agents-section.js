@@ -59,7 +59,7 @@ export function bindAgents(doc, request, confirmStepUp) {
     "#agents-list", "#agents-status", "#agent-form", "#agent-name", "#agent-host", "#agent-create", "#agent-allow", "#agent-retry",
   ].map((id) => doc.querySelector(id));
   if (!listNode || !statusNode || !formNode || !nameInput || !hostInput || !createButton || !allowButton || !retryButton) return { load() {} };
-  let agents = [], pendingId = "", pendingLabel = "", failure = "", retry = null, busy = false, gate = "wait", stopping = new Set();
+  let agents = [], pendingId = "", pendingLabel = "", failure = "", retry = null, busy = false, gate = "wait", stopping = new Set(), running = new Set();
 
   function paint() {
     const banner = failure || (pendingId === "create" || pendingId === "allow" ? pendingLabel : "");
@@ -71,7 +71,7 @@ export function bindAgents(doc, request, confirmStepUp) {
     createButton.disabled = busy || gate !== "ready";
     const rows = agents.map((agent) => {
       const pending = pendingId === agent.agent_id ? pendingLabel : "";
-      const label = pending || (stopping.has(agent.agent_id) ? "Stopping" : stateText(agent, ""));
+      const label = pending || (stopping.has(agent.agent_id) ? "Stopping" : running.has(agent.agent_id) ? "Running" : stateText(agent, ""));
       const state = el(doc, "div", "pc2-card-sublabel", label);
       state.dataset.agentState = agent.agent_id;
       const agentId = el(doc, "div", "pc2-card-sublabel", text(agent.agent_id));
@@ -85,7 +85,7 @@ export function bindAgents(doc, request, confirmStepUp) {
       if (agent.active === true) {
         const start = el(doc, "button", "pc2-btn pc2-btn-secondary", "Start");
         start.type = "button";
-        start.disabled = busy || stopping.has(agent.agent_id);
+        start.disabled = busy || stopping.has(agent.agent_id) || running.has(agent.agent_id);
         start.addEventListener("click", () => run(startJob(agent)));
         actions.append(start);
       }
@@ -144,6 +144,7 @@ export function bindAgents(doc, request, confirmStepUp) {
     // The list is this Home's agent file. It does not read the Runtime's
     // stopping mark, so a reload shows the stored on/off state.
     stopping.clear();
+    running.clear();
   }
 
   function post(id, label, path, body, accept) {
@@ -197,7 +198,9 @@ export function bindAgents(doc, request, confirmStepUp) {
           body: JSON.stringify({ agent_id: id, step_up_token: stepUpToken }),
         });
       } catch (error) {
-        if (refusal(error).code === "agent_stopping") stopping.add(id);
+        const found = refusal(error);
+        if (found.code === "agent_stopping") stopping.add(id);
+        if (found.code === "agent_already_running") running.add(id);
         throw error;
       }
       if (!reply || reply.agent_id !== id || typeof reply.session_id !== "string") {
@@ -220,6 +223,7 @@ export function bindAgents(doc, request, confirmStepUp) {
         const found = refusal(error);
         if (found.code === "agent_already_stopped" || found.code === "agent_no_session") {
           stopping.delete(id);
+          running.delete(id);
         }
         throw error;
       }
@@ -231,6 +235,7 @@ export function bindAgents(doc, request, confirmStepUp) {
       await load();
       if (still.length) stopping.add(id);
       else stopping.delete(id);
+      running.delete(id);
     };
   }
 
