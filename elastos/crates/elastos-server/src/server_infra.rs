@@ -5029,6 +5029,20 @@ mod tests {
         sealed
     }
 
+    fn plant_real_old_sealed(path: &std::path::Path, device_key: &[u8; 32], len: u64) {
+        let sealed = plant_device_envelope(path, device_key, b"sealed");
+        assert!(
+            localhost_provider::header_is_device_key_envelope(&sealed),
+            "the writer changed spelling"
+        );
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_len(len)
+            .unwrap();
+    }
+
     #[test]
     fn crash_at_every_migration_write_restarts_and_leaves_one_key() {
         let _clear = ClearLocalhostMigrationFaults;
@@ -6272,10 +6286,19 @@ mod tests {
         assert!(prep < roots, "roots are created before prepare returns");
         crate::localhost_file_migration::prepare_localhost_files(root)
             .expect("a refusal stopped Home");
-        // The gateway order: prepare, then the auth check, then principal roots.
-        elastos_server::auth::verify_auth_audit_chain_ready(root).expect("verify stopped Home");
-        elastos_server::api::auth_gateway::verify_configured_principal_roots_ready(root)
-            .expect("principal roots stopped Home");
+        // The gateway order: prepare, then one read covers auth and principal roots.
+        // The server start checks auth again, because that entry also loads it.
+        elastos_server::gateway_cmd::verify_ready_after_prepare(root).expect("verify stopped Home");
+        elastos_server::gateway_cmd::verify_auth_audit_after_prepare(root)
+            .expect("the server start stopped Home");
+        let auth = include_str!("auth.rs");
+        let at = auth
+            .find("pub fn verify_auth_audit_chain_ready")
+            .expect("audit check");
+        assert!(
+            !auth[at..at + 180].contains("refusal_leaves_elastos_unmade"),
+            "auth.rs skipped a refused prepare"
+        );
         if elastos_server::local_apps::local_apps_refusal(root).is_none() {
             ensure_file_backed_roots(root).ok();
         }
@@ -6583,9 +6606,10 @@ mod tests {
         migrate_again(huge.path(), &device_key);
         let read = take_localhost_migration_bytes_read();
         let opens = take_localhost_migration_opens();
-        assert!(
-            read < 1024 * 1024,
-            "a padded envelope was loaded whole: {read}"
+        assert_eq!(
+            read,
+            fs::metadata(&over).unwrap().len(),
+            "an old header under the hard limit was not opened once: {read}"
         );
         assert_eq!(opens, 1, "a settled file was opened: {opens}");
         home_is_up(huge.path());
@@ -6594,11 +6618,11 @@ mod tests {
         migrate_again(huge.path(), &device_key);
         assert_eq!(take_localhost_migration_bytes_read(), 0);
         assert_eq!(take_localhost_migration_opens(), 0);
-        let over_opened =
+        let over_err =
             localhost_provider::read_sealed_localhost_file(&file_key, &over, "Users/over.bin")
-                .unwrap();
-        assert!(over_opened.starts_with(&envelope));
-        assert_eq!(over_opened.len(), 32 * 1024 * 1024 + 1);
+                .unwrap_err()
+                .to_string();
+        assert_eq!(over_err, "Users/over.bin is cut off. Remove it.");
         let big_opened =
             localhost_provider::read_sealed_localhost_file(&file_key, &big, "Users/big.bin")
                 .unwrap();
@@ -6966,7 +6990,10 @@ mod tests {
         localhost_provider_bridge_config(root, &device_key).unwrap();
         let read = take_localhost_migration_bytes_read();
         let opens = take_localhost_migration_opens();
-        assert!(read < 1024 * 1024, "plain files were loaded whole: {read}");
+        assert!(
+            read > 32 * 1024 * 1024 && read < 40 * 1024 * 1024,
+            "the old header was not opened once: {read}"
+        );
         assert_eq!(opens, 2, "the settled plain file was opened: {opens}");
         home_is_up(root);
         let _ = take_localhost_migration_bytes_read();
@@ -6978,10 +7005,11 @@ mod tests {
             localhost_provider::read_sealed_localhost_file(&file_key, &brace, "Users/brace.bin")
                 .unwrap();
         assert!(brace_opened.starts_with(b"{not-an-envelope"));
-        let over_opened =
+        let over_err =
             localhost_provider::read_sealed_localhost_file(&file_key, &over, "Users/over.bin")
-                .unwrap();
-        assert!(over_opened.starts_with(&envelope));
+                .unwrap_err()
+                .to_string();
+        assert_eq!(over_err, "Users/over.bin is cut off. Remove it.");
         let plain_opened =
             localhost_provider::read_sealed_localhost_file(&file_key, &plain, "Users/video.bin")
                 .unwrap();
@@ -7695,13 +7723,11 @@ mod tests {
             fs::create_dir(&dir).unwrap();
         }
         let huge = dir.join("huge.bin");
-        fs::write(&huge, b"{over").unwrap();
-        std::fs::OpenOptions::new()
-            .write(true)
-            .open(&huge)
-            .unwrap()
-            .set_len(localhost_provider::SEALED_READ_HARD_LIMIT + 1)
-            .unwrap();
+        plant_real_old_sealed(
+            &huge,
+            &device_key,
+            localhost_provider::SEALED_READ_HARD_LIMIT + 1,
+        );
         let got = match localhost_bringup(root.path(), &device_key) {
             LocalhostBringup::Refuse(got) => got,
             LocalhostBringup::Start(_) => panic!("a file past the hard limit started local apps"),
@@ -7734,13 +7760,11 @@ mod tests {
                 .join(&wide)
                 .join(format!("f{index}.bin"));
             fs::create_dir_all(path.parent().unwrap()).unwrap();
-            fs::write(&path, b"{over").unwrap();
-            std::fs::OpenOptions::new()
-                .write(true)
-                .open(&path)
-                .unwrap()
-                .set_len(localhost_provider::SEALED_READ_HARD_LIMIT + 1)
-                .unwrap();
+            plant_real_old_sealed(
+                &path,
+                &device_key,
+                localhost_provider::SEALED_READ_HARD_LIMIT + 1,
+            );
         }
         let got = match localhost_bringup(root.path(), &device_key) {
             LocalhostBringup::Refuse(got) => got,
@@ -7913,13 +7937,11 @@ mod tests {
         fs::create_dir_all(root.path().join("Users")).unwrap();
         for index in 0..6 {
             let path = root.path().join(format!("Users/h{index}.bin"));
-            fs::write(&path, b"{over").unwrap();
-            std::fs::OpenOptions::new()
-                .write(true)
-                .open(&path)
-                .unwrap()
-                .set_len(localhost_provider::SEALED_READ_HARD_LIMIT + 1)
-                .unwrap();
+            plant_real_old_sealed(
+                &path,
+                &device_key,
+                localhost_provider::SEALED_READ_HARD_LIMIT + 1,
+            );
         }
         let note = root.path().join("Users/note.bin");
         plant_device_envelope(&note, &device_key, b"note");
@@ -7955,13 +7977,11 @@ mod tests {
         let root = TempDir::new().unwrap();
         let huge = root.path().join("Users/huge.bin");
         fs::create_dir_all(huge.parent().unwrap()).unwrap();
-        fs::write(&huge, b"{device-key").unwrap();
-        std::fs::OpenOptions::new()
-            .write(true)
-            .open(&huge)
-            .unwrap()
-            .set_len(localhost_provider::SEALED_READ_HARD_LIMIT + 1)
-            .unwrap();
+        plant_real_old_sealed(
+            &huge,
+            &device_key,
+            localhost_provider::SEALED_READ_HARD_LIMIT + 1,
+        );
         let video = root.path().join("Users/video.bin");
         fs::write(&video, b"ftyp").unwrap();
         std::fs::OpenOptions::new()
@@ -8025,6 +8045,109 @@ mod tests {
                 .unwrap(),
             b"small"
         );
+    }
+
+    #[test]
+    fn a_persons_brace_file_past_1_gib_starts_and_is_served_byte_for_byte() {
+        let _guard = LocalAppsGuard::lock();
+        let device_key = [0x41; 32];
+        let root = TempDir::new().unwrap();
+        let huge = root.path().join("Users/huge.bin");
+        fs::create_dir_all(huge.parent().unwrap()).unwrap();
+        fs::write(&huge, b"{over").unwrap();
+        let len = localhost_provider::SEALED_READ_HARD_LIMIT + 1;
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&huge)
+            .unwrap()
+            .set_len(len)
+            .unwrap();
+        let name = root.path().join("Users/name.json");
+        let name_prefix = br#"{"version":1,"name":"ada""#;
+        fs::write(&name, name_prefix).unwrap();
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&name)
+            .unwrap()
+            .set_len(40 * 1024 * 1024)
+            .unwrap();
+        match localhost_bringup(root.path(), &device_key) {
+            LocalhostBringup::Start(_) => {}
+            LocalhostBringup::Refuse(got) => panic!("a person's file stopped local apps: {got}"),
+        }
+        home_is_up(root.path());
+        assert!(localhost_provider::is_plain_localhost_file(&huge).unwrap());
+        assert_eq!(
+            localhost_provider::read_plain_localhost_range(&huge, "Users/huge.bin", 0, Some(5))
+                .unwrap(),
+            b"{over"
+        );
+        assert_eq!(
+            localhost_provider::read_plain_localhost_range(
+                &huge,
+                "Users/huge.bin",
+                len - 1,
+                Some(1)
+            )
+            .unwrap(),
+            vec![0]
+        );
+        let mut sum = 0u64;
+        let streamed =
+            localhost_provider::stream_plain_localhost_file(&huge, 1024 * 1024, |chunk| {
+                for byte in chunk {
+                    sum += *byte as u64;
+                }
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(streamed, len);
+        assert_eq!(sum, b"{over".iter().map(|byte| *byte as u64).sum::<u64>());
+        assert!(localhost_provider::is_plain_localhost_file(&name).unwrap());
+        let opened =
+            localhost_provider::read_sealed_localhost_file(&device_key, &name, "Users/name.json")
+                .unwrap();
+        assert!(opened.starts_with(name_prefix));
+        assert_eq!(opened.len(), 40 * 1024 * 1024);
+    }
+
+    #[test]
+    fn an_old_header_that_cannot_open_under_the_hard_limit_leaves_local_apps_on() {
+        let _guard = LocalAppsGuard::lock();
+        let device_key = [0x42; 32];
+        let root = TempDir::new().unwrap();
+        let cut = root.path().join("Users/cut.bin");
+        plant_real_old_sealed(&cut, &device_key, 40 * 1024 * 1024);
+        let bad = root.path().join("Users/bad.bin");
+        let head = br#"{"version":1,"nonce":"00112233445566778899aabb","ciphertext":"a"#;
+        let tail = br#""}"#;
+        let mut bad_bytes = Vec::with_capacity(40 * 1024 * 1024);
+        bad_bytes.extend_from_slice(head);
+        bad_bytes.push(b'g');
+        bad_bytes.extend(std::iter::repeat_n(
+            b'a',
+            40 * 1024 * 1024 - bad_bytes.len() - tail.len(),
+        ));
+        bad_bytes.extend_from_slice(tail);
+        fs::write(&bad, &bad_bytes).unwrap();
+        assert!(localhost_provider::header_is_device_key_envelope(
+            &bad_bytes
+        ));
+        match localhost_bringup(root.path(), &device_key) {
+            LocalhostBringup::Start(_) => {}
+            LocalhostBringup::Refuse(got) => {
+                panic!("a cut-off old header stopped local apps: {got}")
+            }
+        }
+        home_is_up(root.path());
+        assert_eq!(fs::metadata(&cut).unwrap().len(), 40 * 1024 * 1024);
+        assert_eq!(fs::metadata(&bad).unwrap().len(), 40 * 1024 * 1024);
+        for (path, label) in [(&cut, "Users/cut.bin"), (&bad, "Users/bad.bin")] {
+            let err = localhost_provider::read_sealed_localhost_file(&device_key, path, label)
+                .unwrap_err()
+                .to_string();
+            assert_eq!(err, format!("{label} is cut off. Remove it."));
+        }
     }
 
     #[test]

@@ -31,6 +31,23 @@ fn verify_principal_roots_ready_and_report(data_dir: &std::path::Path) -> anyhow
     Ok(())
 }
 
+/// One read of a refused prepare, then both start checks. The server calls
+/// [`verify_auth_audit_after_prepare`] again because that entry also loads auth.
+pub fn verify_ready_after_prepare(data_dir: &std::path::Path) -> anyhow::Result<()> {
+    if crate::local_apps::refusal_leaves_elastos_unmade(data_dir) {
+        return Ok(());
+    }
+    crate::auth::verify_auth_audit_chain_ready(data_dir)?;
+    verify_principal_roots_ready_and_report(data_dir)
+}
+
+pub fn verify_auth_audit_after_prepare(data_dir: &std::path::Path) -> anyhow::Result<()> {
+    if !crate::local_apps::refusal_leaves_elastos_unmade(data_dir) {
+        crate::auth::verify_auth_audit_chain_ready(data_dir)?;
+    }
+    Ok(())
+}
+
 pub async fn run_gateway_direct<F, Fut, P>(
     addr: String,
     public: bool,
@@ -86,8 +103,7 @@ where
     // After the host lock, before auth creates ElastOS/System/Auth.
     prepare_files(&data_dir)?;
     crate::host_lock::spawn_installed_binary_supersession_watch(&data_dir, "gateway");
-    crate::auth::verify_auth_audit_chain_ready(&data_dir)?;
-    verify_principal_roots_ready_and_report(&data_dir)?;
+    verify_ready_after_prepare(&data_dir)?;
     let cache_path = cache_dir.unwrap_or_else(|| data_dir.join("gateway-cache"));
     std::fs::create_dir_all(&cache_path)?;
     let GatewayControlPlane {
@@ -137,8 +153,7 @@ where
     // After the host lock, before auth creates ElastOS/System/Auth.
     prepare_files(&data_dir)?;
     crate::host_lock::spawn_installed_binary_supersession_watch(&data_dir, "gateway-public");
-    crate::auth::verify_auth_audit_chain_ready(&data_dir)?;
-    verify_principal_roots_ready_and_report(&data_dir)?;
+    verify_ready_after_prepare(&data_dir)?;
     let components_path = data_dir.join("components.json");
     if !components_path.exists() {
         anyhow::bail!(

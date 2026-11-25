@@ -62,6 +62,23 @@ pub fn header_is_file_key_envelope(header: &[u8]) -> bool {
     header.starts_with(FILE_KEY_ENVELOPE_PREFIX)
 }
 
+/// `encrypt_bytes` has written this since the first localhost provider.
+/// Lowercase hex, no spaces: `{"version":1,"nonce":"<24 hex>","ciphertext":"<hex>`.
+pub fn header_is_device_key_envelope(header: &[u8]) -> bool {
+    const HEAD: &[u8] = br#"{"version":1,"nonce":""#;
+    const MID: &[u8] = br#"","ciphertext":""#;
+    const NONCE: usize = 24;
+    let mid_at = HEAD.len() + NONCE;
+    let digit_at = mid_at + MID.len();
+    header.len() > digit_at
+        && header.starts_with(HEAD)
+        && header[HEAD.len()..mid_at]
+            .iter()
+            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+        && header[mid_at..].starts_with(MID)
+        && matches!(header[digit_at], b'0'..=b'9' | b'a'..=b'f')
+}
+
 fn open_new_format(key: &[u8; 32], bytes: Vec<u8>, name: &str) -> io::Result<Vec<u8>> {
     let cause = match ciphertext_in_place(bytes) {
         None => "cut off",
@@ -120,8 +137,10 @@ mod scan {
     use super::{header_rules_out_envelope, ENVELOPE_BYTE_LIMIT};
     use std::io::{self, Read};
     pub fn reads_as_plain_bytes(header: &[u8], len: u64, rest: &mut dyn Read) -> io::Result<(bool, u64)> {
-        // The header this Home writes is an envelope at every size. Do not scan the body.
-        if super::header_is_file_key_envelope(header) { return Ok((false, 0)); }
+        // A header this Home writes, new or old, is an envelope at every size. Do not scan the body.
+        if super::header_is_file_key_envelope(header) || super::header_is_device_key_envelope(header) {
+            return Ok((false, 0));
+        }
         if header_rules_out_envelope(header) || len <= ENVELOPE_BYTE_LIMIT { return Ok((header_rules_out_envelope(header), 0)); }
         let mut s = Src { rest, n: 0, b: [0; 8192], i: 0, j: header.len() };
         s.b[..header.len()].copy_from_slice(header);
@@ -277,7 +296,7 @@ pub fn read_sealed_localhost_file(key: &[u8; 32], path: &Path, name: &str) -> io
         }
         return decrypt_bytes(key, &raw);
     }
-    if header_is_file_key_envelope(header) {
+    if header_is_file_key_envelope(header) || header_is_device_key_envelope(header) {
         if len > SEALED_READ_HARD_LIMIT {
             return Err(hard_limit_refusal(name));
         }
@@ -546,6 +565,37 @@ mod tests {
         .unwrap();
         assert!(!plain);
         assert_eq!(extra, 0);
+    }
+
+    #[test]
+    fn an_old_header_is_an_envelope_without_a_scan() {
+        let sealed = encrypt_bytes(&[4; 32], b"x").unwrap();
+        assert!(header_is_device_key_envelope(&sealed));
+        assert!(!header_is_file_key_envelope(&sealed));
+        let (plain, extra) = reads_as_plain_bytes(
+            &sealed[..ENVELOPE_HEADER],
+            ENVELOPE_BYTE_LIMIT + 1,
+            &mut Boom,
+        )
+        .unwrap();
+        assert!(!plain);
+        assert_eq!(extra, 0);
+        let (plain, extra) = reads_as_plain_bytes(
+            &sealed[..ENVELOPE_HEADER],
+            SEALED_READ_HARD_LIMIT + 1,
+            &mut Boom,
+        )
+        .unwrap();
+        assert!(!plain);
+        assert_eq!(extra, 0);
+        assert!(!header_is_device_key_envelope(
+            br#"{"version":1,"nonce":"00112233445566778899aabb","ciphertext":"g"#
+        ));
+        assert!(plain_bytes(
+            br#"{"version":1,"name":"ada""#,
+            ENVELOPE_BYTE_LIMIT + 1
+        ));
+        assert!(!header_is_device_key_envelope(FILE_KEY_ENVELOPE_PREFIX));
     }
 
     #[test]

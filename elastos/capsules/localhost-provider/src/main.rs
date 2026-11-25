@@ -1705,4 +1705,87 @@ mod tests {
         std::io::Read::read_exact(&mut fs::File::open(&big).unwrap(), &mut head).unwrap();
         assert!(localhost_provider::header_is_file_key_envelope(&head));
     }
+
+    fn old_sealed(dir: &std::path::Path, name: &str, len: u64) -> std::path::PathBuf {
+        let path = dir.join(name);
+        let sealed = localhost_provider::encrypt_bytes(&[9; 32], b"sealed").unwrap();
+        assert!(localhost_provider::header_is_device_key_envelope(&sealed));
+        fs::write(&path, &sealed).unwrap();
+        fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_len(len)
+            .unwrap();
+        path
+    }
+
+    #[test]
+    fn an_old_header_is_refused_when_cut_off_or_past_the_hard_limit() {
+        let dir = setup_test_dir();
+        fs::create_dir(dir.path().join("Users")).unwrap();
+        let provider = make_encrypted_provider(&dir);
+        let forty = 40 * 1024 * 1024;
+        let huge = localhost_provider::SEALED_READ_HARD_LIMIT + 1;
+        let cut = old_sealed(dir.path(), "Users/cut.bin", forty);
+        let before = fs::metadata(&cut).unwrap().len();
+        let mut head = [0u8; 63];
+        std::io::Read::read_exact(&mut fs::File::open(&cut).unwrap(), &mut head).unwrap();
+        assert_eq!(
+            refusal(&provider, "Users/cut.bin", None, None),
+            "Users/cut.bin is cut off. Remove it."
+        );
+        assert_eq!(
+            refusal(&provider, "Users/cut.bin", Some(0), Some(4)),
+            "Users/cut.bin is cut off. Remove it."
+        );
+        let err = provider
+            .write_file("Users/cut.bin", "token", b"more", true)
+            .unwrap_err()
+            .to_string();
+        assert_eq!(err, "Users/cut.bin is cut off. Remove it.");
+        assert_eq!(fs::metadata(&cut).unwrap().len(), before);
+        let mut after = [0u8; 63];
+        std::io::Read::read_exact(&mut fs::File::open(&cut).unwrap(), &mut after).unwrap();
+        assert_eq!(after, head);
+
+        let big = old_sealed(dir.path(), "Users/huge.bin", huge);
+        let sliced = refusal(&provider, "Users/huge.bin", Some(0), Some(8));
+        assert!(
+            sliced.contains("Users/huge.bin is larger than this process can read"),
+            "{sliced}"
+        );
+        assert!(sliced.contains("Move it out of the folder."), "{sliced}");
+        let err = provider
+            .write_file("Users/huge.bin", "token", b"more", true)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("larger than this process can read"), "{err}");
+        assert_eq!(fs::metadata(&big).unwrap().len(), huge);
+        let mut big_head = [0u8; 63];
+        std::io::Read::read_exact(&mut fs::File::open(&big).unwrap(), &mut big_head).unwrap();
+        assert!(localhost_provider::header_is_device_key_envelope(&big_head));
+
+        let name = dir.path().join("Users/name.json");
+        let prefix = br#"{"version":1,"name":"ada""#;
+        fs::write(&name, prefix).unwrap();
+        fs::OpenOptions::new()
+            .write(true)
+            .open(&name)
+            .unwrap()
+            .set_len(localhost_provider::ENVELOPE_BYTE_LIMIT + 1)
+            .unwrap();
+        assert!(localhost_provider::is_plain_localhost_file(&name).unwrap());
+        assert_eq!(
+            provider
+                .read_file(
+                    "Users/name.json",
+                    "token",
+                    Some(0),
+                    Some(prefix.len() as u64)
+                )
+                .unwrap(),
+            prefix
+        );
+    }
 }
