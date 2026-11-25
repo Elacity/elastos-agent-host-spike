@@ -3,6 +3,8 @@ use elastos_runtime::signature::{generate_keypair, SigningKey};
 
 const HOME_CLI_CAPSULE_ID_FOR_TEST: &str = "home-cli";
 pub(super) static HOME_GATEWAY_TEST_ENV_LOCK: TokioMutex<()> = TokioMutex::const_new(());
+/// Frame shells are one process slot. These tests take it for the whole test.
+pub(super) static FRAME_SHELL_TEST_LOCK: TokioMutex<()> = TokioMutex::const_new(());
 
 struct EnvRestore {
     key: &'static str,
@@ -81,6 +83,7 @@ async fn home_test_get_json_without_origin(
 async fn home_frame_comes_from_the_managed_runtime() {
     use elastos_compute::ComputeProvider;
 
+    let _frame_shells = FRAME_SHELL_TEST_LOCK.lock().await;
     let dir = tempfile::tempdir().unwrap();
     let owner = passkey_authority(dir.path());
     let other = passkey_authority_with_name_role_credential(
@@ -427,6 +430,7 @@ fn recent_session_labels(
 #[cfg(unix)]
 #[tokio::test]
 async fn a_frame_poll_that_gets_401_attaches_once_more() {
+    let _frame_shells = FRAME_SHELL_TEST_LOCK.lock().await;
     let dir = tempfile::tempdir().unwrap();
     let owner = passkey_authority(dir.path());
     let storage = elastos_storage::providers::LocalFSProvider::new(dir.path().join("storage"));
@@ -457,6 +461,7 @@ async fn a_frame_poll_that_gets_401_attaches_once_more() {
 #[cfg(unix)]
 #[tokio::test]
 async fn a_thousand_frame_polls_keep_one_shell_and_a_restart_mints_once() {
+    let _frame_shells = FRAME_SHELL_TEST_LOCK.lock().await;
     let dir = tempfile::tempdir().unwrap();
     let owner = passkey_authority(dir.path());
     let storage = elastos_storage::providers::LocalFSProvider::new(dir.path().join("storage"));
@@ -586,7 +591,10 @@ async fn a_thousand_frame_polls_keep_one_shell_and_a_restart_mints_once() {
             .await
             .unwrap();
         assert_eq!(refused.status(), StatusCode::FORBIDDEN);
-        assert_eq!(refused.text().await.unwrap(), "no session");
+        assert_eq!(
+            refused.text().await.unwrap(),
+            "shell has no frame principal"
+        );
     }
     evict_task.abort();
 }
@@ -594,6 +602,7 @@ async fn a_thousand_frame_polls_keep_one_shell_and_a_restart_mints_once() {
 #[cfg(unix)]
 #[tokio::test]
 async fn a_hostile_frame_stops_reading_past_the_bound() {
+    let _frame_shells = FRAME_SHELL_TEST_LOCK.lock().await;
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let api_url = format!("http://{}", listener.local_addr().unwrap());
     tokio::spawn(async move {
@@ -653,6 +662,7 @@ async fn a_hostile_frame_stops_reading_past_the_bound() {
 #[cfg(unix)]
 #[tokio::test]
 async fn a_frame_poll_sends_nothing_to_a_dead_or_open_runtime() {
+    let _frame_shells = FRAME_SHELL_TEST_LOCK.lock().await;
     let hits = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let api_url = format!("http://{}", listener.local_addr().unwrap());
@@ -727,6 +737,7 @@ async fn a_frame_poll_sends_nothing_to_a_dead_or_open_runtime() {
 #[cfg(unix)]
 #[tokio::test]
 async fn an_evicted_frame_shell_gets_401_and_the_poll_attaches_once() {
+    let _frame_shells = FRAME_SHELL_TEST_LOCK.lock().await;
     let dir = tempfile::tempdir().unwrap();
     let owner = passkey_authority(dir.path());
     let storage = elastos_storage::providers::LocalFSProvider::new(dir.path().join("storage"));
@@ -784,6 +795,7 @@ async fn an_evicted_frame_shell_gets_401_and_the_poll_attaches_once() {
 async fn thirty_three_principals_each_get_their_frame_again() {
     use elastos_compute::ComputeProvider;
 
+    let _frame_shells = FRAME_SHELL_TEST_LOCK.lock().await;
     let dir = tempfile::tempdir().unwrap();
     let mut people = Vec::new();
     for n in 0..33 {
@@ -894,6 +906,7 @@ async fn thirty_three_principals_each_get_their_frame_again() {
 async fn ordinary_attaches_do_not_change_a_frame_answer() {
     use elastos_compute::ComputeProvider;
 
+    let _frame_shells = FRAME_SHELL_TEST_LOCK.lock().await;
     let dir = tempfile::tempdir().unwrap();
     let owner = passkey_authority(dir.path());
     let provider = Arc::new(elastos_compute::providers::ComponentProvider::new());
@@ -976,7 +989,7 @@ async fn ordinary_attaches_do_not_change_a_frame_answer() {
     let last_ordinary = ordinary_answer(&client, &api_url, ordinary.last().unwrap()).await;
     assert_eq!(first_ordinary, last_ordinary);
     assert_eq!(first_ordinary.0, StatusCode::FORBIDDEN);
-    assert_eq!(first_ordinary.1, "no session");
+    assert_eq!(first_ordinary.1, "shell has no frame principal");
     for n in 0..9 {
         client
             .post(format!("{api_url}/api/auth/attach"))
@@ -1000,6 +1013,131 @@ async fn ordinary_attaches_do_not_change_a_frame_answer() {
         .await
         .unwrap();
     task.abort();
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn forty_runtime_restarts_keep_at_most_32_frame_shells() {
+    let _frame_shells = FRAME_SHELL_TEST_LOCK.lock().await;
+    let hits = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let seen = std::sync::Arc::clone(&hits);
+    let app = Router::new().route(
+        "/api/auth/attach",
+        post(move || {
+            let seen = std::sync::Arc::clone(&seen);
+            async move {
+                let n = seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Json(json!({ "token": format!("shell-{n}") }))
+            }
+        }),
+    );
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let api_url = format!("http://{}", listener.local_addr().unwrap());
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    for n in 0..40 {
+        let secret = format!("rev-{n:02}");
+        let token = super::super::gateway_home_system::testing_frame_shell(
+            &api_url,
+            &secret,
+            "person:local:p",
+        )
+        .await;
+        assert!(token.is_some(), "restart {n} did not attach");
+        let keys = super::super::gateway_home_system::frame_shell_keys().await;
+        assert!(keys.len() <= 32, "restart {n} kept {} shells", keys.len());
+        assert!(
+            keys.iter().all(|key| key.contains(&secret)),
+            "restart {n} kept an older runtime: {keys:?}"
+        );
+    }
+    let keys = super::super::gateway_home_system::frame_shell_keys().await;
+    assert_eq!(keys.len(), 1, "{keys:?}");
+    assert!(keys[0].contains("rev-39"), "{keys:?}");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_hanging_attach_for_one_principal_does_not_delay_another() {
+    let _frame_shells = FRAME_SHELL_TEST_LOCK.lock().await;
+    super::super::gateway_home_system::reset_frame_flight_waits();
+    let hits = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let armed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let release = std::sync::Arc::new(tokio::sync::Notify::new());
+    let seen = std::sync::Arc::clone(&hits);
+    let hold = std::sync::Arc::clone(&release);
+    let ready = std::sync::Arc::clone(&armed);
+    let app = Router::new().route(
+        "/api/auth/attach",
+        post(move || {
+            let seen = std::sync::Arc::clone(&seen);
+            let hold = std::sync::Arc::clone(&hold);
+            let ready = std::sync::Arc::clone(&ready);
+            async move {
+                let n = seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                if n == 0 {
+                    let wait = hold.notified();
+                    tokio::pin!(wait);
+                    wait.as_mut().enable();
+                    ready.store(true, std::sync::atomic::Ordering::SeqCst);
+                    wait.await;
+                }
+                Json(json!({ "token": format!("shell-{n}") }))
+            }
+        }),
+    );
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let api_url = format!("http://{}", listener.local_addr().unwrap());
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    let shells = super::super::gateway_home_system::testing_frame_shell;
+    let url = api_url.clone();
+    let first = tokio::spawn(async move { shells(&url, "hang-secret", "person:local:p1").await });
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        while !armed.load(std::sync::atomic::Ordering::SeqCst) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("p1 did not reach its attach");
+    let url = api_url.clone();
+    let second = tokio::spawn(async move { shells(&url, "hang-secret", "person:local:p1").await });
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        while super::super::gateway_home_system::frame_flight_waits() == 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the second p1 poll did not share the attach");
+    let started = std::time::Instant::now();
+    let other = tokio::time::timeout(
+        std::time::Duration::from_millis(500),
+        super::super::gateway_home_system::testing_frame_shell(
+            &api_url,
+            "hang-secret",
+            "person:local:p2",
+        ),
+    )
+    .await;
+    release.notify_waiters();
+    let other = other.expect("p2 waited on p1's attach");
+    assert!(
+        started.elapsed() < std::time::Duration::from_millis(500),
+        "p2 took {:?}",
+        started.elapsed()
+    );
+    assert_eq!(
+        hits.load(std::sync::atomic::Ordering::SeqCst),
+        2,
+        "two polls of p1 must be one attach"
+    );
+    let first = first.await.unwrap();
+    let second = second.await.unwrap();
+    assert_eq!(first, second);
+    assert_eq!(first.as_deref(), Some("shell-0"));
+    assert_eq!(other.as_deref(), Some("shell-1"));
 }
 
 #[cfg(unix)]

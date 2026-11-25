@@ -1458,10 +1458,17 @@ fn home_frame_guest(data_dir: &std::path::Path, context: &HomeLaunchTokenContext
     )
 }
 
+type FrameFlight = (tokio::sync::Notify, Mutex<Option<Option<String>>>);
+
 struct FrameSlot {
     client: reqwest::Client,
     shells: Vec<(String, String)>,
+    prefix: String,
+    flights: Vec<(String, Arc<FrameFlight>)>,
 }
+
+#[cfg(test)]
+static FRAME_FLIGHT_WAITS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 fn frame_slot() -> &'static tokio::sync::Mutex<FrameSlot> {
     static SLOT: OnceLock<tokio::sync::Mutex<FrameSlot>> = OnceLock::new();
@@ -1472,6 +1479,8 @@ fn frame_slot() -> &'static tokio::sync::Mutex<FrameSlot> {
                 .build()
                 .unwrap_or_else(|_| reqwest::Client::new()),
             shells: Vec::new(),
+            prefix: String::new(),
+            flights: Vec::new(),
         })
     })
 }
@@ -1518,34 +1527,52 @@ async fn frame_shell(
     secret: &str,
     context: &HomeLaunchTokenContext,
 ) -> Option<(reqwest::Client, String)> {
-    let principal = context.principal_id();
-    let key = frame_key(api_url, secret, principal);
-    let mut slot = frame_slot().lock().await;
-    if let Some((_, token)) = slot.shells.iter().find(|(saved, _)| saved == &key) {
-        return Some((slot.client.clone(), token.clone()));
+    let prefix = frame_runtime_prefix(api_url, secret);
+    let key = format!("{prefix}{}", context.principal_id());
+    let client;
+    let flight;
+    {
+        let mut slot = frame_slot().lock().await;
+        if slot.prefix != prefix {
+            slot.shells.clear();
+            slot.prefix = prefix.clone();
+        }
+        if let Some((_, token)) = slot.shells.iter().find(|(saved, _)| saved == &key) {
+            return Some((slot.client.clone(), token.clone()));
+        }
+        client = slot.client.clone();
+        if let Some((_, existing)) = slot.flights.iter().find(|(saved, _)| saved == &key) {
+            let flight = Arc::clone(existing);
+            let notified = flight.0.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            #[cfg(test)]
+            FRAME_FLIGHT_WAITS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            drop(slot);
+            notified.await;
+            let found = flight.1.lock().expect("frame").clone().flatten();
+            return found.map(|token| (client, token));
+        }
+        flight = Arc::new((tokio::sync::Notify::new(), std::sync::Mutex::new(None)));
+        slot.flights.push((key.clone(), Arc::clone(&flight)));
     }
-    let client = slot.client.clone();
     let token = home_attach_frame_shell(&client, api_url, secret, context)
         .await
-        .ok()?;
-    slot.shells.retain(|(saved, _)| saved != &key);
-    let prefix = frame_runtime_prefix(api_url, secret);
-    let kept = slot
-        .shells
-        .iter()
-        .filter(|(saved, _)| saved.starts_with(&prefix))
-        .count();
-    if kept >= crate::api::handlers::attach::FRAME_SHELL_CAP {
-        if let Some(index) = slot
-            .shells
-            .iter()
-            .position(|(saved, _)| saved.starts_with(&prefix))
-        {
-            slot.shells.remove(index);
+        .ok();
+    let mut slot = frame_slot().lock().await;
+    if slot.prefix == prefix {
+        if let Some(token) = &token {
+            slot.shells.retain(|(saved, _)| saved != &key);
+            let room = crate::api::handlers::attach::FRAME_SHELL_CAP - 1;
+            let drop_n = slot.shells.len().saturating_sub(room);
+            slot.shells.drain(0..drop_n);
+            slot.shells.push((key.clone(), token.clone()));
         }
     }
-    slot.shells.push((key, token.clone()));
-    Some((client, token))
+    *flight.1.lock().expect("frame") = Some(token.clone());
+    slot.flights.retain(|(saved, _)| saved != &key);
+    flight.0.notify_waiters();
+    token.map(|token| (client, token))
 }
 
 async fn drop_frame_shell(api_url: &str, secret: &str, principal: &str) {
@@ -1555,6 +1582,45 @@ async fn drop_frame_shell(api_url: &str, secret: &str, principal: &str) {
         .await
         .shells
         .retain(|(saved, _)| saved != &key);
+}
+
+#[cfg(test)]
+pub(super) async fn frame_shell_keys() -> Vec<String> {
+    frame_slot()
+        .lock()
+        .await
+        .shells
+        .iter()
+        .map(|(key, _)| key.clone())
+        .collect()
+}
+
+#[cfg(test)]
+pub(super) fn reset_frame_flight_waits() {
+    FRAME_FLIGHT_WAITS.store(0, std::sync::atomic::Ordering::SeqCst);
+}
+
+#[cfg(test)]
+pub(super) fn frame_flight_waits() -> usize {
+    FRAME_FLIGHT_WAITS.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+#[cfg(test)]
+pub(super) async fn testing_frame_shell(
+    api_url: &str,
+    secret: &str,
+    principal: &str,
+) -> Option<String> {
+    let context = HomeLaunchTokenContext::for_test(
+        principal,
+        "session",
+        None,
+        "grant",
+        crate::auth::PrincipalKind::Human,
+    );
+    frame_shell(api_url, secret, &context)
+        .await
+        .map(|(_, token)| token)
 }
 
 async fn frame_bytes(mut response: reqwest::Response) -> Vec<u8> {

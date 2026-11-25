@@ -111,7 +111,7 @@ pub(crate) async fn resident_frame(
             }
             // An ordinary shell stays forbidden. A frame shell that lost its
             // slot is already gone from the registry, so that poll is 401.
-            return (StatusCode::FORBIDDEN, "no session").into_response();
+            return (StatusCode::FORBIDDEN, "shell has no frame principal").into_response();
         }
         return (StatusCode::FORBIDDEN, "guest session").into_response();
     }

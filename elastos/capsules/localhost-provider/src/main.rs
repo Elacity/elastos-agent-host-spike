@@ -230,10 +230,17 @@ pub struct LocalProvider {
 
 impl LocalProvider {
     fn is_plaintext_path(path: &str) -> bool {
+        Self::plaintext_root(path, true)
+    }
+
+    fn plaintext_root(path: &str, uri: bool) -> bool {
         let trimmed = path.trim_start_matches('/');
-        parse_localhost_path(trimmed)
-            .map(|(root, _)| is_plaintext_root(root))
-            .unwrap_or(false)
+        let parsed = if uri {
+            parse_localhost_uri(path).or_else(|| parse_localhost_path(trimmed))
+        } else {
+            parse_localhost_path(trimmed)
+        };
+        parsed.is_some_and(|(root, _)| is_plaintext_root(root))
     }
 
     /// Create a new provider with configuration
@@ -547,7 +554,7 @@ impl LocalProvider {
         }
 
         if let Some(ref key) = self.encryption_key {
-            if Self::is_plaintext_path(path) {
+            if Self::plaintext_root(path, false) {
                 let mut file = fs::OpenOptions::new()
                     .write(true)
                     .create(true)
@@ -1982,5 +1989,48 @@ mod tests {
         );
         let growth = after.saturating_sub(before);
         assert!(growth < 256 * 1024, "rss grew by {growth} KiB");
+    }
+
+    #[test]
+    fn v2_uri_read_uses_the_file_key_and_a_uri_write_stays_encrypted() {
+        let dir = setup_test_dir();
+        for root in ["Local", "Public", "Users"] {
+            fs::create_dir_all(dir.path().join(root)).unwrap();
+        }
+        let provider = make_encrypted_provider(&dir);
+        for (root, bytes) in [
+            ("Public", &b"plain-public"[..]),
+            ("Local", &b"secret-local"[..]),
+            ("Users", &b"secret-users"[..]),
+        ] {
+            let path = format!("{root}/note.txt");
+            provider.write_file(&path, "token", bytes, false).unwrap();
+            let stored = fs::read(provider.resolve_path(&path).unwrap()).unwrap();
+            if root == "Public" {
+                assert_eq!(stored, bytes, "a Public path write stays plain");
+            } else {
+                assert_ne!(stored, bytes, "{root} stays encrypted");
+                assert!(std::str::from_utf8(&stored).unwrap().contains("ciphertext"));
+            }
+            let data = read_v2_window(
+                &provider,
+                &format!("localhost://{path}"),
+                "token",
+                None,
+                None,
+            )
+            .unwrap_or_else(|err| panic!("{root} uri read: {err}"));
+            assert_eq!(data["content"]["b64"], encode_b64(bytes), "{root}");
+        }
+        provider
+            .write_file("localhost://Public/uri.txt", "token", b"not-plain", false)
+            .unwrap();
+        let stored =
+            fs::read(provider.resolve_path("localhost://Public/uri.txt").unwrap()).unwrap();
+        assert_ne!(stored, b"not-plain");
+        assert!(
+            std::str::from_utf8(&stored).unwrap().contains("ciphertext"),
+            "a localhost URI write stays encrypted"
+        );
     }
 }

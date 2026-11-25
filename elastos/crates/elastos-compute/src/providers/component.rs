@@ -183,6 +183,8 @@ struct ComponentActivation {
     /// The test holds start here until it has the task, before the worker is published.
     #[cfg(test)]
     publish_gate: Option<Arc<TestGate>>,
+    #[cfg(test)]
+    attach_gate: Option<Arc<TestGate>>,
     /// The test holds a natural exit here after the worker has signalled done.
     #[cfg(test)]
     exit_gate: Option<Arc<TestGate>>,
@@ -361,6 +363,23 @@ pub struct ComponentProvider {
     threads_live: Arc<AtomicUsize>,
 }
 
+#[cfg(any(test, feature = "test-fixtures"))]
+pub struct TestingOpenRead {
+    window: crate::providers::bus2_stream::WindowRead,
+    trailer: tokio::sync::oneshot::Receiver<std::result::Result<(), String>>,
+}
+
+#[cfg(any(test, feature = "test-fixtures"))]
+impl TestingOpenRead {
+    pub fn pull(&mut self, n: usize) -> Option<Vec<u8>> {
+        self.window.pull(n)
+    }
+
+    pub fn trailer(&mut self) -> Option<std::result::Result<(), String>> {
+        self.trailer.try_recv().ok()
+    }
+}
+
 impl ComponentProvider {
     pub fn new() -> Self {
         Self {
@@ -519,6 +538,28 @@ impl ComponentProvider {
                 frame: crate::providers::bus2_ui::Frame { nodes },
             },
         );
+    }
+
+    #[cfg(any(test, feature = "test-fixtures"))]
+    pub async fn testing_open_read(
+        &self,
+        id: &CapsuleId,
+        grant: &str,
+        bytes: &[u8],
+    ) -> Option<TestingOpenRead> {
+        let instances = self.instances.read().await;
+        let instance = instances.get(id)?;
+        let stop = instance.stop_requested.clone();
+        let cancel = instance.cancel_requested.clone();
+        let grants = instance.grants.clone();
+        drop(instances);
+        use crate::providers::bus2_stream::{ReadHold, WindowRead};
+        let hold = ReadHold::try_reserve(&self.read_budget, bytes.len())?;
+        let (tx, trailer) = tokio::sync::oneshot::channel();
+        let grant = grant.to_string();
+        let end = Arc::new(move || v2_read_stopped(&stop, &cancel, &grants, &grant));
+        let window = WindowRead::new(bytes.to_vec(), tx, hold).stop_when(end);
+        Some(TestingOpenRead { window, trailer })
     }
 
     /// Revokes `grant` in the guest's book and drops a frame that names it,
@@ -836,6 +877,8 @@ impl ComponentProvider {
                 #[cfg(test)]
                 publish_gate: None,
                 #[cfg(test)]
+                attach_gate: None,
+                #[cfg(test)]
                 exit_gate: None,
                 #[cfg(test)]
                 present_gate: None,
@@ -1000,6 +1043,8 @@ impl ComponentProvider {
             let instance = entries.get_mut(&handle.id).expect("entry");
             #[cfg(test)]
             let refuse_spawn = instance.refuse_join_owner;
+            #[cfg(test)]
+            let attach_gate = instance.attach_gate.clone();
             let join = V2Join::prepare(
                 None,
                 Some(worker),
@@ -1007,6 +1052,8 @@ impl ComponentProvider {
                 instance.wake.clone(),
                 #[cfg(test)]
                 refuse_spawn,
+                #[cfg(test)]
+                attach_gate,
             );
             instance.join = Some(join.clone());
             instance.starting = true;
@@ -1035,7 +1082,7 @@ impl ComponentProvider {
             let mut entries = self.instances.write().await;
             let Some(instance) = entries.get_mut(&handle.id) else {
                 drop(entries);
-                abort.abort();
+                join.abort_task(&abort);
                 drop(sender);
                 return Err(ElastosError::Compute(
                     "v2 guest was removed before its thread was stored".into(),
@@ -1047,6 +1094,7 @@ impl ComponentProvider {
                 .is_some_and(|held| held.was_started())
             {
                 drop(entries);
+                join.abort_task(&abort);
                 drop(sender);
                 return Err(ElastosError::Compute(
                     "v2 guest was stopped before it was published".into(),
@@ -1555,11 +1603,16 @@ fn out_of_fuel(err: &wasmtime::Error) -> bool {
         .any(|link| matches!(link.downcast_ref::<Trap>(), Some(Trap::OutOfFuel)))
 }
 
+struct JoinedTask {
+    task: Option<tokio::task::AbortHandle>,
+    aborted: bool,
+}
+
 /// One owner of a v2 worker. Later stops wait on this completion. The slot
 /// stays until `wait` reports the worker has ended.
 struct V2Join {
     worker: Mutex<Option<std::thread::JoinHandle<()>>>,
-    task: Mutex<Option<tokio::task::AbortHandle>>,
+    task: Mutex<JoinedTask>,
     cancel: Arc<AtomicBool>,
     done: Mutex<bool>,
     cv: Condvar,
@@ -1574,6 +1627,8 @@ struct V2Join {
     wake: Arc<tokio::sync::Notify>,
     #[cfg(test)]
     refuse_spawn: AtomicBool,
+    #[cfg(test)]
+    attach_gate: Option<Arc<TestGate>>,
 }
 
 impl V2Join {
@@ -1583,10 +1638,14 @@ impl V2Join {
         cancel: Arc<AtomicBool>,
         wake: Arc<tokio::sync::Notify>,
         #[cfg(test)] refuse_spawn: bool,
+        #[cfg(test)] attach_gate: Option<Arc<TestGate>>,
     ) -> Arc<Self> {
         Arc::new(Self {
             worker: Mutex::new(worker),
-            task: Mutex::new(task),
+            task: Mutex::new(JoinedTask {
+                task,
+                aborted: false,
+            }),
             cancel,
             done: Mutex::new(false),
             cv: Condvar::new(),
@@ -1597,6 +1656,8 @@ impl V2Join {
             wake,
             #[cfg(test)]
             refuse_spawn: AtomicBool::new(refuse_spawn),
+            #[cfg(test)]
+            attach_gate,
         })
     }
 
@@ -1610,13 +1671,30 @@ impl V2Join {
         self.started.load(Ordering::Acquire)
     }
 
+    fn abort_task(&self, task: &tokio::task::AbortHandle) {
+        raise_flag(&self.cancel, &self.wake);
+        task.abort();
+    }
+
     fn attach_task(&self, task: tokio::task::AbortHandle) {
-        if self.owning.load(Ordering::Acquire) && !task.is_finished() {
-            self.cancel.store(true, Ordering::Release);
-            self.wake.notify_one();
-            task.abort();
+        #[cfg(test)]
+        if let Some(gate) = &self.attach_gate {
+            gate.wait();
         }
-        *self.task.lock().expect("join") = Some(task);
+        let mut slot = self.task.lock().expect("join");
+        let late = slot.aborted;
+        if !late {
+            slot.task = Some(task.clone());
+        }
+        drop(slot);
+        if late {
+            self.abort_task(&task);
+        }
+    }
+
+    #[cfg(test)]
+    fn is_aborted(&self) -> bool {
+        self.task.lock().expect("join").aborted
     }
 
     /// Starts the single owner thread. A second call does nothing. When the
@@ -1653,12 +1731,12 @@ impl V2Join {
             return;
         }
         std::thread::sleep(V2_STOP_GRACE);
-        if let Some(task) = self.task.lock().expect("join").take() {
-            if !task.is_finished() {
-                self.cancel.store(true, Ordering::Release);
-                self.wake.notify_one();
-                task.abort();
-            }
+        let mut slot = self.task.lock().expect("join");
+        slot.aborted = true;
+        let task = slot.task.take().filter(|task| !task.is_finished());
+        drop(slot);
+        if let Some(task) = task {
+            self.abort_task(&task);
         }
         if let Some(worker) = self.worker.lock().expect("join").take() {
             let _ = worker.join();
@@ -1727,6 +1805,8 @@ fn begin_v2_join(instance: &mut ComponentActivation) -> Option<Arc<V2Join>> {
     }
     #[cfg(test)]
     let refuse_spawn = instance.refuse_join_owner;
+    #[cfg(test)]
+    let attach_gate = instance.attach_gate.clone();
     let wake = instance.wake.clone();
     let join = V2Join::prepare(
         task,
@@ -1735,6 +1815,8 @@ fn begin_v2_join(instance: &mut ComponentActivation) -> Option<Arc<V2Join>> {
         wake,
         #[cfg(test)]
         refuse_spawn,
+        #[cfg(test)]
+        attach_gate,
     );
     instance.join = Some(join.clone());
     instance.status = CapsuleStatus::Stopping;
@@ -7430,7 +7512,7 @@ mod tests {
             .await
             .get_mut(&handle.id)
             .unwrap()
-            .test_max_ticks = 4;
+            .test_max_ticks = 30;
         provider.start(&handle).await.expect("the resident starts");
         for _ in 0..400 {
             let sender = provider
@@ -7471,7 +7553,7 @@ mod tests {
             .await
             .get_mut(&handle.id)
             .unwrap()
-            .test_max_ticks = 4;
+            .test_max_ticks = 30;
         provider.start(&handle).await.expect("the resident starts");
         for _ in 0..2_000 {
             let sender = provider
@@ -8147,6 +8229,149 @@ mod tests {
         reader.join().expect("reader");
     }
 
+    fn spin_guest() -> Vec<u8> {
+        v2_variant(&[(
+            "call $new global.set $set\n      call $next)",
+            "call $new global.set $set\n      (loop $spin br $spin) i32.const 0)",
+        )])
+    }
+
+    async fn a_late_attach_ends_with(forget: bool) {
+        let provider = Arc::new(ComponentProvider::new());
+        let handle = load_v2_fixture(&provider, spin_guest()).await;
+        let gate = TestGate::new();
+        {
+            let mut entries = provider.instances.write().await;
+            let instance = entries.get_mut(&handle.id).unwrap();
+            instance.attach_gate = Some(gate.clone());
+            instance.test_max_ticks = 500;
+        }
+        let running = Arc::clone(&provider);
+        let starting_handle = handle.clone();
+        let starting = tokio::spawn(async move { running.start(&starting_handle).await });
+        let entered = Arc::clone(&gate);
+        tokio::task::spawn_blocking(move || entered.entered())
+            .await
+            .unwrap();
+        let began = Instant::now();
+        let ending = Arc::clone(&provider);
+        let ending_handle = handle.clone();
+        let finished = tokio::spawn(async move {
+            if forget {
+                ending.forget_instance(&ending_handle.id).await;
+            } else {
+                ending.stop(&ending_handle).await.expect("stop");
+            }
+        });
+        let watched = provider
+            .instances
+            .read()
+            .await
+            .get(&handle.id)
+            .expect("the slot is held at the race")
+            .join
+            .clone()
+            .expect("join");
+        let release = gate;
+        tokio::task::spawn_blocking(move || {
+            while !watched.is_aborted() {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            release.open();
+        })
+        .await
+        .unwrap();
+        finished.await.expect("end task");
+        assert!(
+            began.elapsed() < Duration::from_secs(1),
+            "the guest was still up after {:?}",
+            began.elapsed()
+        );
+        assert!(
+            provider.instances.read().await.get(&handle.id).is_none(),
+            "the slot stayed"
+        );
+        let started = starting.await.expect("start task");
+        let message = format!("{started:?}");
+        assert!(
+            message.contains("stopped before it was published")
+                || message.contains("removed before its thread was stored"),
+            "{message}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_task_attached_after_stop_took_the_slot_is_aborted() {
+        a_late_attach_ends_with(false).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_task_attached_after_forget_took_the_slot_is_aborted() {
+        a_late_attach_ends_with(true).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_task_attached_after_drop_took_the_slot_is_aborted() {
+        let provider = ComponentProvider::new();
+        let handle = load_v2_fixture(&provider, spin_guest()).await;
+        let gate = TestGate::new();
+        let task = tokio::spawn(std::future::pending::<()>());
+        let abort = task.abort_handle();
+        let watch = abort.clone();
+        let worker = std::thread::spawn(move || {
+            let started = Instant::now();
+            while !watch.is_finished() && started.elapsed() < Duration::from_secs(3) {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        });
+        let join = V2Join::prepare(
+            None,
+            Some(worker),
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(tokio::sync::Notify::new()),
+            false,
+            Some(Arc::clone(&gate)),
+        );
+        provider
+            .instances
+            .write()
+            .await
+            .get_mut(&handle.id)
+            .unwrap()
+            .join = Some(Arc::clone(&join));
+        let passed = abort.clone();
+        let attacher = std::thread::spawn(move || join.attach_task(passed));
+        gate.entered();
+        let watched = provider
+            .instances
+            .read()
+            .await
+            .get(&handle.id)
+            .unwrap()
+            .join
+            .clone()
+            .unwrap();
+        let release = Arc::clone(&gate);
+        let opener = std::thread::spawn(move || {
+            while !watched.is_aborted() {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            release.open();
+        });
+        let began = Instant::now();
+        tokio::task::spawn_blocking(move || drop(provider))
+            .await
+            .unwrap();
+        assert!(
+            began.elapsed() < Duration::from_secs(1),
+            "drop left the worker up for {:?}",
+            began.elapsed()
+        );
+        opener.join().expect("opener");
+        attacher.join().expect("attacher");
+        assert!(abort.is_finished(), "the late task was not aborted");
+    }
+
     #[test]
     fn owns_thread_is_true_only_when_a_thread_was_spawned() {
         let wake = Arc::new(tokio::sync::Notify::new());
@@ -8156,11 +8381,19 @@ mod tests {
             Arc::new(AtomicBool::new(false)),
             wake.clone(),
             true,
+            None,
         );
         inline.start();
         assert!(inline.started.load(Ordering::Acquire));
         assert!(!inline.owns_thread());
-        let threaded = V2Join::prepare(None, None, Arc::new(AtomicBool::new(false)), wake, false);
+        let threaded = V2Join::prepare(
+            None,
+            None,
+            Arc::new(AtomicBool::new(false)),
+            wake,
+            false,
+            None,
+        );
         threaded.start();
         assert!(threaded.owns_thread());
     }

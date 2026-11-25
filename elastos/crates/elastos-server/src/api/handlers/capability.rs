@@ -740,29 +740,27 @@ pub async fn revoke_capability(
     // Check if it was granted
     match &request.status {
         elastos_runtime::capability::RequestStatus::Granted { token, .. } => {
-            // Revoke the token
-            state
-                .capability_manager
-                .revoke(*token.id(), "Revoked by user via API")
-                .await
-                .map_err(|error| {
-                    (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        format!("Revocation could not be saved: {error}"),
-                    )
-                })?;
-
-            // Mark the request as revoked in the pending store
-            state
-                .pending_store
-                .revoke_request_by(&request_id, "Revoked by user", Settler::Shell)
-                .await;
+            // The guest hears the revoke before a failed save is the answer.
             tell_v2_grant_revoked(
                 state.v2_guests.as_deref(),
                 request.session_id.as_str(),
                 token,
             )
             .await;
+            let saved = state
+                .capability_manager
+                .revoke(*token.id(), "Revoked by user via API")
+                .await;
+            state
+                .pending_store
+                .revoke_request_by(&request_id, "Revoked by user", Settler::Shell)
+                .await;
+            saved.map_err(|error| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("Revocation could not be saved: {error}"),
+                )
+            })?;
 
             Ok(Json(RevokeCapabilityOutput {
                 success: true,
@@ -2393,5 +2391,121 @@ mod tests {
             crate::provider_resource::WALLET_STATUS_RESOURCE
         );
         assert_eq!(pending[0].action, Action::Read);
+    }
+
+    #[tokio::test]
+    async fn a_failed_revoke_save_still_tells_the_guest() {
+        use elastos_compute::ComputeProvider;
+
+        let dir = tempfile::tempdir().unwrap();
+        let audit = std::sync::Arc::new(elastos_runtime::primitives::audit::AuditLog::new());
+        let store = std::sync::Arc::new(
+            elastos_runtime::capability::CapabilityStore::with_persistence(dir.path())
+                .await
+                .unwrap(),
+        );
+        let metrics =
+            std::sync::Arc::new(elastos_runtime::primitives::metrics::MetricsManager::new());
+        let capability_manager = std::sync::Arc::new(CapabilityManager::new(
+            store.clone(),
+            audit.clone(),
+            metrics,
+        ));
+        let guests = std::sync::Arc::new(elastos_compute::providers::ComponentProvider::new());
+        let bytes = wat::parse_str(include_str!(
+            "../../../../../tests/fixtures/components/v2-resident.wat"
+        ))
+        .unwrap();
+        let manifest_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/fixtures/components/bus-v1/capsule.json");
+        let mut manifest: elastos_common::CapsuleManifest =
+            serde_json::from_slice(&std::fs::read(manifest_path).unwrap()).unwrap();
+        manifest.bus_contract = Some(elastos_common::ELASTOS_BUS_V2_CONTRACT.into());
+        manifest.wit_world_sha256 = Some(elastos_common::elastos_bus_v2_wit_sha256());
+        let handle = guests.load_admitted(bytes, manifest).await.unwrap();
+        let state = CapabilityState {
+            pending_store: std::sync::Arc::new(PendingRequestStore::new(audit.clone())),
+            capability_manager,
+            capability_store: store,
+            policy_evaluator: std::sync::Arc::new(PolicyEvaluator::new(
+                Box::new(elastos_runtime::capability::evaluator::ShellPassthroughVerifier),
+                audit,
+            )),
+            v2_guests: Some(guests.clone()),
+        };
+        let session = elastos_runtime::session::SessionId::from_string(handle.id.as_str());
+        let resource = ResourceId::new("localhost://Public/note.txt");
+        let request = state
+            .pending_store
+            .create_request(session, resource.clone(), Action::Read)
+            .await;
+        let id = request.id.to_string();
+        let token = state.capability_manager.grant(
+            handle.id.as_str(),
+            resource,
+            Action::Read,
+            TokenConstraints::default(),
+            None,
+        );
+        state
+            .pending_store
+            .grant_request(&id, token.clone(), GrantDuration::Session)
+            .await
+            .unwrap();
+        let encoded = token.to_base64().unwrap();
+        guests
+            .testing_hold_grant(&handle.id, &encoded, "localhost://Public/note.txt", "read")
+            .await;
+        ComputeProvider::start(guests.as_ref(), &handle)
+            .await
+            .unwrap();
+        guests.testing_store_v2_frame(
+            handle.id.as_str(),
+            None,
+            vec![elastos_compute::providers::bus2_ui::FrameNode::Image {
+                grant: encoded.clone(),
+                resource: "localhost://Public/note.txt".into(),
+            }],
+        );
+        assert!(
+            guests
+                .read_v2_frame(None, handle.id.as_str())
+                .await
+                .is_some(),
+            "the image is stored before the revoke"
+        );
+        let mut open = guests
+            .testing_open_read(&handle.id, &encoded, b"image-bytes")
+            .await
+            .expect("open read");
+        assert_eq!(open.pull(1).unwrap(), b"i");
+        std::fs::create_dir(dir.path().join("revoked_tokens")).unwrap();
+        let refused = revoke_capability(
+            State(state),
+            Extension(Session::new_shell("shell".into())),
+            Path(id),
+        )
+        .await
+        .expect_err("the save fails");
+        assert_eq!(refused.0, StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(refused.1.contains("could not be saved"), "{}", refused.1);
+        assert!(
+            open.pull(1).is_none(),
+            "the open read still delivered bytes"
+        );
+        assert!(
+            matches!(open.trailer(), Some(Err(_))),
+            "the trailer was not an error"
+        );
+        assert!(
+            guests
+                .read_v2_frame(None, handle.id.as_str())
+                .await
+                .is_none(),
+            "the image stayed"
+        );
+        ComputeProvider::stop(guests.as_ref(), &handle)
+            .await
+            .unwrap();
     }
 }

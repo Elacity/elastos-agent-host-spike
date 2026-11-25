@@ -4364,7 +4364,8 @@ pub(crate) mod tests {
         before.trim_end().ends_with("->")
     }
 
-    /// A `type` alias or a `use ... as` alias of `BridgeContext`.
+    /// A `type` alias or a `use ... as` alias of `BridgeContext`, including one
+    /// written across more than one line.
     fn bridge_context_alias_lines() -> Vec<String> {
         let crates = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
         let mut files = Vec::new();
@@ -4372,8 +4373,8 @@ pub(crate) mod tests {
         let mut found = Vec::new();
         for file in files {
             let text = production_text(&std::fs::read_to_string(&file).unwrap());
-            for line in text.lines() {
-                if !bridge_context_alias_line(line) {
+            for statement in collapsed_statements(&text) {
+                if !bridge_context_alias_line(&statement) {
                     continue;
                 }
                 let name = file
@@ -4381,24 +4382,164 @@ pub(crate) mod tests {
                     .unwrap()
                     .to_string_lossy()
                     .replace('\\', "/");
-                found.push(format!("{name}: {line}"));
+                found.push(format!("{name}: {statement}"));
             }
         }
         found.sort();
         found
     }
 
-    fn bridge_context_alias_line(line: &str) -> bool {
-        let trimmed = line.trim_start();
-        let rest = trimmed
-            .strip_prefix("pub(crate) ")
-            .or_else(|| trimmed.strip_prefix("pub(super) "))
-            .or_else(|| trimmed.strip_prefix("pub "))
-            .unwrap_or(trimmed);
-        if rest.starts_with("type ") && rest.contains("BridgeContext") {
+    fn collapse_ws(text: &str) -> String {
+        let mut out = String::new();
+        let mut pending = false;
+        for ch in text.chars() {
+            if ch.is_whitespace() {
+                pending = !out.is_empty();
+                continue;
+            }
+            if pending {
+                out.push(' ');
+                pending = false;
+            }
+            out.push(ch);
+        }
+        out
+    }
+
+    /// Statements split on `;` outside strings, character literals, and comments.
+    fn collapsed_statements(text: &str) -> Vec<String> {
+        let mut statements = Vec::new();
+        let mut current = String::new();
+        let mut rest = text;
+        let push = |current: &mut String, statements: &mut Vec<String>| {
+            let collapsed = collapse_ws(current);
+            current.clear();
+            if !collapsed.is_empty() {
+                statements.push(collapsed);
+            }
+        };
+        while let Some(ch) = rest.chars().next() {
+            if rest.starts_with("/*") {
+                let end = rest.find("*/").map(|at| at + 2).unwrap_or(rest.len());
+                rest = &rest[end..];
+                current.push(' ');
+                continue;
+            }
+            if rest.starts_with("//") {
+                let end = rest.find('\n').unwrap_or(rest.len());
+                rest = &rest[end..];
+                current.push(' ');
+                continue;
+            }
+            let width = ch.len_utf8();
+            if ch == '\'' && !char_literal(rest) {
+                current.push(ch);
+                rest = &rest[width..];
+                continue;
+            }
+            if ch == '"' || ch == '\'' {
+                current.push(ch);
+                rest = &rest[width..];
+                let mut escaped = false;
+                while let Some(inner) = rest.chars().next() {
+                    let inner_width = inner.len_utf8();
+                    current.push(inner);
+                    rest = &rest[inner_width..];
+                    if escaped {
+                        escaped = false;
+                        continue;
+                    }
+                    if inner == '\\' {
+                        escaped = true;
+                        continue;
+                    }
+                    if inner == ch {
+                        break;
+                    }
+                }
+                continue;
+            }
+            if ch == ';' {
+                push(&mut current, &mut statements);
+                rest = &rest[width..];
+                continue;
+            }
+            current.push(ch);
+            rest = &rest[width..];
+        }
+        push(&mut current, &mut statements);
+        statements
+    }
+
+    /// `'a'` and `'\n'` are character literals. `'static` and `'a` are lifetimes.
+    fn char_literal(text: &str) -> bool {
+        let mut chars = text.chars();
+        if chars.next() != Some('\'') {
+            return false;
+        }
+        match chars.next() {
+            Some('\\') => true,
+            Some(ch) if ch != '\'' => chars.next() == Some('\''),
+            _ => false,
+        }
+    }
+
+    #[test]
+    fn a_split_bridge_context_alias_is_one_statement() {
+        let text = "fn f<'a>(value: &'a BridgeContext) -> &'a BridgeContext { value }\nuse crate::bus::{\n    BridgeContext as Hidden\n};\ntype Alias =\n    BridgeContext;\n";
+        let found: Vec<_> = collapsed_statements(text)
+            .into_iter()
+            .filter(|line| bridge_context_alias_line(line))
+            .collect();
+        assert_eq!(found.len(), 2, "{found:?}");
+    }
+
+    fn bridge_context_alias_line(statement: &str) -> bool {
+        let padded = format!(" {statement}");
+        if type_alias_of_bridge(&padded) {
             return true;
         }
-        rest.starts_with("use ") && rest.contains("BridgeContext") && rest.contains(" as ")
+        use_alias_of_bridge(&padded)
+    }
+
+    fn type_alias_of_bridge(padded: &str) -> bool {
+        let mut rest = padded;
+        while let Some(at) = rest.find(" type ") {
+            let after = rest[at + " type ".len()..].trim_start();
+            let Some(eq) = after.find('=') else {
+                rest = &rest[at + 6..];
+                continue;
+            };
+            let name = after[..eq].trim();
+            let named = !name.is_empty()
+                && name
+                    .chars()
+                    .all(|ch| ch.is_ascii_alphanumeric() || ch == '_');
+            let rhs = after[eq + 1..].trim_start();
+            let head = rhs
+                .split(|ch: char| [';', '{', '<', ' '].contains(&ch))
+                .next()
+                .unwrap_or("");
+            if named && (head == "BridgeContext" || head.ends_with("::BridgeContext")) {
+                return true;
+            }
+            rest = &rest[at + 6..];
+        }
+        false
+    }
+
+    fn use_alias_of_bridge(padded: &str) -> bool {
+        let mut rest = padded;
+        while let Some(at) = rest.find(" use ") {
+            let after = &rest[at + 1..];
+            let end = after.find('{').map(|brace| brace + 1).unwrap_or(0);
+            let tail = if end == 0 { after } else { &after[end - 1..] };
+            if tail.contains("BridgeContext as") {
+                return true;
+            }
+            rest = &rest[at + 5..];
+        }
+        false
     }
 
     /// The end (exclusive) of the item a preceding `#[cfg(test)]` applies to.

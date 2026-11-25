@@ -568,7 +568,7 @@ fn code(result: Result<(String, String), BundleRefusal>) -> &'static str {
 }
 
 #[tokio::test]
-async fn v2_resident_is_refused_from_folder_and_cid() {
+async fn v2_resident_starts_from_a_folder_and_the_cid_path_is_refused() {
     let publisher = key(42);
     let home = Home::trusting(&[&publisher]).await;
     home.admit(&[&publisher], true).await;
