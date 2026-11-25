@@ -31,8 +31,14 @@ pub(crate) struct FuelBucket {
     at: Instant,
     /// This suspension was already charged. A spurious poll must not read fuel again.
     pub(crate) open: bool,
-    /// Sleep or a stream wait. The guest cannot run, so ticks do not count.
+    /// Sleep. The guest cannot run, so ticks do not count. An events read
+    /// that is only pending does not set this: the guest may still run.
     pub(crate) parked: bool,
+    /// Ticks in the current execution window. A wait longer than one tick
+    /// refills it. It is not a lifetime sum.
+    pub(crate) window_ticks: u64,
+    /// When the events read last went pending, if it is still pending.
+    pub(crate) wait_since: Option<Instant>,
     /// Refill below one fuel unit, kept across wakes.
     remainder: u64,
     /// `get_fuel` or `set_fuel` failed. The run ends with this name.
@@ -49,6 +55,8 @@ impl FuelBucket {
             at: now,
             open: false,
             parked: false,
+            window_ticks: 0,
+            wait_since: None,
             remainder: 0,
             fault: None,
             clock_ms: 0,
