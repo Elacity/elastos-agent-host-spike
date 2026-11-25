@@ -2974,11 +2974,13 @@ fn main() {
                 .await
                 .unwrap_or_else(|error| panic!("http smoke storage: {error}")),
         );
-        let runtime = Arc::new(elastos_server::runtime::Runtime::with_providers_and_component(
-            storage,
-            Vec::new(),
-            None,
-        ));
+        let runtime = Arc::new(
+            elastos_server::runtime::Runtime::with_providers_and_component(
+                storage,
+                Vec::new(),
+                None,
+            ),
+        );
         let secret = "fence-r15-attach".to_string();
         // Home's server binds inside `start_server_with_sessions`. Take a free
         // port, drop the probe, and hand that address to the production start.
