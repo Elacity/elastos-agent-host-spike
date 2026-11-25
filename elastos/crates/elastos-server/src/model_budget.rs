@@ -389,6 +389,11 @@ impl ModelBudget {
         Ok(Hold { tokens })
     }
 
+    #[cfg(test)]
+    pub(crate) fn bound_home_for_test(&self) -> Option<PathBuf> {
+        self.home_dir()
+    }
+
     #[cfg(all(test, unix))]
     pub(crate) fn held_for_test(&self, agent: &AgentKey) -> u64 {
         self.agents

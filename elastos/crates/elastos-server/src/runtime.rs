@@ -3677,6 +3677,37 @@ pub(crate) mod tests {
         )
     }
 
+    /// The registry setup stores the Home on the budget. The budget rows bind
+    /// a home themselves, so this row is the one that reads that setup.
+    #[tokio::test]
+    async fn set_provider_registry_binds_the_model_budget_to_the_home() {
+        let temp = tempfile::tempdir().unwrap();
+        let data_dir = temp.path().join("home");
+        let storage = Arc::new(
+            LocalFSProvider::new(temp.path().join("storage"))
+                .await
+                .unwrap(),
+        );
+        let runtime = Runtime::with_providers_and_component(storage, Vec::new(), None);
+        let audit_log = Arc::new(AuditLog::new());
+        let capability_manager = Arc::new(CapabilityManager::new(
+            Arc::new(CapabilityStore::new()),
+            audit_log.clone(),
+            Arc::new(MetricsManager::new()),
+        ));
+        let pending_store =
+            Arc::new(elastos_runtime::capability::pending::PendingRequestStore::new(audit_log));
+        runtime
+            .set_provider_registry(
+                Arc::new(ProviderRegistry::new()),
+                capability_manager,
+                pending_store,
+                data_dir.clone(),
+            )
+            .await;
+        assert_eq!(runtime.model_budget.bound_home_for_test(), Some(data_dir));
+    }
+
     impl Runtime {
         /// How many per-agent turns this runtime still holds.
         pub(crate) fn launch_turn_count_for_test(&self) -> usize {
