@@ -4699,9 +4699,14 @@ mod tests {
     #[test]
     fn localhost_provider_config_omits_device_key() {
         let device_key = [0x5a; 32];
+        let other_key = [0x5b; 32];
         let file_key = expected_localhost_file_key(&device_key);
+        let other_file_key = expected_localhost_file_key(&other_key);
         assert_ne!(file_key, device_key);
+        assert_ne!(other_file_key, other_key);
+        assert_ne!(file_key, other_file_key);
         assert_eq!(localhost_file_key(&device_key).unwrap(), file_key);
+        assert_eq!(localhost_file_key(&other_key).unwrap(), other_file_key);
         let temp = TempDir::new().unwrap();
         plant_device_key(temp.path(), &device_key);
         let device_key_bytes = fs::read(temp.path().join("identity/device.key")).unwrap();
