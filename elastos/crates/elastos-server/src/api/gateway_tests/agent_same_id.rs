@@ -1350,6 +1350,117 @@ async fn create_recovery_kit_refuses_when_an_unarchived_key_would_seal_an_agent(
     assert_eq!(std::fs::read(&planted.path).unwrap(), note_file);
 }
 
+/// Create Recovery Kit through full-export, with the archive removed so
+/// `hold_unarchived` runs. `prepare` may write the agents file first.
+async fn export_unarchived(
+    prepare: impl FnOnce(&std::path::Path, &str),
+) -> (StatusCode, String, tempfile::TempDir) {
+    let dir = tempfile::tempdir().unwrap();
+    let app = gateway_router(wallet_test_state(dir.path()).await);
+    let owner = passkey_authority(dir.path());
+    crate::auth::store_test_principal_root_protection(dir.path(), &owner.principal_id);
+    let principal =
+        crate::auth::load_principal_for_proof_binding(dir.path(), &owner.proof_binding_id).unwrap();
+    prepare(dir.path(), &owner.principal_id);
+    let mut stored = crate::auth::load_principal_root_protection(
+        dir.path(),
+        &owner.principal_id,
+        &principal.localhost_root,
+    )
+    .unwrap()
+    .unwrap();
+    stored.protectors[0].archive = None;
+    crate::auth::store_principal_root_protection(dir.path(), stored).unwrap();
+    let intent = json!({
+        "principal_id": owner.principal_id,
+        "localhost_root": principal.localhost_root,
+        "label": "Kit",
+        "download_password": null,
+    });
+    let token = step_up_token_for_app_context(
+        dir.path(),
+        SYSTEM_CAPSULE_ID,
+        &owner.system_token,
+        "auth.full-recovery-bundle.export",
+        &intent,
+    );
+    let mut request = intent;
+    request["schema"] = json!("elastos.full-recovery-bundle.export.request/v1");
+    request["step_up_token"] = json!(token);
+    let response = app
+        .oneshot(
+            test_browser_request("localhost:61180", "null")
+                .method("POST")
+                .uri("/api/auth/recovery/full-export")
+                .header("x-elastos-home-token", owner.system_token.as_str())
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(request.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = response.status();
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    (status, String::from_utf8(bytes.to_vec()).unwrap(), dir)
+}
+
+fn mode_0600(path: &std::path::Path, bytes: &[u8]) {
+    std::fs::write(path, bytes).unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
+}
+
+#[tokio::test]
+async fn full_export_with_no_agents_file_still_saves_the_kit() {
+    let (status, body, dir) = export_unarchived(|_, _| {}).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body.contains("elastos.full-recovery-bundle/v1"), "{body}");
+    assert!(!crate::agents::agent_file_path(dir.path()).unwrap().exists());
+    assert!(super::step_up_was_spent(dir.path()));
+}
+
+#[tokio::test]
+async fn full_export_with_only_a_retired_agent_still_saves_the_kit() {
+    let (status, body, dir) = export_unarchived(|path, owner| {
+        let planted = crate::agents::tests::plant_opening_agent(path, owner, "export-retired-only");
+        let record = crate::auth::stored_principal_record(path, owner)
+            .unwrap()
+            .unwrap();
+        let caller = crate::agents::Caller {
+            principal_id: owner,
+            proof_binding_id: &record.proof_binding_id,
+            session_id: "session:export-retired",
+        };
+        crate::agents::retire(path, &caller, &planted.agent_id, 11).unwrap();
+    })
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body.contains("elastos.full-recovery-bundle/v1"), "{body}");
+    let saved = String::from_utf8(agent_bytes(dir.path())).unwrap();
+    assert!(saved.contains("\"retired_at\": 11") || saved.contains("\"retired_at\":11"));
+    assert!(super::step_up_was_spent(dir.path()));
+}
+
+#[tokio::test]
+async fn full_export_of_a_damaged_agents_file_names_the_refusal_and_leaves_the_step_up() {
+    let (status, body, dir) = export_unarchived(|path, _| {
+        mode_0600(&crate::agents::agent_file_path(path).unwrap(), b"{");
+    })
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(body, "agents are unavailable: agent file does not parse");
+    assert!(
+        !super::step_up_was_spent(dir.path()),
+        "hold_unarchived's refusal leaves the step-up unspent"
+    );
+    assert_eq!(
+        std::fs::read(crate::agents::agent_file_path(dir.path()).unwrap()).unwrap(),
+        b"{"
+    );
+}
+
 /// Add a replacement passkey, revoke the first, and the owner still lists
 /// and opens every agent with the same id and the same data.
 #[tokio::test]
