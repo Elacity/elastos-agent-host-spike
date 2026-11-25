@@ -4276,9 +4276,55 @@ fn a_full_disk_lets_home_start_and_the_charge_keeps_the_floor() {
     charge_then_restart_stays_above_the_floor(&home);
 }
 
-/// An unreadable sign-in file keeps that file's name on the later charge.
+/// Windows answers before the sign-in read and before the parent check.
 #[test]
-fn an_unreadable_sign_in_file_lets_home_start_and_the_charge_keeps_the_floor() {
+fn windows_answers_before_the_sign_in_read_and_the_parent_check() {
+    let agents = include_str!("../agents.rs");
+    let raise = source_until(
+        source_from(agents, "fn raise_spend_file_to_signed_floor"),
+        "\nfn quiet_when_agents_are_unavailable",
+    );
+    let windows = raise.find("cfg(not(unix))").expect("windows heal");
+    let audit = raise.find("load_spend_audit(").expect("spend audit");
+    assert!(
+        windows < audit,
+        "the heal reads the sign-in file on Windows"
+    );
+    let wait = source_until(
+        source_from(agents, "fn wait_agent_file_lock"),
+        "\nfn release_probe_lock",
+    );
+    let named = wait.find("WINDOWS_AGENT_FILE").expect("windows wait");
+    let parent = wait
+        .find("ensure_regular_auth_parent")
+        .expect("parent check");
+    assert!(named < parent, "the wait checks the parent on Windows");
+    let lock = source_until(
+        source_from(agents, "fn lock_for_write"),
+        "\nfn acquire_agent_lock(",
+    );
+    let named = lock.find("WINDOWS_AGENT_FILE").expect("windows writer");
+    let take = lock.find("acquire_agent_lock_for").expect("writer take");
+    assert!(named < take, "the writer checks the parent on Windows");
+}
+
+/// The spend heal does not block the start. The gateway's own audit check
+/// still needs a readable sign-in file, and that check stays.
+#[test]
+fn the_spend_heal_does_not_block_the_start_and_the_gateway_audit_still_needs_a_readable_sign_in_file(
+) {
+    let doc = include_str!("../../../../../docs/AGENT_ARCHITECTURE.md");
+    assert!(
+        doc.contains("the spend heal does not block the start"),
+        "the architecture doc still says the heal blocks the start"
+    );
+    assert!(doc.contains("the gateway's own audit check still needs a readable sign-in file"));
+    let gateway = include_str!("../gateway_cmd.rs");
+    assert_eq!(
+        gateway.matches("verify_auth_audit_chain_ready(").count(),
+        2,
+        "gateway and gateway-public keep their own sign-in audit check"
+    );
     use std::os::unix::fs::PermissionsExt;
     let home = home_behind_its_floor();
     let path = crate::auth::auth_state_path(home.dir.path()).unwrap();
@@ -4478,7 +4524,8 @@ fn a_lock_directory_on_a_current_file_is_named_lock_not_free() {
     assert!(take_agent_lock_wait().is_none(), "standing waited");
 }
 
-static BOUNDED_LOCK_NOTE: std::sync::Mutex<Option<std::path::PathBuf>> = std::sync::Mutex::new(None);
+static BOUNDED_LOCK_NOTE: std::sync::Mutex<Option<std::path::PathBuf>> =
+    std::sync::Mutex::new(None);
 static BOUNDED_LOCK_OPENS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
 fn note_bounded_lock_open(file: &std::fs::File) {
@@ -4533,7 +4580,10 @@ fn a_bounded_wait_opens_a_removed_lock_again_inside_its_bound() {
             waiter.is_finished() || opened_at.elapsed() < std::time::Duration::from_secs(5),
             "the bounded wait did not open the lock"
         );
-        assert!(!waiter.is_finished(), "the waiter exited before opening the lock");
+        assert!(
+            !waiter.is_finished(),
+            "the waiter exited before opening the lock"
+        );
         std::thread::sleep(std::time::Duration::from_millis(20));
     }
     std::thread::sleep(std::time::Duration::from_millis(1200));
@@ -4542,6 +4592,7 @@ fn a_bounded_wait_opens_a_removed_lock_again_inside_its_bound() {
         .read(true)
         .write(true)
         .create(true)
+        .truncate(true)
         .open(&path)
         .unwrap();
     let new_lock = crate::host_lock::FileLock::exclusive(replacement).unwrap();
@@ -4581,7 +4632,7 @@ fn a_lock_wait_on_a_home_without_agents_leaves_no_lock_file() {
             .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound),
         "the home has an agents file"
     );
-    wait_agent_file_lock(dir.path()).expect("the wait takes the lock");
+    let _waited = wait_agent_file_lock(dir.path()).expect("the wait takes the lock");
     let path = records.with_file_name("agent-records.json.lock");
     assert!(
         path.symlink_metadata()

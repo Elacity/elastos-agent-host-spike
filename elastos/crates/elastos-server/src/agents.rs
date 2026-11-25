@@ -112,6 +112,7 @@ pub(crate) const DOES_NOT_PARSE: &str = "agent file does not parse";
 pub(crate) const CANNOT_WRITE: &str = "agent file cannot be written";
 pub(crate) const SIGN_IN_CANNOT_READ: &str = "sign-in file cannot be read";
 const LOCK_NOT_FREE: &str = "agent file lock is not free";
+#[cfg(unix)]
 pub(crate) const HEAL_LOCK_WAIT: Duration = Duration::from_millis(200);
 /// Charge, spend, and standing checks wait this long for the agent file lock.
 pub(crate) const CHARGE_LOCK_WAIT: Duration = Duration::from_secs(2);
@@ -502,6 +503,7 @@ impl AgentFileLockFlag {
         Self { armed: true }
     }
 
+    #[cfg(not(unix))]
     fn idle() -> Self {
         Self { armed: false }
     }
@@ -575,6 +577,7 @@ impl ChargeLockWaited {
         Self
     }
 
+    #[cfg(unix)]
     fn arm() -> Self {
         CHARGE_LOCK_WAITED.with(|flag| flag.set(true));
         Self
@@ -590,7 +593,15 @@ impl Drop for ChargeLockWaited {
 /// Takes the agent lock for a writer of the agents file. The flock wait
 /// finishes before this process's agent mutex.
 fn lock_for_write(data_dir: &Path, wait: Option<Duration>) -> anyhow::Result<WriteLock> {
-    acquire_agent_lock_for(data_dir, true, wait)
+    #[cfg(not(unix))]
+    {
+        let _ = (data_dir, wait);
+        return Err(Named(WINDOWS_AGENT_FILE).into());
+    }
+    #[cfg(unix)]
+    {
+        acquire_agent_lock_for(data_dir, true, wait)
+    }
 }
 
 /// `create_when_absent` keeps the lock file when the agents file is missing,
@@ -607,6 +618,7 @@ fn acquire_agent_lock(data_dir: &Path, create_when_absent: bool) -> anyhow::Resu
 fn open_agent_lock_file(path: &Path) -> anyhow::Result<std::fs::File> {
     match crate::auth_state_files::open_regular_lock_file(path, "agent records") {
         Ok(file) => Ok(file),
+        #[allow(clippy::needless_return)]
         Err(_) => return Err(Named(LOCK_NOT_FREE).into()),
     }
 }
@@ -1009,20 +1021,28 @@ pub(crate) fn wait_agent_file_lock(data_dir: &Path) -> Result<ChargeLockWaited, 
     if !build_allows_for_home(data_dir) {
         return Ok(ChargeLockWaited::idle());
     }
-    let records = agent_file_path(data_dir).map_err(|err| reason_of(&err))?;
-    let path = records.with_file_name(format!("{AGENT_RECORDS_FILE}.lock"));
-    if let Some(parent) = path.parent() {
-        crate::auth_state_files::ensure_regular_auth_parent(data_dir, parent)
-            .map_err(|err| reason_of(&err))?;
+    #[cfg(not(unix))]
+    {
+        return Err(WINDOWS_AGENT_FILE);
     }
-    let lock =
-        lock_the_agents_file(&path, Some(CHARGE_LOCK_WAIT)).map_err(|err| reason_of(&err))?;
-    release_probe_lock(&records, &path, lock);
-    Ok(ChargeLockWaited::arm())
+    #[cfg(unix)]
+    {
+        let records = agent_file_path(data_dir).map_err(|err| reason_of(&err))?;
+        let path = records.with_file_name(format!("{AGENT_RECORDS_FILE}.lock"));
+        if let Some(parent) = path.parent() {
+            crate::auth_state_files::ensure_regular_auth_parent(data_dir, parent)
+                .map_err(|err| reason_of(&err))?;
+        }
+        let lock =
+            lock_the_agents_file(&path, Some(CHARGE_LOCK_WAIT)).map_err(|err| reason_of(&err))?;
+        release_probe_lock(&records, &path, lock);
+        Ok(ChargeLockWaited::arm())
+    }
 }
 
 /// A probe that settles on a Home with no agents file removes that lock file
 /// before it releases the lock.
+#[cfg(unix)]
 fn release_probe_lock(records: &Path, lock_path: &Path, lock: FileLock) {
     let absent = std::fs::symlink_metadata(records)
         .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound);
@@ -1082,29 +1102,37 @@ pub fn raise_spend_file_to_signed_floor(data_dir: &Path) -> Result<(), &'static 
     if !build_allows_for_home(data_dir) || crate::host_lock::is_subordinate_managed_runtime() {
         return Ok(());
     }
-    let audit = crate::model_budget::load_spend_audit(data_dir)?;
-    let preview = match open(data_dir, false) {
-        Ok(opened) => opened,
-        Err(err) => return quiet_when_agents_are_unavailable(err),
-    };
-    if raised_copy(data_dir, &audit, &preview.file)?.is_none() {
+    #[cfg(not(unix))]
+    {
         return Ok(());
     }
-    let opened = match open_for(data_dir, true, Some(HEAL_LOCK_WAIT)) {
-        Ok(opened) => opened,
-        Err(err) => return quiet_when_agents_are_unavailable(err),
-    };
-    let Some(after) = raised_copy(data_dir, &audit, &opened.file)? else {
-        return Ok(());
-    };
-    let caller = Caller {
-        principal_id: "",
-        proof_binding_id: "",
-        session_id: "",
-    };
-    write(data_dir, &opened, Operation::Heal, &after, &caller, "", 0).map_err(|_| CANNOT_WRITE)
+    #[cfg(unix)]
+    {
+        let audit = crate::model_budget::load_spend_audit(data_dir)?;
+        let preview = match open(data_dir, false) {
+            Ok(opened) => opened,
+            Err(err) => return quiet_when_agents_are_unavailable(err),
+        };
+        if raised_copy(data_dir, &audit, &preview.file)?.is_none() {
+            return Ok(());
+        }
+        let opened = match open_for(data_dir, true, Some(HEAL_LOCK_WAIT)) {
+            Ok(opened) => opened,
+            Err(err) => return quiet_when_agents_are_unavailable(err),
+        };
+        let Some(after) = raised_copy(data_dir, &audit, &opened.file)? else {
+            return Ok(());
+        };
+        let caller = Caller {
+            principal_id: "",
+            proof_binding_id: "",
+            session_id: "",
+        };
+        write(data_dir, &opened, Operation::Heal, &after, &caller, "", 0).map_err(|_| CANNOT_WRITE)
+    }
 }
 
+#[cfg(unix)]
 fn quiet_when_agents_are_unavailable(err: anyhow::Error) -> Result<(), &'static str> {
     let named = err.downcast_ref::<Named>().map(|named| named.0);
     match named {
@@ -1118,6 +1146,7 @@ fn quiet_when_agents_are_unavailable(err: anyhow::Error) -> Result<(), &'static 
 
 /// One file with every non-retired total raised to its signed floor.
 /// Retired agents stay as they were. `None` when nothing is behind.
+#[cfg(unix)]
 fn raised_copy(
     data_dir: &Path,
     audit: &crate::model_budget::SpendAudit,
