@@ -113,9 +113,10 @@ pub fn unchanged_before_launch(program: &Path) -> Result<(), &'static str> {
     let Some(given) = std::env::var_os(RUNTIME_BINARY) else {
         return Ok(());
     };
-    // Compare the files, not the path strings. A launch through a symlink, or
-    // through another spelling of the same file, is still the given Runtime and
-    // is hashed again. A path that cannot be resolved is compared as given.
+    // Compare the resolved paths, not the path strings. A launch through a
+    // symlink to the same file is still the given Runtime and is hashed again.
+    // A hard link is not covered: its path stays different, so this check
+    // skips the re-hash. A path that cannot be resolved is compared as given.
     if !same_runtime_file(program, Path::new(&given)) {
         return Ok(());
     }
@@ -195,9 +196,9 @@ fn build_native(package: &str, name: &str) -> Result<BinaryUnderTest, String> {
     Ok(BinaryUnderTest { binary, sha256 })
 }
 
-/// True when `program` and `given` name one file. Both paths are resolved,
-/// so a symlink and its target compare equal. When either path cannot be
-/// resolved, the two paths are compared as given.
+/// True when `program` and `given` name one file after resolving symlinks.
+/// A hard link is not covered: those paths stay different, so this is false.
+/// When either path cannot be resolved, the two paths are compared as given.
 fn same_runtime_file(program: &Path, given: &Path) -> bool {
     match (std::fs::canonicalize(program), std::fs::canonicalize(given)) {
         (Ok(program_path), Ok(given_path)) => program_path == given_path,
