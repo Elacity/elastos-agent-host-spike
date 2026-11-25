@@ -552,7 +552,7 @@ def main(argv=None):
         totals = count(worktree_files(args.root))
         print(json.dumps(totals) if args.json else table(totals), end="\n" if args.json else "")
         status, verdict = check(args.root, totals, args.base) if args.check or args.report else (0, None)
-        if args.check and verdict and mode == "advisory":  # warn, do not fail, until the budget enforces
+        if args.check and verdict and mode == "advisory":  # warn, do not fail
             print(f"::warning title=core-size budget (advisory)::{verdict}")
             if os.environ.get("GITHUB_STEP_SUMMARY"):
                 with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as summary:
