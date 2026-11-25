@@ -436,9 +436,47 @@ pub(crate) async fn compose(_plan: &ProviderHostPlan) -> anyhow::Result<Provider
     .into())
 }
 
+/// One stderr line for a custody host whose chain fence refused the start.
+///
+/// The container log is this process's stderr. A multi-line error becomes
+/// one line so the reason is visible in that log.
+pub(crate) fn custody_fence_refusal_line(reason: &str) -> Option<String> {
+    let flat = reason.split_whitespace().collect::<Vec<_>>().join(" ");
+    let fence = flat.contains("provider start is refused")
+        || flat.contains("linux confinement refused")
+        || flat.contains("landlock install refused")
+        || flat.contains("seccomp install refused")
+        || flat.contains("seccomp install report refused")
+        || flat.contains("could not close inherited descriptors")
+        || flat.contains("provider exec refused");
+    if fence && flat.contains("chain-provider") {
+        Some(format!("chain-provider start is refused: {flat}"))
+    } else {
+        None
+    }
+}
+
 /// Host the planned providers until SIGTERM or SIGINT, then retract readiness.
 pub(crate) async fn run(plan: ProviderHostPlan) -> anyhow::Result<()> {
-    let host = compose(&plan).await?;
+    let host = match compose(&plan).await {
+        Ok(host) => host,
+        Err(err) => {
+            let refused = if plan
+                .providers
+                .iter()
+                .any(|hosted| hosted.plane == ProviderPlane::Custody)
+            {
+                custody_fence_refusal_line(&format!("{err:#}"))
+            } else {
+                None
+            };
+            if let Some(line) = refused {
+                eprintln!("{line}");
+                std::process::exit(1);
+            }
+            return Err(err);
+        }
+    };
     tracing::info!(
         providers = %plan.provider_names().join(","),
         receipt = %host.receipt_path().display(),
@@ -533,6 +571,31 @@ mod tests {
             Some(std::io::ErrorKind::Unsupported)
         );
         assert_eq!(std::fs::read_dir(temp.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn a_custody_fence_refusal_is_one_stderr_line() {
+        let line = custody_fence_refusal_line(
+            "failed to spawn chain-provider: provider start is refused: libc.so.6\nwas not in /lib, /usr/lib",
+        )
+        .expect("a chain fence refusal is named");
+        assert_eq!(line.lines().count(), 1, "{line}");
+        assert!(line.contains("libc.so.6"), "{line}");
+        assert!(line.contains("was not in /lib, /usr/lib"), "{line}");
+        assert!(
+            line.starts_with("chain-provider start is refused: "),
+            "{line}"
+        );
+        assert!(custody_fence_refusal_line("chain-provider configuration is invalid").is_none());
+        assert!(
+            custody_fence_refusal_line("provider start is refused: localhost-provider").is_none()
+        );
+        let closed = custody_fence_refusal_line(
+            "failed to spawn chain-provider: the probe child could not close inherited descriptors: errno 1",
+        )
+        .expect("a close_range failure is a fence refusal");
+        assert_eq!(closed.lines().count(), 1, "{closed}");
+        assert!(closed.contains("close inherited descriptors"), "{closed}");
     }
 
     #[test]
