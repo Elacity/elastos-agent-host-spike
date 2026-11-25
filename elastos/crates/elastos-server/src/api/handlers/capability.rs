@@ -524,6 +524,11 @@ async fn is_live(manager: &CapabilityManager, r: &PendingCapabilityRequest) -> b
 /// The one way a server path creates a pending request: retire dead grants,
 /// then create. `POST /api/capability/request`, the resource bridge and
 /// Browser operator admission each call it with their own store and manager.
+///
+/// A repeated plan submit keeps the earlier pending card, and only in a build
+/// that has agents. Every other resource, and a default build, always receives
+/// a new request. The Browser operator stores its record under that request
+/// id, so a reused id would replace the record the operator already holds.
 pub async fn create_request_retiring(
     store: &PendingRequestStore,
     manager: &CapabilityManager,
@@ -533,18 +538,24 @@ pub async fn create_request_retiring(
     reason: String,
 ) -> PendingCapabilityRequest {
     retire_dead_grants(store, manager).await;
-    // One step keeps one live card. A repeated ask returns the earlier pending
-    // row. A denied or expired row is not pending, so the next ask is new.
-    if let Some(existing) = store.list_requests().await.into_iter().find(|request| {
-        request.is_pending()
-            && request.session_id.as_str() == session_id.as_str()
-            && request.resource.as_str() == resource.as_str()
-            && request.action == action
-    }) {
-        return existing;
+    if plan_submit_reuses_its_card(&resource) {
+        if let Some(existing) = store.list_requests().await.into_iter().find(|request| {
+            request.is_pending()
+                && request.session_id.as_str() == session_id.as_str()
+                && request.resource.as_str() == resource.as_str()
+                && request.action == action
+        }) {
+            return existing;
+        }
     }
     let request = store.create_request_with_reason(session_id, resource, action, reason);
     request.await
+}
+
+/// One plan submit keeps one live card. A denied or expired row is not
+/// pending, so the next submit is new. Any other ask is a new request.
+fn plan_submit_reuses_its_card(resource: &ResourceId) -> bool {
+    crate::agents::build_allows() && resource.as_str() == "elastos://inspect/submit_agent_plan"
 }
 
 /// At capacity, settle each granted record whose token can no longer
@@ -1032,8 +1043,49 @@ mod tests {
             "again".to_string(),
         )
         .await;
-        assert_eq!(first.id.as_str(), second.id.as_str());
-        assert_eq!(state.pending_store.list_pending().await.len(), 1);
+        // The rule is the plan submit and the feature. A default build keeps
+        // the earlier behaviour: the second submit is its own card.
+        if crate::agents::build_allows() {
+            assert_eq!(first.id.as_str(), second.id.as_str());
+            assert_eq!(state.pending_store.list_pending().await.len(), 1);
+        } else {
+            assert_ne!(first.id.as_str(), second.id.as_str());
+            assert_eq!(state.pending_store.list_pending().await.len(), 2);
+        }
+    }
+
+    /// A Browser operator ask is a new request in every build. Reusing its id
+    /// would replace the admission record the operator already stored.
+    #[tokio::test]
+    async fn a_repeated_browser_ask_is_a_new_card() {
+        let state = test_state();
+        let session = elastos_runtime::session::SessionId::from_string("session:page");
+        let resource = ResourceId::new("elastos://browser/pages/page/input");
+        let first = create_request_retiring(
+            &state.pending_store,
+            &state.capability_manager,
+            session.clone(),
+            resource.clone(),
+            Action::Write,
+            "type".to_string(),
+        )
+        .await;
+        let second = create_request_retiring(
+            &state.pending_store,
+            &state.capability_manager,
+            session,
+            resource,
+            Action::Write,
+            "type again".to_string(),
+        )
+        .await;
+        assert_ne!(first.id.as_str(), second.id.as_str());
+        assert_eq!(state.pending_store.list_pending().await.len(), 2);
+        let mut records = std::collections::HashMap::new();
+        records.insert(first.id.as_str().to_string(), "first page");
+        records.insert(second.id.as_str().to_string(), "second page");
+        assert_eq!(records.get(first.id.as_str()), Some(&"first page"));
+        assert_eq!(records.len(), 2);
     }
 
     #[test]
