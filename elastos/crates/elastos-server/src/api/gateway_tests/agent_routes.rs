@@ -158,7 +158,10 @@ mod off {
     }
 
     fn tcp_listeners() -> Vec<String> {
-        let output = std::process::Command::new("/usr/sbin/lsof")
+        if let Some(rows) = linux_listening_sockets() {
+            return rows;
+        }
+        let output = std::process::Command::new("lsof")
             .args([
                 "-nP",
                 "-a",
@@ -176,6 +179,54 @@ mod off {
             .collect();
         rows.sort();
         rows
+    }
+
+    /// Linux has no fixed path for `lsof`. The process's own listening
+    /// sockets are in `/proc/net/tcp`. Other systems use `lsof` on `PATH`.
+    fn linux_listening_sockets() -> Option<Vec<String>> {
+        #[cfg(not(target_os = "linux"))]
+        {
+            None
+        }
+        #[cfg(target_os = "linux")]
+        {
+            let mut by_inode = std::collections::HashMap::<String, String>::new();
+            for path in ["/proc/net/tcp", "/proc/net/tcp6"] {
+                let Ok(text) = std::fs::read_to_string(path) else {
+                    continue;
+                };
+                for line in text.lines().skip(1) {
+                    let cols: Vec<&str> = line.split_whitespace().collect();
+                    if cols.len() > 9 && cols[3] == "0A" {
+                        by_inode.insert(cols[9].to_string(), cols[1].to_string());
+                    }
+                }
+            }
+            if by_inode.is_empty() && std::fs::read_to_string("/proc/net/tcp").is_err() {
+                return None;
+            }
+            let mut rows = Vec::new();
+            let Ok(fds) = std::fs::read_dir("/proc/self/fd") else {
+                return None;
+            };
+            for entry in fds.flatten() {
+                let Ok(link) = std::fs::read_link(entry.path()) else {
+                    continue;
+                };
+                let text = link.to_string_lossy();
+                let Some(inode) = text
+                    .strip_prefix("socket:[")
+                    .and_then(|rest| rest.strip_suffix(']'))
+                else {
+                    continue;
+                };
+                if let Some(address) = by_inode.get(inode) {
+                    rows.push(address.clone());
+                }
+            }
+            rows.sort();
+            Some(rows)
+        }
     }
 }
 
