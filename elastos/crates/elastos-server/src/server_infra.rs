@@ -2753,9 +2753,9 @@ mod tests {
         assert!(checked.contains("Windows does not open or start the file"));
     }
 
-    /// Home comes up with object and chain absent. The log names each helper,
-    /// and each helper's route refuses by name. `/api/health` is bound only
-    /// after this start returns, so a successful start is the health step.
+    /// Home comes up with object and chain absent. The log names each helper.
+    /// This test then binds Home's server and asks over HTTP: health is 200,
+    /// and each helper's route refuses by name.
     #[test]
     fn a_missing_object_or_chain_helper_leaves_home_healthy() {
         let scratch = TempDir::new().unwrap();
@@ -2893,6 +2893,28 @@ fn main() {
         )
         .unwrap();
         assert_eq!(facts["health"], "ok", "{facts}");
+        assert_eq!(facts["http_health"], 200, "{facts}");
+        assert!(
+            facts["http_health_body"]
+                .as_str()
+                .unwrap_or("")
+                .contains("ok"),
+            "{facts}"
+        );
+        assert!(
+            facts["http_object_body"]
+                .as_str()
+                .unwrap_or("")
+                .contains("object_session_proxy_denied"),
+            "{facts}"
+        );
+        assert!(
+            facts["http_chain_body"]
+                .as_str()
+                .unwrap_or("")
+                .contains("no provider for scheme: chain"),
+            "{facts}"
+        );
         for (key, scheme) in [("object", "object"), ("chain", "chain")] {
             assert!(
                 facts[key]
@@ -2947,13 +2969,131 @@ fn main() {
             Ok(value) => value.to_string(),
             Err(error) => error.to_string(),
         };
+        let storage: Arc<dyn elastos_storage::StorageProvider> = Arc::new(
+            elastos_storage::providers::LocalFSProvider::new(data_dir.join("http-smoke-storage"))
+                .await
+                .unwrap_or_else(|error| panic!("http smoke storage: {error}")),
+        );
+        let runtime = Arc::new(elastos_server::runtime::Runtime::with_providers_and_component(
+            storage,
+            Vec::new(),
+            None,
+        ));
+        let secret = "fence-r15-attach".to_string();
+        // Home's server binds inside `start_server_with_sessions`. Take a free
+        // port, drop the probe, and hand that address to the production start.
+        let probe = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .unwrap_or_else(|error| panic!("http smoke bind: {error}"));
+        let addr = probe
+            .local_addr()
+            .unwrap_or_else(|error| panic!("http smoke addr: {error}"));
+        drop(probe);
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(api::server::start_server_with_sessions(
+            api::server::ServerConfig {
+                runtime,
+                session_registry: infrastructure.session_registry.clone(),
+                capability_manager: infrastructure.capability_manager.clone(),
+                capability_store: infrastructure.capability_store.clone(),
+                pending_store: infrastructure.pending_store.clone(),
+                namespace_store: Some(infrastructure.namespace_store.clone()),
+                provider_registry: Some(infrastructure.provider_registry.clone()),
+                audit_log: Some(infrastructure.audit_log.clone()),
+                identity_state: infrastructure.identity_state.clone(),
+                docs_dir: None,
+                addr: addr.to_string(),
+                capsule_dir: None,
+                data_dir: Some(data_dir.clone()),
+                tls_config: None,
+                supervisor: None,
+                ready_tx: Some(ready_tx),
+                attach_secret: Some(secret.clone()),
+                host_helpers: Vec::new(),
+            },
+        ));
+        ready_rx
+            .await
+            .unwrap_or_else(|_| panic!("Home server did not bind"));
+        let url = format!("http://{addr}");
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(5))
+            .build()
+            .unwrap();
+        let mut health_status = 0u16;
+        let mut health_body = String::new();
+        for _ in 0..50 {
+            if let Ok(response) = client.get(format!("{url}/api/health")).send().await {
+                health_status = response.status().as_u16();
+                health_body = response.text().await.unwrap_or_default();
+                if health_status == 200 {
+                    break;
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        let attach = client
+            .post(format!("{url}/api/auth/attach"))
+            .json(&serde_json::json!({"secret": secret, "scope": "shell"}))
+            .send()
+            .await
+            .unwrap_or_else(|error| panic!("attach: {error}"));
+        let attach_status = attach.status();
+        let attach_body: serde_json::Value = attach
+            .json()
+            .await
+            .unwrap_or_else(|error| panic!("attach body: {error}"));
+        let token = attach_body["token"]
+            .as_str()
+            .unwrap_or_else(|| panic!("attach {attach_status} returned no token: {attach_body}"));
+        let ask = |path: String| {
+            let client = client.clone();
+            let token = token.to_string();
+            async move {
+                let response = client
+                    .post(path)
+                    .header("Authorization", format!("Bearer {token}"))
+                    .header("Content-Type", "application/json")
+                    .body("{}")
+                    .send()
+                    .await
+                    .unwrap_or_else(|error| panic!("provider route: {error}"));
+                let status = response.status().as_u16();
+                let body = response.text().await.unwrap_or_default();
+                (status, body)
+            }
+        };
+        let (object_http, object_http_body) =
+            ask(format!("{url}/api/provider/object/status")).await;
+        let (chain_http, chain_http_body) = ask(format!("{url}/api/provider/chain/networks")).await;
+        server.abort();
+        let clip = |text: &str| {
+            let mut owned = text.replace(['\n', '\r'], " ");
+            let end = owned
+                .char_indices()
+                .nth(240)
+                .map(|(index, _)| index)
+                .unwrap_or(owned.len());
+            owned.truncate(end);
+            owned
+        };
         if let Some(carrier) = infrastructure.carrier_service.as_mut() {
             carrier.shutdown().await.unwrap();
         }
         drop(infrastructure);
         println!(
             "{}",
-            serde_json::json!({"health": "ok", "object": object, "chain": chain})
+            serde_json::json!({
+                "health": "ok",
+                "object": object,
+                "chain": chain,
+                "http_health": health_status,
+                "http_health_body": clip(&health_body),
+                "http_object": object_http,
+                "http_object_body": clip(&object_http_body),
+                "http_chain": chain_http,
+                "http_chain_body": clip(&chain_http_body),
+            })
         );
     }
 
