@@ -390,6 +390,26 @@ fn shell_created(audit: &elastos_runtime::primitives::audit::AuditLog) -> usize 
         .count()
 }
 
+/// Newest session rows, labeled the way the ring shows them: `created:shell`
+/// or `created:capsule`. A client attach is a capsule session.
+#[cfg(unix)]
+fn recent_session_labels(
+    audit: &elastos_runtime::primitives::audit::AuditLog,
+    limit: usize,
+) -> Vec<String> {
+    use elastos_runtime::primitives::audit::AuditEvent;
+    audit
+        .recent_events(limit)
+        .into_iter()
+        .filter_map(|event| match event {
+            AuditEvent::SessionCreated { session_type, .. } => {
+                Some(format!("created:{session_type}"))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn a_thousand_frame_polls_keep_one_shell_and_a_restart_mints_once() {
@@ -422,13 +442,25 @@ async fn a_thousand_frame_polls_keep_one_shell_and_a_restart_mints_once() {
         1,
         "a thousand polls keep one shell, have {first:?}"
     );
-    // Each poll re-checks the attach secret. That records a client session, so
-    // the one shell event leaves the 1000-event ring. A shell minted on every
-    // poll would still fill the ring with shell events.
+    // The concurrent polls above assert exactly one shell. Each later poll
+    // re-checks the attach secret as a client session, which the ring records
+    // as `created:capsule`. The ring holds 1000 events, so that one shell
+    // event is no longer in it. A shell minted on every poll would leave
+    // `created:shell` in the newest rows.
     let shells_in_ring = shell_created(&audit);
+    let recent = recent_session_labels(&audit, 6);
+    assert_eq!(
+        shells_in_ring, 0,
+        "a thousand client attaches push the one shell out of the ring, recent {recent:?}"
+    );
+    assert_eq!(
+        recent.len(),
+        6,
+        "the newest six rows are session creates, recent {recent:?}"
+    );
     assert!(
-        shells_in_ring <= 1,
-        "a thousand polls mint one shell, the ring holds {shells_in_ring}"
+        recent.iter().all(|label| label == "created:capsule"),
+        "the newest rows are client attaches, recent {recent:?}"
     );
     let frame_token = first[0].clone();
     let client = reqwest::Client::new();
