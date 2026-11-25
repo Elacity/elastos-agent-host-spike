@@ -187,7 +187,7 @@ A hand-started subordinate host on the Home's own root keeps running. Its live-r
 
 A second Start while that run is live is refused, and the refusal says "this agent is already running", including when that Start presents the same grant. A Start while a Stop still holds its token is refused, and the refusal says "this agent is stopping". A Stop that has not finished answers "stopping" (`routes.rs:580`) and leaves the run live.
 
-The run ends when that Stop finishes, when the guest fails, when the guest crashes, when that run is cancelled, or when the Home process starts again, and a later Start can then begin. When an end cannot run (`OwedEnd::Lost`, `runtime.rs:964`), the live-run token is released while the registry row may still show the run as live.
+The run ends when that Stop finishes, when the guest fails, when the guest crashes, when that run is cancelled, or when the Home process starts again, and a later Start can then begin. When an end cannot run (`OwedEnd::Lost`, `runtime.rs:969`), the live-run token is released while the registry row may still show the run as live.
 
 Retire refuses a later Start because the agent is retired. The launch answers "the caller owns no agent with that id" (`a_retired_or_unknown_agent_refuses_its_launch`).
 

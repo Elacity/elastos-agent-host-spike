@@ -819,6 +819,11 @@ impl ActivationContextHeld {
             }
         };
         self.release().await;
+        #[cfg(test)]
+        let ended_key = self
+            .live_run
+            .as_ref()
+            .map(|run| std::sync::Arc::as_ptr(&run.runs) as usize);
         let _turn = self.hold_launch_turn().await;
         if let (Some(authority), false) = (&self.authority, self.audited) {
             let record = self
@@ -866,8 +871,8 @@ impl ActivationContextHeld {
         // row is still live. A start that never records a row, such as a
         // launch cancelled before registration, still drops the token here.
         #[cfg(test)]
-        if let Some(run) = &self.live_run {
-            await_live_run_gate(std::sync::Arc::as_ptr(&run.runs) as usize, "ended").await;
+        if let Some(key) = ended_key {
+            await_live_run_gate(key, "ended").await;
         }
         drop(self.live_run.take());
 
