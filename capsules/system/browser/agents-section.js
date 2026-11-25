@@ -63,8 +63,19 @@ export function bindAgents(doc, request, confirmStepUp) {
 
   function paint() {
     const banner = failure || (pendingId === "create" || pendingId === "allow" ? pendingLabel : "");
+    // Hidden until this Home's list says agents are on or waiting to be
+    // allowed. A default build stays hidden, including the first paint.
     for (const node of doc.querySelectorAll('[data-settings="agents"]')) {
-      node.hidden = gate === "missing";
+      node.hidden = gate === "wait" || gate === "missing";
+    }
+    if (gate === "missing") {
+      const account = doc.querySelector('.settings-sidebar-item[data-settings="account"]');
+      if (account) {
+        for (const item of doc.querySelectorAll(".settings-sidebar-item, .settings-content")) {
+          const on = item.dataset && item.dataset.settings === "account";
+          if (item.classList) item.classList.toggle("active", on);
+        }
+      }
     }
     statusNode.textContent = banner || (gate === "missing" ? "Agents are not built into this Runtime" : gate === "off" ? HOME_OFF : "");
     formNode.hidden = gate !== "ready";
