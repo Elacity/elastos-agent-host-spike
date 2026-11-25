@@ -606,3 +606,180 @@ fn file_backed_roots_exist_before_the_first_helper_spawn() {
         .expect("start");
     assert!(chain_root < start);
 }
+
+/// Library list through the fenced object-provider binary.
+///
+/// The helper cannot read `components.json`, `capsules`, or `config.toml`, so
+/// its own reply has no viewer and no `protect`. The Runtime fills those
+/// fields from the same data directory. Removing the fill makes this red.
+/// The helper reply stays empty, which is the fence.
+#[cfg(all(
+    not(elastos_unsupported_os_check),
+    any(
+        target_os = "macos",
+        all(
+            target_os = "linux",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        )
+    )
+))]
+#[tokio::test]
+async fn fenced_object_library_list_gets_viewers_from_the_runtime() {
+    use sha2::{Digest, Sha256};
+    use std::os::unix::fs::PermissionsExt;
+
+    fn authority() -> elastos_common::ProviderAuthority {
+        serde_json::from_value(serde_json::json!({
+            "reason": "runtime grant",
+            "capabilities": [],
+            "audit_events": [],
+            "rights": []
+        }))
+        .expect("full grant authority")
+    }
+
+    let temp = tempfile::tempdir().unwrap();
+    let data = std::fs::canonicalize(temp.path()).unwrap();
+    std::fs::set_permissions(&data, std::fs::Permissions::from_mode(0o700)).unwrap();
+    for name in elastos_common::localhost::FILE_BACKED_ROOTS {
+        let root = data.join(name);
+        std::fs::create_dir(&root).unwrap();
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    std::fs::write(data.join("config.toml"), "protected_content = true\n").unwrap();
+    let capsule = data.join("capsules/documents");
+    std::fs::create_dir_all(&capsule).unwrap();
+    std::fs::write(
+        capsule.join("index.html"),
+        "<!doctype html><title>Documents</title>",
+    )
+    .unwrap();
+    std::fs::write(
+        capsule.join("capsule.json"),
+        serde_json::to_vec(&serde_json::json!({
+            "schema": "elastos.capsule/v1",
+            "name": "documents",
+            "version": "0.1.0",
+            "description": "Documents",
+            "author": "elastos",
+            "role": "viewer",
+            "type": "data",
+            "entrypoint": "index.html"
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    std::fs::write(
+        data.join("components.json"),
+        serde_json::to_vec(&serde_json::json!({
+            "external": {
+                "documents": { "install_path": "capsules/documents", "platforms": {} }
+            },
+            "capsules": {},
+            "profiles": {}
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let principal = "person:local:ada";
+    let record = crate::auth::store_test_human_principal(&data, principal);
+    let relative = record.localhost_root.trim_start_matches("localhost://");
+    let note = data.join(relative).join("note.txt");
+    std::fs::create_dir_all(note.parent().unwrap()).unwrap();
+    std::fs::write(&note, b"hello library").unwrap();
+    let (_, did) = elastos_identity::load_or_create_did(&data).unwrap();
+    let binary = provider_binary("object-provider");
+    let digest = hex::encode(Sha256::digest(std::fs::read(&binary).unwrap()));
+    let checked =
+        elastos_runtime::provider::CheckedExecutable::pinned(&binary, &format!("sha256:{digest}"))
+            .unwrap()
+            .with_home_data_dir(&data);
+    let started = elastos_runtime::provider::ProviderBridge::spawn_path_allow(
+        "object-provider",
+        &authority(),
+        &checked,
+        &data,
+        elastos_runtime::provider::BridgeProviderConfig {
+            base_path: data.display().to_string(),
+            extra: serde_json::json!({ "runtime_did": did }),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap_or_else(|err| panic!("object init failed: {err}"));
+    let listed = started
+        .bridge()
+        .send_raw(&serde_json::json!({
+            "op": "list",
+            "principal_id": principal,
+            "uri": record.localhost_root
+        }))
+        .await
+        .unwrap_or_else(|err| panic!("library list failed: {err}"));
+    assert_eq!(listed["status"], "ok", "{listed}");
+    let raw = listed["data"]["objects"]
+        .as_array()
+        .and_then(|objects| objects.iter().find(|object| object["name"] == "note.txt"))
+        .cloned()
+        .unwrap_or_else(|| panic!("note.txt missing from the fenced list: {listed}"));
+    let raw_viewers = raw.get("viewers").and_then(|value| value.as_array());
+    assert!(
+        raw_viewers
+            .map(|viewers| viewers.is_empty())
+            .unwrap_or(true),
+        "the fenced helper must not see the documents viewer: {raw}"
+    );
+    assert!(
+        !raw["capabilities"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|cap| cap == "protect"),
+        "the fenced helper must not see protect: {raw}"
+    );
+    let kept = raw.clone();
+    let mut filled = listed;
+    crate::library::fill_fenced_library_fields(&data, &mut filled);
+    let object = filled["data"]["objects"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|object| object["name"] == "note.txt")
+        .unwrap();
+    assert_eq!(object["viewer"], "documents", "{object}");
+    assert_eq!(object["viewers"][0]["id"], "documents");
+    assert_eq!(object["viewers"][0]["label"], "Documents");
+    assert!(
+        object["capabilities"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|cap| cap == "protect"),
+        "{object}"
+    );
+    for key in [
+        "schema",
+        "uri",
+        "name",
+        "kind",
+        "mime",
+        "size",
+        "created_at",
+        "modified_at",
+        "revision",
+        "availability",
+        "content_cid",
+        "metadata",
+        "published",
+        "shared",
+    ] {
+        assert_eq!(object[key], kept[key], "{key} changed: {object}");
+    }
+    let before = kept["capabilities"].as_array().unwrap();
+    let after = object["capabilities"].as_array().unwrap();
+    assert!(
+        after.starts_with(before),
+        "capabilities lost a field: {before:?} -> {after:?}"
+    );
+    started.bridge().shutdown().await.unwrap();
+}

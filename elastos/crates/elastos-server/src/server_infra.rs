@@ -1184,9 +1184,7 @@ async fn setup_server_infrastructure_impl(
         let binary_path = binaries::resolve_verified_native_provider_binary("localhost-provider")?
             .ok_or_else(|| {
                 anyhow::anyhow!(
-                    "localhost-provider not installed.\n  \
-                 Run:\n  \
-                   elastos setup --with localhost-provider"
+                    "Home does not start without localhost-provider. When the helper is missing, run `elastos setup --with localhost-provider`."
                 )
             })?;
 
@@ -1210,10 +1208,7 @@ async fn setup_server_infrastructure_impl(
                 .await
                 .map_err(|e| {
                     anyhow::anyhow!(
-                        "Failed to spawn localhost-provider capsule: {}.\n  \
-                     Reinstall with:\n  \
-                       elastos setup --with localhost-provider",
-                        e
+                        "Home does not start without localhost-provider: {e}. When the helper is missing, run `elastos setup --with localhost-provider`. Otherwise follow the remedy in this message and start Home again."
                     )
                 })?;
         tracing::info!(
@@ -2706,6 +2701,14 @@ mod tests {
         assert!(
             production.contains("localhost's refusal is fatal"),
             "the Windows sentence names the fatal localhost refusal"
+        );
+        assert!(
+            production.contains("Home does not start without localhost-provider"),
+            "localhost's refusal stops Home and names that fact"
+        );
+        assert!(
+            production.contains("elastos setup --with localhost-provider"),
+            "the message names the remedy"
         );
         let first = production
             .find("async fn spawn_allow_listed_provider(")

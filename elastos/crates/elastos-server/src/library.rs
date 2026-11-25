@@ -8925,6 +8925,73 @@ fn viewer_options_for_name(data_dir: &Path, name: &str) -> Vec<LibraryViewerOpti
         .collect()
 }
 
+/// Fill `viewer`, `viewers`, and the `protect` capability on library objects
+/// the fenced object helper returned.
+///
+/// The helper's roots are `ElastOS`, `Users`, and `UsersAI`. It does not
+/// receive `components.json`, `capsules`, or `config.toml`. The Runtime reads
+/// those three and writes only these fields. Every other `LibraryObject`
+/// field stays the helper's: `schema`, `uri`, `name`, `kind`, `mime`, `size`,
+/// `created_at`, `modified_at`, `revision`, `thumbnail_uri`, `availability`,
+/// `blocked_reason`, `content_cid`, `published_cid`, `metadata`, `published`,
+/// `publication`, `shared`, and the capabilities the helper already computed.
+pub fn fill_fenced_library_fields(data_dir: &Path, value: &mut Value) {
+    match value {
+        Value::Array(items) => {
+            for item in items {
+                fill_fenced_library_fields(data_dir, item);
+            }
+        }
+        Value::Object(map) => {
+            if map.get("schema").and_then(Value::as_str) == Some(LIBRARY_OBJECT_SCHEMA) {
+                fill_one_fenced_library_object(data_dir, map);
+            }
+            let nested: Vec<String> = map.keys().cloned().collect();
+            for key in nested {
+                if let Some(child) = map.get_mut(&key) {
+                    fill_fenced_library_fields(data_dir, child);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn fill_one_fenced_library_object(data_dir: &Path, map: &mut serde_json::Map<String, Value>) {
+    let name = map
+        .get("uri")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let viewers = viewer_options_for_name(data_dir, &name);
+    if viewers.is_empty() {
+        map.remove("viewer");
+        map.remove("viewers");
+    } else {
+        map.insert("viewer".to_string(), json!(viewers[0].id));
+        map.insert("viewers".to_string(), json!(viewers));
+    }
+    let file = map.get("kind").and_then(Value::as_str) == Some("file");
+    let published = map.get("published").and_then(Value::as_bool) == Some(true);
+    let blocked = map.get("blocked_reason").is_some();
+    let can_publish = map
+        .get("capabilities")
+        .and_then(Value::as_array)
+        .is_some_and(|caps| caps.iter().any(|cap| cap.as_str() == Some("publish")));
+    if file
+        && !published
+        && !blocked
+        && can_publish
+        && crate::protected_content_runtime::protected_content_enabled(data_dir)
+    {
+        if let Some(caps) = map.get_mut("capabilities").and_then(Value::as_array_mut) {
+            if !caps.iter().any(|cap| cap.as_str() == Some("protect")) {
+                caps.push(json!("protect"));
+            }
+        }
+    }
+}
+
 fn viewer_ids_for_name(name: &str) -> Vec<&'static str> {
     let lower = name.to_lowercase();
     if archive_family_for_name(&lower).is_some() {

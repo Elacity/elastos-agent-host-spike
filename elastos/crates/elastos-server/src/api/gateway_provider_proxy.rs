@@ -2059,6 +2059,12 @@ pub(super) async fn gateway_provider_proxy(
             }),
         }
     };
+    // The fenced object helper cannot read components.json, capsules, or
+    // config.toml. The Runtime fills viewer, viewers, and protect from those
+    // files. Other object fields stay the helper's.
+    if scheme == "object" {
+        crate::library::fill_fenced_library_fields(&state.data_dir, &mut response);
+    }
     let mut response_status = StatusCode::OK;
     if scheme == "model" {
         if let Some(refusal) = local_model_request_expiry_refusal(&request, &response) {
