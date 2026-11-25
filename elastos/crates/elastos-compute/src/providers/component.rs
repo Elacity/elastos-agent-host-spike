@@ -3499,7 +3499,9 @@ mod tests {
             started.elapsed().as_millis()
         );
         assert!(
-            ending == "returned" || ending.contains("stopped") || ending.contains(ENDING_EPOCH_DEADLINE),
+            ending == "returned"
+                || ending.contains("stopped")
+                || ending.contains(ENDING_EPOCH_DEADLINE),
             "{ending}"
         );
     }
@@ -3932,6 +3934,11 @@ mod tests {
             Some("person:local:test".into()),
         );
         state.reads = reads.clone();
+        state.grants.lock().expect("grant book").hold(
+            "grant-token",
+            "localhost://Users/self/Documents/note.bin",
+            "read",
+        );
         state
     }
 

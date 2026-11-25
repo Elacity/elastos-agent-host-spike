@@ -391,11 +391,11 @@ impl GrantBook {
         self.closed = true;
     }
 
-    /// A revoked, forgotten, or closed grant cannot back a read.
+    /// A revoked, forgotten, or closed grant cannot back a read. An id that
+    /// is not one of the grants this guest holds cannot either, including an
+    /// id that has fallen out of the dropped ring.
     pub fn blocks_read(&self, id: &str) -> bool {
-        self.closed
-            || self.revoked.iter().any(|kept| kept == id)
-            || self.dropped.iter().any(|kept| kept == id)
+        self.closed || self.grants.iter().all(|grant| grant.id != id)
     }
 
     pub fn is_empty(&self) -> bool {
@@ -616,6 +616,26 @@ mod tests {
         assert!(
             matches!(err, PresentError::Denied(ref message) if message.contains("old")),
             "{err:?}"
+        );
+    }
+
+    #[test]
+    fn an_id_that_left_the_dropped_ring_still_blocks_a_read() {
+        let mut book = GrantBook::default();
+        for n in 0..(MAX_HELD_GRANTS + MAX_REVOKED_GRANTS + 1) {
+            book.hold(
+                &format!("g{n}"),
+                "localhost://Users/self/Pictures/a.png",
+                "read",
+            );
+        }
+        assert!(
+            book.dropped.iter().all(|id| id != "g0"),
+            "g0 has left the dropped ring"
+        );
+        assert!(
+            book.blocks_read("g0"),
+            "an id that is not a held grant cannot be read"
         );
     }
 
