@@ -12,7 +12,8 @@ use crate::resource_bridge::{BridgePrincipal, LaunchContent};
 use elastos_bundle_identity::{checked_bundle_within, Budget, CheckedBundle, LabCid};
 use elastos_common::{AuthorityBound, CapsuleManifest, CapsuleType, ElastosError, Result};
 use elastos_compute::providers::{
-    component_bridge_leg, BridgeHostcall, ComponentBridgeLeg, ComponentProvider, STOPPED_BEFORE_RUN,
+    component_bridge_leg, BridgeHostcall, BridgeHostcallAsync, ComponentBridgeLeg,
+    ComponentProvider, STOPPED_BEFORE_RUN,
 };
 use elastos_compute::{CapsuleHandle, ComputeProvider};
 use elastos_storage::StorageProvider;
@@ -1252,62 +1253,82 @@ impl Runtime {
             let host_activation_stops = self.activation_stops.clone();
             let host_launch_contents = self.launch_contents.clone();
             let host_handle = tokio::runtime::Handle::current();
+            let bridge_call: BridgeHostcallAsync =
+                Arc::new(move |line, capsule_id, principal_id| {
+                    let manifest_capabilities = host_manifest_capabilities
+                        .read()
+                        .ok()
+                        .and_then(|guard| guard.get(capsule_id).cloned())
+                        .unwrap_or_default();
+                    // The content this caller was launched with, if it is the
+                    // program of a content launch: looked up by its own id, as
+                    // its ceiling is, and nobody else's. A poisoned lock still
+                    // holds the table, as for the guard. The read guard ends with
+                    // this statement: it is not held across the call below, so an
+                    // activation's end can take the content away while another
+                    // guest is inside the bridge.
+                    let launch = host_launch_contents
+                        .read()
+                        .unwrap_or_else(|it| it.into_inner())
+                        .get(capsule_id)
+                        .cloned();
+                    let (model_token_ceiling, model_budget) = Self::model_dispatch_budget(
+                        capsule_id,
+                        &host_model_token_ceilings,
+                        &host_model_budget,
+                        &host_model_offer_bounds,
+                    );
+                    // The stop this activation was asked for, if any: the bridge's
+                    // wait loop leaves a long capability wait through it.
+                    let stop = host_activation_stops
+                        .read()
+                        .unwrap_or_else(|it| it.into_inner())
+                        .get(capsule_id)
+                        .map(|stop| stop.flag.clone());
+                    let ctx = crate::resource_bridge::BridgeContext {
+                        provider_registry: host_reg.clone(),
+                        capability_manager: host_cap_mgr.clone(),
+                        pending_store: host_pending.clone(),
+                        capsule_id: capsule_id.to_string(),
+                        // The provider minted this id for the one activation, so
+                        // the Runtime session is the activation, taken here from
+                        // the Runtime's own hostcall and never from the Bus
+                        // identity field the guest reads.
+                        session_id: capsule_id.to_string(),
+                        principal_id: principal_id.map(ToOwned::to_owned),
+                        manifest_capabilities,
+                        data_dir: Some(host_data_dir.clone()),
+                        launch,
+                        model_token_ceiling,
+                        model_budget,
+                        stop,
+                    };
+                    let line = line.to_string();
+                    Box::pin(async move {
+                        let response =
+                            crate::resource_bridge::handle_component_resource_request(&line, ctx)
+                                .await
+                                .map_err(|err| err.to_string())?;
+                        serde_json::to_string(&response).map_err(|err| err.to_string())
+                    })
+                        as std::pin::Pin<
+                            Box<
+                                dyn std::future::Future<
+                                        Output = std::result::Result<String, String>,
+                                    > + Send,
+                            >,
+                        >
+                });
+            let bridge_for_v1 = bridge_call.clone();
+            component.set_bus_hostcall_async(bridge_call);
+            // v1 stays on the caller thread. The leg is Caller, so this does
+            // not start a thread. v2 awaits `bridge_call` and never comes here.
             component.set_bus_hostcall(Arc::new(move |line, capsule_id, principal_id| {
-                let manifest_capabilities = host_manifest_capabilities
-                    .read()
-                    .ok()
-                    .and_then(|guard| guard.get(capsule_id).cloned())
-                    .unwrap_or_default();
-                // The content this caller was launched with, if it is the
-                // program of a content launch: looked up by its own id, as
-                // its ceiling is, and nobody else's. A poisoned lock still
-                // holds the table, as for the guard. The read guard ends with
-                // this statement: it is not held across the call below, so an
-                // activation's end can take the content away while another
-                // guest is inside the bridge.
-                let launch = host_launch_contents
-                    .read()
-                    .unwrap_or_else(|it| it.into_inner())
-                    .get(capsule_id)
-                    .cloned();
-                let (model_token_ceiling, model_budget) = Self::model_dispatch_budget(
-                    capsule_id,
-                    &host_model_token_ceilings,
-                    &host_model_budget,
-                    &host_model_offer_bounds,
-                );
-                // The stop this activation was asked for, if any: the bridge's
-                // wait loop leaves a long capability wait through it.
-                let stop = host_activation_stops
-                    .read()
-                    .unwrap_or_else(|it| it.into_inner())
-                    .get(capsule_id)
-                    .map(|stop| stop.flag.clone());
-                let ctx = crate::resource_bridge::BridgeContext {
-                    provider_registry: host_reg.clone(),
-                    capability_manager: host_cap_mgr.clone(),
-                    pending_store: host_pending.clone(),
-                    capsule_id: capsule_id.to_string(),
-                    // The provider minted this id for the one activation, so
-                    // the Runtime session is the activation, taken here from
-                    // the Runtime's own hostcall and never from the Bus
-                    // identity field the guest reads.
-                    session_id: capsule_id.to_string(),
-                    principal_id: principal_id.map(ToOwned::to_owned),
-                    manifest_capabilities,
-                    data_dir: Some(host_data_dir.clone()),
-                    launch,
-                    model_token_ceiling,
-                    model_budget,
-                    stop,
-                };
-                let response = Self::block_on_component_bridge(
+                Self::block_on_component_bridge(
                     &host_handle,
                     component_bridge_leg(),
-                    crate::resource_bridge::handle_component_resource_request(line, ctx),
+                    bridge_for_v1(line, capsule_id, principal_id),
                 )
-                .map_err(|err| err.to_string())?;
-                serde_json::to_string(&response).map_err(|err| err.to_string())
             }));
             tracing::info!("Component resource bridge configured");
         }

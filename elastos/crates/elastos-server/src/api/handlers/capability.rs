@@ -823,6 +823,11 @@ pub async fn revoke_all_capabilities(
         )
         .await;
     }
+    // The snapshot above misses a grant recorded after it was taken. The sweep
+    // revokes every grant a live v2 guest holds now, including that one.
+    if let Some(guests) = state.v2_guests.as_deref() {
+        guests.deliver_revoke_all().await;
+    }
 
     Json(RevokeAllOutput {
         success: true,

@@ -249,7 +249,14 @@ fn launch_response(
     };
     let window = |key: &str| request.get(key).and_then(|value| value.as_u64());
     let bytes = apply_read_window(bytes, window("offset"), window("length"));
-    provider_ok_result(serde_json::json!({"content": bytes, "size": bytes.len()}))
+    let binary = request
+        .get("check_revision")
+        .and_then(|value| value.as_bool())
+        == Some(true);
+    provider_ok_result(serde_json::json!({
+        "content": read_content_value(&bytes, binary),
+        "size": bytes.len()
+    }))
 }
 
 /// A bridge principal: who a capsule runs for, after verification.
@@ -1370,8 +1377,12 @@ fn protected_principal_root_resource_response(
     }
     let agent_path = crate::provider_resource::in_agents_area(&rooted);
     let agent_journal = operation == "write" && agent_path;
-    match crate::auth::load_principal_root_protection(data_dir, principal_id, &localhost_root) {
-        Ok(Some(_)) => {}
+    let protection = match crate::auth::load_principal_root_protection(
+        data_dir,
+        principal_id,
+        &localhost_root,
+    ) {
+        Ok(Some(protection)) => protection,
         Ok(None) if agent_path => {
             return Some(resource_error_response(
                 "principal_root_protection_required",
@@ -1391,7 +1402,7 @@ fn protected_principal_root_resource_response(
                 &err.to_string(),
             ));
         }
-    }
+    };
 
     let Some(path) = rooted_localhost_fs_path(data_dir, &rooted) else {
         return Some(resource_error_response(
@@ -1402,6 +1413,36 @@ fn protected_principal_root_resource_response(
 
     match operation {
         "read" => {
+            let offset = request.get("offset").and_then(|value| value.as_u64());
+            let length = request.get("length").and_then(|value| value.as_u64());
+            let check_revision = request
+                .get("check_revision")
+                .and_then(|value| value.as_bool())
+                == Some(true);
+            // The cap is `length`, which the guest sets to its cap plus one.
+            // The bound comes from the object's head and tail. Over that cap,
+            // the body stays unread.
+            if let Some(length) = length {
+                let bound = match crate::auth::principal_root_object_content_bound(
+                    data_dir,
+                    principal_id,
+                    &localhost_root,
+                    &rooted,
+                    &path,
+                    Some(protection.data_key_id.as_str()),
+                ) {
+                    Ok(bound) => bound,
+                    Err(err) => {
+                        return Some(provider_error_result("read_failed", &err.to_string()))
+                    }
+                };
+                if bound > offset.unwrap_or(0).saturating_add(length) {
+                    return Some(provider_error_result(
+                        "invalid",
+                        "object is over the read cap",
+                    ));
+                }
+            }
             let bytes = match crate::auth::read_principal_root_object(
                 data_dir,
                 principal_id,
@@ -1416,11 +1457,7 @@ fn protected_principal_root_resource_response(
                 crate::auth::principal_root_object_revision(principal_id, &rooted, &bytes);
             // A v2 read sets this. The object is read again. A change between
             // the two reads is a conflict, so the call ends as an error.
-            if request
-                .get("check_revision")
-                .and_then(|value| value.as_bool())
-                == Some(true)
-            {
+            if check_revision {
                 #[cfg(test)]
                 run_read_revision_gap();
                 let again = match crate::auth::read_principal_root_object(
@@ -1444,13 +1481,9 @@ fn protected_principal_root_resource_response(
                     ));
                 }
             }
-            let bytes = apply_read_window(
-                bytes,
-                request.get("offset").and_then(|value| value.as_u64()),
-                request.get("length").and_then(|value| value.as_u64()),
-            );
+            let bytes = apply_read_window(bytes, offset, length);
             Some(provider_ok_result(serde_json::json!({
-                "content": bytes,
+                "content": read_content_value(&bytes, check_revision),
                 "size": bytes.len(),
                 "revision": revision,
             })))
@@ -1664,6 +1697,17 @@ fn run_read_revision_gap() {
 #[cfg(test)]
 fn set_read_revision_gap(hook: Option<Box<dyn FnMut() + Send>>) {
     *READ_REVISION_GAP.lock().expect("revision gap") = hook;
+}
+
+/// v2 sends bytes as base64. v1 keeps a JSON array of numbers.
+fn read_content_value(bytes: &[u8], binary: bool) -> serde_json::Value {
+    if binary {
+        serde_json::json!({
+            "b64": base64::Engine::encode(&base64::engine::general_purpose::STANDARD, bytes)
+        })
+    } else {
+        serde_json::json!(bytes)
+    }
 }
 
 fn apply_read_window(bytes: Vec<u8>, offset: Option<u64>, length: Option<u64>) -> Vec<u8> {

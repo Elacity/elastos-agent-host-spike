@@ -442,13 +442,14 @@ mod tests {
             let start = offset.min(doc.len());
             let end = start.saturating_add(length).min(doc.len());
             let window = doc[start..end].to_vec();
+            let text = String::from_utf8(window.clone()).map_err(|err| err.to_string())?;
             Ok(serde_json::json!({
                 "id": 1,
                 "response": {
                     "type": "resource_result",
                     "result": {
                         "status": "ok",
-                        "data": { "content": window, "size": window.len() }
+                        "data": { "content": text, "size": window.len() }
                     },
                     "audit": "read-1"
                 }
@@ -484,6 +485,16 @@ mod tests {
         provider
             .set_bridge_principal(&first.id, Some("person:local:a".into()))
             .await;
+        for id in [&first.id, &second.id] {
+            provider
+                .testing_hold_grant(
+                    id,
+                    "grant-token",
+                    "localhost://Users/self/Documents/note.bin",
+                    "read",
+                )
+                .await;
+        }
         provider.start(&first).await.expect("first guest starts");
         provider.start(&second).await.expect("second guest starts");
 
@@ -603,7 +614,7 @@ mod tests {
                 let end = start.saturating_add(length).min(self.note.len());
                 Ok(serde_json::json!({
                     "status": "ok",
-                    "data": { "content": self.note[start..end] }
+                    "data": { "content": String::from_utf8_lossy(&self.note[start..end]) }
                 }))
             }
         }
@@ -624,14 +635,13 @@ mod tests {
             }))
             .await;
         let lines = Arc::new(Mutex::new(Vec::<String>::new()));
-        let host = tokio::runtime::Handle::current();
         let provider = ComponentProvider::new();
         {
             let registry = registry.clone();
             let manager = manager.clone();
             let pending = pending.clone();
             let lines = lines.clone();
-            provider.set_bus_hostcall(Arc::new(move |line, capsule, principal| {
+            provider.set_bus_hostcall_async(Arc::new(move |line, capsule, principal| {
                 lines.lock().expect("lines").push(line.to_string());
                 let ctx = BridgeContext {
                     provider_registry: registry.clone(),
@@ -649,13 +659,19 @@ mod tests {
                     model_budget: None,
                     stop: None,
                 };
-                let response = crate::runtime::Runtime::block_on_component_bridge(
-                    &host,
-                    elastos_compute::providers::component_bridge_leg(),
-                    handle_component_resource_request(line, ctx),
-                )
-                .map_err(|err| err.to_string())?;
-                serde_json::to_string(&response).map_err(|err| err.to_string())
+                let line = line.to_string();
+                Box::pin(async move {
+                    let response = handle_component_resource_request(&line, ctx)
+                        .await
+                        .map_err(|err| err.to_string())?;
+                    serde_json::to_string(&response).map_err(|err| err.to_string())
+                })
+                    as std::pin::Pin<
+                        Box<
+                            dyn std::future::Future<Output = std::result::Result<String, String>>
+                                + Send,
+                        >,
+                    >
             }));
         }
 
@@ -882,7 +898,7 @@ mod tests {
                 let end = start.saturating_add(length).min(self.note.len());
                 Ok(serde_json::json!({
                     "status": "ok",
-                    "data": { "content": self.note[start..end] }
+                    "data": { "content": String::from_utf8_lossy(&self.note[start..end]) }
                 }))
             }
         }
@@ -904,14 +920,13 @@ mod tests {
             }))
             .await;
         let lines = Arc::new(Mutex::new(Vec::<String>::new()));
-        let host = tokio::runtime::Handle::current();
         let provider = Arc::new(ComponentProvider::new());
         {
             let registry = registry.clone();
             let manager = manager.clone();
             let pending = pending.clone();
             let lines = lines.clone();
-            provider.set_bus_hostcall(Arc::new(move |line, capsule, principal| {
+            provider.set_bus_hostcall_async(Arc::new(move |line, capsule, principal| {
                 lines.lock().expect("lines").push(line.to_string());
                 let ctx = BridgeContext {
                     provider_registry: registry.clone(),
@@ -929,13 +944,19 @@ mod tests {
                     model_budget: None,
                     stop: None,
                 };
-                let response = crate::runtime::Runtime::block_on_component_bridge(
-                    &host,
-                    elastos_compute::providers::component_bridge_leg(),
-                    handle_component_resource_request(line, ctx),
-                )
-                .map_err(|err| err.to_string())?;
-                serde_json::to_string(&response).map_err(|err| err.to_string())
+                let line = line.to_string();
+                Box::pin(async move {
+                    let response = handle_component_resource_request(&line, ctx)
+                        .await
+                        .map_err(|err| err.to_string())?;
+                    serde_json::to_string(&response).map_err(|err| err.to_string())
+                })
+                    as std::pin::Pin<
+                        Box<
+                            dyn std::future::Future<Output = std::result::Result<String, String>>
+                                + Send,
+                        >,
+                    >
             }));
         }
 
