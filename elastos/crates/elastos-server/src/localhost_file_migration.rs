@@ -194,7 +194,7 @@ fn localhost_refused(path: &Path, why: &str) -> anyhow::Error {
         return anyhow::anyhow!("{rel} is not the migration record. {RECOVERY}");
     } else if why == "mismatch" {
         return anyhow::anyhow!(
-            "{rel} does not match this Home (restored or copied folder, changed device key). {RECOVERY}"
+            "{rel} does not match this Home (restored or copied folder, changed device key). Restore the matching identity/device.key, or move AppCapsules, ElastOS, Local, Users, and UsersAI aside to start empty, then restart."
         );
     } else if why.starts_with("larger") {
         why

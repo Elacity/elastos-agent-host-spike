@@ -5919,7 +5919,7 @@ mod tests {
         let before = fs::read(&kept).unwrap();
         let marker_before =
             fs::read(restored.path().join("identity/localhost-file-key-v1")).unwrap();
-        let mismatch = "identity/localhost-file-key-v1 does not match this Home (restored or copied folder, changed device key). Make it readable or move it out of the folder, then restart.".to_string();
+        let mismatch = "identity/localhost-file-key-v1 does not match this Home (restored or copied folder, changed device key). Restore the matching identity/device.key, or move AppCapsules, ElastOS, Local, Users, and UsersAI aside to start empty, then restart.".to_string();
         expect_refusal(restored.path(), &other_key, &mismatch, false);
         assert_eq!(fs::read(&kept).unwrap(), before);
         assert_eq!(
