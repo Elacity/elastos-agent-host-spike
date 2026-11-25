@@ -6265,6 +6265,93 @@ mod tests {
     }
 
     #[test]
+    fn creating_the_identity_folder_or_the_lock_names_the_write_failure() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let device_key = [0xc3; 32];
+        let root = TempDir::new().unwrap();
+        let note = root.path().join("Users/note.bin");
+        let planted = plant_device_envelope(&note, &device_key, b"stay");
+        struct RestoreMode {
+            path: std::path::PathBuf,
+        }
+        impl Drop for RestoreMode {
+            fn drop(&mut self) {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = fs::set_permissions(&self.path, fs::Permissions::from_mode(0o755));
+            }
+        }
+        let _restore_root = RestoreMode {
+            path: root.path().to_path_buf(),
+        };
+        fs::set_permissions(root.path(), fs::Permissions::from_mode(0o555)).unwrap();
+        let err = localhost_provider_bridge_config(root.path(), &device_key).unwrap_err();
+        let text = err.to_string();
+        assert!(text.contains("identity could not be written"), "{text}");
+        assert!(text.contains("Permission denied"), "{text}");
+        assert!(
+            text.contains("Free space, or the folder's permissions, then restart."),
+            "{text}"
+        );
+        assert!(!text.contains("is not readable"), "{text}");
+        fs::set_permissions(root.path(), fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(fs::read(&note).unwrap(), planted);
+        assert!(!root.path().join("identity").exists());
+
+        let locked = TempDir::new().unwrap();
+        let locked_note = locked.path().join("Users/note.bin");
+        let planted = plant_device_envelope(&locked_note, &device_key, b"stay");
+        let identity = locked.path().join("identity");
+        fs::create_dir(&identity).unwrap();
+        let _restore_identity = RestoreMode {
+            path: identity.clone(),
+        };
+        fs::set_permissions(&identity, fs::Permissions::from_mode(0o555)).unwrap();
+        let err = localhost_provider_bridge_config(locked.path(), &device_key).unwrap_err();
+        let text = err.to_string();
+        assert!(
+            text.contains("identity/localhost-file-key.lock could not be written"),
+            "{text}"
+        );
+        assert!(text.contains("Permission denied"), "{text}");
+        assert!(
+            text.contains("Free space, or the folder's permissions, then restart."),
+            "{text}"
+        );
+        assert!(!text.contains("is not readable"), "{text}");
+        fs::set_permissions(&identity, fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(fs::read(&locked_note).unwrap(), planted);
+        assert!(!locked
+            .path()
+            .join("identity/localhost-file-key-v1")
+            .exists());
+
+        let leftover = TempDir::new().unwrap();
+        let users = leftover.path().join("Users");
+        fs::create_dir_all(&users).unwrap();
+        let temp_name = users.join(".note.bin.elastos-localhost-file-key-v1.tmp");
+        fs::write(&temp_name, b"temp").unwrap();
+        let _restore_users = RestoreMode {
+            path: users.clone(),
+        };
+        fs::set_permissions(&users, fs::Permissions::from_mode(0o555)).unwrap();
+        let err = localhost_provider_bridge_config(leftover.path(), &device_key).unwrap_err();
+        let text = err.to_string();
+        assert!(
+            text.contains("Users/.note.bin.elastos-localhost-file-key-v1.tmp could not be written"),
+            "{text}"
+        );
+        assert!(text.contains("Permission denied"), "{text}");
+        assert!(!text.contains("is not readable"), "{text}");
+        fs::set_permissions(&users, fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(fs::read(&temp_name).unwrap(), b"temp");
+        assert!(!leftover
+            .path()
+            .join("identity/localhost-file-key-v1")
+            .exists());
+    }
+
+    #[test]
     fn rewrite_keeps_an_owner_mode_and_drops_extra_attributes() {
         use std::os::unix::fs::{MetadataExt, PermissionsExt};
         use std::process::Command;

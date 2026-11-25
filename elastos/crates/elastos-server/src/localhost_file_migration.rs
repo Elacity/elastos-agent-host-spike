@@ -624,7 +624,7 @@ fn migrate_localhost_tree(
         if file_type.is_file() && is_rewrite_temp(name) {
             charge_migration_write()?;
             std::fs::remove_file(&path)
-                .with_context(|| localhost_refused(&path, "cannot be removed"))?;
+                .map_err(|err| localhost_write_refused(&path, &err.to_string()))?;
             continue;
         }
         if file_type.is_dir() {
@@ -763,9 +763,7 @@ fn ensure_identity_dir(identity: &Path) -> anyhow::Result<()> {
                         }
                     }
                 }
-                Err(err) => {
-                    Err(err).with_context(|| localhost_refused(identity, "cannot be created"))
-                }
+                Err(err) => Err(localhost_write_refused(identity, &err.to_string())),
             }
         }
         Err(err) => Err(err).with_context(|| localhost_refused(identity, "cannot be read")),
@@ -795,7 +793,7 @@ fn acquire_migration_lock(data_dir: &Path) -> anyhow::Result<LocalhostMigrationL
         .mode(0o600)
         .custom_flags(libc::O_NOFOLLOW)
         .open(&lock_path)
-        .with_context(|| localhost_refused(&lock_path, "cannot be locked"))?;
+        .map_err(|err| localhost_write_refused(&lock_path, &err.to_string()))?;
     let meta = file
         .metadata()
         .with_context(|| localhost_refused(&lock_path, "cannot be locked"))?;
