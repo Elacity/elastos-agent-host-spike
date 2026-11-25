@@ -118,6 +118,9 @@ struct ComponentActivation {
     join: Option<Arc<V2Join>>,
     /// How long a stop waits for that join before it answers "still running".
     join_bound: Duration,
+    /// The test asks the next join to skip spawning its owner thread.
+    #[cfg(test)]
+    refuse_join_owner: bool,
     #[cfg(test)]
     test_max_ticks: u64,
     #[cfg(test)]
@@ -647,6 +650,8 @@ impl ComponentProvider {
                 worker: None,
                 join: None,
                 join_bound: V2_HOST_DEADLINE,
+                #[cfg(test)]
+                refuse_join_owner: false,
                 #[cfg(test)]
                 test_max_ticks: V2_TEST_EPOCH_TICKS,
                 #[cfg(test)]
@@ -1310,6 +1315,12 @@ struct V2Join {
     done: Mutex<bool>,
     cv: Condvar,
     started: AtomicBool,
+    /// One caller runs `own`. A second caller waits until that one sets `done`.
+    owning: AtomicBool,
+    /// The owner thread was not spawned. `wait` joins on its caller.
+    inline: AtomicBool,
+    #[cfg(test)]
+    refuse_spawn: bool,
 }
 
 impl V2Join {
@@ -1317,6 +1328,7 @@ impl V2Join {
         task: Option<tokio::task::AbortHandle>,
         worker: Option<std::thread::JoinHandle<()>>,
         cancel: Arc<AtomicBool>,
+        #[cfg(test)] refuse_spawn: bool,
     ) -> Arc<Self> {
         Arc::new(Self {
             worker: Mutex::new(worker),
@@ -1325,12 +1337,26 @@ impl V2Join {
             done: Mutex::new(false),
             cv: Condvar::new(),
             started: AtomicBool::new(false),
+            owning: AtomicBool::new(false),
+            inline: AtomicBool::new(false),
+            #[cfg(test)]
+            refuse_spawn,
         })
     }
 
-    /// Starts the single owner thread. A second call does nothing.
+    /// Starts the single owner thread. A second call does nothing. When the
+    /// owner thread cannot be spawned, the caller of `wait` joins instead.
     fn start(self: &Arc<Self>) {
         if self.started.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        #[cfg(test)]
+        let refuse = self.refuse_spawn;
+        #[cfg(not(test))]
+        let refuse = false;
+        if refuse {
+            tracing::error!("join-owner");
+            self.inline.store(true, Ordering::Release);
             return;
         }
         let join = Arc::clone(self);
@@ -1338,11 +1364,17 @@ impl V2Join {
             .name("component-v2-join".into())
             .spawn(move || join.own());
         if spawned.is_err() {
-            self.started.store(false, Ordering::Release);
+            tracing::error!("join-owner");
+            self.inline.store(true, Ordering::Release);
         }
     }
 
     fn own(&self) {
+        if self.owning.swap(true, Ordering::AcqRel) {
+            let guard = self.done.lock().expect("join");
+            let _guard = self.cv.wait_while(guard, |done| !*done).expect("join");
+            return;
+        }
         std::thread::sleep(V2_STOP_GRACE);
         if let Some(task) = self.task.lock().expect("join").take() {
             if !task.is_finished() {
@@ -1358,6 +1390,10 @@ impl V2Join {
     }
 
     fn wait(&self, bound: Duration) -> bool {
+        if self.inline.load(Ordering::Acquire) {
+            self.own();
+            return self.finished();
+        }
         let guard = self.done.lock().expect("join");
         let (guard, _) = self
             .cv
@@ -1387,7 +1423,15 @@ fn begin_v2_join(instance: &mut ComponentActivation) -> Option<Arc<V2Join>> {
     if task.is_none() && worker.is_none() {
         return None;
     }
-    let join = V2Join::prepare(task, worker, instance.cancel_requested.clone());
+    #[cfg(test)]
+    let refuse_spawn = instance.refuse_join_owner;
+    let join = V2Join::prepare(
+        task,
+        worker,
+        instance.cancel_requested.clone(),
+        #[cfg(test)]
+        refuse_spawn,
+    );
     instance.join = Some(join.clone());
     instance.status = CapsuleStatus::Stopping;
     join.start();
@@ -2944,6 +2988,39 @@ mod tests {
         assert!(provider.instances.read().await.contains_key(&third.id));
         provider.stop(&second).await.unwrap();
         provider.stop(&third).await.unwrap();
+    }
+
+    /// The owner thread is not spawned. Stop joins the worker on its caller
+    /// and the slot is free.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn v2_join_owner_that_cannot_spawn_joins_inline() {
+        let provider = ComponentProvider::new();
+        let bytes = wat::parse_str(include_str!(
+            "../../../../tests/fixtures/components/v2-resident.wat"
+        ))
+        .unwrap();
+        let handle = load_v2_fixture(&provider, bytes).await;
+        provider.start(&handle).await.unwrap();
+        provider
+            .instances
+            .write()
+            .await
+            .get_mut(&handle.id)
+            .unwrap()
+            .refuse_join_owner = true;
+        provider
+            .stop(&handle)
+            .await
+            .expect("a join-owner that cannot be spawned joins on the caller");
+        assert!(
+            provider.instances.read().await.is_empty(),
+            "the inline join frees the slot"
+        );
+        assert_eq!(
+            provider.threads_live.load(Ordering::Acquire),
+            0,
+            "the worker was joined"
+        );
     }
 
     /// Revoke, revoke-all, and activation end change the book before any poll.
