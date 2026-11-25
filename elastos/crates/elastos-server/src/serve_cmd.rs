@@ -408,6 +408,9 @@ pub async fn run_serve(
         println!("  Capsule  shell           {}", cid);
     }
     println!("  API:     http://{}", addr);
+    // A piped stdout is block-buffered. The refusal sentence has to reach a
+    // parent before this process settles into the server loop.
+    let _ = std::io::Write::flush(&mut std::io::stdout());
 
     let components_path = data_dir.join("components.json");
     let sup = if components_path.exists() {
