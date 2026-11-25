@@ -88,17 +88,25 @@ test("two failed polls clear the panel and the first failure keeps it", async ()
       }
       return Promise.reject(new Error("down"));
     },
-    30,
+    20,
     { deadlineMs: 200 },
   );
-  await new Promise((resolve) => setTimeout(resolve, 20));
-  assert.equal(panel.children[0].textContent, "live");
-  await new Promise((resolve) => setTimeout(resolve, 40));
-  assert.equal(panel.children[0].textContent, "live");
-  await new Promise((resolve) => setTimeout(resolve, 80));
-  clearInterval(timer);
-  assert.ok(calls >= 3);
-  assert.equal(panel.children.length, 0);
+  const until = async (done) => {
+    const start = Date.now();
+    while (!done()) {
+      if (Date.now() - start > 1000) throw new Error("the poll did not arrive");
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+  };
+  try {
+    await until(() => calls >= 1 && panel.children[0] && panel.children[0].textContent === "live");
+    await until(() => calls >= 2);
+    assert.equal(panel.children[0].textContent, "live");
+    await until(() => panel.children.length === 0);
+    assert.ok(calls >= 3);
+  } finally {
+    clearInterval(timer);
+  }
 });
 
 test("a deadline aborts the fetch", async () => {
@@ -108,12 +116,17 @@ test("a deadline aborts the fetch", async () => {
     panel,
     (abort) => {
       signal = abort;
-      return new Promise(() => {});
+      return new Promise((_, reject) => {
+        if (abort) abort.addEventListener("abort", () => reject(new Error("aborted")));
+      });
     },
     1000,
     { deadlineMs: 30 },
   );
-  await new Promise((resolve) => setTimeout(resolve, 80));
-  clearInterval(timer);
-  assert.equal(signal.aborted, true);
+  try {
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    assert.equal(signal.aborted, true);
+  } finally {
+    clearInterval(timer);
+  }
 });
