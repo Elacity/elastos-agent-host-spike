@@ -3133,7 +3133,8 @@ pub(crate) async fn recovery_kit_import_inner(
             );
         }
     }
-    // Before activation or any store.
+    // Read before the provider wait. The count that decides is taken later,
+    // under the agent writer, after that wait has returned.
     let replaces_root_key = !input.reassign_to_current_principal
         && crate::auth::load_principal_root_protection(
             &state.data_dir,
@@ -3141,14 +3142,6 @@ pub(crate) async fn recovery_kit_import_inner(
             &kit.localhost_root,
         )?
         .is_some_and(|stored| stored.data_key_id != kit.data_key_id);
-    if input.reassign_to_current_principal || replaces_root_key {
-        let count = crate::agents::opening_agent_count(&state.data_dir, &principal.principal_id)?;
-        if count > 0 {
-            return Err(
-                crate::agents::Refused(crate::agents::agents_would_stop_opening(count)).into(),
-            );
-        }
-    }
     let now = crate::auth::now_ts();
     let candidate_data_key = crate::auth::recovery_kit_data_key(&kit)?;
     let mut protection = protection_from_recovery_kit(
@@ -3174,6 +3167,17 @@ pub(crate) async fn recovery_kit_import_inner(
             }
         },
         None => None,
+    };
+    // The agent writer create uses, from this count until the store below
+    // returns. The DID provider wait above is finished, so the lock is not
+    // held across it.
+    let _agent_writer = if input.reassign_to_current_principal || replaces_root_key {
+        Some(crate::agents::hold_agent_writer_for_root_change(
+            &state.data_dir,
+            &principal.principal_id,
+        )?)
+    } else {
+        None
     };
     let protected_object_inventory =
         principal_root_protected_object_inventory(&state.data_dir, &kit.localhost_root);

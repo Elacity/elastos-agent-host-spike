@@ -24,6 +24,9 @@
 //! - A write holds the agent lock, raises `sequence` by exactly one, replaces
 //!   the file in one step at mode 0600, and then appends one audit event to
 //!   the owner's audit chain.
+//! - A root-key change holds that same lock from the count until the key is
+//!   stored. An agent created in between waits, and then wraps under the key
+//!   the store left.
 //! - Every write is one of a closed list of operations, and each operation
 //!   may change only what `permits` lists for it.
 //! - This module never holds the owner's data key. It asks `auth` for a key
@@ -31,6 +34,8 @@
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
+#[cfg(test)]
+use std::sync::Condvar;
 use std::sync::{Mutex, MutexGuard};
 
 use anyhow::Context;
@@ -866,6 +871,10 @@ fn create_in_any_build(
     if live >= MAX_LIVE_AGENTS_PER_OWNER {
         return refused(AT_THE_LIMIT);
     }
+    // The wrap reads the owner's key. A root-key change holds this same lock
+    // until its store returns, so the key read here is the key that store left.
+    #[cfg(test)]
+    pause_agent_writer(data_dir, PAUSE_BEFORE_WRAP);
     let id = crate::auth::fresh_agent_id();
     let root = crate::auth::principal_kind_localhost_root(&id, PrincipalKind::Agent);
     let Some(protection) = protect_agent_root(data_dir, owner, &id, &root, now)? else {
@@ -992,6 +1001,125 @@ pub(crate) fn agents_would_stop_opening(count: usize) -> String {
         ("agents", "Retire them first")
     };
     format!("{count} {word} on this Home would stop opening. {retire}, or import on another Home.")
+}
+
+/// Held from the opening count until the caller finishes storing the key.
+pub(crate) struct AgentWriterGuard {
+    _lock: WriteLock,
+}
+
+/// The count and the key store are one decision. The caller stores the key
+/// before dropping the guard. The guard is taken after any provider wait.
+pub(crate) fn hold_agent_writer_for_root_change(
+    data_dir: &Path,
+    owner_id: &str,
+) -> anyhow::Result<AgentWriterGuard> {
+    let lock = lock_for_write(data_dir)?;
+    let count = opening_agent_count(data_dir, owner_id)?;
+    if count > 0 {
+        return Err(Refused(agents_would_stop_opening(count)).into());
+    }
+    #[cfg(test)]
+    pause_agent_writer(data_dir, PAUSE_BEFORE_STORE);
+    Ok(AgentWriterGuard { _lock: lock })
+}
+
+#[cfg(test)]
+pub(crate) const PAUSE_BEFORE_STORE: &str = "before-store";
+#[cfg(test)]
+pub(crate) const PAUSE_BEFORE_WRAP: &str = "before-wrap";
+
+#[cfg(test)]
+struct WriterPause {
+    data_dir: PathBuf,
+    point: &'static str,
+    arrived: bool,
+    release: bool,
+}
+
+#[cfg(test)]
+static WRITER_PAUSE: Mutex<Option<WriterPause>> = Mutex::new(None);
+#[cfg(test)]
+static WRITER_PAUSE_CV: Condvar = Condvar::new();
+
+#[cfg(test)]
+pub(crate) struct AgentWriterPauseGuard;
+
+#[cfg(test)]
+impl Drop for AgentWriterPauseGuard {
+    fn drop(&mut self) {
+        release_agent_writer_pause();
+    }
+}
+
+#[cfg(test)]
+fn writer_pause_lock() -> MutexGuard<'static, Option<WriterPause>> {
+    WRITER_PAUSE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// Arms one pause. Dropping the guard lets the waiter continue.
+#[cfg(test)]
+pub(crate) fn arm_agent_writer_pause(
+    data_dir: &Path,
+    point: &'static str,
+) -> AgentWriterPauseGuard {
+    *writer_pause_lock() = Some(WriterPause {
+        data_dir: data_dir.to_path_buf(),
+        point,
+        arrived: false,
+        release: false,
+    });
+    AgentWriterPauseGuard
+}
+
+#[cfg(test)]
+pub(crate) fn wait_until_agent_writer_paused() -> bool {
+    let mut guard = writer_pause_lock();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    while guard.as_ref().is_none_or(|pause| !pause.arrived) {
+        let now = std::time::Instant::now();
+        if now >= deadline {
+            return false;
+        }
+        let (next, timeout) = WRITER_PAUSE_CV
+            .wait_timeout(guard, deadline - now)
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        guard = next;
+        if timeout.timed_out() && guard.as_ref().is_none_or(|pause| !pause.arrived) {
+            return false;
+        }
+    }
+    true
+}
+
+#[cfg(test)]
+pub(crate) fn release_agent_writer_pause() {
+    if let Some(pause) = writer_pause_lock().as_mut() {
+        pause.release = true;
+    }
+    WRITER_PAUSE_CV.notify_all();
+}
+
+#[cfg(test)]
+fn pause_agent_writer(data_dir: &Path, point: &str) {
+    let mut guard = writer_pause_lock();
+    loop {
+        let waiting = matches!(
+            guard.as_ref(),
+            Some(pause) if pause.data_dir == data_dir && pause.point == point && !pause.release
+        );
+        if !waiting {
+            break;
+        }
+        let pause = guard.as_mut().expect("pause is armed");
+        pause.arrived = true;
+        WRITER_PAUSE_CV.notify_all();
+        guard = WRITER_PAUSE_CV
+            .wait(guard)
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+    }
 }
 
 const NO_SUCH_AGENT: &str = "the caller owns no agent with that id";

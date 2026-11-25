@@ -435,3 +435,167 @@ async fn reassignment_refuses_when_the_replaced_account_owns_opening_agents() {
         "the note still opens"
     );
 }
+
+fn enable_agents(home: &ImportedHome) {
+    let owner = crate::auth::stored_principal_record(home.temp.path(), &home.principal_id)
+        .unwrap()
+        .unwrap();
+    let caller = crate::agents::Caller {
+        principal_id: &home.principal_id,
+        proof_binding_id: &owner.proof_binding_id,
+        session_id: "session:race",
+    };
+    assert!(crate::agents::set_enabled(home.temp.path(), &caller, true, 1).unwrap());
+}
+
+fn create_racing_agent(
+    home: &ImportedHome,
+    request_id: &str,
+) -> anyhow::Result<crate::agents::AgentView> {
+    let owner = crate::auth::stored_principal_record(home.temp.path(), &home.principal_id)
+        .unwrap()
+        .unwrap();
+    let caller = crate::agents::Caller {
+        principal_id: &home.principal_id,
+        proof_binding_id: &owner.proof_binding_id,
+        session_id: "session:race",
+    };
+    crate::agents::create(
+        home.temp.path(),
+        &caller,
+        &crate::agents::CreateRequest {
+            display_name: "Helper".to_string(),
+            agent_host: "agent-host".to_string(),
+            request_id: request_id.to_string(),
+        },
+        |_| {
+            Ok(
+                crate::agent_admission::VerifiedAgentHost::unchecked_for_test(
+                    "agent-host",
+                    "bafyagenthost",
+                    "bafyagenthostbytes",
+                ),
+            )
+        },
+        2,
+    )
+}
+
+fn stored_key_id(home: &ImportedHome) -> String {
+    crate::auth::load_principal_root_protection(
+        home.temp.path(),
+        &home.principal_id,
+        &home.localhost_root,
+    )
+    .unwrap()
+    .unwrap()
+    .data_key_id
+}
+
+fn note_opens(dir: &std::path::Path, agent_id: &str) {
+    let root = crate::auth::principal_stored_localhost_root(Some(dir), agent_id).unwrap();
+    let uri = format!("{root}/journal/stable-id.txt");
+    let path = elastos_common::localhost::rooted_localhost_fs_path(dir, &uri).unwrap();
+    let note = b"opens-under-the-key-in-force";
+    crate::auth::write_principal_root_object(dir, agent_id, &root, &uri, &path, note).unwrap();
+    assert_eq!(
+        crate::auth::read_principal_root_object(dir, agent_id, &root, &uri, &path).unwrap(),
+        note,
+        "the note opens under the key in force"
+    );
+}
+
+/// Create and a root-key import at once. The import pauses before its store,
+/// or create pauses before it reads the key. The other side then runs. The
+/// import is refused and the key stays, or create runs after the store and
+/// the note opens under the new key.
+#[tokio::test]
+async fn create_and_a_root_key_import_at_once_do_not_seal_the_new_agent() {
+    race_root_key_import(true);
+    race_root_key_import(false);
+}
+
+fn drive<T>(future: impl std::future::Future<Output = T>) -> T {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("race runtime")
+        .block_on(future)
+}
+
+fn race_root_key_import(import_first: bool) {
+    let home = imported_home();
+    enable_agents(&home);
+    let kit = different_root_key(&home);
+    let new_key = kit.data_key_id.clone();
+    let old_key = stored_key_id(&home);
+    assert_ne!(old_key, new_key);
+    let point = if import_first {
+        crate::agents::PAUSE_BEFORE_STORE
+    } else {
+        crate::agents::PAUSE_BEFORE_WRAP
+    };
+    let (import_result, created) = std::thread::scope(|scope| {
+        let pause = crate::agents::arm_agent_writer_pause(home.temp.path(), point);
+        if import_first {
+            let import = scope.spawn(|| drive(import_kit(&home, kit, false)));
+            assert!(
+                crate::agents::wait_until_agent_writer_paused(),
+                "agent writer did not pause"
+            );
+            let create = scope.spawn(|| create_racing_agent(&home, "race-import-first"));
+            let started = std::time::Instant::now();
+            while !create.is_finished() && started.elapsed() < std::time::Duration::from_secs(2) {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            assert!(
+                !create.is_finished(),
+                "create sealed an agent before the import stored the key"
+            );
+            drop(pause);
+            let import_result = import.join().unwrap();
+            let created = create.join().unwrap();
+            (import_result, created)
+        } else {
+            let create = scope.spawn(|| create_racing_agent(&home, "race-create-first"));
+            assert!(
+                crate::agents::wait_until_agent_writer_paused(),
+                "agent writer did not pause"
+            );
+            let import = scope.spawn(|| drive(import_kit(&home, kit, false)));
+            let started = std::time::Instant::now();
+            while !import.is_finished() && started.elapsed() < std::time::Duration::from_secs(2) {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            assert!(
+                !import.is_finished(),
+                "the import stored the key while create held the writer"
+            );
+            drop(pause);
+            let created = create.join().unwrap();
+            let import_result = import.join().unwrap();
+            (import_result, created)
+        }
+    });
+    let created = created.expect("create");
+    if import_first {
+        let response = import_result.expect("the import stores the new key, then create runs");
+        assert_eq!(response.status, "imported");
+        assert_eq!(stored_key_id(&home), new_key);
+    } else {
+        let err = import_result
+            .expect_err("the import is refused and the key stays")
+            .to_string();
+        assert_eq!(err, crate::agents::agents_would_stop_opening(1));
+        assert_eq!(stored_key_id(&home), old_key);
+        assert!(
+            crate::auth::load_auth_state(home.temp.path())
+                .unwrap()
+                .audit
+                .iter()
+                .all(|event| event.event_type != "auth.recovery_kit.imported"),
+            "a refused import writes no imported event"
+        );
+    }
+    note_opens(home.temp.path(), &created.agent_id);
+}
