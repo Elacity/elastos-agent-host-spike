@@ -8,7 +8,7 @@ use std::pin::Pin;
 use std::sync::atomic::AtomicUsize;
 use std::sync::{
     atomic::{AtomicBool, AtomicU64, Ordering},
-    Arc, Mutex, OnceLock,
+    Arc, Condvar, Mutex, OnceLock,
 };
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
@@ -116,6 +116,11 @@ struct ComponentActivation {
     cancel_requested: Arc<AtomicBool>,
     task: Option<tokio::task::AbortHandle>,
     worker: Option<std::thread::JoinHandle<()>>,
+    /// The one join of this guest's worker. A later stop waits on it and does
+    /// not free the slot while the worker has not ended.
+    join: Option<Arc<V2Join>>,
+    /// How long a stop waits for that join before it answers "still running".
+    join_bound: Duration,
     #[cfg(test)]
     test_max_ticks: u64,
     #[cfg(test)]
@@ -393,7 +398,7 @@ impl ComponentProvider {
     /// and component it took out of the entry; its own removal then finds no
     /// entry to take.
     pub async fn forget_instance(&self, capsule_id: &CapsuleId) {
-        let (task, worker, cancel) = {
+        let join = {
             let mut instances = self.instances.write().await;
             let Some(instance) = instances.get_mut(capsule_id) else {
                 drop(instances);
@@ -404,27 +409,28 @@ impl ComponentProvider {
             instance.grants.lock().expect("grant book").clear();
             instance.stop_requested.store(true, Ordering::Release);
             drop(instance.events.take());
-            let task = instance.task.take();
-            let worker = instance.worker.take();
-            let cancel = instance.cancel_requested.clone();
-            if task.is_none() && worker.is_none() {
+            let join = begin_v2_join(instance);
+            if join.is_none() {
                 instances.remove(capsule_id);
-            } else {
-                instance.status = CapsuleStatus::Stopping;
             }
-            (task, worker, cancel)
+            join
         };
-        self.frames.lock().expect("frames").remove(&capsule_id.0);
         self.clear_bridge_principal(capsule_id).await;
-        if task.is_none() && worker.is_none() {
+        let Some(join) = join else {
+            self.frames.lock().expect("frames").remove(&capsule_id.0);
             return;
-        }
+        };
         let id = capsule_id.clone();
-        let joined = tokio::task::spawn_blocking(move || join_v2(task, worker, cancel))
+        let bound = self
+            .instances
+            .read()
             .await
-            .unwrap_or(false);
-        if joined {
+            .get(&id)
+            .map(|instance| instance.join_bound)
+            .unwrap_or(V2_HOST_DEADLINE);
+        if wait_v2_join(join, bound).await {
             self.instances.write().await.remove(&id);
+            self.frames.lock().expect("frames").remove(&id.0);
         } else {
             tracing::error!(capsule_id = %id, "forget left a guest thread running");
         }
@@ -642,6 +648,8 @@ impl ComponentProvider {
                 cancel_requested: Arc::new(AtomicBool::new(false)),
                 task: None,
                 worker: None,
+                join: None,
+                join_bound: V2_HOST_DEADLINE,
                 #[cfg(test)]
                 test_max_ticks: V2_TEST_EPOCH_TICKS,
                 #[cfg(test)]
@@ -1218,30 +1226,98 @@ fn out_of_fuel(err: &wasmtime::Error) -> bool {
         .any(|link| matches!(link.downcast_ref::<Trap>(), Some(Trap::OutOfFuel)))
 }
 
-/// Sleeps the grace, then aborts and joins. `true` means the worker has ended.
-fn join_v2(
-    task: Option<tokio::task::AbortHandle>,
-    worker: Option<std::thread::JoinHandle<()>>,
+/// One owner of a v2 worker. Later stops wait on this completion. The slot
+/// stays until `wait` reports the worker has ended.
+struct V2Join {
+    worker: Mutex<Option<std::thread::JoinHandle<()>>>,
+    task: Mutex<Option<tokio::task::AbortHandle>>,
     cancel: Arc<AtomicBool>,
-) -> bool {
-    std::thread::sleep(V2_STOP_GRACE);
-    if let Some(task) = task {
-        if !task.is_finished() {
-            cancel.store(true, Ordering::Release);
-            task.abort();
+    done: Mutex<bool>,
+    cv: Condvar,
+    started: AtomicBool,
+}
+
+impl V2Join {
+    fn prepare(
+        task: Option<tokio::task::AbortHandle>,
+        worker: Option<std::thread::JoinHandle<()>>,
+        cancel: Arc<AtomicBool>,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            worker: Mutex::new(worker),
+            task: Mutex::new(task),
+            cancel,
+            done: Mutex::new(false),
+            cv: Condvar::new(),
+            started: AtomicBool::new(false),
+        })
+    }
+
+    /// Starts the single owner thread. A second call does nothing.
+    fn start(self: &Arc<Self>) {
+        if self.started.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let join = Arc::clone(self);
+        let spawned = std::thread::Builder::new()
+            .name("component-v2-join".into())
+            .spawn(move || join.own());
+        if spawned.is_err() {
+            self.started.store(false, Ordering::Release);
         }
     }
-    let Some(worker) = worker else {
-        return true;
-    };
-    let (done_tx, done_rx) = std::sync::mpsc::channel();
-    let started = std::thread::Builder::new()
-        .name("component-v2-join".into())
-        .spawn(move || {
+
+    fn own(&self) {
+        std::thread::sleep(V2_STOP_GRACE);
+        if let Some(task) = self.task.lock().expect("join").take() {
+            if !task.is_finished() {
+                self.cancel.store(true, Ordering::Release);
+                task.abort();
+            }
+        }
+        if let Some(worker) = self.worker.lock().expect("join").take() {
             let _ = worker.join();
-            let _ = done_tx.send(());
-        });
-    started.is_ok() && done_rx.recv_timeout(V2_HOST_DEADLINE).is_ok()
+        }
+        *self.done.lock().expect("join") = true;
+        self.cv.notify_all();
+    }
+
+    fn wait(&self, bound: Duration) -> bool {
+        let guard = self.done.lock().expect("join");
+        let (guard, _) = self
+            .cv
+            .wait_timeout_while(guard, bound, |done| !*done)
+            .expect("join");
+        *guard
+    }
+
+    fn owns_thread(&self) -> bool {
+        self.started.load(Ordering::Acquire)
+    }
+}
+
+/// Moves this guest's worker into the one join, or returns the join a stop
+/// already owns. `None` means there is no worker to join.
+fn begin_v2_join(instance: &mut ComponentActivation) -> Option<Arc<V2Join>> {
+    if let Some(join) = instance.join.clone() {
+        return Some(join);
+    }
+    let task = instance.task.take();
+    let worker = instance.worker.take();
+    if task.is_none() && worker.is_none() {
+        return None;
+    }
+    let join = V2Join::prepare(task, worker, instance.cancel_requested.clone());
+    instance.join = Some(join.clone());
+    instance.status = CapsuleStatus::Stopping;
+    join.start();
+    Some(join)
+}
+
+async fn wait_v2_join(join: Arc<V2Join>, bound: Duration) -> bool {
+    tokio::task::spawn_blocking(move || join.wait(bound))
+        .await
+        .unwrap_or(false)
 }
 
 /// Charges the loan once. A bucket that is already parked is left unread.
@@ -1327,28 +1403,26 @@ impl Drop for ComponentProvider {
             tracing::error!("instance lock busy; a guest thread may still be running");
             return;
         };
-        let mut workers = Vec::new();
+        let mut joins = Vec::new();
         for (id, instance) in instances.iter_mut() {
             instance.cancel_requested.store(true, Ordering::Release);
-            if let Some(task) = instance.task.take() {
-                task.abort();
-            }
-            if let Some(worker) = instance.worker.take() {
-                instance.status = CapsuleStatus::Stopping;
-                workers.push((id.clone(), worker));
-            }
+            instance.stop_requested.store(true, Ordering::Release);
+            let Some(join) = begin_v2_join(instance) else {
+                continue;
+            };
+            joins.push((id.clone(), join));
         }
         drop(instances);
-        for (id, worker) in workers {
-            let (done_tx, done_rx) = std::sync::mpsc::channel();
-            let started = std::thread::Builder::new()
-                .name("component-v2-drop".into())
-                .spawn(move || {
-                    let _ = worker.join();
-                    let _ = done_tx.send(());
-                });
-            if started.is_err() || done_rx.recv_timeout(V2_HOST_DEADLINE).is_err() {
-                tracing::error!(capsule_id = %id, "drop left a guest thread running");
+        for (id, join) in joins {
+            if join.wait(V2_HOST_DEADLINE) {
+                continue;
+            }
+            tracing::error!(capsule_id = %id, "drop left a guest thread running");
+            // The owner thread holds the join handle until the worker ends.
+            // With no owner, the handle must stay allocated so the thread is
+            // not detached while it still runs.
+            if !join.owns_thread() {
+                std::mem::forget(join);
             }
         }
     }
@@ -1397,47 +1471,41 @@ impl ComputeProvider for ComponentProvider {
         // One lock for the look and the action: a start cannot mark the
         // entry running between the two.
         let mut instances = self.instances.write().await;
-        let Some(instance) = instances.get(&handle.id) else {
+        let Some(instance) = instances.get_mut(&handle.id) else {
             drop(instances);
             self.frames.lock().expect("frames").remove(&handle.id.0);
             return Ok(());
         };
-        let running = instance.status == CapsuleStatus::Running
-            && instance.manifest.bus_contract.as_deref() != Some(ELASTOS_BUS_V2_CONTRACT);
-        if running {
+        let id = handle.id.clone();
+        let v2 = instance.manifest.bus_contract.as_deref() == Some(ELASTOS_BUS_V2_CONTRACT);
+        if !v2 && instance.status == CapsuleStatus::Running {
             // A resident v1 activation is ended by its own epoch callback; the
             // worker removes the entry when the run ends.
             instance.stop_requested.store(true, Ordering::Release);
             return Ok(());
         }
-        let id = handle.id.clone();
-        let (task, worker, cancel) =
-            if instance.manifest.bus_contract.as_deref() == Some(ELASTOS_BUS_V2_CONTRACT) {
-                let instance = instances.get_mut(&id).expect("v2 entry");
-                instance.stop_requested.store(true, Ordering::Release);
-                instance.grants.lock().expect("grant book").clear();
-                drop(instance.events.take());
-                let task = instance.task.take();
-                let worker = instance.worker.take();
-                let cancel = instance.cancel_requested.clone();
-                if task.is_some() || worker.is_some() {
-                    instance.status = CapsuleStatus::Stopping;
-                }
-                (task, worker, cancel)
-            } else {
-                (None, None, Arc::new(AtomicBool::new(false)))
-            };
-        self.frames.lock().expect("frames").remove(&id.0);
-        if task.is_none() && worker.is_none() {
+        if !v2 {
             instances.remove(&id);
+            drop(instances);
+            self.frames.lock().expect("frames").remove(&id.0);
             return Ok(());
         }
+        instance.stop_requested.store(true, Ordering::Release);
+        instance.grants.lock().expect("grant book").clear();
+        drop(instance.events.take());
+        let bound = instance.join_bound;
+        let join = begin_v2_join(instance);
+        if join.is_none() {
+            instances.remove(&id);
+        }
         drop(instances);
-        let joined = tokio::task::spawn_blocking(move || join_v2(task, worker, cancel))
-            .await
-            .map_err(|err| ElastosError::Compute(format!("v2 stop join: {err}")))?;
-        if joined {
+        let Some(join) = join else {
+            self.frames.lock().expect("frames").remove(&id.0);
+            return Ok(());
+        };
+        if wait_v2_join(join, bound).await {
             self.instances.write().await.remove(&id);
+            self.frames.lock().expect("frames").remove(&id.0);
             Ok(())
         } else {
             tracing::error!(capsule_id = %id, "stop left a guest thread running");
@@ -2468,6 +2536,110 @@ mod tests {
         provider.start(&third).await.unwrap();
         provider.stop(&second).await.unwrap();
         provider.stop(&third).await.unwrap();
+    }
+
+    /// Two stops at once, and a retry after "still running", leave the slot
+    /// and the worker in place while the guest is inside a host call.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn v2_two_stops_keep_the_slot_until_the_worker_joins() {
+        let provider = Arc::new(ComponentProvider::new());
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let release = Arc::new((Mutex::new(false), Condvar::new()));
+        let gate = release.clone();
+        provider.set_bus_hostcall(Arc::new(move |_line, _, _| {
+            let _ = entered_tx.send(());
+            let (lock, cv) = &*gate;
+            let mut open = lock.lock().expect("release");
+            while !*open {
+                open = cv.wait(open).expect("release");
+            }
+            Ok(serde_json::json!({
+                "id": 1,
+                "response": {
+                    "type": "resource_result",
+                    "result": { "status": "ok", "data": { "content": "ok", "size": 2 } },
+                    "audit": "read-1"
+                }
+            })
+            .to_string())
+        }));
+        let bytes = wat::parse_str(include_str!(
+            "../../../../tests/fixtures/components/v2-read-stream.wat"
+        ))
+        .unwrap();
+        let handle = load_v2_fixture(&provider, bytes).await;
+        provider
+            .instances
+            .write()
+            .await
+            .get_mut(&handle.id)
+            .unwrap()
+            .join_bound = Duration::from_millis(40);
+        provider.start(&handle).await.unwrap();
+        entered_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("the guest enters the host call");
+        let first = {
+            let provider = provider.clone();
+            let handle = handle.clone();
+            tokio::spawn(async move { provider.stop(&handle).await })
+        };
+        let second = {
+            let provider = provider.clone();
+            let handle = handle.clone();
+            tokio::spawn(async move { provider.stop(&handle).await })
+        };
+        let (one, two) = tokio::join!(first, second);
+        for result in [one.unwrap(), two.unwrap()] {
+            let err = result.expect_err("a stop during the host call does not free the worker");
+            assert!(
+                err.to_string().contains("still running"),
+                "later stop waits on the same join, got {err}"
+            );
+        }
+        {
+            let instances = provider.instances.read().await;
+            let slot = instances
+                .get(&handle.id)
+                .expect("the slot stays until joined");
+            assert_eq!(slot.status, CapsuleStatus::Stopping);
+            assert!(slot.join.is_some(), "one join owns the worker");
+            assert!(slot.worker.is_none(), "the handle lives in that join");
+        }
+        assert!(
+            provider.threads_live.load(Ordering::Acquire) >= 1,
+            "the worker, and the memory it holds, is still alive"
+        );
+        let again = provider.stop(&handle).await.unwrap_err().to_string();
+        assert!(
+            again.contains("still running"),
+            "a retry after still running does not free the slot, got {again}"
+        );
+        assert!(provider.instances.read().await.contains_key(&handle.id));
+        {
+            let (lock, cv) = &*release;
+            *lock.lock().expect("release") = true;
+            cv.notify_all();
+        }
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            match provider.stop(&handle).await {
+                Ok(()) => break,
+                Err(err) if err.to_string().contains("still running") => {
+                    assert!(
+                        Instant::now() < deadline,
+                        "the worker did not join after the host call returned"
+                    );
+                }
+                Err(err) => panic!("stop after the host call: {err}"),
+            }
+        }
+        assert!(provider.instances.read().await.is_empty());
+        let quiet = Instant::now() + Duration::from_secs(2);
+        while provider.threads_live.load(Ordering::Acquire) != 0 {
+            assert!(Instant::now() < quiet, "the worker did not leave");
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
     }
 
     /// Revoke, revoke-all, and activation end change the book before any poll.
