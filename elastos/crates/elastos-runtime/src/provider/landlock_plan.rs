@@ -1,12 +1,11 @@
 //! Landlock file decisions for one provider launch; attachment comes later.
 //!
-//! Non-Linux builds still compile the Linux-only helpers. Linux itself has
-//! no module-wide dead-code allow: an omitted library is named when the
-//! helper exits before it answers.
-#![cfg_attr(not(target_os = "linux"), allow(dead_code))]
+//! Helpers only Linux (and its tests) call are gated. An omitted library is
+//! named when the helper exits before it answers.
 
 use super::rights::AdmittedRights;
 use super::rights_table::RuntimeProviderId;
+use elastos_common::elf_needed::{dt_needed, library_required};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::{
     io,
@@ -156,11 +155,13 @@ fn remember_omitted(omitted: &[String]) {
 
 /// Optional libraries the last plan left out. The bridge names them when the
 /// helper exits before it answers.
+#[cfg(target_os = "linux")]
 pub(super) fn take_omitted_libraries() -> Vec<String> {
     LAST_OMITTED.with(|slot| std::mem::take(&mut *slot.borrow_mut()))
 }
 
 /// Read `PT_INTERP` from this descriptor while `body` plans the loaders.
+#[cfg(any(target_os = "linux", test))]
 pub(super) fn with_interpreter_fd<T>(fd: i32, body: impl FnOnce() -> T) -> T {
     INTERPRETER_FD.with(|slot| {
         let previous = slot.replace(fd);
@@ -171,21 +172,22 @@ pub(super) fn with_interpreter_fd<T>(fd: i32, body: impl FnOnce() -> T) -> T {
 }
 
 /// The directory opened at the check. `build` takes it for `STORAGE_ROOT`.
+#[cfg(target_os = "linux")]
 pub(super) fn set_checked_directory(directory: OwnedFd) {
     CHECKED_DIRECTORY.with(|slot| *slot.borrow_mut() = Some(directory));
 }
 
+#[cfg(target_os = "linux")]
 pub(super) fn clear_checked_directory() {
-    CHECKED_DIRECTORY.with(|slot| {
-        slot.borrow_mut().take();
-    });
+    CHECKED_DIRECTORY.with(|slot| drop(slot.borrow_mut().take()));
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 pub(super) fn checked_directory_is_held() -> bool {
     CHECKED_DIRECTORY.with(|slot| slot.borrow().is_some())
 }
 
+#[cfg(any(target_os = "linux", test))]
 fn take_checked_directory() -> Option<OwnedFd> {
     CHECKED_DIRECTORY.with(|slot| slot.borrow_mut().take())
 }
@@ -330,6 +332,14 @@ fn pread_all(fd: i32, buf: &mut [u8], offset: u64) -> Result<(), String> {
     Ok(())
 }
 
+fn program_needed() -> Result<Option<Vec<String>>, String> {
+    let fd = INTERPRETER_FD.with(|slot| slot.get());
+    if fd < 0 {
+        return Ok(None);
+    }
+    dt_needed(|buf, off| pread_all(fd, buf, off).is_ok(), "the executable").map(Some)
+}
+
 fn plan_loaders(provider: RuntimeProviderId, arch: LoaderArch) -> Result<PlannedLoaders, String> {
     // The host arch is the machine that will open the files. The other arch
     // stays the Debian row: one machine does not hold both sysroots. That
@@ -390,6 +400,7 @@ fn trusted_loader_uid() -> Result<u32, String> {
     Ok(overflow)
 }
 
+#[cfg(any(target_os = "linux", test))]
 fn uid_mapped_from_outside_root(text: &str) -> Option<u32> {
     for line in text.lines() {
         let mut parts = line.split_whitespace();
@@ -426,6 +437,38 @@ pub(super) fn resolve_loader_paths(
     )
 }
 
+/// A listed glibc library is required when the executable's own `DT_NEEDED`
+/// names it. The loader is always required. A required library's own
+/// `DT_NEEDED` is not walked: the dynamic linker already refuses a missing
+/// soname of a library it has loaded, and reading those files is a second
+/// parser on this path. Anything else in the list is optional and is allowed
+/// only when the file is there. With no program descriptor the historical
+/// `libc` and `libgcc` stay required.
+fn glibc_libraries(
+    arch: LoaderArch,
+    root: &Path,
+    dirs: &[&str],
+    trust_uid: u32,
+) -> Result<PlannedLoaders, String> {
+    let needed = program_needed()?;
+    let mut names = vec![loader_name(arch), "libc.so.6", "libgcc_s.so.1"];
+    names.extend(OPTIONAL_LIBRARIES.iter().copied());
+    let (mut files, mut omitted) = (Vec::new(), Vec::new());
+    for name in names {
+        let required = library_required(name, loader_name(arch), needed.as_deref());
+        let preferred = (name == loader_name(arch)).then_some(preferred_loader(arch));
+        match locate(root, dirs, name, preferred, trust_uid) {
+            Ok(file) => files.push(file),
+            Err(LocateFail::Missing) if !required => {}
+            Err(LocateFail::Refused { tried }) if !required => {
+                omitted.push(format!("omitted library {name}, tried {tried}"));
+            }
+            Err(fail) => return Err(fail.message(name, dirs, preferred)),
+        }
+    }
+    Ok(PlannedLoaders { files, omitted })
+}
+
 fn resolve_named(
     provider: RuntimeProviderId,
     arch: LoaderArch,
@@ -448,13 +491,14 @@ fn resolve_named(
         standard = loader_dirs(arch);
         &standard
     };
-    let required: Vec<&str> = match interp {
-        Interpreter::Static => Vec::new(),
-        Interpreter::Glibc => vec![loader_name(arch), "libc.so.6", "libgcc_s.so.1"],
-        Interpreter::Musl => vec![musl_loader_name(arch)],
-    };
-    let mut files = Vec::new();
-    let mut omitted = Vec::new();
+    if interp == Interpreter::Glibc {
+        return glibc_libraries(arch, root, dirs, trust_uid);
+    }
+    // Musl requires only its loader. An optional soname the program names stays
+    // optional: promoting it does not fit the core budget. The dynamic linker
+    // still refuses a soname it cannot open.
+    let required = [musl_loader_name(arch)];
+    let (mut files, mut omitted) = (Vec::new(), Vec::new());
     for name in required {
         let preferred = (name == loader_name(arch)).then_some(preferred_loader(arch));
         match locate(root, dirs, name, preferred, trust_uid) {
@@ -481,13 +525,7 @@ enum LocateFail {
 }
 
 #[cfg(unix)]
-fn locate(
-    root: &Path,
-    dirs: &[&str],
-    name: &str,
-    preferred: Option<&str>,
-    trust_uid: u32,
-) -> Result<LocatedFile, LocateFail> {
+fn tried_paths(name: &str, dirs: &[&str], preferred: Option<&str>) -> Vec<String> {
     let mut tried = Vec::new();
     if let Some(path) = preferred {
         tried.push(path.to_string());
@@ -498,6 +536,18 @@ fn locate(
             tried.push(path);
         }
     }
+    tried
+}
+
+#[cfg(unix)]
+fn locate(
+    root: &Path,
+    dirs: &[&str],
+    name: &str,
+    preferred: Option<&str>,
+    trust_uid: u32,
+) -> Result<LocatedFile, LocateFail> {
+    let tried = tried_paths(name, dirs, preferred);
     let list = tried.join(", ");
     for rel in &tried {
         let candidate = under_root(root, rel);
@@ -565,16 +615,10 @@ pub(super) fn owned_fd_above_stdio(fd: i32) -> Result<OwnedFd, i32> {
     Ok(unsafe { OwnedFd::from_raw_fd(dup) })
 }
 
-fn open_loader_stat(path: &Path) -> std::io::Result<(libc::stat, OwnedFd)> {
+fn open_stat(path: &Path, flags: i32) -> std::io::Result<(libc::stat, OwnedFd)> {
     use std::os::unix::ffi::OsStrExt;
     let c_path = std::ffi::CString::new(path.as_os_str().as_bytes())
         .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "nul"))?;
-    // Follow a loader symlink once. The descriptor stays open, so a later
-    // name at this path is a different inode and is not the rule.
-    #[cfg(target_os = "linux")]
-    let flags = libc::O_PATH | libc::O_CLOEXEC;
-    #[cfg(not(target_os = "linux"))]
-    let flags = libc::O_RDONLY | libc::O_CLOEXEC;
     let fd = unsafe { libc::open(c_path.as_ptr(), flags) };
     if fd < 0 {
         return Err(std::io::Error::last_os_error());
@@ -587,70 +631,50 @@ fn open_loader_stat(path: &Path) -> std::io::Result<(libc::stat, OwnedFd)> {
     Ok((unsafe { info.assume_init() }, held))
 }
 
+fn hold_if(path: &Path, flags: i32, directory: bool) -> Option<OwnedFd> {
+    let (info, held) = open_stat(path, flags).ok()?;
+    let kind = [libc::S_IFREG, libc::S_IFDIR][usize::from(directory)];
+    (info.st_mode & libc::S_IFMT == kind).then_some(held)
+}
+
+/// Follow a loader symlink once. The descriptor stays open, so a later name
+/// at this path is a different inode and is not the rule.
+fn open_loader_stat(path: &Path) -> std::io::Result<(libc::stat, OwnedFd)> {
+    #[cfg(target_os = "linux")]
+    let flags = libc::O_PATH | libc::O_CLOEXEC;
+    #[cfg(not(target_os = "linux"))]
+    let flags = libc::O_RDONLY | libc::O_CLOEXEC;
+    open_stat(path, flags)
+}
+
 /// A regular file opened without following a symlink. The executable rule
 /// uses the verified descriptor when launch has one; this hold is the
 /// descriptor for a plan built before that launch.
 fn hold_regular_nofollow(path: &Path) -> Option<OwnedFd> {
-    use std::os::unix::ffi::OsStrExt;
-    let Ok(c_path) = std::ffi::CString::new(path.as_os_str().as_bytes()) else {
-        return None;
-    };
-    let flags = libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NOFOLLOW;
-    let fd = unsafe { libc::open(c_path.as_ptr(), flags) };
-    if fd < 0 {
-        return None;
-    }
-    let held = owned_fd_above_stdio(fd).ok()?;
-    let mut info = std::mem::MaybeUninit::<libc::stat>::uninit();
-    if unsafe { libc::fstat(held.as_raw_fd(), info.as_mut_ptr()) } < 0 {
-        return None;
-    }
-    let info = unsafe { info.assume_init() };
-    (info.st_mode & libc::S_IFMT == libc::S_IFREG).then_some(held)
+    hold_if(
+        path,
+        libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+        false,
+    )
 }
 
 /// Follow the final symlink once and hold that regular file. Chain's
 /// resolver names are often symlinks; the rule is the held target.
 fn hold_regular_follow(path: &Path) -> Option<OwnedFd> {
-    use std::os::unix::ffi::OsStrExt;
-    let Ok(c_path) = std::ffi::CString::new(path.as_os_str().as_bytes()) else {
-        return None;
-    };
     #[cfg(target_os = "linux")]
     let flags = libc::O_PATH | libc::O_CLOEXEC;
     #[cfg(not(target_os = "linux"))]
     let flags = libc::O_RDONLY | libc::O_CLOEXEC;
-    let fd = unsafe { libc::open(c_path.as_ptr(), flags) };
-    if fd < 0 {
-        return None;
-    }
-    let held = owned_fd_above_stdio(fd).ok()?;
-    let mut info = std::mem::MaybeUninit::<libc::stat>::uninit();
-    if unsafe { libc::fstat(held.as_raw_fd(), info.as_mut_ptr()) } < 0 {
-        return None;
-    }
-    let info = unsafe { info.assume_init() };
-    (info.st_mode & libc::S_IFMT == libc::S_IFREG).then_some(held)
+    hold_if(path, flags, false)
 }
 
+#[cfg(any(target_os = "linux", test))]
 fn hold_directory_path(path: &Path) -> Option<OwnedFd> {
-    use std::os::unix::ffi::OsStrExt;
-    let c_path = std::ffi::CString::new(path.as_os_str().as_bytes()).ok()?;
     #[cfg(target_os = "linux")]
     let flags = libc::O_PATH | libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_DIRECTORY;
     #[cfg(not(target_os = "linux"))]
     let flags = libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_DIRECTORY;
-    let fd = unsafe { libc::open(c_path.as_ptr(), flags) };
-    if fd < 0 {
-        return None;
-    }
-    let held = owned_fd_above_stdio(fd).ok()?;
-    let mut info = std::mem::MaybeUninit::<libc::stat>::uninit();
-    if unsafe { libc::fstat(held.as_raw_fd(), info.as_mut_ptr()) } < 0 {
-        return None;
-    }
-    let info = unsafe { info.assume_init() };
-    (info.st_mode & libc::S_IFMT == libc::S_IFDIR).then_some(held)
+    hold_if(path, flags, true)
 }
 
 #[cfg(unix)]
@@ -696,17 +720,7 @@ fn parents_are_private(root: &Path, file: &Path) -> bool {
 impl LocateFail {
     #[cfg(unix)]
     fn message(self, name: &str, dirs: &[&str], preferred: Option<&str>) -> String {
-        let mut tried = Vec::new();
-        if let Some(path) = preferred {
-            tried.push(path.to_string());
-        }
-        for dir in dirs {
-            let path = format!("{dir}/{name}");
-            if !tried.contains(&path) {
-                tried.push(path);
-            }
-        }
-        let list = tried.join(", ");
+        let list = tried_paths(name, dirs, preferred).join(", ");
         match self {
             LocateFail::Missing => {
                 format!("provider start is refused: {name} was not in {list}")
@@ -777,6 +791,7 @@ pub(super) struct StorageRoot<'a> {
     pub ino: u64,
 }
 
+#[cfg(any(target_os = "linux", test))]
 pub(super) struct Bindings {
     pub storage_root: PathBuf,
     pub provider_executable: PathBuf,
@@ -824,16 +839,24 @@ fn query_abi() -> io::Result<u32> {
         Ok(abi as u32)
     }
 }
-#[cfg(not(target_os = "linux"))]
-fn query_abi() -> io::Result<u32> {
-    Err(io::Error::from(io::ErrorKind::Unsupported))
-}
+#[cfg(target_os = "linux")]
 pub(super) fn kernel_abi() -> Result<u32, String> {
     query_abi().map_err(|_| NO_LANDLOCK.to_string())
 }
 
+#[cfg(all(test, not(target_os = "linux")))]
+fn query_abi() -> io::Result<u32> {
+    Err(io::Error::from(io::ErrorKind::Unsupported))
+}
+
+#[cfg(all(test, not(target_os = "linux")))]
+pub(super) fn kernel_abi() -> Result<u32, String> {
+    Err(NO_LANDLOCK.to_string())
+}
+
 /// `NoNewPrivs: 1` and `Seccomp: 2` (filter mode) are the confined child.
 /// Anything else is a refusal the parent names.
+#[cfg(any(target_os = "linux", test))]
 pub(super) fn child_confinement_refusal(status: &str) -> Option<&'static str> {
     let mut no_new_privs = false;
     let mut seccomp_filter = false;
@@ -852,6 +875,7 @@ pub(super) fn child_confinement_refusal(status: &str) -> Option<&'static str> {
     }
 }
 
+#[cfg(any(target_os = "linux", test))]
 pub(super) fn build(
     provider: RuntimeProviderId,
     admitted: &AdmittedRights,
@@ -861,6 +885,7 @@ pub(super) fn build(
     build_for_arch(provider, admitted, bindings, LoaderArch::host(), abi)
 }
 
+#[cfg(any(target_os = "linux", test))]
 fn build_for_arch(
     provider: RuntimeProviderId,
     admitted: &AdmittedRights,
@@ -1023,7 +1048,8 @@ pub(super) fn build_path_allow_plan(
         held,
     };
     remember_omitted(&plan.omitted_libraries);
-    Ok(plan)
+    // The installer reads `held` on Linux. This read keeps the field live here.
+    Ok((plan.held.len(), plan).1)
 }
 
 #[cfg(test)]
@@ -1415,6 +1441,67 @@ mod tests {
         std::fs::write(&path, b"library").unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
         path
+    }
+
+    /// A 64-bit ELF whose `DT_NEEDED` entries are `needed`. The load is the
+    /// whole file, so the string table sits inside it.
+    #[cfg(unix)]
+    fn elf_with_needed(needed: &[&str]) -> Vec<u8> {
+        let mut strings = vec![0u8];
+        let mut rels = Vec::new();
+        for name in needed {
+            rels.push(strings.len() as u64);
+            strings.extend_from_slice(name.as_bytes());
+            strings.push(0);
+        }
+        let dyn_off = 64 + 56 * 2;
+        let dyn_len = (3 + rels.len()) * 16;
+        let str_off = dyn_off + dyn_len;
+        let mut buf = vec![0u8; str_off + strings.len()];
+        buf[0..4].copy_from_slice(b"\x7fELF");
+        buf[4] = 2;
+        buf[5] = 1;
+        buf[32..40].copy_from_slice(&64u64.to_le_bytes());
+        buf[54..56].copy_from_slice(&56u16.to_le_bytes());
+        buf[56..58].copy_from_slice(&2u16.to_le_bytes());
+        let write_ph = |buf: &mut [u8], at: usize, kind: u32, off: u64, size: u64| {
+            buf[at..at + 4].copy_from_slice(&kind.to_le_bytes());
+            buf[at + 8..at + 16].copy_from_slice(&off.to_le_bytes());
+            buf[at + 16..at + 24].copy_from_slice(&off.to_le_bytes());
+            buf[at + 32..at + 40].copy_from_slice(&size.to_le_bytes());
+        };
+        let load_len = buf.len() as u64;
+        write_ph(&mut buf, 64, 1, 0, load_len);
+        write_ph(&mut buf, 64 + 56, 2, dyn_off as u64, dyn_len as u64);
+        let mut at = dyn_off;
+        let write_dyn = |buf: &mut [u8], at: &mut usize, tag: i64, val: u64| {
+            buf[*at..*at + 8].copy_from_slice(&tag.to_le_bytes());
+            buf[*at + 8..*at + 16].copy_from_slice(&val.to_le_bytes());
+            *at += 16;
+        };
+        write_dyn(&mut buf, &mut at, 5, str_off as u64);
+        write_dyn(&mut buf, &mut at, 10, strings.len() as u64);
+        for rel in rels {
+            write_dyn(&mut buf, &mut at, 1, rel);
+        }
+        write_dyn(&mut buf, &mut at, 0, 0);
+        buf[str_off..].copy_from_slice(&strings);
+        buf
+    }
+
+    /// An ELF whose dynamic section is not a table of 16-byte entries.
+    #[cfg(unix)]
+    fn elf_malformed_dynamic() -> Vec<u8> {
+        let mut buf = vec![0u8; 64 + 56];
+        buf[0..4].copy_from_slice(b"\x7fELF");
+        buf[4] = 2;
+        buf[5] = 1;
+        buf[32..40].copy_from_slice(&64u64.to_le_bytes());
+        buf[54..56].copy_from_slice(&56u16.to_le_bytes());
+        buf[56..58].copy_from_slice(&1u16.to_le_bytes());
+        buf[64..68].copy_from_slice(&2u32.to_le_bytes());
+        buf[96..104].copy_from_slice(&8u64.to_le_bytes());
+        buf
     }
 
     #[cfg(unix)]
@@ -2056,5 +2143,88 @@ mod tests {
             err.contains("provider start is refused: interpreter"),
             "{err}"
         );
+    }
+
+    /// A soname is required only when the executable names it in `DT_NEEDED`.
+    /// The same rows run for both architectures.
+    #[cfg(unix)]
+    #[test]
+    fn a_library_is_required_only_when_dt_needed_names_it() {
+        use std::io::Write;
+        use std::os::fd::AsRawFd;
+        let uid = unsafe { libc::geteuid() };
+        let open_elf = |bytes: &[u8]| {
+            let mut file = tempfile::tempfile().unwrap();
+            file.write_all(bytes).unwrap();
+            file
+        };
+        for arch in [LoaderArch::X86_64, LoaderArch::Aarch64] {
+            let dir = match arch {
+                LoaderArch::X86_64 => "/lib/x86_64-linux-gnu",
+                LoaderArch::Aarch64 => "/lib/aarch64-linux-gnu",
+            };
+            let loader = format!("{dir}/{}", loader_name(arch));
+            let libc_so = format!("{dir}/libc.so.6");
+            let libgcc = format!("{dir}/libgcc_s.so.1");
+            let plan = |root: &std::path::Path, program: &std::fs::File| {
+                with_interpreter_fd(program.as_raw_fd(), || {
+                    resolve_loader_paths(Chain, arch, root, None, uid)
+                })
+            };
+
+            let missing = tempfile::tempdir().unwrap();
+            plant(missing.path(), &loader, 0o755);
+            plant(missing.path(), &libc_so, 0o755);
+            let program = open_elf(&elf_with_needed(&["libc.so.6", "libgcc_s.so.1"]));
+            let err = plan(missing.path(), &program).unwrap_err();
+            assert!(
+                err.contains("libgcc_s.so.1"),
+                "needed and missing is refused by name: {arch:?} {err}"
+            );
+            assert!(err.contains("provider start is refused"), "{err}");
+
+            let absent = tempfile::tempdir().unwrap();
+            plant(absent.path(), &loader, 0o755);
+            plant(absent.path(), &libc_so, 0o755);
+            let program = open_elf(&elf_with_needed(&["libc.so.6"]));
+            let planned = plan(absent.path(), &program).unwrap();
+            assert!(
+                planned
+                    .files
+                    .iter()
+                    .any(|file| file.path.ends_with("libc.so.6")),
+                "{arch:?}"
+            );
+            assert!(
+                planned
+                    .files
+                    .iter()
+                    .all(|file| !file.path.ends_with("libgcc_s.so.1")),
+                "not needed and missing starts: {arch:?}"
+            );
+
+            let present = tempfile::tempdir().unwrap();
+            plant(present.path(), &loader, 0o755);
+            plant(present.path(), &libc_so, 0o755);
+            plant(present.path(), &libgcc, 0o755);
+            let program = open_elf(&elf_with_needed(&["libc.so.6", "libgcc_s.so.1"]));
+            let planned = plan(present.path(), &program).unwrap();
+            assert!(
+                planned
+                    .files
+                    .iter()
+                    .any(|file| file.path.ends_with("libgcc_s.so.1")),
+                "needed and there starts: {arch:?}"
+            );
+
+            let bad = tempfile::tempdir().unwrap();
+            plant(bad.path(), &loader, 0o755);
+            let program = open_elf(&elf_malformed_dynamic());
+            let err = plan(bad.path(), &program).unwrap_err();
+            assert!(
+                err.contains("the executable dynamic section is malformed"),
+                "{arch:?} {err}"
+            );
+        }
     }
 }

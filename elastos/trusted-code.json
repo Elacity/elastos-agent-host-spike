@@ -21,6 +21,7 @@
     "elastos/crates/elastos-common/src/manifest.rs",
     "elastos/crates/elastos-common/src/pinned_manifest.rs",
     "elastos/crates/elastos-common/src/cid_form.rs",
+    "elastos/crates/elastos-common/src/elf_needed.rs",
     "elastos/crates/elastos-common/src/localhost.rs",
     "elastos/crates/elastos-server/src/capsule_record.rs",
     "elastos/crates/elastos-server/src/installed_release.rs",

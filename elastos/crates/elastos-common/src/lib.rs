@@ -17,6 +17,7 @@ pub mod capsule_manifest_file;
 pub mod chat_protocol;
 mod cid_form;
 pub mod collaboration_protocol;
+pub mod elf_needed;
 mod error;
 mod free_space;
 pub mod host_memory;
