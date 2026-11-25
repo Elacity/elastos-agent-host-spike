@@ -159,6 +159,98 @@ test("the agents sentence is shown only for a confirmed agents answer", async ()
   assert.equal(confirmed.success({}).endsWith(STAY), true);
 });
 
+const flowSource = source.slice(
+  source.indexOf("async function onRecoveryImport("),
+  source.indexOf("async function refreshChainNetworks("),
+);
+const FEATURE_OFF = "request failed: 409 agents are not built into this Runtime";
+
+function recoveryFlow() {
+  const calls = [];
+  const pending = { hidden: true, textContent: "" };
+  const note = { hidden: true, textContent: "", dataset: {} };
+  const statusNode = {
+    hidden: true,
+    textContent: "",
+    dataset: {},
+    classList: { toggle() {} },
+  };
+  const button = { textContent: "", disabled: false };
+  const context = vm.createContext({
+    hasShellAccess: () => true,
+    fetchJson: async (url) => {
+      calls.push(String(url));
+      if (String(url).includes("/api/apps/system/agents")) {
+        throw new Error(FEATURE_OFF);
+      }
+      if (String(url).includes("/api/auth/recovery/status")) {
+        return {
+          principal_id: "person:current",
+          localhost_root: "localhost://Users/current",
+        };
+      }
+      if (String(url).includes("/api/auth/recovery/full-import")) {
+        return {
+          schema: "elastos.full-recovery-bundle.import.response/v2",
+          status: "imported",
+          wallet_restore: { status: "complete", imported_count: 0 },
+          runtime_audit: { status: "complete" },
+        };
+      }
+      throw new Error(`unexpected ${url}`);
+    },
+    shellHeaders: () => ({}),
+    readText: (value) => (typeof value === "string" ? value.trim() : ""),
+    shortText: (value) => (typeof value === "string" ? value.trim() : ""),
+    publicSystemError: (value) => String((value && value.message) || value || ""),
+    pendingRecoveryImport: null,
+    recoveryImportInput: { value: "" },
+    recoveryPasswordInput: { value: "" },
+    recoveryPendingNode: pending,
+    recoveryPendingTextNode: pending,
+    recoveryNoteNode: note,
+    recoveryStatusNode: statusNode,
+    recoveryAttachButton: button,
+    recoveryDownloadButton: null,
+    recoveryExportBusy: false,
+    refreshRecoveryStatus: async () => {},
+    refreshSystemSummary: async () => {},
+    refreshAccountList: async () => {},
+    notifyHomeSummaryChanged: () => {},
+  });
+  vm.runInContext(flowSource, context);
+  return { context, calls, pending, note };
+}
+
+function kitFile(principalId, root) {
+  return {
+    text: async () => JSON.stringify({
+      schema: "elastos.full-recovery-bundle/v1",
+      principal_id: principalId,
+      localhost_root: root,
+    }),
+  };
+}
+
+test("onRecoveryImport asks the agents probe before the pending sentence", async () => {
+  const page = recoveryFlow();
+  const file = kitFile("person:other", "localhost://Users/other");
+  await page.context.onRecoveryImport({ target: { files: [file] } });
+  assert.equal(page.calls.includes("/api/apps/system/agents"), true);
+  assert.equal(page.pending.textContent.includes(STAY), false);
+  assert.equal(page.pending.textContent.includes("another Home account"), true);
+});
+
+test("submitRecoveryImport asks the agents probe before the success sentence", async () => {
+  const page = recoveryFlow();
+  await page.context.submitRecoveryImport({
+    schema: "elastos.full-recovery-bundle.import.request/v1",
+  });
+  assert.equal(page.calls.includes("/api/apps/system/agents"), true);
+  assert.equal(page.note.textContent.includes(STAY), false);
+  assert.equal(page.note.textContent, "Recovery Kit imported.");
+});
+
 test("a Home whose Profile needs backup still sees files needing attention", () => {
   const action = "Documents/a.bin does not carry the label this Home writes on encrypted files.";
   const shown = render({
