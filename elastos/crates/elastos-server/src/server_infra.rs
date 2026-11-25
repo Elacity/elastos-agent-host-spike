@@ -6038,9 +6038,18 @@ mod tests {
         fs::write(&look, look_bytes).unwrap();
         fs::write(&named, named_bytes).unwrap();
         plant_device_envelope(&real, &device_key, b"real");
-        localhost_provider_bridge_config(root, &device_key).unwrap();
+        assert!(localhost_provider::is_encrypted_envelope(named_bytes));
+        assert!(!localhost_provider::is_encrypted_envelope(look_bytes));
+        let err = localhost_provider_bridge_config(root, &device_key).unwrap_err();
+        let text = err.to_string();
+        assert!(text.contains("Users/named.json"), "{text}");
+        assert!(text.contains("not decryptable"), "{text}");
         assert_eq!(fs::read(&look).unwrap(), look_bytes);
         assert_eq!(fs::read(&named).unwrap(), named_bytes);
+        assert!(!root.join("identity/localhost-file-key-v1").exists());
+        fs::remove_file(&named).unwrap();
+        localhost_provider_bridge_config(root, &device_key).unwrap();
+        assert_eq!(fs::read(&look).unwrap(), look_bytes);
         assert_envelope_opens_with_exactly_one_key(&real, b"real", &device_key, &file_key);
         assert_current_marker(root, &device_key);
     }
