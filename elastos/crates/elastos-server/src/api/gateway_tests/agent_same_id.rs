@@ -600,6 +600,23 @@ fn still_running<T>(handle: &std::thread::ScopedJoinHandle<'_, T>) -> bool {
     !handle.is_finished()
 }
 
+/// Both waiters in one five-second window. A second call would start another
+/// window and let a slow machine time the first waiter out before the second
+/// is checked.
+fn both_stay_through_one_window<T, U>(
+    left: &std::thread::ScopedJoinHandle<'_, T>,
+    right: &std::thread::ScopedJoinHandle<'_, U>,
+    left_reason: &str,
+    right_reason: &str,
+) {
+    let started = std::time::Instant::now();
+    while started.elapsed() < std::time::Duration::from_secs(5) {
+        assert!(!left.is_finished(), "{left_reason}");
+        assert!(!right.is_finished(), "{right_reason}");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+}
+
 fn drive<T>(future: impl std::future::Future<Output = T>) -> T {
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -785,11 +802,12 @@ fn two_imports_and_a_create(import_pauses: bool) {
             let different_import =
                 scope.spawn(move || drive(import_kit(home_ref, different_kit, false)));
             let create = scope.spawn(move || create_racing_agent(home_ref, "two-import-create"));
-            assert!(
-                still_running(&different_import),
-                "the other import did not wait for the writer"
+            both_stay_through_one_window(
+                &different_import,
+                &create,
+                "the other import did not wait for the writer",
+                "create did not wait for the writer",
             );
-            assert!(still_running(&create), "create did not wait for the writer");
             drop(pause);
             let same_result = same_import.join().unwrap();
             let _different_result = different_import.join().unwrap();
@@ -807,13 +825,11 @@ fn two_imports_and_a_create(import_pauses: bool) {
             let same_import = scope.spawn(move || drive(import_kit(home_ref, same, false)));
             let different_import =
                 scope.spawn(move || drive(import_kit(home_ref, different, false)));
-            assert!(
-                still_running(&same_import),
-                "the same-key import decided before the writer and did not hold it"
-            );
-            assert!(
-                still_running(&different_import),
-                "the other import did not wait for the writer"
+            both_stay_through_one_window(
+                &same_import,
+                &different_import,
+                "the same-key import decided before the writer and did not hold it",
+                "the other import did not wait for the writer",
             );
             drop(pause);
             let created = create.join().unwrap();

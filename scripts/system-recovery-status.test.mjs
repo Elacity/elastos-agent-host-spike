@@ -131,6 +131,8 @@ test("recovery text says agents stay on the Home where they were created", async
   assert.equal(on.refusal({ message: `request failed: 409 ${orphans}` }), orphans);
   const unreadable = "This Home has an agents file this build cannot read, so a root-key change is refused.";
   assert.equal(on.refusal({ message: `request failed: 409 ${unreadable}` }), unreadable);
+  const wrap = "This Home cannot open the key that wraps an agent's data, so a root-key change is refused.";
+  assert.equal(on.refusal({ message: `request failed: 409 ${wrap}` }), wrap);
   assert.equal(await on.builds(() => Promise.resolve({ agents_built: true })), true);
   assert.equal(await on.builds(() => Promise.resolve({ agents: [] })), false);
   assert.equal(
@@ -218,7 +220,7 @@ function recoveryFlow(options = {}) {
     recoveryAttachButton: button,
     recoveryDownloadButton: null,
     recoveryExportBusy: false,
-    refreshRecoveryStatus: async () => {},
+    refreshRecoveryStatus: async () => ({ agents_built: options.agentsBuilt === true }),
     refreshSystemSummary: async () => {},
     refreshAccountList: async () => {},
     notifyHomeSummaryChanged: () => {},
@@ -272,6 +274,7 @@ test("onRecoveryImport reads agents_built and does not decide from a 409", async
     target: { files: [kitFile("person:other", "localhost://Users/other")] },
   });
   assert.equal(shown.calls.includes("/api/apps/system/agents"), false);
+  assert.equal(shown.calls.filter((url) => String(url).includes("/api/auth/recovery/status")).length, 1);
   assert.equal(shown.pending.textContent.includes(STAY), true);
 });
 
@@ -292,6 +295,7 @@ test("submitRecoveryImport reads agents_built and does not decide from a 403", a
     schema: "elastos.full-recovery-bundle.import.request/v1",
   });
   assert.equal(shown.calls.includes("/api/apps/system/agents"), false);
+  assert.equal(shown.calls.filter((url) => String(url).includes("/api/auth/recovery/status")).length, 0);
   assert.equal(shown.note.textContent.endsWith(STAY), true);
 });
 

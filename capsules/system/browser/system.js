@@ -2762,7 +2762,7 @@ function requestHomePasskeyAdd(homeToken, parentOrigin) {
 
 async function refreshRecoveryStatus() {
   if (!recoveryStatusNode || !hasShellAccess()) {
-    return;
+    return null;
   }
   try {
     const status = await fetchJson("/api/auth/recovery/status", {
@@ -2770,10 +2770,12 @@ async function refreshRecoveryStatus() {
     });
     setRecoveryStatus(status);
     focusRequestedSettingsAction();
+    return status;
   } catch (error) {
     showRecoveryStatus("Unavailable", "error");
     showRecoveryNote(String(error.message || error), "error");
     setRecoveryButton("Download Recovery Kit", true);
+    return null;
   }
 }
 
@@ -2919,7 +2921,7 @@ async function onRecoveryImport(event) {
     if (plan.reassign) {
       pendingRecoveryImport = { imported };
       showRecoveryStatus("Review", "muted");
-      showRecoveryPending(plan, await runtimeBuildsAgents());
+      showRecoveryPending(plan, status.agents_built === true);
       return;
     }
     pendingRecoveryImport = { imported };
@@ -2986,7 +2988,7 @@ async function submitRecoveryImport(body, terminalRetryToken = "") {
   } else if (readText(response.home_token)) {
     apiHomeToken = readText(response.home_token);
   }
-  await refreshRecoveryStatus();
+  const status = await refreshRecoveryStatus();
   await refreshSystemSummary();
   await refreshAccountList();
   notifyHomeSummaryChanged();
@@ -2994,7 +2996,7 @@ async function submitRecoveryImport(body, terminalRetryToken = "") {
     if (recoveryPasswordInput) {
       recoveryPasswordInput.value = "";
     }
-    const agentsBuilt = await runtimeBuildsAgents();
+    const agentsBuilt = Boolean(status && status.agents_built === true);
     showRecoveryStatus("", "success");
     showRecoveryNote(
       response.status === "reassigned"
@@ -3112,6 +3114,7 @@ function recoveryRefusal(error) {
     /(\d+ agents? on this Home would stop opening\. Retire (?:that agent|them) first, or import on another Home\.)/,
     /(\d+ agents? on this Home would belong to nobody\. This recovery changes the owner id (?:its record names|their records name)\.)/,
     /(This Home has an agents file this build cannot read, so a root-key change is refused\.)/,
+    /(This Home cannot open the key that wraps an agent's data, so a root-key change is refused\.)/,
   ];
   for (const pattern of patterns) {
     const found = message.match(pattern);
