@@ -385,7 +385,12 @@ fn owned_agents(data_dir: &std::path::Path) -> Vec<OwnedAgent> {
                 owner,
             })
         })
-        .filter(|agent| crate::agents::stored_agent(data_dir, &agent.owner, &agent.id).is_ok())
+        .filter(|agent| {
+            // An agent that is off is still this owner's. `stored_agent`
+            // refuses it; the stop lookup does not, so Inbox does not call
+            // the agent someone else's.
+            crate::agents::stored_agent_for_stop(data_dir, &agent.owner, &agent.id).is_ok()
+        })
         .collect()
 }
 
@@ -1002,6 +1007,20 @@ async fn decide_contact_request(
     })
 }
 
+#[derive(Debug)]
+struct PlaneStatus {
+    code: u16,
+    message: String,
+}
+
+impl std::fmt::Display for PlaneStatus {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for PlaneStatus {}
+
 async fn decide_capability(
     coords: &crate::runtime_control::RuntimeCoords,
     request_id: &str,
@@ -1028,13 +1047,25 @@ async fn decide_capability(
             "Denied.",
         )
     };
-    client
+    let response = client
         .post(format!("{}/api/capability/{path}", coords.api_url))
         .header(AUTHORIZATION, format!("Bearer {shell}"))
         .json(&body)
         .send()
-        .await?
-        .error_for_status()?;
+        .await?;
+    let status = response.status();
+    let text = response.text().await.unwrap_or_default();
+    if !status.is_success() {
+        let message = if text.trim().is_empty() {
+            status.to_string()
+        } else {
+            text
+        };
+        return Err(anyhow::Error::new(PlaneStatus {
+            code: status.as_u16(),
+            message,
+        }));
+    }
     Ok(done.to_string())
 }
 
@@ -1092,9 +1123,39 @@ async fn answer_agent_ask(
         decide_capability(&coords, request_id, false).await?;
         anyhow::bail!("a path outside the agent's own folder is not pending");
     }
-    sign_agent_grant(data_dir, caller, ask, request_id, approve)?;
-    let answered = decide_capability(&coords, request_id, approve).await?;
-    Ok(answered)
+    // The plane answers first. A 409 is a refusal row, never an approval.
+    // An approval row is signed only after the plane accepts. If that sign
+    // fails, the grant is denied so the mint does not stand.
+    let decided = decide_capability(&coords, request_id, approve).await;
+    match decided {
+        Err(error) => {
+            if plane_conflict(&error) {
+                let _ = sign_agent_grant(data_dir, caller, ask, request_id, false);
+            }
+            Err(error)
+        }
+        Ok(answered) => {
+            if let Err(error) = sign_agent_grant(data_dir, caller, ask, request_id, approve) {
+                if approve {
+                    let _ = decide_capability(&coords, request_id, false).await;
+                }
+                return Err(error);
+            }
+            Ok(answered)
+        }
+    }
+}
+
+/// Set by a test before `sign_agent_grant`. The sign fails and writes nothing,
+/// so a caller that minted already has to take the grant back.
+#[cfg(test)]
+pub(crate) static FAIL_GRANT_AUDIT: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+fn plane_conflict(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<PlaneStatus>()
+        .is_some_and(|status| status.code == 409)
 }
 
 fn sign_agent_grant(
@@ -1104,6 +1165,10 @@ fn sign_agent_grant(
     request_id: &str,
     approve: bool,
 ) -> anyhow::Result<()> {
+    #[cfg(test)]
+    if FAIL_GRANT_AUDIT.swap(false, std::sync::atomic::Ordering::SeqCst) {
+        anyhow::bail!("injected agent grant audit failure");
+    }
     let event_type = if approve {
         "agent.grant.approved"
     } else {
@@ -1304,5 +1369,38 @@ mod tests {
             capability_decision("capability-approve-request:agent:req-1").map(|(id, _)| id),
             Some("agent:req-1")
         );
+    }
+
+    #[test]
+    fn an_injected_grant_audit_failure_writes_no_row() {
+        FAIL_GRANT_AUDIT.store(true, std::sync::atomic::Ordering::SeqCst);
+        let error = sign_agent_grant(
+            std::path::Path::new("/no/such/home"),
+            "person:owner",
+            &ask("elastos://inspect/submit_agent_plan", "write"),
+            "req-1",
+            true,
+        )
+        .expect_err("the injected failure refuses the grant row");
+        assert_eq!(error.to_string(), "injected agent grant audit failure");
+        assert!(
+            !FAIL_GRANT_AUDIT.load(std::sync::atomic::Ordering::SeqCst),
+            "the failure is used once"
+        );
+    }
+
+    #[test]
+    fn a_plane_conflict_is_a_refusal_and_another_status_is_not() {
+        let conflict = anyhow::Error::new(PlaneStatus {
+            code: 409,
+            message: "the session has ended".to_string(),
+        });
+        assert!(plane_conflict(&conflict));
+        assert_eq!(conflict.to_string(), "the session has ended");
+        let other = anyhow::Error::new(PlaneStatus {
+            code: 500,
+            message: "runtime failed".to_string(),
+        });
+        assert!(!plane_conflict(&other));
     }
 }
