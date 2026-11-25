@@ -240,6 +240,17 @@ async fn localhost_and_object_providers_work_inside_their_fences() {
         }
     }
     assert_eq!(std::fs::read(&key_path).unwrap(), secret);
+    std::fs::write(
+        data.join("config.toml"),
+        format!("{} = true\n", crate::library::PROTECT_HOST_CONFIG_KEY),
+    )
+    .unwrap();
+    std::fs::write(data.join("components.json"), b"{}\n").unwrap();
+    for path in ["config.toml", "components.json"] {
+        let answer = exchange(&bridge, serde_json::json!({"op": "read", "path": path})).await;
+        assert_eq!(answer["status"], "error", "{path}: {answer}");
+        assert!(data.join(path).is_file(), "{path}");
+    }
     bridge.shutdown().await.unwrap();
 
     let (_object_hold, object_data) = data_root();
@@ -1352,6 +1363,301 @@ async fn spawn_object(
     )
     .await
     .unwrap_or_else(|err| panic!("object init failed: {err}"))
+}
+
+/// Publish, rename, move, and share of a published file go through the fenced
+/// object helper. Unpublish runs in the Runtime. A restart reconciles from the
+/// records, so a withdrawn file stays withdrawn. The Home already has a
+/// Recovery Kit.
+#[cfg(any(
+    all(not(elastos_unsupported_os_check), target_os = "macos"),
+    all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    )
+))]
+#[tokio::test]
+async fn fenced_library_publish_rename_move_share_survive_restart() {
+    use async_trait::async_trait;
+    use base64::Engine;
+    use elastos_runtime::provider::{
+        Provider, ProviderError, ProviderRegistry, ResourceRequest, ResourceResponse,
+    };
+    use sha2::{Digest, Sha256};
+    use std::os::unix::fs::PermissionsExt;
+    use std::sync::Arc;
+
+    struct RecordingContent;
+
+    #[async_trait]
+    impl Provider for RecordingContent {
+        async fn handle(
+            &self,
+            _request: ResourceRequest,
+        ) -> Result<ResourceResponse, ProviderError> {
+            Err(ProviderError::Provider("raw requests only".into()))
+        }
+        fn schemes(&self) -> Vec<&'static str> {
+            Vec::new()
+        }
+        fn name(&self) -> &'static str {
+            "recording-content"
+        }
+        async fn send_raw(
+            &self,
+            request: &serde_json::Value,
+        ) -> Result<serde_json::Value, ProviderError> {
+            let cid = match request["op"].as_str() {
+                Some("publish") => {
+                    let digest = Sha256::digest(request["data"].as_str().unwrap_or_default());
+                    format!("bafytest{}", &hex::encode(digest)[..16])
+                }
+                _ => request["cid"].as_str().unwrap_or_default().to_string(),
+            };
+            let status = if request["op"] == "unpublish" {
+                "local_unpinned"
+            } else {
+                "local_pinned"
+            };
+            Ok(serde_json::json!({
+                "status": "ok",
+                "data": {
+                    "cid": cid,
+                    "availability": { "status": status },
+                    "receipt": { "status": status },
+                }
+            }))
+        }
+    }
+
+    /// The record file name is the sha256 of the document URI. The file body is
+    /// an encrypted principal-root object, so the document URI is this name.
+    fn record_names(data: &Path, root: &str) -> std::collections::BTreeSet<String> {
+        let rel = root.trim_start_matches("localhost://");
+        let dir = data
+            .join(rel)
+            .join(".AppData/LocalHost/.Runtime/Library/Published");
+        let mut names = std::collections::BTreeSet::new();
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            return names;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+                continue;
+            }
+            if let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) {
+                names.insert(stem.to_string());
+            }
+        }
+        names
+    }
+
+    fn record_id(uri: &str) -> String {
+        hex::encode(Sha256::digest(uri.as_bytes()))
+    }
+
+    let (_hold, data) = helper_data_root();
+    let principal = "person:local:ada";
+    let protection = crate::auth::store_test_principal_root_protection(&data, principal);
+    let root = protection.localhost_root;
+    let key = recovery_key_path(&data);
+    let key_bytes = std::fs::read(&key).unwrap();
+    assert_eq!(key_bytes.len(), 32);
+    std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o644)).unwrap();
+    let (_, did) = elastos_identity::load_or_create_did(&data).unwrap();
+    let binary = provider_binary("object-provider");
+    let object = spawn_object(&binary, &data, &did).await;
+    let library = data.join("ElastOS/SystemServices/Library");
+    assert_eq!(
+        file_mode(&library),
+        0o700,
+        "the index directory is owner-only"
+    );
+    assert!(
+        !data.join("ElastOS/SystemServices/Wallet").exists(),
+        "the object helper does not create Wallet"
+    );
+    let bridge = object.bridge();
+    let registry = Arc::new(ProviderRegistry::new());
+    registry
+        .register_sub_provider("content", Arc::new(RecordingContent))
+        .await
+        .unwrap();
+    let payload = base64::engine::general_purpose::STANDARD.encode(b"published-bytes");
+
+    async fn runtime(
+        data: &Path,
+        registry: &Arc<ProviderRegistry>,
+        principal: &str,
+        op: &str,
+        uri: &str,
+    ) -> serde_json::Value {
+        crate::library::handle_object_provider_runtime_request(
+            data,
+            registry.clone(),
+            &serde_json::json!({
+                "op": op,
+                "principal_id": principal,
+                "uri": uri,
+            }),
+        )
+        .await
+    }
+
+    async fn stat(
+        bridge: &elastos_runtime::provider::ProviderBridge,
+        principal: &str,
+        uri: &str,
+    ) -> serde_json::Value {
+        exchange_ok(
+            bridge,
+            serde_json::json!({
+                "op": "stat",
+                "principal_id": principal,
+                "uri": uri,
+            }),
+        )
+        .await
+    }
+
+    let mut cids = Vec::new();
+    let mut withdrawn_at = Vec::new();
+    for (name, op) in [
+        ("rename.txt", "rename"),
+        ("move.txt", "move"),
+        ("share.txt", "share"),
+    ] {
+        let uri = format!("{root}/{name}");
+        let wrote = exchange_ok(
+            bridge,
+            serde_json::json!({
+                "op": "write",
+                "principal_id": principal,
+                "uri": uri,
+                "data": payload,
+            }),
+        )
+        .await;
+        assert_eq!(wrote["status"], "ok", "{name}: {wrote}");
+        let published = runtime(&data, &registry, principal, "publish", &uri).await;
+        assert_eq!(published["status"], "ok", "{name}: {published}");
+        let cid = published["data"]["cid"].as_str().unwrap().to_string();
+        let saw = stat(bridge, principal, &uri).await;
+        assert_eq!(
+            saw["data"]["object"]["publication"]["cid"], cid,
+            "{name}: {saw}"
+        );
+        assert!(
+            record_names(&data, &root).contains(&record_id(&uri)),
+            "{name} record missing"
+        );
+        let (dest, answer) = match op {
+            "rename" => {
+                let answer = exchange_ok(
+                    bridge,
+                    serde_json::json!({
+                        "op": "rename",
+                        "principal_id": principal,
+                        "uri": uri,
+                        "name": "renamed.txt",
+                    }),
+                )
+                .await;
+                (format!("{root}/renamed.txt"), answer)
+            }
+            "move" => {
+                let folder = exchange_ok(
+                    bridge,
+                    serde_json::json!({
+                        "op": "mkdir",
+                        "principal_id": principal,
+                        "parent_uri": root,
+                        "name": "Moved",
+                    }),
+                )
+                .await;
+                assert_eq!(folder["status"], "ok", "{folder}");
+                let answer = exchange_ok(
+                    bridge,
+                    serde_json::json!({
+                        "op": "move",
+                        "principal_id": principal,
+                        "uri": uri,
+                        "target_parent_uri": format!("{root}/Moved"),
+                    }),
+                )
+                .await;
+                (format!("{root}/Moved/{name}"), answer)
+            }
+            "share" => {
+                let answer = exchange_ok(
+                    bridge,
+                    serde_json::json!({
+                        "op": "share",
+                        "principal_id": principal,
+                        "uri": uri,
+                        "recipients": [],
+                    }),
+                )
+                .await;
+                (uri.clone(), answer)
+            }
+            _ => unreachable!(),
+        };
+        assert_eq!(answer["status"], "ok", "{name}: {answer}");
+        assert_eq!(
+            answer["data"]["object"]["publication"]["cid"], cid,
+            "{answer}"
+        );
+        if op == "share" {
+            assert_eq!(answer["data"]["policy"], "public_link", "{answer}");
+        }
+        let names = record_names(&data, &root);
+        assert!(
+            names.contains(&record_id(&dest)),
+            "{name} has no record at {dest}"
+        );
+        if dest != uri {
+            assert!(
+                !names.contains(&record_id(&uri)),
+                "{name} left a record at {uri}"
+            );
+        }
+        let withdrawn = runtime(&data, &registry, principal, "unpublish", &dest).await;
+        assert_eq!(withdrawn["status"], "ok", "{name}: {withdrawn}");
+        let after = stat(bridge, principal, &dest).await;
+        assert!(
+            after["data"]["object"]["publication"].is_null(),
+            "{name} still published: {after}"
+        );
+        assert!(!crate::library::cid_is_published_here(&data, &cid));
+        cids.push(cid);
+        withdrawn_at.push(dest);
+    }
+    assert_eq!(file_mode(&key), 0o600);
+    assert_eq!(std::fs::read(&key).unwrap(), key_bytes);
+    bridge.shutdown().await.unwrap();
+    crate::library::reconcile_published_cids(&data);
+    for cid in &cids {
+        assert!(!crate::library::cid_is_published_here(&data, cid), "{cid}");
+    }
+    let restarted = spawn_object(&binary, &data, &did).await;
+    crate::library::reconcile_published_cids(&data);
+    let again = restarted.bridge();
+    for (cid, dest) in cids.iter().zip(withdrawn_at.iter()) {
+        assert!(
+            !crate::library::cid_is_published_here(&data, cid),
+            "withdrawn after restart: {cid}"
+        );
+        let saw = stat(again, principal, dest).await;
+        assert!(
+            saw["data"]["object"]["publication"].is_null(),
+            "withdrawn file published again: {saw}"
+        );
+    }
+    assert_eq!(std::fs::read(&key).unwrap(), key_bytes);
+    again.shutdown().await.unwrap();
 }
 
 /// One write and one read with a Recovery Kit already on disk. The key is

@@ -8357,6 +8357,7 @@ fn write_publish_record(
         record,
     )?;
     if active {
+        stop_before_publish_index()?;
         set_published_index_entry(data_dir, principal_id, record, true)?;
     }
     Ok(())
@@ -8619,6 +8620,9 @@ fn remove_publish_record(
 
 /// A plain publication moves with its file on rename and move, so Unpublish
 /// keeps control of it. Protected publications keep their records as before.
+///
+/// The old record goes before the new one, and the index names the new place
+/// only inside that write. A crash in between leaves one record or none.
 fn move_publish_record(
     data_dir: &Path,
     principal_id: &str,
@@ -8631,12 +8635,62 @@ fn move_publish_record(
     if record_is_runtime_custody(&record) {
         return Ok(());
     }
+    if record_is_published(&record) {
+        set_published_index_entry(data_dir, principal_id, &record, false)?;
+    }
+    remove_publish_record(data_dir, principal_id, from_uri)?;
+    stop_before_new_publish_record()?;
     record.object_uri = to_uri.to_string();
     if let Some(object_uri) = record.content_security.get_mut("object_uri") {
         *object_uri = Value::String(to_uri.to_string());
     }
-    write_publish_record(data_dir, principal_id, &record)?;
-    remove_publish_record(data_dir, principal_id, from_uri)
+    write_publish_record(data_dir, principal_id, &record)
+}
+
+#[cfg(test)]
+thread_local! {
+    static MOVE_GAP: std::cell::Cell<u8> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn arm_move_gap(kind: u8) {
+    MOVE_GAP.with(|gap| gap.set(kind));
+}
+
+#[cfg(test)]
+fn take_move_gap(kind: u8) -> bool {
+    MOVE_GAP.with(|gap| {
+        gap.get() == kind && {
+            gap.set(0);
+            true
+        }
+    })
+}
+
+#[cfg(test)]
+fn stop_before_new_publish_record() -> anyhow::Result<()> {
+    if take_move_gap(1) {
+        bail!("move publish stopped before the new record");
+    }
+    Ok(())
+}
+
+#[cfg(not(test))]
+fn stop_before_new_publish_record() -> anyhow::Result<()> {
+    Ok(())
+}
+
+#[cfg(test)]
+fn stop_before_publish_index() -> anyhow::Result<()> {
+    if take_move_gap(2) {
+        bail!("publish index stopped after the record");
+    }
+    Ok(())
+}
+
+#[cfg(not(test))]
+fn stop_before_publish_index() -> anyhow::Result<()> {
+    Ok(())
 }
 
 /// Refuses to delete `uri` (a file, or a folder and everything in it) while it
@@ -8932,7 +8986,8 @@ pub(crate) use crate::protected_content_runtime::ENABLED_CONFIG_KEY as PROTECT_H
 /// Fill `viewer`, `viewers`, and the `protect` capability on library objects
 /// the fenced object helper returned.
 ///
-/// The helper's roots are `ElastOS/System`, `Users`, and `UsersAI`. It does not
+/// The helper's roots are `ElastOS/System`, `Users`, `UsersAI`, and
+/// `ElastOS/SystemServices/Library` (the published-CID index only). It does not
 /// receive `components.json`, `capsules`, or `config.toml`. The Runtime reads
 /// those three and writes only these fields. Every other `LibraryObject`
 /// field stays the helper's: `schema`, `uri`, `name`, `kind`, `mime`, `size`,
@@ -11203,6 +11258,53 @@ mod publish_tests {
             .call("trash", json!({ "uri": home.uri("Documents/Moved") }))
             .await;
         assert_eq!(trash["status"], "ok", "{trash}");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_move_drops_the_old_record_before_the_index_names_the_new_one() {
+        let home = home("did:key:z6MkMoveRecordOrder").await;
+        let from = home.uri("Documents/a.txt");
+        let to = home.uri("Documents/b.txt");
+        let later = home.uri("Documents/c.txt");
+        let record = serde_json::from_value(json!({
+            "schema": "elastos.library.publish-record/v1",
+            "object_uri": from,
+            "cid": "cid-move-order",
+            "published_at": 1,
+            "receipt": {},
+            "availability": {"status": "local_pinned"},
+            "publication_id": "pub-move-order",
+            "content_security": {
+                "schema": "elastos.library.published-content-security/v1",
+                "object_uri": from,
+                "published_payload": "plain_content"
+            }
+        }))
+        .unwrap();
+        write_publish_record(home.dir.path(), home.principal, &record).unwrap();
+
+        arm_move_gap(1);
+        let stopped = move_publish_record(home.dir.path(), home.principal, &from, &to);
+        assert!(stopped.is_err(), "{stopped:?}");
+        assert!(read_publish_record(home.dir.path(), home.principal, &from).is_err());
+        assert!(read_publish_record(home.dir.path(), home.principal, &to).is_err());
+        assert!(!cid_is_published_here(home.dir.path(), "cid-move-order"));
+
+        write_publish_record(home.dir.path(), home.principal, &record).unwrap();
+        arm_move_gap(2);
+        let index_stopped = move_publish_record(home.dir.path(), home.principal, &from, &to);
+        assert!(index_stopped.is_err(), "{index_stopped:?}");
+        assert!(read_publish_record(home.dir.path(), home.principal, &from).is_err());
+        let kept = read_publish_record(home.dir.path(), home.principal, &to).unwrap();
+        assert_eq!(kept.object_uri, to);
+        assert!(record_is_published(&kept));
+        assert!(!cid_is_published_here(home.dir.path(), "cid-move-order"));
+
+        move_publish_record(home.dir.path(), home.principal, &to, &later).unwrap();
+        assert!(read_publish_record(home.dir.path(), home.principal, &to).is_err());
+        assert!(read_publish_record(home.dir.path(), home.principal, &later).is_ok());
+        assert!(cid_is_published_here(home.dir.path(), "cid-move-order"));
     }
 }
 

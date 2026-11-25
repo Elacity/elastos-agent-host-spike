@@ -318,6 +318,20 @@ pub fn ensure_system_service_roots(base_dir: &Path) -> std::io::Result<Vec<PathB
     Ok(created)
 }
 
+/// An existing directory named `Library` is the published-CID index. Home
+/// narrows that one component to owner-only before a helper starts. Any other
+/// name keeps the mode it already has.
+#[cfg(unix)]
+pub fn narrow_library(part: &str, path: &Path, relative: &str) -> Result<(), String> {
+    if part != "Library" {
+        return Ok(());
+    }
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).map_err(|error| {
+        format!("provider start is refused: {relative} is not owner-only: {error}")
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

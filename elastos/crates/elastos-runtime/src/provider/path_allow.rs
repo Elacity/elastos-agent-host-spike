@@ -28,21 +28,25 @@ pub(crate) struct HelperConfinement {
 
 /// Object file roots. The seatbelt parameter is the first name. The directory
 /// is the second. Seatbelt parameter names cannot contain `/`, so
-/// `ElastOS_System` is the parameter for `ElastOS/System`.
+/// `ElastOS_System` is the parameter for `ElastOS/System` and `LibraryIndex`
+/// is the parameter for `ElastOS/SystemServices/Library`.
 ///
 /// `Users` and `UsersAI` hold caller-chosen object names. Object's ElastOS
 /// root is `ElastOS/System`, the directory its auth state, lock file, and
-/// temp files use. A Home that does not have that directory yet gets it
-/// created at 0700, owned by the current user.
+/// temp files use. The published-CID index is the only file under
+/// `ElastOS/SystemServices/Library`. That directory is this helper's own
+/// rule. Home creates it before the helper starts and leaves it owner-only.
+/// Nothing else under `ElastOS/SystemServices` is an object root.
 ///
 /// Linux Landlock cannot exclude a child of a granted directory. Localhost
 /// still grants `ElastOS`, so `ElastOS/SystemServices/Wallet` stays inside
 /// that grant on Linux. macOS adds a Seatbelt deny for that wallet directory
-/// after the `ElastOS` allow.
+/// after the `ElastOS` allow. The object helper does not grant `ElastOS`.
 const OBJECT_ROOTS: &[(&str, &str)] = &[
     ("ElastOS_System", "ElastOS/System"),
     ("Users", "Users"),
     ("UsersAI", "UsersAI"),
+    ("LibraryIndex", "ElastOS/SystemServices/Library"),
 ];
 
 /// macOS localhost deny. Not a Landlock rule: Linux cannot exclude this child.
@@ -233,8 +237,8 @@ fn resolve_roots(
 }
 
 /// Create each missing component of `relative` at mode 0700. A symlink or a
-/// non-directory on that path is refused. An existing directory is left as it
-/// is, including its mode.
+/// non-directory on that path is refused. An existing directory keeps its
+/// mode, except a component named `Library`, which is narrowed to 0700.
 fn ensure_nested_directory(data_dir: &Path, relative: &str) -> Result<(), String> {
     let mut current = data_dir.to_path_buf();
     for part in relative.split('/') {
@@ -255,7 +259,7 @@ fn ensure_nested_directory(data_dir: &Path, relative: &str) -> Result<(), String
                     "provider start is refused: {relative} is not a directory. Replace it with a directory you own, then start Home again."
                 ));
             }
-            Ok(_) => {}
+            Ok(_) => elastos_common::localhost::narrow_library(part, &current, relative)?,
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
                 std::fs::create_dir(&current).map_err(|error| {
                     format!("provider start is refused: {relative} could not be created: {error}")
@@ -453,7 +457,10 @@ mod tests {
                 "localhost-provider",
                 elastos_common::localhost::FILE_BACKED_ROOTS,
             ),
-            ("object-provider", &["ElastOS_System", "Users", "UsersAI"]),
+            (
+                "object-provider",
+                &["ElastOS_System", "Users", "UsersAI", "LibraryIndex"],
+            ),
             ("chain-provider", &["chain-provider"]),
         ];
         let did = super::super::landlock_plan::build(
@@ -656,10 +663,10 @@ mod tests {
             }
             assert_eq!(roots.len(), expected.len(), "{component_key} root count");
             for (rule, name) in roots.iter().zip(expected.iter()) {
-                let relative = if *name == "ElastOS_System" {
-                    "ElastOS/System"
-                } else {
-                    *name
+                let relative = match *name {
+                    "ElastOS_System" => "ElastOS/System",
+                    "LibraryIndex" => "ElastOS/SystemServices/Library",
+                    other => other,
                 };
                 let path = data_dir.join(relative);
                 assert_eq!(rule.0, *name, "{component_key}");
@@ -672,6 +679,14 @@ mod tests {
                 if *name == "ElastOS_System" {
                     assert_eq!(
                         rule.1.parent().and_then(|parent| parent.parent()),
+                        Some(data_dir)
+                    );
+                } else if *name == "LibraryIndex" {
+                    assert_eq!(
+                        rule.1
+                            .parent()
+                            .and_then(|parent| parent.parent())
+                            .and_then(|parent| parent.parent()),
                         Some(data_dir)
                     );
                 } else {
@@ -707,6 +722,15 @@ mod tests {
                     rule.1, data_dir,
                     "allow list grew to the whole data directory"
                 );
+                if *component_key == "object-provider" {
+                    let text = rule.1.to_string_lossy();
+                    assert!(
+                        !text.ends_with("SystemServices")
+                            && !text.contains("SystemServices/Wallet")
+                            && !text.contains("SystemServices/Content"),
+                        "{component_key} granted {text}"
+                    );
+                }
             }
         }
 
@@ -751,7 +775,33 @@ mod tests {
         let meta = std::fs::symlink_metadata(&system).unwrap();
         assert!(meta.is_dir());
         assert_eq!(meta.permissions().mode() & 0o777, 0o700);
+        let library = data.join("ElastOS/SystemServices/Library");
+        let library_meta = std::fs::symlink_metadata(&library).unwrap();
+        assert!(library_meta.is_dir());
+        assert_eq!(library_meta.permissions().mode() & 0o777, 0o700);
+        assert!(!data.join("ElastOS/SystemServices/Wallet").exists());
         assert!(rendered.landlock.iter().any(|rule| rule.1 == system));
+        assert!(rendered.landlock.iter().any(|rule| rule.1 == library));
+    }
+
+    #[test]
+    fn an_existing_library_index_is_narrowed_to_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let held = tempfile::tempdir().expect("data directory");
+        let data = held.path();
+        std::fs::create_dir(data.join("Users")).unwrap();
+        std::fs::create_dir(data.join("UsersAI")).unwrap();
+        let library = data.join("ElastOS/SystemServices/Library");
+        std::fs::create_dir_all(&library).unwrap();
+        std::fs::set_permissions(&library, std::fs::Permissions::from_mode(0o755)).unwrap();
+        render("object-provider", data, Path::new(EXE), 5).expect("existing Library is narrowed");
+        let mode = std::fs::symlink_metadata(&library)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o700);
+        assert!(!data.join("ElastOS/SystemServices/Wallet").exists());
     }
 
     #[cfg(target_os = "macos")]
@@ -773,6 +823,8 @@ mod tests {
             .map(|name| {
                 let path = if name == "ElastOS_System" {
                     data.join("ElastOS/System")
+                } else if name == "LibraryIndex" {
+                    data.join("ElastOS/SystemServices/Library")
                 } else if name == "ELASTOS_WALLET" {
                     wallet.to_path_buf()
                 } else if name == "PROVIDER_EXECUTABLE" {
