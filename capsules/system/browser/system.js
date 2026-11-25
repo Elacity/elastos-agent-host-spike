@@ -3098,7 +3098,10 @@ function fullRecoveryImportRequest(principalId, localhostRoot, bundle, recoveryP
 const AGENTS_STAY_ON_THIS_HOME = "Agents and their data stay on the Home where you created them; this bundle does not carry them.";
 
 function runtimeBuildsAgents() {
-  return fetchJson("/api/apps/system/agents", { headers: shellHeaders() }).then(() => true, (error) => !String((error && error.message) || "").includes("agents are not built into this Runtime"));
+  return fetchJson("/api/apps/system/agents", { headers: shellHeaders() }).then(
+    (body) => Boolean(body && Array.isArray(body.agents)),
+    () => false,
+  );
 }
 
 function recoveryRefusal(error) {

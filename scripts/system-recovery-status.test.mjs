@@ -134,6 +134,27 @@ test("recovery text says agents stay on the Home where they were created", async
   assert.equal(rust.includes(`const AGENTS_STAY_ON_THIS_HOME: &str = "${STAY}";`), true);
 });
 
+test("the agents sentence is shown only for a confirmed agents answer", async () => {
+  const page = recoveryPage(false);
+  const plan = { kitRoot: "localhost://Users/ab" };
+  const failures = [
+    () => Promise.reject(new Error("request failed: 409 agents are not built into this Runtime")),
+    () => Promise.reject(new Error("request failed: 401")),
+    () => Promise.reject(new Error("network")),
+    () => Promise.resolve({}),
+    () => Promise.resolve(null),
+  ];
+  for (const failure of failures) {
+    assert.equal(await page.builds(failure), false);
+  }
+  assert.equal(page.pendingText(plan).includes(STAY), false);
+  assert.equal(page.success({}).includes(STAY), false);
+  const confirmed = recoveryPage(true);
+  assert.equal(await confirmed.builds(() => Promise.resolve({ agents: [] })), true);
+  assert.equal(confirmed.pendingText(plan).endsWith(STAY), true);
+  assert.equal(confirmed.success({}).endsWith(STAY), true);
+});
+
 test("a Home whose Profile needs backup still sees files needing attention", () => {
   const action = "Documents/a.bin does not carry the label this Home writes on encrypted files.";
   const shown = render({
