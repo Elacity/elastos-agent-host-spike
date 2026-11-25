@@ -1743,19 +1743,22 @@ async function main() {
   } catch (error) {
     mark("step_up_approve", "fail", String(error.message || error));
   }
+  let stopDuringStep = null;
   if (state.approveBody) {
-    const approved = await call("POST", "/api/apps/inbox/actions", state.inboxToken, state.approveBody);
+    // The installed guest finishes its one write and leaves before a Stop
+    // that waits for the approve response. The Stop goes out with the
+    // approve, so it meets that agent's step while the step is still open.
+    const approvedPromise = call("POST", "/api/apps/inbox/actions", state.inboxToken, state.approveBody);
+    const stopPromise = call("POST", "/api/apps/system/agents/stop", state.systemToken, {
+      agent_id: state.agentA,
+    });
+    const approved = await approvedPromise;
     keep("step_up_approve", approved.status === 200, approved.text.slice(0, 300));
+    stopDuringStep = await stopPromise;
   }
   let settled = null;
-  let stopDuringStep = null;
   const settleDeadline = Date.now() + 30000;
   while (Date.now() < settleDeadline) {
-    if (!stopDuringStep && state.approveBody) {
-      stopDuringStep = await call("POST", "/api/apps/system/agents/stop", state.systemToken, {
-        agent_id: state.agentA,
-      });
-    }
     settled = inspectRecords().find((record) => record.request_id === state.requestId) || null;
     if (settled && settled.status !== "pending") break;
     await sleep(300);
