@@ -1486,7 +1486,12 @@ jobs:
     # routed back to the lane whose PR caused it by the orchestrator.
     if: ${{ github.event_name == 'push' || github.event_name == 'schedule' }}
     # The two hop builds have a 70-minute step budget and the update journey 75.
-    timeout-minutes: 150
+    # The helper fence rows add about 70 minutes: 25 for the cold
+    # localhost-provider debug build (the 25m04s B4-R shape, run 44658596104),
+    # about 20 for the cold object-provider workspace, about 5 for chain on
+    # that same target, and about 20 for the fence-row test build on the
+    # localhost target once those dependencies exist.
+    timeout-minutes: 220
     # cancel-on-failure never runs after merge, so the gate's verdict is what
     # spares about 80 macOS minutes when it fails; macOS is off the PR path.
     needs: source-gate
@@ -1554,6 +1559,50 @@ jobs:
             grep -Eq '^test result: ok\. 1 passed; 0 failed;' "$log" \
               || { echo "::error::${name} selected no test or failed"; exit 1; }
           done
+      # Helper fence rows on this Mac runner. The three debug binaries are the
+      # ones those rows spawn. The cold localhost-provider build is the same
+      # shape as the 25m04s B4-R debug build above (run 44658596104); object
+      # and chain share one target after that. Added time is about 70 minutes.
+      # The test compile reuses the localhost target. It must not create the
+      # job CARGO_TARGET_DIR: the freshness step below requires that path absent.
+      - name: helper fence rows
+        timeout-minutes: 100
+        env:
+          CARGO_BUILD_JOBS: "3"
+        run: |
+          set -euo pipefail
+          localhost="${GITHUB_WORKSPACE}/target/fence-localhost-provider"
+          helpers="${GITHUB_WORKSPACE}/target/provider-fence-tests"
+          CARGO_TARGET_DIR="$localhost" \
+            CARGO_BUILD_BUILD_DIR="$localhost/build" \
+            cargo build --locked \
+              --manifest-path elastos/Cargo.toml \
+              -p localhost-provider \
+              --bin localhost-provider \
+              --target-dir "$localhost"
+          CARGO_TARGET_DIR="$helpers" \
+            CARGO_BUILD_BUILD_DIR="$helpers/build" \
+            cargo build --locked \
+              --manifest-path capsules/object-provider/Cargo.toml \
+              --bin object-provider \
+              --target-dir "$helpers"
+          CARGO_TARGET_DIR="$helpers" \
+            CARGO_BUILD_BUILD_DIR="$helpers/build" \
+            cargo build --locked \
+              --manifest-path capsules/chain-provider/Cargo.toml \
+              --bin chain-provider \
+              --target-dir "$helpers"
+          cd elastos
+          CARGO_TARGET_DIR="$localhost" \
+            CARGO_BUILD_BUILD_DIR="$localhost/build" \
+            cargo test --locked -p elastos-server --lib confine_helper_tests -- --test-threads=2
+          CARGO_TARGET_DIR="$localhost" \
+            CARGO_BUILD_BUILD_DIR="$localhost/build" \
+            cargo test --locked -p elastos-runtime --lib -- --test-threads=2 \
+            a_root_swapped_between_render_and_sandbox_exec_is_refused_and_starts_nothing \
+            a_symlink_subpath_resolves_outside_and_the_device_key_stays_unread \
+            localhost_object_and_chain_cannot_open_device_key \
+            chain_provider_binary_answers_inside_its_fence
       - name: reserve hosted Mac build and fixture capacity
         timeout-minutes: 10
         run: python3 scripts/update-hop-compare.py prepare-ci-disk
