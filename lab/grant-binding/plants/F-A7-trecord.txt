@@ -7,6 +7,6 @@ test: ledger::model_timeout_ends_an_uncertain_hold
         }
         Ok(TimeoutRecord)
 --- new
-        Self::return_unused_hold(&mut ledger, reservation, amount, request);
+        Self::return_unused_hold(&mut ledger, reservation, amount);
         Ok(TimeoutRecord)
 --- end
