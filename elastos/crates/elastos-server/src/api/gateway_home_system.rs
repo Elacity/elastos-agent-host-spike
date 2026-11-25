@@ -1459,12 +1459,12 @@ fn home_frame_guest(data_dir: &std::path::Path, context: &HomeLaunchTokenContext
 }
 
 type FrameFlight = (tokio::sync::Notify, Mutex<Option<Option<String>>>);
+type FlightMap = Mutex<Vec<(String, Arc<FrameFlight>)>>;
 
 struct FrameSlot {
     client: reqwest::Client,
     shells: Vec<(String, String)>,
     prefix: String,
-    flights: Vec<(String, Arc<FrameFlight>)>,
 }
 
 #[cfg(test)]
@@ -1480,9 +1480,29 @@ fn frame_slot() -> &'static tokio::sync::Mutex<FrameSlot> {
                 .unwrap_or_else(|_| reqwest::Client::new()),
             shells: Vec::new(),
             prefix: String::new(),
-            flights: Vec::new(),
         })
     })
+}
+
+fn frame_flights() -> &'static FlightMap {
+    static FLIGHTS: OnceLock<FlightMap> = OnceLock::new();
+    FLIGHTS.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+struct FlightGuard {
+    key: String,
+    flight: Arc<FrameFlight>,
+}
+
+impl Drop for FlightGuard {
+    fn drop(&mut self) {
+        let mut flights = frame_flights().lock().expect("flights");
+        let before = flights.len();
+        flights.retain(|(saved, _)| saved != &self.key);
+        if flights.len() != before {
+            self.flight.0.notify_waiters();
+        }
+    }
 }
 
 fn frame_runtime_prefix(api_url: &str, secret: &str) -> String {
@@ -1530,31 +1550,54 @@ async fn frame_shell(
     let prefix = frame_runtime_prefix(api_url, secret);
     let key = format!("{prefix}{}", context.principal_id());
     let client;
-    let flight;
+    let guard;
     {
         let mut slot = frame_slot().lock().await;
         if slot.prefix != prefix {
             slot.shells.clear();
             slot.prefix = prefix.clone();
+            for (_, flight) in std::mem::take(&mut *frame_flights().lock().expect("flights")) {
+                flight.0.notify_waiters();
+            }
         }
         if let Some((_, token)) = slot.shells.iter().find(|(saved, _)| saved == &key) {
             return Some((slot.client.clone(), token.clone()));
         }
         client = slot.client.clone();
-        if let Some((_, existing)) = slot.flights.iter().find(|(saved, _)| saved == &key) {
-            let flight = Arc::clone(existing);
+        let existing = frame_flights()
+            .lock()
+            .expect("flights")
+            .iter()
+            .find(|(saved, _)| saved == &key)
+            .map(|(_, flight)| Arc::clone(flight));
+        if let Some(flight) = existing {
             let notified = flight.0.notified();
             tokio::pin!(notified);
             notified.as_mut().enable();
+            let settled = flight.1.lock().expect("frame").is_some()
+                || frame_flights()
+                    .lock()
+                    .expect("flights")
+                    .iter()
+                    .all(|(saved, _)| saved != &key);
             #[cfg(test)]
             FRAME_FLIGHT_WAITS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             drop(slot);
-            notified.await;
+            if !settled {
+                notified.await;
+            }
             let found = flight.1.lock().expect("frame").clone().flatten();
             return found.map(|token| (client, token));
         }
-        flight = Arc::new((tokio::sync::Notify::new(), std::sync::Mutex::new(None)));
-        slot.flights.push((key.clone(), Arc::clone(&flight)));
+        let flight = Arc::new((tokio::sync::Notify::new(), Mutex::new(None)));
+        frame_flights()
+            .lock()
+            .expect("flights")
+            .push((key.clone(), Arc::clone(&flight)));
+        guard = FlightGuard {
+            key: key.clone(),
+            flight,
+        };
     }
     let token = home_attach_frame_shell(&client, api_url, secret, context)
         .await
@@ -1569,9 +1612,9 @@ async fn frame_shell(
             slot.shells.push((key.clone(), token.clone()));
         }
     }
-    *flight.1.lock().expect("frame") = Some(token.clone());
-    slot.flights.retain(|(saved, _)| saved != &key);
-    flight.0.notify_waiters();
+    drop(slot);
+    *guard.flight.1.lock().expect("frame") = Some(token.clone());
+    drop(guard);
     token.map(|token| (client, token))
 }
 
@@ -1603,6 +1646,18 @@ pub(super) fn reset_frame_flight_waits() {
 #[cfg(test)]
 pub(super) fn frame_flight_waits() -> usize {
     FRAME_FLIGHT_WAITS.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+#[cfg(test)]
+pub(super) fn frame_flight_count() -> usize {
+    frame_flights().lock().expect("flights").len()
+}
+
+#[cfg(test)]
+pub(super) fn testing_clear_flights() {
+    for (_, flight) in std::mem::take(&mut *frame_flights().lock().expect("flights")) {
+        flight.0.notify_waiters();
+    }
 }
 
 #[cfg(test)]

@@ -1141,6 +1141,142 @@ async fn a_hanging_attach_for_one_principal_does_not_delay_another() {
 }
 
 #[cfg(unix)]
+#[tokio::test]
+async fn an_aborted_attach_drops_its_flight_and_the_next_poll_gets_the_frame() {
+    let _frame_shells = FRAME_SHELL_TEST_LOCK.lock().await;
+    super::super::gateway_home_system::testing_clear_flights();
+    super::super::gateway_home_system::reset_frame_flight_waits();
+    let hold = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let hits = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let release = std::sync::Arc::new(tokio::sync::Notify::new());
+    let seen = std::sync::Arc::clone(&hits);
+    let gate = std::sync::Arc::clone(&hold);
+    let parked = std::sync::Arc::clone(&release);
+    let app = Router::new().route(
+        "/api/auth/attach",
+        post(move || {
+            let seen = std::sync::Arc::clone(&seen);
+            let gate = std::sync::Arc::clone(&gate);
+            let parked = std::sync::Arc::clone(&parked);
+            async move {
+                let n = seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                if gate.load(std::sync::atomic::Ordering::SeqCst) {
+                    let wait = parked.notified();
+                    tokio::pin!(wait);
+                    wait.as_mut().enable();
+                    wait.await;
+                }
+                Json(json!({ "token": format!("shell-{n}") }))
+            }
+        }),
+    );
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let api_url = format!("http://{}", listener.local_addr().unwrap());
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    let count = super::super::gateway_home_system::frame_flight_count;
+    async fn until(mut ready: impl FnMut() -> bool) {
+        tokio::time::timeout(std::time::Duration::from_secs(2), async move {
+            while !ready() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("timed out");
+    }
+    let url = api_url.clone();
+    let leader = tokio::spawn(async move {
+        super::super::gateway_home_system::testing_frame_shell(
+            &url,
+            "abort-secret",
+            "person:local:p",
+        )
+        .await
+    });
+    until(|| count() == 1).await;
+    let url = api_url.clone();
+    let waiter = tokio::spawn(async move {
+        super::super::gateway_home_system::testing_frame_shell(
+            &url,
+            "abort-secret",
+            "person:local:p",
+        )
+        .await
+    });
+    until(|| super::super::gateway_home_system::frame_flight_waits() >= 1).await;
+    leader.abort();
+    let waiter = tokio::time::timeout(std::time::Duration::from_secs(2), waiter)
+        .await
+        .expect("the waiter was not woken")
+        .unwrap();
+    assert_eq!(waiter, None, "a dropped attach has no token");
+    until(|| count() == 0).await;
+    hold.store(false, std::sync::atomic::Ordering::SeqCst);
+    let next = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        super::super::gateway_home_system::testing_frame_shell(
+            &api_url,
+            "abort-secret",
+            "person:local:p",
+        ),
+    )
+    .await
+    .expect("the next poll waited on the dropped attach");
+    assert!(next.is_some(), "the next poll gets its frame");
+    until(|| count() == 0).await;
+
+    hold.store(true, std::sync::atomic::Ordering::SeqCst);
+    let url = api_url.clone();
+    let held = tokio::spawn(async move {
+        super::super::gateway_home_system::testing_frame_shell(&url, "prefix-a", "person:local:p")
+            .await
+    });
+    until(|| count() == 1).await;
+    let waits = super::super::gateway_home_system::frame_flight_waits();
+    let url = api_url.clone();
+    let old = tokio::spawn(async move {
+        super::super::gateway_home_system::testing_frame_shell(&url, "prefix-a", "person:local:p")
+            .await
+    });
+    until(|| super::super::gateway_home_system::frame_flight_waits() > waits).await;
+    hold.store(false, std::sync::atomic::Ordering::SeqCst);
+    let changed = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        super::super::gateway_home_system::testing_frame_shell(
+            &api_url,
+            "prefix-b",
+            "person:local:p",
+        ),
+    )
+    .await
+    .expect("a new prefix did not attach");
+    let old = tokio::time::timeout(std::time::Duration::from_secs(2), old)
+        .await
+        .expect("a new prefix did not wake the held flight")
+        .unwrap();
+    assert_eq!(old, None, "a cleared flight has no token");
+    assert!(changed.is_some());
+    assert_eq!(count(), 0, "a new prefix clears the held flight");
+    held.abort();
+    until(|| count() == 0).await;
+
+    hold.store(true, std::sync::atomic::Ordering::SeqCst);
+    for n in 0..50 {
+        let url = api_url.clone();
+        let task = tokio::spawn(async move {
+            super::super::gateway_home_system::testing_frame_shell(&url, "fifty", "person:local:p")
+                .await
+        });
+        until(|| count() == 1).await;
+        task.abort();
+        until(|| count() == 0).await;
+        assert_eq!(count(), 0, "abort {n} left a flight");
+    }
+    assert_eq!(count(), 0, "50 aborts left a flight");
+}
+
+#[cfg(unix)]
 async fn spawn_bad_frame_runtime() -> String {
     let app = Router::new()
         .route("/api/health", get(|| async { "ok" }))
