@@ -203,7 +203,7 @@ pub fn load_or_create_did(data_dir: &Path) -> anyhow::Result<(ed25519_dalek::Sig
 /// copy named `provider`, so the binary also sets `ELASTOS_OBJECT_HELPER`.
 /// The launcher clears the inherited environment, and the runtime binary's
 /// name is not `provider`.
-pub(super) fn object_helper_process() -> bool {
+pub fn object_helper_process() -> bool {
     #[cfg(unix)]
     {
         let marked = std::env::var_os("ELASTOS_OBJECT_HELPER").is_some_and(|value| value == "1");
@@ -248,6 +248,21 @@ pub fn install_object_helper_runtime_did(did: &str) -> anyhow::Result<()> {
         anyhow::bail!("the object helper runtime DID is already set");
     }
     Ok(())
+}
+
+/// The public runtime DID Home passed at init, when this process is the object
+/// helper. The device key file is not opened.
+#[cfg(unix)]
+pub fn object_helper_installed_runtime_did() -> Option<String> {
+    if !object_helper_process() {
+        return None;
+    }
+    OBJECT_HELPER_RUNTIME_DID.get().cloned()
+}
+
+#[cfg(not(unix))]
+pub fn object_helper_installed_runtime_did() -> Option<String> {
+    None
 }
 
 /// The public runtime DID, and a signing key that is not the device key.

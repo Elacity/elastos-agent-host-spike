@@ -627,10 +627,7 @@ fn observe_audit_chain_activation_file_identity(
 fn observe_runtime_device_key_file_identity(
     data_dir: &Path,
 ) -> anyhow::Result<Option<RegularFileIdentity>> {
-    observe_optional_regular_file_identity(
-        &elastos_identity::device_key_path(data_dir),
-        "runtime device key",
-    )
+    crate::auth_state_files::observe_device_key_for_auth_load(data_dir)
 }
 
 fn invalidate_verified_auth_state_cache(data_dir: &Path) {
@@ -12605,7 +12602,7 @@ pub(crate) fn create_owner_only_dir_all(data_dir: &Path, path: &Path) -> anyhow:
             && metadata.uid() == unsafe { libc::geteuid() }
             && metadata.permissions().mode() & 0o077 != 0
         {
-            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
+            crate::auth_state_files::restrict_nofollow_mode(path, 0o700)
                 .with_context(|| format!("failed to restrict {path:?} to owner-only"))?;
         }
     }

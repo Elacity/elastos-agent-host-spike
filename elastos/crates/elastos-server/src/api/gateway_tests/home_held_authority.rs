@@ -91,7 +91,7 @@ const OPEN_ROWS: &[(&str, &str, &str)] = &[
     ),
     (
         "elastos-runtime/src/provider/path_allow.rs",
-        "file_roots",
+        "root_specs",
         "RuntimeProviderId::Object => OBJECT_ROOTS",
     ),
 ];
@@ -162,7 +162,7 @@ fn rows() -> Vec<HeldRow> {
     ),
     row(
         "elastos-runtime/src/provider/path_allow.rs",
-        "file_roots",
+        "root_specs",
         "RuntimeProviderId::Object => OBJECT_ROOTS",
         1,
         mark(
@@ -985,11 +985,11 @@ fn rows() -> Vec<HeldRow> {
         mark("home-own", "audit chain", "Home", "Home reads its audit chain with this device"),
     ),
     row(
-        "elastos-server/src/auth.rs",
-        "observe_runtime_device_key_file_identity",
+        "elastos-server/src/auth_state_files.rs",
+        "observe_device_key_for_auth_load",
         "device_key_path",
         1,
-        mark("home-own", "device key file", "Home", "Home watches the device key file so a changed key drops the cached auth state"),
+        mark("home-own", "device key file", "Home", "Home watches the device key file so a changed key drops the cached auth state. The object helper treats a fence refusal to stat that file as absent and does not open it."),
     ),
     row(
         "elastos-server/src/auth.rs",
@@ -2137,7 +2137,7 @@ fn localhost_object_and_chain_start_on_the_path_allow_list() {
         if (row.file, row.function, row.mechanism)
             == (
                 "elastos-runtime/src/provider/path_allow.rs",
-                "file_roots",
+                "root_specs",
                 "RuntimeProviderId::Object => OBJECT_ROOTS",
             )
         {
@@ -2149,11 +2149,11 @@ fn localhost_object_and_chain_start_on_the_path_allow_list() {
     let roots = sources()
         .get("elastos-runtime/src/provider/path_allow.rs")
         .expect("path_allow");
-    let bodies = function_raw_bodies(roots, "file_roots");
+    let bodies = function_raw_bodies(roots, "root_specs");
     assert_eq!(bodies.len(), 1);
     assert!(
         bodies[0].contains("RuntimeProviderId::Object => OBJECT_ROOTS"),
-        "the object helper root grant left file_roots"
+        "the object helper root grant left root_specs"
     );
 }
 

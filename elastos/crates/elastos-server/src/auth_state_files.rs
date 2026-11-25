@@ -81,8 +81,6 @@ pub(crate) fn ensure_regular_auth_parent(_data_dir: &Path, _parent: &Path) -> an
 
 #[cfg(unix)]
 pub(crate) fn open_regular_lock_file(path: &Path, label: &str) -> anyhow::Result<File> {
-    use std::os::unix::fs::PermissionsExt;
-
     let mut options = OpenOptions::new();
     options.create(true).truncate(false).read(true).write(true);
     #[cfg(unix)]
@@ -90,13 +88,14 @@ pub(crate) fn open_regular_lock_file(path: &Path, label: &str) -> anyhow::Result
     let file = options
         .open(path)
         .with_context(|| format!("failed to open {label} lock {path:?}"))?;
-    if !file.metadata()?.is_file() {
+    let metadata = file.metadata()?;
+    if !metadata.is_file() {
         anyhow::bail!("{label} lock must be a regular non-symlink file");
     }
     // The mode belongs to the inode this descriptor already holds.
     #[cfg(test)]
     before_lock_file_mode(path);
-    file.set_permissions(std::fs::Permissions::from_mode(0o600))
+    restrict_open_file_mode(&file, 0o600)
         .with_context(|| format!("failed to restrict secret file permissions for {path:?}"))?;
     Ok(file)
 }
@@ -106,16 +105,73 @@ pub(crate) fn open_regular_lock_file(_path: &Path, _label: &str) -> anyhow::Resu
     Err(unsupported_on_this_platform())
 }
 
+/// The object helper refuses these sign-in and audit records, and the
+/// temporary names `write_secret_bytes_atomic` builds for them. Lock files
+/// stay openable: a read still has to take the lock, and the lock is not the
+/// record.
+pub(crate) const OBJECT_HELPER_AUTH_WRITE_REFUSAL: &str =
+    "object helper refuses to write Home sign-in files";
+
+fn auth_sign_in_family(path: &Path) -> bool {
+    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    name == "auth-state.json"
+        || name == "audit-chain-required.json"
+        || (name.starts_with(".auth-state.json.") && name.ends_with(".tmp"))
+        || (name.starts_with(".audit-chain-required.json.") && name.ends_with(".tmp"))
+}
+
+/// Open `path` with `O_NOFOLLOW` and `fchmod` it to `mode` when the mode
+/// differs. A symlink fails the open and its target stays as it is.
+#[cfg(unix)]
+pub(crate) fn restrict_nofollow_mode(path: &Path, mode: u32) -> anyhow::Result<()> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut options = OpenOptions::new();
+    options.read(true).custom_flags(libc::O_NOFOLLOW);
+    let file = options
+        .open(path)
+        .with_context(|| format!("failed to open {path:?} to restrict its mode"))?;
+    let metadata = file.metadata()?;
+    if metadata.file_type().is_symlink() {
+        anyhow::bail!("refusing to change the mode of a symlink {path:?}");
+    }
+    restrict_open_file_mode(&file, mode)
+        .with_context(|| format!("failed to restrict secret file permissions for {path:?}"))
+}
+
+#[cfg(all(test, unix))]
+thread_local! {
+    static SECRET_MODE_NARROWS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(unix)]
+fn restrict_open_file_mode(file: &File, mode: u32) -> anyhow::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let current = file.metadata()?.permissions().mode() & 0o777;
+    if current == mode {
+        return Ok(());
+    }
+    #[cfg(test)]
+    SECRET_MODE_NARROWS.with(|count| count.set(count.get() + 1));
+    file.set_permissions(std::fs::Permissions::from_mode(mode))
+        .context("failed to restrict secret file permissions")
+}
+
 #[cfg(unix)]
 pub(crate) fn set_secret_file_permissions(path: &Path) -> anyhow::Result<()> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let permissions = std::fs::Permissions::from_mode(0o600);
-        std::fs::set_permissions(path, permissions)
-            .with_context(|| format!("failed to restrict secret file permissions for {path:?}"))?;
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut options = OpenOptions::new();
+    options.read(true).custom_flags(libc::O_NOFOLLOW);
+    let file = options
+        .open(path)
+        .with_context(|| format!("failed to restrict secret file permissions for {path:?}"))?;
+    let metadata = file.metadata()?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        anyhow::bail!("secret file must be a regular non-symlink file");
     }
-    Ok(())
+    restrict_open_file_mode(&file, 0o600)
+        .with_context(|| format!("failed to restrict secret file permissions for {path:?}"))
 }
 
 #[cfg(not(unix))]
@@ -165,6 +221,29 @@ pub(crate) fn regular_file_identity_from_metadata(
     Err(unsupported_on_this_platform())
 }
 
+/// The object helper does not open the device key. On macOS the fence also
+/// refuses to stat it. That refusal is an absent identity, so sign-in still
+/// loads. Runtime outside the helper still sees a real permission error.
+pub(crate) fn observe_device_key_for_auth_load(
+    data_dir: &Path,
+) -> anyhow::Result<Option<RegularFileIdentity>> {
+    let path = elastos_identity::device_key_path(data_dir);
+    match observe_optional_regular_file_identity(&path, "runtime device key") {
+        Ok(identity) => Ok(identity),
+        Err(err) if object_helper_cannot_stat_device_key(&err) => Ok(None),
+        Err(err) => Err(err),
+    }
+}
+
+fn object_helper_cannot_stat_device_key(err: &anyhow::Error) -> bool {
+    elastos_identity::object_helper_process()
+        && err.chain().any(|cause| {
+            cause.downcast_ref::<std::io::Error>().is_some_and(|io| {
+                io.kind() == ErrorKind::PermissionDenied || io.raw_os_error() == Some(1)
+            })
+        })
+}
+
 pub(crate) fn observe_optional_regular_file_identity(
     path: &Path,
     label: &str,
@@ -200,6 +279,9 @@ pub(crate) fn write_secret_bytes_atomic(
     path: &Path,
     bytes: &[u8],
 ) -> anyhow::Result<Option<RegularFileIdentity>> {
+    if elastos_identity::object_helper_process() && auth_sign_in_family(path) {
+        anyhow::bail!(OBJECT_HELPER_AUTH_WRITE_REFUSAL);
+    }
     let unique = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|duration| duration.as_nanos())
@@ -259,10 +341,7 @@ fn run_auth_state_write_hook(path: &Path) -> anyhow::Result<()> {
 /// Sets mode `0600` on a descriptor the caller already holds.
 #[cfg(unix)]
 pub(crate) fn set_open_secret_file_permissions(file: &File) -> anyhow::Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-    file.set_permissions(std::fs::Permissions::from_mode(0o600))
-        .context("failed to restrict secret file permissions")?;
-    Ok(())
+    restrict_open_file_mode(file, 0o600)
 }
 
 #[cfg(all(test, unix))]
@@ -395,5 +474,54 @@ mod tests {
         let text = format!("{error:#}");
         assert!(text.contains("failed to read"), "{text}");
         assert_eq!(mode(&path), 0o000);
+    }
+
+    #[test]
+    fn secret_mode_changes_only_when_it_differs_and_a_symlink_is_not_followed() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("recovery-archive.key");
+        let victim = dir.path().join("victim");
+        write_mode(&victim, b"victim", 0o644);
+        write_mode(&path, b"key", 0o644);
+        super::SECRET_MODE_NARROWS.with(|count| count.set(0));
+        super::set_secret_file_permissions(&path).unwrap();
+        assert_eq!(mode(&path), 0o600);
+        assert_eq!(super::SECRET_MODE_NARROWS.with(|count| count.get()), 1);
+        super::set_secret_file_permissions(&path).unwrap();
+        assert_eq!(mode(&path), 0o600);
+        assert_eq!(
+            super::SECRET_MODE_NARROWS.with(|count| count.get()),
+            1,
+            "a matching mode does not fchmod again"
+        );
+        fs::remove_file(&path).unwrap();
+        std::os::unix::fs::symlink(&victim, &path).unwrap();
+        let error = super::set_secret_file_permissions(&path).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("failed to restrict secret file permissions"),
+            "{error:#}"
+        );
+        assert_eq!(mode(&victim), 0o644, "symlink target mode changed");
+    }
+
+    #[test]
+    fn a_directory_narrows_through_the_open_descriptor() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("folder");
+        fs::create_dir(&path).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+        super::restrict_nofollow_mode(&path, 0o700).unwrap();
+        assert_eq!(mode(&path), 0o700);
+        super::restrict_nofollow_mode(&path, 0o700).unwrap();
+        assert_eq!(mode(&path), 0o700);
+    }
+
+    #[test]
+    fn this_process_can_write_a_sign_in_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("auth-state.json");
+        super::write_secret_bytes_atomic(&path, b"{\"ok\":true}").unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"{\"ok\":true}");
+        assert!(!elastos_identity::object_helper_process());
     }
 }

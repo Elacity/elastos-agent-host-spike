@@ -331,6 +331,7 @@ async fn localhost_and_object_providers_work_inside_their_fences() {
         "the confined helper must not create a runtime-did file"
     );
     object_bridge.shutdown().await.unwrap();
+    recovery_kit_touch(&object_bin).await;
 }
 
 /// An old data directory has no helper capsule.json. The helpers still start
@@ -576,6 +577,7 @@ async fn an_updated_home_reads_existing_files_through_the_fence() {
     } else {
         eprintln!("other-volume-read none");
     }
+    recovery_kit_touch(&provider_binary("object-provider")).await;
 }
 
 /// Source and installed Homes both run `setup_server_infrastructure_impl`.
@@ -786,6 +788,7 @@ async fn fenced_object_library_list_gets_viewers_from_the_runtime() {
         "capabilities lost a field: {before:?} -> {after:?}"
     );
     started.bridge().shutdown().await.unwrap();
+    recovery_kit_touch(&provider_binary("object-provider")).await;
 }
 
 /// Deleting the gateway's object fill (the call after `send_raw`) turns this
@@ -803,9 +806,34 @@ fn gateway_object_reply_calls_fill_fenced_library_fields() {
         window.contains("crate::library::fill_fenced_library_fields"),
         "deleting gateway_provider_proxy's object fill turns this row red"
     );
+    let home = include_str!("api/gateway_home_system.rs");
+    let bridge = include_str!("resource_bridge.rs");
+    let server = include_str!("server_infra.rs");
+    // One deleted call site stays red. A `contains` check stays green when
+    // another call in the same file remains.
+    assert_eq!(
+        proxy.matches("fill_fenced_library_fields(").count(),
+        2,
+        "gateway_provider_proxy fill sites"
+    );
+    assert_eq!(
+        home.matches("fill_fenced_library_fields(").count(),
+        3,
+        "desktop, trash, and desktop events"
+    );
+    assert_eq!(
+        bridge.matches("fill_fenced_library_fields(").count(),
+        1,
+        "resource_bridge fill sites"
+    );
+    assert_eq!(
+        server.matches("fill_fenced_library_fields(").count(),
+        1,
+        "server_infra fill sites"
+    );
     for (label, path) in [
-        ("desktop", include_str!("api/gateway_home_system.rs")),
-        ("resource_bridge", include_str!("resource_bridge.rs")),
+        ("desktop", home),
+        ("resource_bridge", bridge),
         ("library events", proxy),
     ] {
         assert!(
@@ -830,7 +858,7 @@ async fn musl_release_helpers_start_under_the_fence() {
     use base64::Engine as _;
     use sha2::{Digest, Sha256};
     use std::io::Write as _;
-    use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
     fn binary(key: &str) -> PathBuf {
         let path = std::env::var(key).unwrap_or_else(|_| panic!("{key} is unset"));
@@ -897,6 +925,103 @@ async fn musl_release_helpers_start_under_the_fence() {
     )
     .await;
     assert_eq!(read["status"], "ok", "{read}");
+
+    // A 4 MiB read is its own musl mallocng group. Freeing it calls munmap.
+    // Eight reads that keep the mapping grow the helper by tens of mebibytes.
+    let bulk = data.join("ElastOS/bulk.bin");
+    {
+        let mut file = std::fs::File::create(&bulk).unwrap();
+        let chunk = vec![b'a'; 1024 * 1024];
+        for _ in 0..4 {
+            file.write_all(&chunk).unwrap();
+        }
+    }
+    fn resident_kib(binary: &Path) -> u64 {
+        let want = std::fs::metadata(binary).unwrap();
+        let want_path = std::fs::canonicalize(binary).unwrap();
+        let mut matches = Vec::new();
+        for entry in std::fs::read_dir("/proc").unwrap().flatten() {
+            if !entry
+                .file_name()
+                .to_string_lossy()
+                .chars()
+                .all(|ch| ch.is_ascii_digit())
+            {
+                continue;
+            }
+            let exe = entry.path().join("exe");
+            let same_file = std::fs::metadata(&exe)
+                .map(|meta| meta.dev() == want.dev() && meta.ino() == want.ino())
+                .unwrap_or(false);
+            let same_path = std::fs::read_link(&exe)
+                .map(|path| path == want_path || path == binary)
+                .unwrap_or(false);
+            if !same_file && !same_path {
+                continue;
+            }
+            let status = std::fs::read_to_string(entry.path().join("status")).unwrap_or_default();
+            let kib = status.lines().find_map(|line| {
+                let rest = line.strip_prefix("VmRSS:")?;
+                rest.split_whitespace().next()?.parse::<u64>().ok()
+            });
+            if let Some(kib) = kib {
+                matches.push(kib);
+            }
+        }
+        assert_eq!(
+            matches.len(),
+            1,
+            "localhost helper resident set: {matches:?}"
+        );
+        matches[0]
+    }
+    let warm = exchange(
+        localhost.bridge(),
+        serde_json::json!({
+            "op": "read",
+            "path": "ElastOS/bulk.bin",
+            "encoding": "utf8"
+        }),
+    )
+    .await;
+    assert_eq!(warm["status"], "ok", "{warm}");
+    assert_eq!(warm["data"]["size"], 4 * 1024 * 1024, "{warm}");
+    drop(warm);
+    let before = resident_kib(&localhost_bin);
+    for _ in 0..8 {
+        let got = exchange(
+            localhost.bridge(),
+            serde_json::json!({
+                "op": "read",
+                "path": "ElastOS/bulk.bin",
+                "encoding": "utf8"
+            }),
+        )
+        .await;
+        assert_eq!(got["status"], "ok", "{got}");
+        assert_eq!(got["data"]["size"], 4 * 1024 * 1024);
+    }
+    let after = resident_kib(&localhost_bin);
+    assert!(
+        after.saturating_sub(before) < 16 * 1024,
+        "localhost resident grew from {before} KiB to {after} KiB"
+    );
+    std::fs::create_dir_all(data.join("ElastOS/tree/nested")).unwrap();
+    std::fs::write(data.join("ElastOS/tree/nested/leaf.txt"), b"leaf").unwrap();
+    let deleted = exchange(
+        localhost.bridge(),
+        serde_json::json!({
+            "op": "delete",
+            "path": "ElastOS/tree",
+            "recursive": true
+        }),
+    )
+    .await;
+    assert_eq!(deleted["status"], "ok", "{deleted}");
+    assert!(
+        !data.join("ElastOS/tree").exists(),
+        "localhost left the tree"
+    );
     localhost.bridge().shutdown().await.unwrap();
 
     std::fs::remove_dir_all(data.join("ElastOS")).unwrap();
@@ -1033,56 +1158,573 @@ async fn musl_release_helpers_start_under_the_fence() {
     bridge.shutdown().await.unwrap();
 
     let resolv = std::fs::read_to_string("/etc/resolv.conf").unwrap_or_default();
-    assert!(
-        resolv.lines().any(|line| {
-            let mut parts = line.split_whitespace();
-            parts.next() == Some("nameserver")
-                && parts.next().is_some_and(|addr| addr.starts_with("127."))
-        }),
-        "the musl fence proof needs a loopback nameserver in /etc/resolv.conf:\n{resolv}"
-    );
-    let chain = elastos_runtime::provider::ProviderBridge::spawn_path_allow(
-        "chain-provider",
-        &authority(),
-        &pinned(&chain_bin, &data),
-        &data,
+    let loopback_nameserver = resolv.lines().any(|line| {
+        let mut parts = line.split_whitespace();
+        parts.next() == Some("nameserver")
+            && parts.next().is_some_and(|addr| addr.starts_with("127."))
+    });
+    if !loopback_nameserver {
+        eprintln!(
+            "musl fence: this machine has no loopback nameserver, so the chain DNS leg is not run"
+        );
+    } else {
+        let chain = elastos_runtime::provider::ProviderBridge::spawn_path_allow(
+            "chain-provider",
+            &authority(),
+            &pinned(&chain_bin, &data),
+            &data,
+            elastos_runtime::provider::BridgeProviderConfig {
+                base_path: data.display().to_string(),
+                extra: serde_json::json!({
+                    "networks": [{
+                        "id": "dns-probe",
+                        "display_name": "DNS Probe",
+                        "kind": "evm_json_rpc",
+                        "chain_id": 1,
+                        "native_symbol": "ETH",
+                        "provider": "probe",
+                        "mainnet": false,
+                        "explorer_url": null,
+                        "rpc_url": "https://musl-fence.invalid/rpc"
+                    }]
+                }),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap_or_else(|err| panic!("musl chain init failed: {err}"));
+        let lookup = exchange(
+            chain.bridge(),
+            serde_json::json!({"op": "status", "network": "dns-probe"}),
+        )
+        .await;
+        let lookup_text = lookup.to_string().to_lowercase();
+        assert!(
+            !lookup_text.contains("permission denied")
+                && !lookup_text.contains("operation not permitted")
+                && !lookup_text.contains("bad system call"),
+            "chain name lookup was refused by the filter: {lookup}"
+        );
+        let again = exchange(chain.bridge(), serde_json::json!({"op": "networks"})).await;
+        assert_eq!(
+            again["status"], "ok",
+            "chain stayed up after the lookup: {again}"
+        );
+        chain.bridge().shutdown().await.unwrap();
+    }
+    recovery_kit_round_trip(&object_bin).await;
+    eprintln!("musl helper fence: started");
+}
+
+#[cfg(any(
+    all(not(elastos_unsupported_os_check), target_os = "macos"),
+    all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    )
+))]
+fn helper_authority() -> elastos_common::ProviderAuthority {
+    serde_json::from_value(serde_json::json!({
+        "reason": "runtime grant",
+        "capabilities": [],
+        "audit_events": [],
+        "rights": []
+    }))
+    .expect("full grant authority")
+}
+
+#[cfg(any(
+    all(not(elastos_unsupported_os_check), target_os = "macos"),
+    all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    )
+))]
+fn pinned_helper(path: &Path, data_dir: &Path) -> elastos_runtime::provider::CheckedExecutable {
+    use sha2::{Digest, Sha256};
+    let digest = hex::encode(Sha256::digest(std::fs::read(path).unwrap()));
+    elastos_runtime::provider::CheckedExecutable::pinned(path, &format!("sha256:{digest}"))
+        .unwrap()
+        .with_home_data_dir(data_dir)
+}
+
+#[cfg(any(
+    all(not(elastos_unsupported_os_check), target_os = "macos"),
+    all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    )
+))]
+fn helper_data_root() -> (tempfile::TempDir, PathBuf) {
+    use std::os::unix::fs::PermissionsExt;
+    let temp = tempfile::tempdir().unwrap();
+    let path = std::fs::canonicalize(temp.path()).unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+    for name in elastos_common::localhost::FILE_BACKED_ROOTS {
+        let root = path.join(name);
+        std::fs::create_dir(&root).unwrap();
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    (temp, path)
+}
+
+#[cfg(any(
+    all(not(elastos_unsupported_os_check), target_os = "macos"),
+    all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    )
+))]
+fn file_mode(path: &Path) -> u32 {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::symlink_metadata(path)
+        .unwrap()
+        .permissions()
+        .mode()
+        & 0o777
+}
+
+#[cfg(any(
+    all(not(elastos_unsupported_os_check), target_os = "macos"),
+    all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    )
+))]
+fn recovery_key_path(data: &Path) -> PathBuf {
+    data.join("ElastOS/System/Auth/recovery-archive.key")
+}
+
+#[cfg(any(
+    all(not(elastos_unsupported_os_check), target_os = "macos"),
+    all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    )
+))]
+fn auth_record_paths(data: &Path) -> (PathBuf, PathBuf) {
+    let dir = data.join("ElastOS/System/Auth");
+    (
+        dir.join("auth-state.json"),
+        dir.join("audit-chain-required.json"),
+    )
+}
+
+#[cfg(any(
+    all(not(elastos_unsupported_os_check), target_os = "macos"),
+    all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    )
+))]
+async fn exchange_ok(
+    bridge: &elastos_runtime::provider::ProviderBridge,
+    request: serde_json::Value,
+) -> serde_json::Value {
+    bridge
+        .send_raw(&request)
+        .await
+        .unwrap_or_else(|err| panic!("{request}: {err}"))
+}
+
+#[cfg(any(
+    all(not(elastos_unsupported_os_check), target_os = "macos"),
+    all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    )
+))]
+async fn spawn_object(
+    binary: &Path,
+    data: &Path,
+    did: &str,
+) -> elastos_runtime::provider::Confined {
+    elastos_runtime::provider::ProviderBridge::spawn_path_allow(
+        "object-provider",
+        &helper_authority(),
+        &pinned_helper(binary, data),
+        data,
         elastos_runtime::provider::BridgeProviderConfig {
             base_path: data.display().to_string(),
-            extra: serde_json::json!({
-                "networks": [{
-                    "id": "dns-probe",
-                    "display_name": "DNS Probe",
-                    "kind": "evm_json_rpc",
-                    "chain_id": 1,
-                    "native_symbol": "ETH",
-                    "provider": "probe",
-                    "mainnet": false,
-                    "explorer_url": null,
-                    "rpc_url": "https://musl-fence.invalid/rpc"
-                }]
-            }),
+            extra: serde_json::json!({ "runtime_did": did }),
             ..Default::default()
         },
     )
     .await
-    .unwrap_or_else(|err| panic!("musl chain init failed: {err}"));
-    let lookup = exchange(
-        chain.bridge(),
-        serde_json::json!({"op": "status", "network": "dns-probe"}),
+    .unwrap_or_else(|err| panic!("object init failed: {err}"))
+}
+
+/// One write and one read with a Recovery Kit already on disk. The key is
+/// widened to 0644 first, so the helper has to narrow it with fchmod.
+#[cfg(any(
+    all(not(elastos_unsupported_os_check), target_os = "macos"),
+    all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    )
+))]
+async fn recovery_kit_touch(binary: &Path) {
+    use base64::Engine;
+    use std::os::unix::fs::PermissionsExt;
+    let (_hold, data) = helper_data_root();
+    let principal = "person:local:ada";
+    let protection = crate::auth::store_test_principal_root_protection(&data, principal);
+    let key = recovery_key_path(&data);
+    assert!(key.is_file(), "the kit stores recovery-archive.key");
+    std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o644)).unwrap();
+    let (_, did) = elastos_identity::load_or_create_did(&data).unwrap();
+    let object = spawn_object(binary, &data, &did).await;
+    let bridge = object.bridge();
+    let uri = format!("{}/kit.txt", protection.localhost_root);
+    let payload = base64::engine::general_purpose::STANDARD.encode(b"kit");
+    let wrote = exchange_ok(
+        bridge,
+        serde_json::json!({
+            "op": "write",
+            "principal_id": principal,
+            "uri": uri,
+            "data": payload
+        }),
     )
     .await;
-    let lookup_text = lookup.to_string().to_lowercase();
-    assert!(
-        !lookup_text.contains("permission denied")
-            && !lookup_text.contains("operation not permitted")
-            && !lookup_text.contains("bad system call"),
-        "chain name lookup was refused by the filter: {lookup}"
-    );
-    let again = exchange(chain.bridge(), serde_json::json!({"op": "networks"})).await;
+    assert_eq!(wrote["status"], "ok", "{wrote}");
+    let read = exchange_ok(
+        bridge,
+        serde_json::json!({"op": "read", "principal_id": principal, "uri": uri}),
+    )
+    .await;
+    assert_eq!(read["status"], "ok", "{read}");
+    assert_eq!(read["data"]["data"], payload);
     assert_eq!(
-        again["status"], "ok",
-        "chain stayed up after the lookup: {again}"
+        file_mode(&key),
+        0o600,
+        "the helper left the key writable by others"
     );
-    chain.bridge().shutdown().await.unwrap();
-    eprintln!("musl helper fence: started");
+    assert_eq!(std::fs::read(&key).unwrap().len(), 32);
+    bridge.shutdown().await.unwrap();
+}
+
+/// Protected root, key present and then created by the helper. List, read,
+/// write, rename, delete, archive preview, and the desktop list the summary
+/// sends all go through the fenced object helper.
+#[cfg(any(
+    all(not(elastos_unsupported_os_check), target_os = "macos"),
+    all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    )
+))]
+async fn recovery_kit_round_trip(binary: &Path) {
+    use base64::Engine;
+    use std::io::Write;
+    use std::os::unix::fs::PermissionsExt;
+    let (_hold, data) = helper_data_root();
+    let principal = "person:local:ada";
+    let protection = crate::auth::store_test_principal_root_protection(&data, principal);
+    let root = protection.localhost_root;
+    let key = recovery_key_path(&data);
+    let key_before = std::fs::read(&key).unwrap();
+    assert_eq!(key_before.len(), 32);
+    std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o644)).unwrap();
+    let (_, did) = elastos_identity::load_or_create_did(&data).unwrap();
+    let object = spawn_object(binary, &data, &did).await;
+    let bridge = object.bridge();
+    let payload = base64::engine::general_purpose::STANDARD.encode(b"protected");
+    let note = format!("{root}/note.txt");
+    let listed = exchange_ok(
+        bridge,
+        serde_json::json!({"op": "list", "principal_id": principal, "uri": root}),
+    )
+    .await;
+    assert_eq!(listed["status"], "ok", "{listed}");
+    let wrote = exchange_ok(
+        bridge,
+        serde_json::json!({
+            "op": "write",
+            "principal_id": principal,
+            "uri": note,
+            "data": payload
+        }),
+    )
+    .await;
+    assert_eq!(wrote["status"], "ok", "{wrote}");
+    assert_eq!(file_mode(&key), 0o600);
+    assert_eq!(std::fs::read(&key).unwrap(), key_before);
+    let read = exchange_ok(
+        bridge,
+        serde_json::json!({"op": "read", "principal_id": principal, "uri": note}),
+    )
+    .await;
+    assert_eq!(read["status"], "ok", "{read}");
+    assert_eq!(read["data"]["data"], payload);
+    let renamed = exchange_ok(
+        bridge,
+        serde_json::json!({
+            "op": "rename",
+            "principal_id": principal,
+            "uri": note,
+            "name": "renamed.txt"
+        }),
+    )
+    .await;
+    assert_eq!(renamed["status"], "ok", "{renamed}");
+    let renamed_uri = format!("{root}/renamed.txt");
+    let trashed = exchange_ok(
+        bridge,
+        serde_json::json!({"op": "trash", "principal_id": principal, "uri": renamed_uri}),
+    )
+    .await;
+    assert_eq!(trashed["status"], "ok", "{trashed}");
+    let trash_uri = trashed["data"]["object"]["uri"]
+        .as_str()
+        .unwrap_or_else(|| panic!("trash uri missing: {trashed}"));
+    let deleted = exchange_ok(
+        bridge,
+        serde_json::json!({
+            "op": "delete_permanently",
+            "principal_id": principal,
+            "uri": trash_uri
+        }),
+    )
+    .await;
+    assert_eq!(deleted["status"], "ok", "{deleted}");
+    let mut zip_bytes = Vec::new();
+    {
+        let mut writer = zip::ZipWriter::new(std::io::Cursor::new(&mut zip_bytes));
+        writer
+            .start_file("note.txt", zip::write::SimpleFileOptions::default())
+            .unwrap();
+        writer.write_all(b"preview-text").unwrap();
+        writer.finish().unwrap();
+    }
+    let archive_uri = format!("{root}/notes.zip");
+    let archived = exchange_ok(
+        bridge,
+        serde_json::json!({
+            "op": "write",
+            "principal_id": principal,
+            "uri": archive_uri,
+            "data": base64::engine::general_purpose::STANDARD.encode(&zip_bytes)
+        }),
+    )
+    .await;
+    assert_eq!(archived["status"], "ok", "{archived}");
+    let preview = exchange_ok(
+        bridge,
+        serde_json::json!({
+            "op": "archive_preview_entry",
+            "principal_id": principal,
+            "uri": archive_uri,
+            "entry": "note.txt"
+        }),
+    )
+    .await;
+    assert_eq!(preview["status"], "ok", "{preview}");
+    let desktop = format!("{root}/Desktop");
+    let made = exchange_ok(
+        bridge,
+        serde_json::json!({
+            "op": "mkdir",
+            "principal_id": principal,
+            "parent_uri": root,
+            "name": "Desktop"
+        }),
+    )
+    .await;
+    assert_eq!(made["status"], "ok", "{made}");
+    let desk = format!("{desktop}/desk.txt");
+    let desk_wrote = exchange_ok(
+        bridge,
+        serde_json::json!({
+            "op": "write",
+            "principal_id": principal,
+            "uri": desk,
+            "data": payload
+        }),
+    )
+    .await;
+    assert_eq!(desk_wrote["status"], "ok", "{desk_wrote}");
+    let summary = exchange_ok(
+        bridge,
+        serde_json::json!({"op": "list", "principal_id": principal, "uri": desktop}),
+    )
+    .await;
+    assert_eq!(summary["status"], "ok", "{summary}");
+    assert!(
+        summary.to_string().contains("desk.txt"),
+        "desktop summary list missed the file: {summary}"
+    );
+    std::fs::remove_file(&key).unwrap();
+    assert!(!key.exists());
+    let missing = exchange_ok(
+        bridge,
+        serde_json::json!({
+            "op": "write",
+            "principal_id": principal,
+            "uri": format!("{root}/after-key.txt"),
+            "data": payload
+        }),
+    )
+    .await;
+    let missing_text = missing.to_string();
+    // A missing key is created here, then the kit already stored cannot be
+    // opened with that new random key. The fence answer is not a refusal.
+    assert_ne!(missing["status"], "ok", "{missing}");
+    assert!(
+        !missing_text.contains("Permission denied")
+            && !missing_text.contains("Operation not permitted")
+            && !missing_text.contains("Bad system call")
+            && !missing_text.contains("bad system call"),
+        "{missing}"
+    );
+    assert!(key.is_file(), "the helper did not create the missing key");
+    assert_eq!(file_mode(&key), 0o600);
+    assert_eq!(std::fs::read(&key).unwrap().len(), 32);
+    std::fs::write(&key, &key_before).unwrap();
+    std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o644)).unwrap();
+    let created = exchange_ok(
+        bridge,
+        serde_json::json!({
+            "op": "write",
+            "principal_id": principal,
+            "uri": format!("{root}/after-key.txt"),
+            "data": payload
+        }),
+    )
+    .await;
+    assert_eq!(created["status"], "ok", "{created}");
+    assert_eq!(file_mode(&key), 0o600);
+    assert_eq!(std::fs::read(&key).unwrap(), key_before);
+    let created_read = exchange_ok(
+        bridge,
+        serde_json::json!({
+            "op": "read",
+            "principal_id": principal,
+            "uri": format!("{root}/after-key.txt")
+        }),
+    )
+    .await;
+    assert_eq!(created_read["status"], "ok", "{created_read}");
+    assert_eq!(created_read["data"]["data"], payload);
+    bridge.shutdown().await.unwrap();
+}
+
+#[cfg(all(
+    not(elastos_unsupported_os_check),
+    any(
+        target_os = "macos",
+        all(
+            target_os = "linux",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        )
+    )
+))]
+#[tokio::test]
+async fn protected_root_with_a_recovery_kit_round_trip() {
+    recovery_kit_round_trip(&provider_binary("object-provider")).await;
+}
+
+/// The object helper does not repair a sign-in file that is ahead of its
+/// audit record. The two files keep the bytes they had.
+#[cfg(all(
+    not(elastos_unsupported_os_check),
+    any(
+        target_os = "macos",
+        all(
+            target_os = "linux",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        )
+    )
+))]
+#[tokio::test]
+async fn object_helper_leaves_a_split_sign_in_record_unchanged() {
+    let (_hold, data) = helper_data_root();
+    let ada = "person:local:ada";
+    crate::auth::store_test_human_principal(&data, ada);
+    let (auth_path, audit_path) = auth_record_paths(&data);
+    let audit_ada = std::fs::read(&audit_path).unwrap();
+    crate::auth::store_test_human_principal(&data, "person:local:bob");
+    let audit_bob = std::fs::read(&audit_path).unwrap();
+    if audit_ada != audit_bob {
+        std::fs::write(&audit_path, &audit_ada).unwrap();
+    } else {
+        std::fs::remove_file(&audit_path).unwrap();
+    }
+    let auth_before = std::fs::read(&auth_path).unwrap();
+    let audit_before = std::fs::read(&audit_path).ok();
+    let (_, did) = elastos_identity::load_or_create_did(&data).unwrap();
+    let object = spawn_object(&provider_binary("object-provider"), &data, &did).await;
+    let answer = exchange_ok(
+        object.bridge(),
+        serde_json::json!({"op": "list", "principal_id": ada}),
+    )
+    .await;
+    let text = answer.to_string();
+    assert!(
+        text.contains(crate::auth_state_files::OBJECT_HELPER_AUTH_WRITE_REFUSAL),
+        "{answer}"
+    );
+    assert_eq!(answer["status"], "error", "{answer}");
+    assert_eq!(std::fs::read(&auth_path).unwrap(), auth_before);
+    assert_eq!(std::fs::read(&audit_path).ok(), audit_before);
+    let auth_dir = auth_path.parent().unwrap();
+    for entry in std::fs::read_dir(auth_dir).unwrap() {
+        let name = entry.unwrap().file_name();
+        let name = name.to_string_lossy();
+        assert!(!name.contains(".tmp"), "the refused write left {name}");
+    }
+    object.bridge().shutdown().await.unwrap();
+}
+
+/// `device:<did>` uses the DID Runtime passed in. An unknown principal keeps
+/// its own refusal. Neither opens the device key.
+#[cfg(all(
+    not(elastos_unsupported_os_check),
+    any(
+        target_os = "macos",
+        all(
+            target_os = "linux",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        )
+    )
+))]
+#[tokio::test]
+async fn object_helper_uses_the_runtime_did_and_names_an_unknown_principal() {
+    let (_hold, data) = helper_data_root();
+    crate::auth::store_test_human_principal(&data, "person:local:ada");
+    let key = data.join("identity/device.key");
+    let key_before = std::fs::read(&key).unwrap();
+    let (_, did) = elastos_identity::load_or_create_did(&data).unwrap();
+    let object = spawn_object(&provider_binary("object-provider"), &data, &did).await;
+    let bridge = object.bridge();
+    let device_id = format!("device:{did}");
+    let device = exchange_ok(
+        bridge,
+        serde_json::json!({"op": "list", "principal_id": device_id}),
+    )
+    .await;
+    assert_eq!(device["status"], "ok", "{device}");
+    let uri = device["data"]["uri"].as_str().unwrap_or("");
+    assert!(
+        uri.starts_with("localhost://Users/"),
+        "device root: {device}"
+    );
+    assert_eq!(std::fs::read(&key).unwrap(), key_before);
+    let unknown = exchange_ok(
+        bridge,
+        serde_json::json!({"op": "list", "principal_id": "person:local:missing"}),
+    )
+    .await;
+    let text = unknown.to_string();
+    assert_eq!(unknown["status"], "error", "{unknown}");
+    assert!(
+        text.contains("person:local:missing") && text.contains("has no stored record"),
+        "{unknown}"
+    );
+    assert!(
+        !text.contains("device.key") && !text.contains("Permission denied"),
+        "{unknown}"
+    );
+    assert_eq!(std::fs::read(&key).unwrap(), key_before);
+    bridge.shutdown().await.unwrap();
 }
