@@ -4944,7 +4944,7 @@ pub(in crate::api) fn auth_error_response(err: anyhow::Error) -> Response {
         )
             .into_response();
     }
-    if err.is::<RecoveryKitPreparationRefused>() || err.is::<crate::agents::Refused>() {
+    if err.is::<RecoveryKitPreparationRefused>() || crate::agents::refusal_text(&err).is_some() {
         return (StatusCode::CONFLICT, err.to_string()).into_response();
     }
     let text = err.to_string();

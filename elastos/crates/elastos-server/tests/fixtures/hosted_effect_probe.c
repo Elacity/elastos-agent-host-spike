@@ -63,15 +63,29 @@ int main(void) {
             if (count <= 0) return 8;
             sent += (size_t)count;
         }
-        char reply[256];
-        ssize_t count = read(client, reply, sizeof(reply) - 1);
+        char raw[8192];
+        size_t got = 0;
+        while (got + 1 < sizeof(raw)) {
+            ssize_t count = read(client, raw + got, sizeof(raw) - 1 - got);
+            if (count < 0) {
+                close(client);
+                return 9;
+            }
+            if (count == 0) break;
+            got += (size_t)count;
+        }
         close(client);
-        if (count <= 0) return 9;
-        reply[count] = 0;
-        char *first_line = strstr(reply, "\r\n");
-        if (!first_line) return 10;
-        *first_line = 0;
-        printf("{\"status\":\"ok\",\"data\":{\"http_status\":\"%s\"}}\n", reply);
+        if (got == 0) return 9;
+        raw[got] = 0;
+        char *line_end = strstr(raw, "\r\n");
+        if (!line_end || (size_t)(line_end - raw) >= 120) return 10;
+        char status[120];
+        size_t status_len = (size_t)(line_end - raw);
+        memcpy(status, raw, status_len);
+        status[status_len] = 0;
+        printf("{\"status\":\"ok\",\"data\":{\"http_status\":\"%s\",\"http_reply\":\"", status);
+        for (size_t i = 0; i < got; i++) printf("%02x", (unsigned char)raw[i]);
+        printf("\"}}\n");
         fflush(stdout);
     }
     return 0;

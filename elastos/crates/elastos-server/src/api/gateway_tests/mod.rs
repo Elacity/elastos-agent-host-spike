@@ -1240,6 +1240,8 @@ mod wallet;
 
 #[path = "../gateway_home_update/tests.rs"]
 mod home_update;
+#[cfg(unix)]
+mod tests;
 
 /// Each of the three mappers answers the held-root refusal with 403 and the
 /// bare text, including under the path context `home_state_write_error` puts
