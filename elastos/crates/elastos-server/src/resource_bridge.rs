@@ -1176,6 +1176,25 @@ async fn authorize_and_dispatch_resource_invoke(
         return finish_component_invoke(bridge_ctx, &audit_id, &dispatch, outcome, response);
     }
 
+    // A v2 read names a root this path does not offer. It is not sent on.
+    if dispatch.operation == "read"
+        && dispatch
+            .request
+            .get("check_revision")
+            .and_then(|value| value.as_bool())
+            == Some(true)
+    {
+        if let Some(root) = unoffered_v2_read_root(&dispatch.resource) {
+            return finish_component_invoke(
+                bridge_ctx,
+                &audit_id,
+                &dispatch,
+                "error",
+                resource_error_response("root_not_offered", &format!("{root} is not offered")),
+            );
+        }
+    }
+
     if dispatch.scheme == "model" {
         if let Some(refusal) = model_budget_refusal(bridge_ctx) {
             return finish_component_invoke(bridge_ctx, &audit_id, &dispatch, "denied", refusal);
@@ -1330,6 +1349,15 @@ fn submit_agent_plan_response(
             })
         }
         Err(err) => resource_error_response("submit_agent_plan_refused", &err.to_string()),
+    }
+}
+
+/// Local, Public, and Users are offered. Any other localhost root is named.
+fn unoffered_v2_read_root(resource: &str) -> Option<&str> {
+    let (root, _) = elastos_common::localhost::parse_localhost_uri(resource)?;
+    match root {
+        "Local" | "Public" | "Users" => None,
+        other => Some(other),
     }
 }
 
@@ -2208,7 +2236,7 @@ async fn handle_request(line: &str, ctx: &Option<BridgeContext>) -> Result<serde
                                 None,
                             );
                             let token = encode_bridge_capability_token(&token);
-                            serde_json::json!({"type": "capability_token", "token": token})
+                            capability_token_response(&token)
                         }
                         false => resource_error_response("not_found", NO_LAUNCH),
                     };
@@ -2325,10 +2353,7 @@ async fn handle_request(line: &str, ctx: &Option<BridgeContext>) -> Result<serde
                             resource,
                             ctx.capsule_id,
                         );
-                        serde_json::json!({
-                            "type": "capability_token",
-                            "token": token_b64,
-                        })
+                        capability_token_response(&token_b64)
                     } else {
                         tracing::warn!(
                             "bridge: capability request timed out {} {} for capsule '{}'",
@@ -2392,6 +2417,32 @@ fn encode_bridge_capability_token(
     token: &elastos_runtime::capability::token::CapabilityToken,
 ) -> String {
     token.to_base64().unwrap_or_default()
+}
+
+/// The guest's grant line. A once grant carries `max_uses`. An expiring
+/// grant carries `expires_at_ms`. A session grant stays the two-field line.
+fn capability_token_response(token_b64: &str) -> serde_json::Value {
+    let mut response = serde_json::Map::new();
+    response.insert(
+        "type".into(),
+        serde_json::Value::String("capability_token".into()),
+    );
+    response.insert(
+        "token".into(),
+        serde_json::Value::String(token_b64.to_string()),
+    );
+    if let Ok(token) = elastos_runtime::capability::token::CapabilityToken::from_base64(token_b64) {
+        if let Some(uses) = token.constraints().max_uses() {
+            response.insert("max_uses".into(), serde_json::json!(uses));
+        }
+        if let Some(expiry) = token.expiry() {
+            response.insert(
+                "expires_at_ms".into(),
+                serde_json::json!(expiry.unix_secs.saturating_mul(1_000)),
+            );
+        }
+    }
+    serde_json::Value::Object(response)
 }
 
 pub async fn handle_remote_request(
@@ -2723,10 +2774,7 @@ pub async fn handle_remote_request_with_audit_dir(
             let body: serde_json::Value = resp.json().await?;
 
             if let Some(token) = body.get("token").and_then(|t| t.as_str()) {
-                serde_json::json!({
-                    "type": "capability_token",
-                    "token": token,
-                })
+                capability_token_response(token)
             } else {
                 match body.get("status").and_then(|s| s.as_str()) {
                     Some("denied") | Some("auto_denied") | Some("expired") => {
@@ -2779,10 +2827,7 @@ pub async fn handle_remote_request_with_audit_dir(
 
                 let token = token
                     .ok_or_else(|| anyhow::anyhow!("capability request still pending after 30s"))?;
-                serde_json::json!({
-                    "type": "capability_token",
-                    "token": token,
-                })
+                capability_token_response(&token)
             }
         }
         "ping" => serde_json::json!({"type": "pong"}),
@@ -2881,6 +2926,27 @@ pub(crate) mod tests {
     };
     use std::sync::Arc;
     use tokio::sync::Mutex;
+
+    #[test]
+    fn a_v2_read_names_every_localhost_root_this_path_does_not_offer() {
+        assert_eq!(unoffered_v2_read_root("localhost://Local/a"), None);
+        assert_eq!(unoffered_v2_read_root("localhost://Public/a"), None);
+        assert_eq!(unoffered_v2_read_root("localhost://Users/self/a"), None);
+        for root in [
+            "MyWebSite",
+            "ElastOS",
+            "AppCapsules",
+            "UsersAI",
+            "WebSpaces",
+        ] {
+            assert_eq!(
+                unoffered_v2_read_root(&format!("localhost://{root}/a")),
+                Some(root),
+                "{root} is named"
+            );
+        }
+        assert_eq!(unoffered_v2_read_root("https://example/a"), None);
+    }
 
     #[cfg(unix)]
     #[tokio::test]

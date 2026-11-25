@@ -41,6 +41,9 @@ pub enum ProviderRequest {
         encoding: Option<String>,
         offset: Option<u64>,
         length: Option<u64>,
+        /// Set by a v2 read. Absent on a v1 read, which keeps its old answer.
+        #[serde(default)]
+        check_revision: bool,
     },
 
     /// Write file contents
@@ -723,19 +726,37 @@ impl LocalProvider {
                 encoding,
                 offset,
                 length,
-            } => match self.read_file(&path, token.as_deref().unwrap_or(""), offset, length) {
-                Ok(data) => match read_response_data(data, encoding.as_deref()) {
-                    Ok(data) => ProviderResponse::Ok { data: Some(data) },
+                check_revision,
+            } => {
+                if check_revision {
+                    return match read_v2_window(
+                        self,
+                        &path,
+                        token.as_deref().unwrap_or(""),
+                        offset,
+                        length,
+                    ) {
+                        Ok(data) => ProviderResponse::Ok { data: Some(data) },
+                        Err(e) => ProviderResponse::Error {
+                            code: v2_read_code(&e),
+                            message: e.to_string(),
+                        },
+                    };
+                }
+                match self.read_file(&path, token.as_deref().unwrap_or(""), offset, length) {
+                    Ok(data) => match read_response_data(data, encoding.as_deref()) {
+                        Ok(data) => ProviderResponse::Ok { data: Some(data) },
+                        Err(e) => ProviderResponse::Error {
+                            code: "read_failed".to_string(),
+                            message: e.to_string(),
+                        },
+                    },
                     Err(e) => ProviderResponse::Error {
                         code: "read_failed".to_string(),
                         message: e.to_string(),
                     },
-                },
-                Err(e) => ProviderResponse::Error {
-                    code: "read_failed".to_string(),
-                    message: e.to_string(),
-                },
-            },
+                }
+            }
 
             ProviderRequest::Write {
                 path,
@@ -819,6 +840,131 @@ impl LocalProvider {
             },
         }
     }
+}
+
+fn v2_read_code(err: &io::Error) -> String {
+    let message = err.to_string();
+    if message.contains("revision_conflict") {
+        "revision_conflict".to_string()
+    } else if message.contains("is not offered") {
+        "root_not_offered".to_string()
+    } else if message.contains("over the read cap") {
+        "invalid".to_string()
+    } else {
+        "read_failed".to_string()
+    }
+}
+
+/// Local, Public, and Users. Any other root is returned by name.
+fn offered_v2_root(path: &str) -> Result<(), String> {
+    let trimmed = path
+        .trim()
+        .trim_start_matches("localhost://")
+        .trim_start_matches('/');
+    match parse_localhost_path(trimmed).map(|(root, _)| root) {
+        Some("Local" | "Public" | "Users") => Ok(()),
+        Some(name) => Err(name.to_string()),
+        None => Err(trimmed.split('/').next().unwrap_or(trimmed).to_string()),
+    }
+}
+
+#[cfg(test)]
+static REVISION_GAP: std::sync::Mutex<Option<Box<dyn FnMut() + Send>>> =
+    std::sync::Mutex::new(None);
+
+fn between_revision_reads() {
+    #[cfg(test)]
+    if let Some(hook) = REVISION_GAP.lock().expect("revision gap").as_mut() {
+        hook();
+    }
+}
+
+/// A v2 read. The file is refused before its body is read when it is larger
+/// than the window. The body is read twice; a change is `revision_conflict`.
+fn read_v2_window(
+    provider: &LocalProvider,
+    path: &str,
+    token: &str,
+    offset: Option<u64>,
+    length: Option<u64>,
+) -> io::Result<serde_json::Value> {
+    if let Err(root) = offered_v2_root(path) {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!("{root} is not offered"),
+        ));
+    }
+    let full_path = provider.resolve_path(path)?;
+    let metadata = fs::metadata(&full_path)?;
+    if metadata.is_dir() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Cannot read directory as file",
+        ));
+    }
+    let start = offset.unwrap_or(0);
+    let window = length.unwrap_or(u64::MAX);
+    if metadata.len().saturating_sub(start) > window {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "object is over the read cap",
+        ));
+    }
+    let first = provider.read_file(path, token, offset, length)?;
+    between_revision_reads();
+    let second = provider.read_file(path, token, offset, length)?;
+    if first != second {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "revision_conflict",
+        ));
+    }
+    Ok(serde_json::json!({
+        "content": { "b64": encode_b64(&first) },
+        "size": first.len(),
+        "revision": fnv_hex(&first),
+    }))
+}
+
+fn encode_b64(bytes: &[u8]) -> String {
+    const ALPHA: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::new();
+    let mut index = 0;
+    while index + 3 <= bytes.len() {
+        let packed = (u32::from(bytes[index]) << 16)
+            | (u32::from(bytes[index + 1]) << 8)
+            | u32::from(bytes[index + 2]);
+        for shift in [18u32, 12, 6, 0] {
+            out.push(ALPHA[((packed >> shift) & 63) as usize] as char);
+        }
+        index += 3;
+    }
+    let rest = bytes.len() - index;
+    if rest > 0 {
+        let mut packed = u32::from(bytes[index]) << 16;
+        if rest == 2 {
+            packed |= u32::from(bytes[index + 1]) << 8;
+        }
+        out.push(ALPHA[((packed >> 18) & 63) as usize] as char);
+        out.push(ALPHA[((packed >> 12) & 63) as usize] as char);
+        if rest == 2 {
+            out.push(ALPHA[((packed >> 6) & 63) as usize] as char);
+            out.push('=');
+        } else {
+            out.push('=');
+            out.push('=');
+        }
+    }
+    out
+}
+
+fn fnv_hex(bytes: &[u8]) -> String {
+    let mut hash = 0xcbf29ce484222325u64;
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    format!("{hash:016x}")
 }
 
 fn read_response_data(data: Vec<u8>, encoding: Option<&str>) -> io::Result<serde_json::Value> {
@@ -1538,5 +1684,162 @@ mod tests {
             .read_file("Public/elastos/index.html", "token", None, None)
             .unwrap();
         assert_eq!(content, b"<h1>Hello</h1>");
+    }
+
+    fn plain_provider(dir: &tempfile::TempDir) -> LocalProvider {
+        LocalProvider::new(ProviderConfig {
+            base_path: dir.path().to_string_lossy().to_string(),
+            allowed_paths: vec!["*".to_string()],
+            read_only: false,
+            encryption_key: String::new(),
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn v2_windowed_read_on_local_public_and_users() {
+        let dir = setup_test_dir();
+        for root in ["Local", "Public", "Users"] {
+            fs::create_dir_all(dir.path().join(root)).unwrap();
+        }
+        let mut provider = plain_provider(&dir);
+        for (root, bytes) in [
+            ("Local", &b"local-bytes"[..]),
+            ("Public", &b"public-bytes"[..]),
+            ("Users", &b"users-bytes"[..]),
+        ] {
+            let path = format!("{root}/note.txt");
+            provider.write_file(&path, "token", bytes, false).unwrap();
+            let request: ProviderRequest = serde_json::from_value(serde_json::json!({
+                "op": "read",
+                "path": path,
+                "offset": 0,
+                "length": 64,
+                "check_revision": true
+            }))
+            .unwrap();
+            let ProviderResponse::Ok { data: Some(data) } = provider.handle_request(request) else {
+                panic!("{root} windowed read failed");
+            };
+            assert_eq!(data["content"]["b64"], encode_b64(bytes), "{root}");
+            assert_eq!(data["size"], bytes.len());
+            assert!(data["revision"].is_string());
+            let v1: ProviderRequest = serde_json::from_value(serde_json::json!({
+                "op": "read", "path": path, "offset": 0, "length": 64
+            }))
+            .unwrap();
+            let ProviderResponse::Ok { data: Some(old) } = provider.handle_request(v1) else {
+                panic!("v1 read failed");
+            };
+            assert!(
+                old["content"].as_array().is_some(),
+                "a v1 read stays a byte array"
+            );
+        }
+        provider
+            .write_file("Local/big.txt", "token", b"0123456789abcdef", false)
+            .unwrap();
+        let over: ProviderRequest = serde_json::from_value(serde_json::json!({
+            "op": "read",
+            "path": "Local/big.txt",
+            "offset": 0,
+            "length": 4,
+            "check_revision": true
+        }))
+        .unwrap();
+        match provider.handle_request(over) {
+            ProviderResponse::Error { code, message } => {
+                assert_eq!(code, "invalid");
+                assert!(message.contains("over the read cap"), "{message}");
+            }
+            other => panic!("oversized object was read: {other:?}"),
+        }
+        *REVISION_GAP.lock().expect("gap") = Some(Box::new({
+            let path = dir.path().join("Local/note.txt");
+            move || {
+                fs::write(&path, b"changed").unwrap();
+            }
+        }));
+        let gap: ProviderRequest = serde_json::from_value(serde_json::json!({
+            "op": "read",
+            "path": "Local/note.txt",
+            "offset": 0,
+            "length": 64,
+            "check_revision": true
+        }))
+        .unwrap();
+        match provider.handle_request(gap) {
+            ProviderResponse::Error { code, message } => {
+                assert_eq!(code, "revision_conflict");
+                assert!(message.contains("revision_conflict"), "{message}");
+            }
+            other => panic!("a changed file was accepted: {other:?}"),
+        }
+        *REVISION_GAP.lock().expect("gap") = None;
+        for root in [
+            "MyWebSite",
+            "ElastOS",
+            "AppCapsules",
+            "UsersAI",
+            "WebSpaces",
+        ] {
+            let request: ProviderRequest = serde_json::from_value(serde_json::json!({
+                "op": "read",
+                "path": format!("{root}/note.txt"),
+                "offset": 0,
+                "length": 8,
+                "check_revision": true
+            }))
+            .unwrap();
+            match provider.handle_request(request) {
+                ProviderResponse::Error { code, message } => {
+                    assert_eq!(code, "root_not_offered", "{root} {message}");
+                    assert!(
+                        message.contains(root) && message.contains("is not offered"),
+                        "{message}"
+                    );
+                }
+                other => panic!("{root} fell through: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn v2_windowed_read_bounds_an_encrypted_users_file() {
+        let dir = setup_test_dir();
+        fs::create_dir_all(dir.path().join("Users")).unwrap();
+        let mut provider = make_encrypted_provider(&dir);
+        provider
+            .write_file("Users/small.txt", "token", b"secret", false)
+            .unwrap();
+        let ok: ProviderRequest = serde_json::from_value(serde_json::json!({
+            "op": "read",
+            "path": "Users/small.txt",
+            "offset": 0,
+            "length": 4096,
+            "check_revision": true
+        }))
+        .unwrap();
+        let ProviderResponse::Ok { data: Some(data) } = provider.handle_request(ok) else {
+            panic!("a small encrypted file must be readable");
+        };
+        assert_eq!(data["content"]["b64"], encode_b64(b"secret"));
+        provider
+            .write_file("Users/big.txt", "token", &[7u8; 32], false)
+            .unwrap();
+        let over: ProviderRequest = serde_json::from_value(serde_json::json!({
+            "op": "read",
+            "path": "Users/big.txt",
+            "offset": 0,
+            "length": 8,
+            "check_revision": true
+        }))
+        .unwrap();
+        match provider.handle_request(over) {
+            ProviderResponse::Error { message, .. } => {
+                assert!(message.contains("over the read cap"), "{message}");
+            }
+            other => panic!("the encrypted body was read: {other:?}"),
+        }
     }
 }
