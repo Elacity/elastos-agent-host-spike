@@ -352,7 +352,7 @@ class CheckTest(unittest.TestCase):
         self.addCleanup(directory.cleanup)
         self.root = Path(directory.name)
         self.summary = self.root / "step-summary.md"
-        # The CI job sets CORE_BUDGET_MODE=advisory; each test chooses its own mode.
+        # The CI job sets CORE_BUDGET_MODE; each test chooses its own mode.
         self.environment = mock.patch.dict(os.environ, {"CORE_BUDGET_MODE": "enforce",
                                                         "GITHUB_STEP_SUMMARY": str(self.summary)})
         self.environment.start()
