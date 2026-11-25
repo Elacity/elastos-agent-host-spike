@@ -1,4 +1,4 @@
-//! This test code stands in for the Runtime's launch by CID, which does not exist yet.
+//! This stand-in is not the Runtime start by CID (Runtime::start_by_bundle in elastos/crates/elastos-server/src/runtime.rs; POST /api/launch/open in elastos/crates/elastos-server/src/api/routes.rs).
 //! PH6 packs, resolves and loads passive content. It starts no component.
 
 use std::collections::BTreeMap;
@@ -267,7 +267,7 @@ fn binding_refusal(refusal: Refusal, cid: &str, detail: &str) {
     ));
 }
 
-/// This test code stands in for the Runtime's launch by CID, which does not exist yet.
+/// This stand-in is not the Runtime start by CID (Runtime::start_by_bundle in elastos/crates/elastos-server/src/runtime.rs; POST /api/launch/open in elastos/crates/elastos-server/src/api/routes.rs).
 #[test]
 fn stand_in_load_names_an_absent_content_cid() {
     let world = World::new();
@@ -292,7 +292,7 @@ fn stand_in_load_names_an_absent_content_cid() {
     assert_eq!(load(&file, &cid).unwrap_err().code(), "io");
 }
 
-/// This test code stands in for the Runtime's launch by CID, which does not exist yet.
+/// This stand-in is not the Runtime start by CID (Runtime::start_by_bundle in elastos/crates/elastos-server/src/runtime.rs; POST /api/launch/open in elastos/crates/elastos-server/src/api/routes.rs).
 #[test]
 fn stand_in_load_keeps_the_bytes_it_hashed() {
     let world = World::new();
@@ -332,7 +332,7 @@ fn stand_in_load_keeps_the_bytes_it_hashed() {
     assert_eq!(loaded.bytes, snapshot);
 }
 
-/// This test code stands in for the Runtime's launch by CID, which does not exist yet.
+/// This stand-in is not the Runtime start by CID (Runtime::start_by_bundle in elastos/crates/elastos-server/src/runtime.rs; POST /api/launch/open in elastos/crates/elastos-server/src/api/routes.rs).
 #[test]
 fn stand_in_refuses_a_staged_capsule_without_a_claim() {
     let world = World::new();
@@ -376,7 +376,7 @@ fn stand_in_refuses_a_staged_capsule_without_a_claim() {
     check(&claims);
 }
 
-/// This test code stands in for the Runtime's launch by CID, which does not exist yet.
+/// This stand-in is not the Runtime start by CID (Runtime::start_by_bundle in elastos/crates/elastos-server/src/runtime.rs; POST /api/launch/open in elastos/crates/elastos-server/src/api/routes.rs).
 #[test]
 fn stand_in_admits_staged_content_when_its_claim_is_present() {
     let world = World::new();
@@ -406,7 +406,7 @@ fn stand_in_admits_staged_content_when_its_claim_is_present() {
     assert_eq!(loaded.bytes, snapshot);
 }
 
-/// This test code stands in for the Runtime's launch by CID, which does not exist yet.
+/// This stand-in is not the Runtime start by CID (Runtime::start_by_bundle in elastos/crates/elastos-server/src/runtime.rs; POST /api/launch/open in elastos/crates/elastos-server/src/api/routes.rs).
 #[test]
 fn stand_in_refuses_another_viewer_cid() {
     let world = World::new();
@@ -448,7 +448,7 @@ fn stand_in_refuses_another_viewer_cid() {
     }
 }
 
-/// This test code stands in for the Runtime's launch by CID, which does not exist yet.
+/// This stand-in is not the Runtime start by CID (Runtime::start_by_bundle in elastos/crates/elastos-server/src/runtime.rs; POST /api/launch/open in elastos/crates/elastos-server/src/api/routes.rs).
 #[test]
 fn stand_in_selects_the_pinned_viewer_and_its_core() {
     let world = World::new();
@@ -497,7 +497,7 @@ fn stand_in_selects_the_pinned_viewer_and_its_core() {
     assert_eq!(content.bytes, snapshot);
 }
 
-/// This test code stands in for the Runtime's launch by CID, which does not exist yet.
+/// This stand-in is not the Runtime start by CID (Runtime::start_by_bundle in elastos/crates/elastos-server/src/runtime.rs; POST /api/launch/open in elastos/crates/elastos-server/src/api/routes.rs).
 #[test]
 fn stand_in_checks_resolved_roles_and_core_selection() {
     for (case, viewer_role, viewer_execution, core_role, core_execution, role) in [
@@ -588,7 +588,7 @@ fn stand_in_checks_resolved_roles_and_core_selection() {
     }
 }
 
-/// This test code stands in for the Runtime's launch by CID, which does not exist yet.
+/// This stand-in is not the Runtime start by CID (Runtime::start_by_bundle in elastos/crates/elastos-server/src/runtime.rs; POST /api/launch/open in elastos/crates/elastos-server/src/api/routes.rs).
 #[test]
 fn stand_in_binds_verified_content_bytes() {
     let world = World::new();
@@ -643,7 +643,7 @@ fn stand_in_binds_verified_content_bytes() {
     assert_eq!(bind_content_stand_in(&extra).unwrap(), bound);
 }
 
-/// This test code stands in for the Runtime's launch by CID, which does not exist yet.
+/// This stand-in is not the Runtime start by CID (Runtime::start_by_bundle in elastos/crates/elastos-server/src/runtime.rs; POST /api/launch/open in elastos/crates/elastos-server/src/api/routes.rs).
 #[test]
 fn stand_in_binding_refuses_a_member_the_uri_check_rejects() {
     let world = World::new();
@@ -667,7 +667,7 @@ fn stand_in_binding_refuses_a_member_the_uri_check_rejects() {
     );
 }
 
-/// This test code stands in for the Runtime's launch by CID, which does not exist yet.
+/// This stand-in is not the Runtime start by CID (Runtime::start_by_bundle in elastos/crates/elastos-server/src/runtime.rs; POST /api/launch/open in elastos/crates/elastos-server/src/api/routes.rs).
 #[test]
 fn stand_in_binding_refuses_a_member_with_no_loaded_bytes() {
     let world = World::new();
@@ -690,7 +690,7 @@ fn stand_in_binding_refuses_a_member_with_no_loaded_bytes() {
     );
 }
 
-/// This test code stands in for the Runtime's launch by CID, which does not exist yet.
+/// This stand-in is not the Runtime start by CID (Runtime::start_by_bundle in elastos/crates/elastos-server/src/runtime.rs; POST /api/launch/open in elastos/crates/elastos-server/src/api/routes.rs).
 #[test]
 fn stand_in_pack_ships_the_complete_photo_set() {
     let world = World::new();
@@ -727,7 +727,7 @@ fn stand_in_pack_ships_the_complete_photo_set() {
     assert_eq!(capsule_bundle::closure_cid(&cli).unwrap(), (cid, entries));
 }
 
-/// This test code stands in for the Runtime's launch by CID, which does not exist yet.
+/// This stand-in is not the Runtime start by CID (Runtime::start_by_bundle in elastos/crates/elastos-server/src/runtime.rs; POST /api/launch/open in elastos/crates/elastos-server/src/api/routes.rs).
 #[test]
 fn stand_in_content_cid_covers_payload_and_viewer_only() {
     let world = World::new();
@@ -761,7 +761,7 @@ fn stand_in_content_cid_covers_payload_and_viewer_only() {
     );
 }
 
-/// This test code stands in for the Runtime's launch by CID, which does not exist yet.
+/// This stand-in is not the Runtime start by CID (Runtime::start_by_bundle in elastos/crates/elastos-server/src/runtime.rs; POST /api/launch/open in elastos/crates/elastos-server/src/api/routes.rs).
 #[test]
 fn stand_in_content_pack_preserves_path_safety() {
     use std::os::unix::fs::symlink;
@@ -804,7 +804,7 @@ fn stand_in_content_pack_preserves_path_safety() {
     }
 }
 
-/// This test code stands in for the Runtime's launch by CID, which does not exist yet.
+/// This stand-in is not the Runtime start by CID (Runtime::start_by_bundle in elastos/crates/elastos-server/src/runtime.rs; POST /api/launch/open in elastos/crates/elastos-server/src/api/routes.rs).
 #[test]
 fn stand_in_content_and_surface_resolve_by_exact_cid() {
     let world = World::new();
@@ -839,7 +839,7 @@ fn stand_in_content_and_surface_resolve_by_exact_cid() {
     );
 }
 
-/// This test code stands in for the Runtime's launch by CID, which does not exist yet.
+/// This stand-in is not the Runtime start by CID (Runtime::start_by_bundle in elastos/crates/elastos-server/src/runtime.rs; POST /api/launch/open in elastos/crates/elastos-server/src/api/routes.rs).
 #[test]
 fn stand_in_bundle_refuses_a_viewer_named_only_by_name() {
     let world = World::new();
@@ -875,7 +875,7 @@ fn stand_in_bundle_refuses_a_viewer_named_only_by_name() {
     }
 }
 
-/// This test code stands in for the Runtime's launch by CID, which does not exist yet.
+/// This stand-in is not the Runtime start by CID (Runtime::start_by_bundle in elastos/crates/elastos-server/src/runtime.rs; POST /api/launch/open in elastos/crates/elastos-server/src/api/routes.rs).
 #[test]
 fn stand_in_bundle_refuses_invalid_content_bindings() {
     let world = World::new();
@@ -990,7 +990,7 @@ fn stand_in_bundle_refuses_invalid_content_bindings() {
     assert!(!into.exists());
 }
 
-/// This test code stands in for the Runtime's launch by CID, which does not exist yet.
+/// This stand-in is not the Runtime start by CID (Runtime::start_by_bundle in elastos/crates/elastos-server/src/runtime.rs; POST /api/launch/open in elastos/crates/elastos-server/src/api/routes.rs).
 #[test]
 fn stand_in_bundle_refuses_unresolved_dependencies() {
     let world = World::new();

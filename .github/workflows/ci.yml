@@ -1,3 +1,4 @@
+# A pull request whose branch starts with spark/ skips the full proof: those jobs carry `if: !(github.event_name == 'pull_request' && startsWith(github.head_ref, 'spark/'))`, and required sets may_skip to that same set when SPARK_PULL_REQUEST is true, so a green spark pull request is the quick checks only. A merge_group event is not a pull_request, so those guards do not skip the queue, and required does not treat the full-proof set as optional there. source-home-macos is the one full-proof job the queue itself does not start: its if is `github.event_name == 'push' || github.event_name == 'schedule'`, and required adds it to may_skip unless POST_MERGE, which is that same push or schedule. The push to spike/agent-host after the merge is that push. Those pushes share one concurrency group and a run that has started is not cancelled, so the macOS proof runs for that started merge and for the newest merge still queued on this branch.
 name: CI
 
 on:
@@ -68,6 +69,10 @@ jobs:
       - name: cargo fmt
         working-directory: elastos
         run: cargo fmt --all -- --check
+      # An expired re-review date in elastos/.cargo/audit.toml fails here and
+      # names the advisory. This step does not fetch.
+      - name: audit re-review dates
+        run: ./scripts/test-source-gate.sh audit
       # scripts/test-source-gate.sh owns the list; the local pre-push gate runs it too.
       - name: product data contracts
         run: ./scripts/test-source-gate.sh product-data
@@ -557,6 +562,16 @@ jobs:
         run: |
           cargo test --locked --lib
           cargo test --locked --test standin_contract
+      # A14's receipt contract. demo.sh itself needs an installed Runtime binary
+      # and data folder, then runs run.sh against them; that path stays out of
+      # this job. tests/demo-gates.sh is the dry run that needs no installed
+      # Home: it uses a stub suite and a stub install. The report test runs that
+      # dry run too (demo_gates_hold_with_a_stub_suite).
+      - name: A14 report contract and demo.sh dry run
+        working-directory: lab/agent-conformance
+        run: |
+          cargo test --locked --test report
+          bash tests/demo-gates.sh "${{ runner.temp }}/a14-demo-gates"
       - name: prepare stand-in probe component
         run: |
           bash scripts/build-component-capsule.sh lab/agent-conformance/probe
@@ -2211,8 +2226,9 @@ jobs:
             sleep 20
             # cargo-audit reports RustSec advisories in its own red job but does not cancel the rest: base has open advisories, and cancelling on it killed every PR run within a minute.
             # A core-size job whose only failed step is its budget verdict does not cancel either: that is settled by changing CORE-BUDGET or moving code, and the review wants the test results. Its counter tests, refusals, checkout and timeouts still cancel.
+            # required then fails because that verdict failed. The other jobs have already finished, so cancelling on required does nothing useful.
             counts="$(gh api "$run/attempts/$GITHUB_RUN_ATTEMPT/jobs?per_page=100" --jq \
-              '[.jobs[] | select(.name != "cancel-on-failure" and .name != "cargo-audit") | select(.name != "core-size" or .conclusion != "failure" or ([.steps[]? | select(.conclusion == "failure") | .name] != ["core size against elastos/CORE-BUDGET"]))] | "\(map(select(.conclusion == "failure" or .conclusion == "timed_out")) | length) \(map(select(.status != "completed")) | length)"')" || continue
+              '[.jobs[] | select(.name != "cancel-on-failure" and .name != "cargo-audit" and .name != "required") | select(.name != "core-size" or .conclusion != "failure" or ([.steps[]? | select(.conclusion == "failure") | .name] != ["core size against elastos/CORE-BUDGET"]))] | "\(map(select(.conclusion == "failure" or .conclusion == "timed_out")) | length) \(map(select(.status != "completed")) | length)"')" || continue
             read -r failed pending <<< "$counts"
             if (( failed > 0 )); then
               echo "A job failed; cancelling the rest of this pull request run."

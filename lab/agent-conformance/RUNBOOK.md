@@ -579,7 +579,8 @@ prints every A14 row with its reasons through `report --a14 <receipt>`, using
 the reporter copy it verified and keeps outside every path the suite was
 given; this command reads that result and runs no reporter of its own. It
 copies the receipt folder to
-`${ELASTOS_DEMO_RECEIPTS:-$HOME/elastos-demo-receipts}/<UTC time>/` with its
+`${ELASTOS_DEMO_RECEIPTS:-$HOME/elastos-demo-receipts}/kept.XXXXXX`, the
+directory `mktemp -d` makes for this run, with its
 own output as `demo-output.log`, and prints that path. It exits 0 only when
 the suite passed and every A14 row reads PASS; the receipt folder is kept
 either way. The receipt is written to its own folder, made after the suite

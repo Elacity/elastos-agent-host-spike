@@ -1203,6 +1203,8 @@ class ReleasePolicyTests(unittest.TestCase):
         source_gate = JOBS["source-gate"]
         self.assertNotRegex(source_gate, r"(?i)sccache|RUSTC_WRAPPER|rust-compile-cache")
         self.assertIn("run: ./scripts/test-source-gate.sh release", source_gate)
+        self.assertIn("run: ./scripts/test-source-gate.sh audit", source_gate)
+        self.assertIn("python3 -I scripts/audit-re-review.py", SOURCE_GATE)
         self.assertNotIn("python3 scripts/install-bootstrap-test.py", SOURCE_GATE)
         self.assertEqual(SOURCE_GATE.count("python3 scripts/release-platform-input-test.py"), 1)
         nested = (WORKFLOW.parents[2] / "scripts/release-platform-input-test.py").read_text()
@@ -1805,6 +1807,13 @@ class ReleasePolicyTests(unittest.TestCase):
         self.assertFalse(glob_regex("elastos/crates/elastos-protected-content-*/**").match("elastos/crates/x/elastos-protected-content-a/b"))
 
     def test_only_pr_runs_share_a_cancellable_concurrency_group(self):
+        # A burst of pushes to spike/agent-host shares one group and does not
+        # cancel a run that has started, so the header must not say every merge.
+        self.assertNotIn("runs for every merge onto this branch", SOURCE)
+        self.assertIn(
+            "the macOS proof runs for that started merge and for the newest merge still queued on this branch",
+            SOURCE,
+        )
         concurrency = SOURCE.split("\nconcurrency:\n", 1)[1].split("\nenv:\n", 1)[0]
         group = field(concurrency, "group")
         for event, ref, _, _, _ in CASES:
@@ -2325,6 +2334,7 @@ class ReleasePolicyTests(unittest.TestCase):
             ("upstream assets skipped though their inputs changed", pr, {**mac, **assets}, "true", 1),
             ("a cancelled job", pr, {**mac, **assets, "lint": "cancelled"}, "false", 1),
             ("custody skipped on a PR", pr, {**mac, **assets, "custody-harness-smoke": "skipped"}, "false", 1),
+            ("core-size failed", pr, {**mac, **assets, "core-size": "failure"}, "false", 1),
         ]
         for name, context, results, upstream, expected in cases:
             self.assertEqual(self.run_required(context, results, upstream), expected, name)
@@ -2591,7 +2601,8 @@ class ReleasePolicyTests(unittest.TestCase):
         # cargo-audit, and core-size's budget verdict alone, report in their own red job without cancelling.
         verdict = "core size against elastos/CORE-BUDGET"
         tests = [("core-size tests", "success"), ("measure the core", "success"), (verdict, "failure")]
-        for job in (("cargo-audit", "completed", "failure"), ("core-size", "completed", "failure", tests)):
+        for job in (("cargo-audit", "completed", "failure"), ("core-size", "completed", "failure", tests),
+                    ("required", "completed", "failure")):
             red = [watch, gate, job, ("source-home-macos", "completed", "success")]
             self.assertEqual(self.run_cancel_watcher([red, red]), (0, [], 2), job)
         # Any other core-size failure cancels: its counter tests, a refusal while measuring, a timeout.
@@ -2605,6 +2616,7 @@ class ReleasePolicyTests(unittest.TestCase):
         # Refusals and an unknown mode fail the measure step in both modes.
         self.assertIn("    env:\n      # enforced since 25 Nov 2026 (Sash); it was advisory before\n"
                       "      CORE_BUDGET_MODE: enforce\n", JOBS["core-size"])
+        self.assertNotRegex(JOBS["core-size"], r"(?m)^\s+(?:if|continue-on-error):")
         self.assertNotRegex("".join(steps("core-size")), r"CORE_BUDGET_MODE\s*[:=]")  # no step overrides it
         # The filter names the verdict step, which only runs --check; measuring, with --base, comes first.
         names = [step.splitlines()[0] for step in steps("core-size")]

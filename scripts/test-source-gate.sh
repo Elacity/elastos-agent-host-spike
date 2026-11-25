@@ -4,7 +4,7 @@
 #   test-source-gate.sh           runs every section
 #   test-source-gate.sh SECTION   runs one section (CI names one per step):
 #                                 product-data, prepush, product-ui, release,
-#                                 redteam
+#                                 redteam, audit
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -63,6 +63,13 @@ product_ui() {
   node --test scripts/gba-launch-page.test.mjs
 }
 
+audit() {
+  # An ignored advisory whose re-review date has passed fails here and names
+  # that advisory. The check reads elastos/.cargo/audit.toml and does not fetch.
+  python3 -I scripts/audit-re-review.py
+  python3 -I scripts/audit-re-review-test.py
+}
+
 release() {
   node --test scripts/ci-model-package.test.mjs scripts/ci-installed-home-failure.test.mjs
   python3 scripts/ci-release-policy-test.py
@@ -91,6 +98,7 @@ case "${1:-all}" in
   product-ui) product_ui ;;
   release) release ;;
   redteam) redteam ;;
-  all) product_data; prepush; product_ui; release; redteam ;;
-  *) echo "usage: $0 [product-data|prepush|product-ui|release|redteam]" >&2; exit 2 ;;
+  audit) audit ;;
+  all) product_data; prepush; product_ui; release; redteam; audit ;;
+  *) echo "usage: $0 [product-data|prepush|product-ui|release|redteam|audit]" >&2; exit 2 ;;
 esac
