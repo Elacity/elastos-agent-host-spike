@@ -807,8 +807,15 @@ pub(super) fn offer_state(data_dir: &Path, offer_id: &str) -> anyhow::Result<&'s
     Ok(if pending { "pending" } else { "none" })
 }
 
-/// The offer has an approval that names this owner's proof and has not ended.
+/// The offer has an approval for this owner's proof that has not ended, whose
+/// effect can run on the offer, and whose configuration is that effect's
+/// current one. The configuration is read before the decision lock.
 pub(crate) fn approved_for_owner(data_dir: &Path, offer_id: &str, owner_proof: &str) -> bool {
+    let Some((kind, runs)) =
+        crate::api::model_provider_egress::current_run_configurations(data_dir, offer_id)
+    else {
+        return false;
+    };
     let _guard = lock().lock().unwrap_or_else(|error| error.into_inner());
     let (Ok(now), Ok(file)) = (now_ms(), read(data_dir)) else {
         return false;
@@ -818,10 +825,15 @@ pub(crate) fn approved_for_owner(data_dir: &Path, offer_id: &str, owner_proof: &
             && decision.status == DecisionStatus::Approved
             && decision.expires_at_ms > now
             && decision.owner_proof_binding_id.as_deref() == Some(owner_proof)
+            && crate::api::model_provider_egress::offer_run_matches(&decision.scope.effect, &kind)
+            && runs.iter().any(|(effect, configuration)| {
+                decision.scope.effect == *effect
+                    && decision.scope.configuration_id == *configuration
+            })
     })
 }
 
-/// Writes one approved decision for `offer_id` under `owner_proof`.
+/// Writes one approved text decision for `offer_id` under `owner_proof`.
 #[cfg(all(test, unix))]
 pub(crate) fn plant_offer_approval(
     data_dir: &Path,
@@ -829,31 +841,101 @@ pub(crate) fn plant_offer_approval(
     owner_proof: &str,
     expires_at_ms: u64,
 ) {
-    let providers = data_dir.join("providers");
-    let root = providers.join("model-provider");
-    std::fs::create_dir_all(&root).unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mode = std::fs::Permissions::from_mode(0o700);
-        std::fs::set_permissions(&providers, mode.clone()).unwrap();
-        std::fs::set_permissions(&root, mode).unwrap();
-    }
+    plant_offer_decision(data_dir, offer_id, owner_proof, expires_at_ms, "text");
+}
+
+/// Writes one approved decision whose effect is `effect`. The stored
+/// configuration is the planted text offer's current one.
+#[cfg(all(test, unix))]
+pub(crate) fn plant_offer_decision(
+    data_dir: &Path,
+    offer_id: &str,
+    owner_proof: &str,
+    expires_at_ms: u64,
+    effect: &str,
+) {
+    seed_text_offer(data_dir, offer_id, "fixture/model");
+    let configuration = text_configuration(data_dir, offer_id);
+    write_planted_decision(
+        data_dir,
+        offer_id,
+        owner_proof,
+        expires_at_ms,
+        effect,
+        &configuration,
+    );
+}
+
+/// Replaces the planted offer's model and leaves the stored decision as it is.
+#[cfg(all(test, unix))]
+pub(crate) fn reseed_text_offer_model(data_dir: &Path, offer_id: &str, model: &str) {
+    seed_text_offer(data_dir, offer_id, model);
+}
+
+#[cfg(all(test, unix))]
+fn seed_text_offer(data_dir: &Path, offer_id: &str, model: &str) {
+    crate::api::model_provider_config::seed_model_provider_operator_offers_for_test(
+        data_dir,
+        vec![serde_json::json!({
+            "id": offer_id,
+            "title": "Fixture",
+            "operation": "text.generate",
+            "input_modalities": ["text/plain"],
+            "output_modalities": ["text/plain"],
+            "enabled": true,
+            "adapter": {
+                "kind": "open_ai_compatible_text",
+                "api_url": "https://openrouter.ai/api/v1/chat/completions",
+                "api_key": "sk-plant",
+                "model": model,
+                "hosted": {
+                    "backend_provider_label": "OpenRouter",
+                    "selection_mode": "pinned",
+                    "privacy_policy_ref": "fixture:privacy:v1",
+                    "terms_ref": "fixture:terms:v1",
+                    "upstream_routing_fallback_assertion": "operator_asserted_disabled"
+                }
+            }
+        })],
+    )
+    .unwrap();
+}
+
+#[cfg(all(test, unix))]
+fn text_configuration(data_dir: &Path, offer_id: &str) -> String {
+    crate::api::model_provider_egress::current_run_configurations(data_dir, offer_id)
+        .and_then(|(_kind, runs)| {
+            runs.into_iter()
+                .find(|(effect, _)| effect == "text")
+                .map(|(_, configuration)| configuration)
+        })
+        .expect("planted text offer has a configuration")
+}
+
+#[cfg(all(test, unix))]
+fn write_planted_decision(
+    data_dir: &Path,
+    offer_id: &str,
+    owner_proof: &str,
+    expires_at_ms: u64,
+    effect: &str,
+    configuration: &str,
+) {
     let file = DecisionFile {
         schema: SCHEMA.into(),
         decisions: vec![EgressDecision {
             id: "model-egress-plant".into(),
             scope: EgressScope {
                 offer_id: offer_id.into(),
-                effect: "text".into(),
+                effect: effect.into(),
                 method: "POST".into(),
-                url: "https://example.test/v1".into(),
-                origin: "https://example.test".into(),
-                recipient: "example.test".into(),
+                url: "https://openrouter.ai/api/v1/chat/completions".into(),
+                origin: "https://openrouter.ai".into(),
+                recipient: "openrouter.ai".into(),
                 payer: "this Home".into(),
-                provider: "fixture".into(),
-                purpose: "text".into(),
-                configuration_id: "ab".repeat(32),
+                provider: "OpenRouter".into(),
+                purpose: effect.into(),
+                configuration_id: configuration.into(),
             },
             connection: None,
             requested_by_proof: None,

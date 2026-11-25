@@ -4091,25 +4091,25 @@ pub(crate) fn agent_owner_approved(
     if crate::agents::stored_agent(data_dir, owner_id, &agent.principal_id).is_err() {
         return false;
     }
-    let Some(owner) = crate::auth::stored_principal_record(data_dir, owner_id)
-        .ok()
-        .flatten()
-    else {
+    let Ok(owners) = crate::auth::active_passkey_principals(data_dir) else {
         return false;
     };
     #[cfg(unix)]
     {
-        crate::auth::is_admin(&owner)
-            && crate::auth::ensure_proof_binding_not_revoked(&owner).is_ok()
-            && crate::api::model_provider_egress_decision::approved_for_owner(
-                data_dir,
-                offer_id,
-                &owner.proof_binding_id,
-            )
+        owners.iter().any(|owner| {
+            owner.principal_id == owner_id
+                && crate::auth::is_admin(owner)
+                && crate::auth::ensure_proof_binding_not_revoked(owner).is_ok()
+                && crate::api::model_provider_egress_decision::approved_for_owner(
+                    data_dir,
+                    offer_id,
+                    &owner.proof_binding_id,
+                )
+        })
     }
     #[cfg(not(unix))]
     {
-        let _ = (owner, offer_id);
+        let _ = (owners, owner_id, offer_id);
         false
     }
 }

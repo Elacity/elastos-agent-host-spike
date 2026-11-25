@@ -18,6 +18,15 @@ pub(crate) fn dispatch_fixture_enabled(data_dir: &Path) -> bool {
         .is_some_and(|homes| homes.lock().unwrap().contains(data_dir))
 }
 
+/// Lets a file-format row charge on a Home the feature-off build would refuse.
+fn allow_dispatch_spend(data_dir: &Path) {
+    DISPATCH_FIXTURES
+        .get_or_init(|| Mutex::new(std::collections::HashSet::new()))
+        .lock()
+        .unwrap()
+        .insert(data_dir.to_path_buf());
+}
+
 pub(crate) fn plant_for_dispatch(data_dir: &Path, owner_id: &str, admin_id: &str) -> String {
     crate::auth::store_test_principal_root_protection(data_dir, owner_id);
     make_admin(data_dir, admin_id);
@@ -1151,13 +1160,18 @@ fn a_new_agent_protection_opens_under_its_own_derived_key_only() {
 }
 
 /// The reason of a named refusal.
-fn refusal_of<T: std::fmt::Debug>(result: anyhow::Result<T>) -> String {
-    let error = result.expect_err("the operation was not refused");
+fn refusal_of<T>(result: anyhow::Result<T>) -> String {
+    let error = match result {
+        Err(error) => error,
+        Ok(_) => panic!("the operation was not refused"),
+    };
     if let Some(refused) = error.downcast_ref::<Refused>() {
         return refused.0.clone();
     }
-    // A file the loader refuses names itself. Its display is that sentence.
-    error.to_string()
+    if let Some(named) = error.downcast_ref::<Named>() {
+        return named.to_string();
+    }
+    panic!("the refusal has no type: {error}");
 }
 
 fn turn_on(home: &Home) {
@@ -2422,6 +2436,13 @@ fn with_the_feature_off_every_operation_refuses_by_name() {
     assert_eq!(home.audit().len(), events);
 }
 
+#[cfg(not(feature = "prototype-agents"))]
+#[test]
+fn model_spend_on_a_home_without_the_feature_is_refused() {
+    let home = Home::new();
+    assert_eq!(model_spend(home.path(), "agent:v2:none"), Err(FEATURE_OFF));
+}
+
 #[cfg(feature = "prototype-agents")]
 #[test]
 fn with_the_feature_on_the_operations_are_served() {
@@ -2604,6 +2625,7 @@ fn an_older_build_refuses_a_spent_file_by_name_and_home_still_loads() {
         "this build accepts the field-less file"
     );
     assert_eq!(frozen_older_agent_parser(&field_less), Ok(()));
+    allow_dispatch_spend(home.path());
     charge_model_spend(home.path(), OWNER_ID, &agent.agent_id, (0, 0), 1, 64, None).unwrap();
     let bytes = home.agent_bytes();
     assert!(std::str::from_utf8(&bytes)
@@ -2646,6 +2668,7 @@ fn an_audit_chain_holding_agent_events_checks_with_the_frozen_code() {
         slot.record.updated_at = 10;
     })
     .unwrap();
+    allow_dispatch_spend(home.path());
     charge_model_spend(home.path(), OWNER_ID, &agent.agent_id, (0, 0), 1, 64, None).unwrap();
     rename_in_any_build(home.path(), &home.caller(), &agent.agent_id, "Helper 2", 10).unwrap();
     retire_in_any_build(home.path(), &home.caller(), &agent.agent_id, 11).unwrap();
@@ -3331,5 +3354,9 @@ fn lock_for_write_refuses_when_this_thread_already_holds_it() {
         Err(err) => err,
         Ok(_) => panic!("a second write lock was taken"),
     };
-    assert!(err.to_string().contains(LOCK_ORDER), "{err}");
+    assert_eq!(
+        err.downcast_ref::<Named>().map(|named| named.0),
+        Some(LOCK_ORDER),
+        "{err}"
+    );
 }

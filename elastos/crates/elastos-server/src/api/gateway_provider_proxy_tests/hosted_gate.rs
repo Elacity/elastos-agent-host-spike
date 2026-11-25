@@ -4,7 +4,9 @@
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use super::super::model_provider_egress_decision::{approved_for_owner, plant_offer_approval};
+use super::super::model_provider_egress_decision::{
+    approved_for_owner, plant_offer_approval, plant_offer_decision, reseed_text_offer_model,
+};
 
 const OFFER: &str = "model:openrouter";
 
@@ -150,9 +152,7 @@ fn an_owner_who_loses_admin_between_the_gate_and_the_charge_is_refused() {
         Some(OFFER),
     );
     match refused {
-        Err(crate::agents::SpendRefusal::Name(name)) => {
-            assert_eq!(name, crate::api::gateway::HOSTED_AGENT_RUN_SENTENCE);
-        }
+        Err(crate::agents::SpendRefusal::HostedRun) => {}
         other => panic!("{other:?}"),
     }
     assert_eq!(
@@ -163,4 +163,97 @@ fn an_owner_who_loses_admin_between_the_gate_and_the_charge_is_refused() {
     crate::agents::charge_model_spend(dir.path(), &owner_id, &agent_id, (0, 0), 1, 64, Some(OFFER))
         .unwrap();
     assert!(crate::agents::model_spend(dir.path(), &agent_id).unwrap().1 > 0);
+}
+
+fn assert_refused_before_the_charge(dir: &Path, owner_id: &str, agent_id: &str) {
+    let request = serde_json::json!({
+        "offer_id": OFFER,
+        "operation": "text.generate",
+        "input": {"prompt": "hi"},
+        "request_id": "model-v1:1700000000000:s10",
+    });
+    let bus = crate::api::gateway::bus_model_provider_request(
+        "runs_create",
+        &request,
+        Some(dir),
+        Some(agent_id),
+        "s10-session",
+        "capability:s10",
+        "s10-capsule",
+    );
+    match bus {
+        Err((_code, message)) => {
+            assert_eq!(message, crate::api::gateway::HOSTED_AGENT_RUN_SENTENCE);
+        }
+        Ok(value) => panic!("the run was admitted: {value}"),
+    }
+    assert_eq!(crate::agents::model_spend(dir, agent_id).unwrap().1, 0);
+    let refused =
+        crate::agents::charge_model_spend(dir, owner_id, agent_id, (0, 0), 1, 64, Some(OFFER));
+    assert!(
+        matches!(refused, Err(crate::agents::SpendRefusal::HostedRun)),
+        "{refused:?}"
+    );
+    assert_eq!(crate::agents::model_spend(dir, agent_id).unwrap().1, 0);
+}
+
+/// The approval names an effect this offer cannot run. No tokens are charged.
+#[test]
+fn an_approval_for_another_effect_is_refused_before_the_charge() {
+    let dir = tempfile::tempdir().unwrap();
+    let (owner_id, owner_proof, agent_id) = passkey_agent(dir.path());
+    plant_offer_decision(
+        dir.path(),
+        OFFER,
+        &owner_proof,
+        now_ms() + 60_000,
+        "validate_models",
+    );
+    assert_refused_before_the_charge(dir.path(), &owner_id, &agent_id);
+}
+
+/// The approval names this offer's previous configuration. No tokens are charged.
+#[test]
+fn an_approval_for_an_older_configuration_is_refused_before_the_charge() {
+    let dir = tempfile::tempdir().unwrap();
+    let (owner_id, owner_proof, agent_id) = passkey_agent(dir.path());
+    plant_offer_approval(dir.path(), OFFER, &owner_proof, now_ms() + 60_000);
+    assert!(approved_for_owner(dir.path(), OFFER, &owner_proof));
+    reseed_text_offer_model(dir.path(), OFFER, "fixture/model-2");
+    assert!(!approved_for_owner(dir.path(), OFFER, &owner_proof));
+    assert_refused_before_the_charge(dir.path(), &owner_id, &agent_id);
+}
+
+/// The approval is under the owner's second passkey. The first passkey is revoked.
+#[test]
+fn an_approval_under_the_second_passkey_counts_when_the_first_is_revoked() {
+    let dir = tempfile::tempdir().unwrap();
+    let (_owner_id, first_proof, agent_id) = passkey_agent(dir.path());
+    let mut state = crate::auth::load_auth_state(dir.path()).unwrap();
+    let mut second = state
+        .principals
+        .iter()
+        .find(|principal| principal.proof_binding_id == first_proof)
+        .unwrap()
+        .clone();
+    let mut passkey = second.proof_binding.passkey.clone().unwrap();
+    passkey.credential_id = format!("{}-second", passkey.credential_id);
+    second.proof_binding = elastos_runtime::auth::ProofBinding::passkey_webauthn(passkey);
+    second.proof_binding_id = second.proof_binding.id();
+    let second_proof = second.proof_binding_id.clone();
+    state.principals.push(second);
+    crate::auth::save_auth_state(dir.path(), &state, None).unwrap();
+    plant_offer_approval(dir.path(), OFFER, &second_proof, now_ms() + 60_000);
+    crate::auth::revoke_passkey_binding(dir.path(), &first_proof, crate::auth::now_ts()).unwrap();
+    let agent = crate::auth::stored_principal_record(dir.path(), &agent_id)
+        .unwrap()
+        .unwrap();
+    assert!(
+        super::gateway_provider_proxy::agent_owner_approved(dir.path(), &agent, OFFER),
+        "the second passkey's approval admits the agent"
+    );
+    assert_eq!(
+        crate::agents::model_spend(dir.path(), &agent_id).unwrap().1,
+        0
+    );
 }

@@ -176,6 +176,112 @@ fn configuration_id_with_fixture_ca(base: String, ca_pem: Option<&str>) -> Strin
     }
 }
 
+/// The effects a run can send, and the adapter kind each one runs on.
+pub(crate) fn offer_run_matches(effect: &str, kind: &str) -> bool {
+    matches!(
+        (effect, kind),
+        ("text", "open_ai_compatible_text")
+            | ("responses", "open_ai_responses_text")
+            | ("decisions", "open_router_decisions")
+            | (
+                "job_create" | "job_status" | "job_cancel",
+                "http_job_artifact"
+            )
+    )
+}
+
+fn configuration_identity(
+    adapter: &serde_json::Value,
+    credential: Option<&str>,
+    url: &Url,
+    fixture_ca_pem: Option<&str>,
+) -> anyhow::Result<String> {
+    let base = hex::encode(Sha256::digest(serde_json::to_vec(&(adapter, credential))?));
+    let ca = (url.scheme() == "https" && url.host_str() == Some("127.0.0.1"))
+        .then_some(fixture_ca_pem)
+        .flatten();
+    Ok(configuration_id_with_fixture_ca(base, ca))
+}
+
+fn chat_url_for_offer(
+    adapter: &serde_json::Value,
+    fixtures: Option<&super::model_provider_config::HostedValidateFixtures>,
+) -> anyhow::Result<String> {
+    let mut url = adapter["api_url"]
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("hosted URL unavailable"))?
+        .to_string();
+    if let Some(fixtures) = fixtures {
+        url = match adapter["hosted"]["backend_provider_label"].as_str() {
+            Some("OpenRouter") => fixtures
+                .openrouter_chat_url
+                .as_ref()
+                .map(|value| value.as_str().to_string())
+                .unwrap_or(url),
+            Some("Venice") => fixtures
+                .venice_chat_url
+                .as_ref()
+                .map(|value| value.as_str().to_string())
+                .unwrap_or(url),
+            _ => url,
+        };
+    }
+    Ok(url)
+}
+
+/// The offer's adapter kind, and the configuration id the broker would send
+/// for each effect that kind can run. Absent when the offer cannot be read.
+pub(crate) fn current_run_configurations(
+    data_dir: &Path,
+    offer_id: &str,
+) -> Option<(String, Vec<(String, String)>)> {
+    let offers = load_model_provider_operator_offers(data_dir).ok()?;
+    let offer = offers
+        .iter()
+        .find(|offer| offer["id"] == offer_id && offer["enabled"] != false)?;
+    let adapter = &offer["adapter"];
+    let kind = adapter["kind"].as_str()?.to_string();
+    let fixtures = load_hosted_validate_fixtures(data_dir).ok()?;
+    let mut runs = Vec::new();
+    for effect in [
+        "text",
+        "responses",
+        "decisions",
+        "job_create",
+        "job_status",
+        "job_cancel",
+    ] {
+        if !offer_run_matches(effect, &kind) {
+            continue;
+        }
+        let (raw_url, credential) = if matches!(effect, "text" | "responses" | "decisions") {
+            let url = chat_url_for_offer(adapter, fixtures.as_ref()).ok()?;
+            let credential = read_hosted_secret(data_dir, offer_id).ok()?;
+            (url, credential)
+        } else {
+            let field = match effect {
+                "job_create" => "create_url",
+                "job_status" => "status_url",
+                _ => "cancel_url",
+            };
+            let url = adapter[field].as_str()?.to_string();
+            let credential = adapter["bearer_token"].as_str().map(str::to_string);
+            (url, credential)
+        };
+        let url = Url::parse(&raw_url).ok()?;
+        let ca = fixtures
+            .as_ref()
+            .and_then(|value| value.loopback_ca_pem.as_deref());
+        let configuration =
+            configuration_identity(adapter, credential.as_deref(), &url, ca).ok()?;
+        runs.push((effect.to_string(), configuration));
+    }
+    if runs.is_empty() {
+        return None;
+    }
+    Some((kind, runs))
+}
+
 #[cfg(test)]
 pub(crate) async fn fetch_validation(
     data_dir: &Path,
@@ -663,12 +769,7 @@ fn resolve_effect(data_dir: &Path, request: &EffectRequest) -> anyhow::Result<De
     let (raw_url, credential, job_backend_id) = match request.effect.as_str() {
         "text" | "responses" | "decisions" => {
             let kind = adapter["kind"].as_str().unwrap_or_default();
-            if !matches!(
-                (request.effect.as_str(), kind),
-                ("text", "open_ai_compatible_text")
-                    | ("responses", "open_ai_responses_text")
-                    | ("decisions", "open_router_decisions")
-            ) {
+            if !offer_run_matches(request.effect.as_str(), kind) {
                 anyhow::bail!("hosted effect differs from offer");
             }
             let body: serde_json::Value = serde_json::from_slice(&request.body)?;
@@ -688,29 +789,14 @@ fn resolve_effect(data_dir: &Path, request: &EffectRequest) -> anyhow::Result<De
                     anyhow::bail!("hosted output cap differs from offer");
                 }
             }
-            let mut url = adapter["api_url"]
-                .as_str()
-                .ok_or_else(|| anyhow::anyhow!("hosted URL unavailable"))?
-                .to_string();
-            if let Some(fixtures) = fixtures.as_ref() {
-                url = match adapter["hosted"]["backend_provider_label"].as_str() {
-                    Some("OpenRouter") => fixtures
-                        .openrouter_chat_url
-                        .as_ref()
-                        .map(|v| v.as_str().to_string())
-                        .unwrap_or(url),
-                    Some("Venice") => fixtures
-                        .venice_chat_url
-                        .as_ref()
-                        .map(|v| v.as_str().to_string())
-                        .unwrap_or(url),
-                    _ => url,
-                };
-            }
+            let url = chat_url_for_offer(adapter, fixtures.as_ref())?;
             (url, read_hosted_secret(data_dir, &request.offer_id)?, None)
         }
         "job_create" | "job_status" | "job_cancel" => {
-            if adapter["kind"] != "http_job_artifact" {
+            if !offer_run_matches(
+                request.effect.as_str(),
+                adapter["kind"].as_str().unwrap_or_default(),
+            ) {
                 anyhow::bail!("job effect differs from offer");
             }
             if request.effect == "job_create" {
@@ -767,10 +853,6 @@ fn resolve_effect(data_dir: &Path, request: &EffectRequest) -> anyhow::Result<De
         .filter(|label| !label.is_empty())
         .unwrap_or("Hosted model")
         .to_string();
-    let base_configuration_id = hex::encode(Sha256::digest(serde_json::to_vec(&(
-        adapter,
-        credential.as_deref(),
-    ))?));
     let fixture_ca_pem = if url.scheme() == "https" && url.host_str() == Some("127.0.0.1") {
         fixtures
             .as_ref()
@@ -778,8 +860,12 @@ fn resolve_effect(data_dir: &Path, request: &EffectRequest) -> anyhow::Result<De
     } else {
         None
     };
-    let configuration_id =
-        configuration_id_with_fixture_ca(base_configuration_id, fixture_ca_pem.as_deref());
+    let configuration_id = configuration_identity(
+        adapter,
+        credential.as_deref(),
+        &url,
+        fixture_ca_pem.as_deref(),
+    )?;
     Ok(Destination {
         url,
         grant_url,

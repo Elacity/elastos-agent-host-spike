@@ -11,8 +11,10 @@
 //! **Hold-only.** A reservation is charged once and never returns: no refund and
 //! no settle (design §5 "No refund"), so an agent that keeps running drains its
 //! ceiling and a cancel or unknown outcome keeps its hold. A bound Home stores
-//! that total on the agent record in blocks: open reads it, and charge writes
-//! one block under the agent lock. `held` can lag other Runtimes; the store refuses.
+//! that total on the agent record in blocks: open reads it under the agents
+//! lock, and charge writes one block under the agent lock. open replaces the
+//! ceiling, including with a smaller one, and never lowers what is held or
+//! charged. `held` can lag other Runtimes; the store refuses.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -23,22 +25,44 @@ use elastos_model_contract::{model_run_id, RuntimeCreateBinding};
 use crate::agent_admission::AdmissionContext;
 use crate::agents::{charge_model_spend, model_spend, SpendRefusal, CANNOT_READ, NO_OWNER};
 
-/// The spent total named by this agent's signed spend events.
-pub(crate) fn signed_spend_floor(data_dir: &Path, agent_id: &str) -> Result<u64, &'static str> {
+#[cfg(test)]
+thread_local! {
+    static NEWER_SPEND_CHECKS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// How many newer spend events this thread signature-checked since the last take.
+#[cfg(test)]
+pub(crate) fn take_newer_spend_checks() -> u64 {
+    NEWER_SPEND_CHECKS.with(|count| count.replace(0))
+}
+
+/// The spent total named by this agent's signed spend events that are newer
+/// than `stored`. Events at or below the file total are not signature-checked.
+pub(crate) fn signed_spend_floor(
+    data_dir: &Path,
+    agent_id: &str,
+    stored: u64,
+) -> Result<u64, &'static str> {
     let state = crate::auth::load_auth_state(data_dir).map_err(|_| CANNOT_READ)?;
-    let mut floor = 0u64;
+    let mut floor = stored;
     for event in &state.audit {
         if event.event_type != "agent.record.spend"
             || event.principal_id.as_deref() != Some(agent_id)
         {
             continue;
         }
+        let Some(spent) = spent_amount(&event.reason) else {
+            continue;
+        };
+        if spent <= stored {
+            continue;
+        }
+        #[cfg(test)]
+        NEWER_SPEND_CHECKS.with(|count| count.set(count.get().saturating_add(1)));
         if crate::auth::verify_signed_full_recovery_outcome_audit_event(data_dir, event).is_err() {
             continue;
         }
-        if let Some(spent) = spent_amount(&event.reason) {
-            floor = floor.max(spent);
-        }
+        floor = floor.max(spent);
     }
     Ok(floor)
 }
@@ -135,9 +159,14 @@ struct Account {
     charged: u64,
     owner: Option<String>,
     /// Held tokens and request fingerprints by `model_run_id()`; only an
-    /// identical retry reuses a hold without a second charge.
+    /// identical retry reuses a hold without a second charge. The map stops
+    /// at [`MAX_HOLDS_PER_AGENT`].
     holds: HashMap<String, HoldFingerprint>,
 }
+
+/// One agent keeps this many distinct run holds. A further run is refused
+/// before it is charged. One thousand small runs still fit.
+const MAX_HOLDS_PER_AGENT: usize = 1024;
 
 /// One reservation of `tokens` for one run. Nothing happens when it is dropped:
 /// the run is charged whether it completes, fails or is never heard from.
@@ -162,6 +191,10 @@ pub(crate) enum Refusal {
         ceiling: u64,
     },
     Record(&'static str),
+    /// The holds map is at [`MAX_HOLDS_PER_AGENT`]. Nothing was charged.
+    HoldsFull,
+    /// The hosted owner approval was not current. Nothing was charged.
+    HostedRun,
 }
 
 /// Every agent's account in this process, behind one mutex.
@@ -240,20 +273,24 @@ impl ModelBudget {
             .clone()
     }
 
-    /// Sets the ceiling and keeps what is already spent. A failed read opens nothing.
+    /// Sets the ceiling. A smaller ceiling replaces that number and does not
+    /// lower what is already held or charged. The stored spend is read under
+    /// the agents lock. A failed read opens nothing.
     pub(crate) fn open(&self, agent: &AgentKey, ceiling: u64) -> Result<(), Refusal> {
         refuse_agent_lock_first()?;
-        let loaded = self
-            .home_dir()
-            .map(|dir| model_spend(&dir, agent.principal()).map_err(Refusal::Record))
-            .transpose()?;
+        let home = self.home_dir();
         let mut agents = self.agents.lock().unwrap_or_else(PoisonError::into_inner);
+        let loaded = match home.as_deref() {
+            Some(dir) => Some(model_spend(dir, agent.principal()).map_err(Refusal::Record)?),
+            None => None,
+        };
         let account = agents.entry(agent.0.clone()).or_default();
         if let Some((owner, spent)) = loaded {
             account.owner = Some(owner);
-            // A restart counts the unused part of a charged block as spent (conservative).
-            account.held = spent;
-            account.charged = spent;
+            // A restart counts the unused part of a charged block as spent.
+            // A later open never lowers a total this process already holds.
+            account.held = account.held.max(spent);
+            account.charged = account.charged.max(spent);
         }
         account.ceiling = ceiling;
         Ok(())
@@ -305,6 +342,9 @@ impl ModelBudget {
                 Err(Refusal::ConflictingRetry)
             };
         }
+        if account.holds.len() >= MAX_HOLDS_PER_AGENT {
+            return Err(Refusal::HoldsFull);
+        }
         let total = if let Some(dir) = home {
             let owner = account.owner.clone().ok_or(Refusal::Record(NO_OWNER))?;
             let memory = (account.held, account.charged);
@@ -331,6 +371,7 @@ impl ModelBudget {
                     });
                 }
                 Err(SpendRefusal::Name(name)) => return Err(Refusal::Record(name)),
+                Err(SpendRefusal::HostedRun) => return Err(Refusal::HostedRun),
             }
         } else {
             account
@@ -355,6 +396,16 @@ impl ModelBudget {
             .unwrap_or_else(PoisonError::into_inner)
             .get(&agent.0)
             .map(|account| account.held)
+            .unwrap_or(0)
+    }
+
+    #[cfg(all(test, unix))]
+    pub(crate) fn charged_for_test(&self, agent: &AgentKey) -> u64 {
+        self.agents
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&agent.0)
+            .map(|account| account.charged)
             .unwrap_or(0)
     }
 
@@ -1117,5 +1168,110 @@ mod tests {
         let next = stored_spent(dir.path(), &agent);
         assert!(next > spent, "{next} {spent}");
         assert!(next < spent.saturating_mul(2), "{next} {spent}");
+    }
+
+    #[test]
+    fn holds_stop_at_the_bound() {
+        let budget = opened();
+        budget.open(&key(A), 2_048).unwrap();
+        for index in 0..MAX_HOLDS_PER_AGENT {
+            budget
+                .reserve(&key(A), &run_key(A, &format!("h{index}")), 1)
+                .unwrap();
+        }
+        assert_eq!(
+            budget.reserve(&key(A), &run_key(A, "over"), 1),
+            Err(Refusal::HoldsFull)
+        );
+        assert_eq!(
+            budget.reserve(&key(A), &run_key(A, "h1023"), 1),
+            Ok(Hold { tokens: 1 })
+        );
+    }
+
+    /// Memory is ahead of an empty file, then the ceiling is lowered. Held
+    /// stays, and the next reserve is checked against the new ceiling. A
+    /// charged file keeps its charged total across the same relaunch.
+    #[cfg(unix)]
+    #[test]
+    fn a_smaller_ceiling_on_relaunch_keeps_what_is_held_and_charged() {
+        let (dir, _owner, agent) = planted_agent();
+        let budget = ModelBudget::new();
+        let key = AgentKey::for_test(&agent);
+        budget.open(&key, 200).unwrap();
+        budget.reserve(&key, &run_key(&agent, "mem"), 40).unwrap();
+        budget.bind_home(dir.path().to_path_buf());
+        budget.open(&key, 30).unwrap();
+        let kept = budget.held_for_test(&key);
+        assert!(kept >= 40, "{kept}");
+        assert_eq!(
+            budget.reserve(&key, &run_key(&agent, "next"), 1),
+            Err(over_cap(1, kept, 30))
+        );
+
+        let (dir, _owner, agent) = planted_agent();
+        let (budget, key) = opened_on(dir.path(), &agent, 200);
+        budget.reserve(&key, &run_key(&agent, "disk"), 40).unwrap();
+        let held = budget.held_for_test(&key);
+        let charged = budget.charged_for_test(&key);
+        assert!(charged >= held);
+        budget.open(&key, 30).unwrap();
+        assert!(budget.held_for_test(&key) >= held);
+        assert!(budget.charged_for_test(&key) >= charged);
+    }
+
+    /// The file is still zero and this process has not reopened. The charge
+    /// reads the planted spend event as its own floor.
+    #[cfg(unix)]
+    #[test]
+    fn the_charge_reads_its_own_floor() {
+        let (dir, _owner, agent) = planted_agent();
+        let (budget, key) = opened_on(dir.path(), &agent, 100);
+        assert_eq!(budget.held_for_test(&key), 0);
+        plant_spend_event(dir.path(), &agent, 40, "audit:planted-floor");
+        assert_eq!(
+            budget.held_for_test(&key),
+            0,
+            "the plant reopened the account"
+        );
+        budget.reserve(&key, &run_key(&agent, "floor"), 1).unwrap();
+        let stored = stored_spent(dir.path(), &agent);
+        assert!(stored > 40, "stored {stored} ignored the planted floor");
+    }
+
+    /// After the file has caught the signed total, only a newer event is checked.
+    #[cfg(unix)]
+    #[test]
+    fn a_charge_verifies_only_spend_events_above_the_stored_total() {
+        let (dir, _owner, agent) = planted_agent();
+        let (budget, key) = opened_on(dir.path(), &agent, 100);
+        budget.reserve(&key, &run_key(&agent, "first"), 40).unwrap();
+        plant_spend_event(dir.path(), &agent, 10, "audit:below-1");
+        plant_spend_event(dir.path(), &agent, 20, "audit:below-2");
+        plant_spend_event(dir.path(), &agent, 40, "audit:equal");
+        plant_spend_event(dir.path(), &agent, 50, "audit:above");
+        let _ = take_newer_spend_checks();
+        let _ = model_spend(dir.path(), &agent).unwrap();
+        assert_eq!(take_newer_spend_checks(), 1);
+    }
+
+    #[cfg(unix)]
+    fn plant_spend_event(dir: &std::path::Path, agent: &str, spent: u64, event_id: &str) {
+        let event = elastos_runtime::auth::RuntimeAuditEventV1 {
+            schema: elastos_runtime::auth::RuntimeAuditEventV1::SCHEMA.to_string(),
+            event_id: event_id.to_string(),
+            event_type: "agent.record.spend".to_string(),
+            principal_id: Some(agent.to_string()),
+            proof_binding_id: None,
+            session_id: None,
+            challenge_id: None,
+            capsule_id: None,
+            result: "ok".to_string(),
+            reason: format!("owner=person seq=9 spent={spent} sha256=ab"),
+            occurred_at: crate::auth::now_ts(),
+            signer_did: None,
+            signature: None,
+        };
+        crate::auth::append_audit_event(dir, event).unwrap();
     }
 }

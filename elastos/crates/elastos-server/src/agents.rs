@@ -448,7 +448,7 @@ struct WriteLock {
 /// lock and then that mutex is refused (`LOCK_ORDER`).
 fn lock_for_write(data_dir: &Path) -> anyhow::Result<WriteLock> {
     if agent_file_lock_held() {
-        anyhow::bail!(LOCK_ORDER);
+        return Err(Named(LOCK_ORDER).into());
     }
     let process = AGENT_WRITE
         .lock()
@@ -627,6 +627,8 @@ pub(crate) enum SpendRefusal {
     /// `asked`, the drawn total excluding it, the charged block, the ceiling.
     Over(u64, u64, u64, u64),
     Name(&'static str),
+    /// The hosted owner approval was not current. The file was not written.
+    HostedRun,
 }
 
 fn reason_of(err: &anyhow::Error) -> &'static str {
@@ -655,10 +657,14 @@ fn agent_of<'a>(
 }
 
 pub(crate) fn model_spend(data_dir: &Path, agent_id: &str) -> Result<(String, u64), &'static str> {
+    if !build_allows_for_home(data_dir) {
+        return Err(FEATURE_OFF);
+    }
     let opened = open(data_dir, true).map_err(|err| reason_of(&err))?;
     let agent = agent_of(&opened.file, agent_id, None)?;
     let owner = agent.record.owner.clone().ok_or(NO_OWNER)?;
-    let floor = crate::model_budget::signed_spend_floor(data_dir, agent_id)?;
+    let floor =
+        crate::model_budget::signed_spend_floor(data_dir, agent_id, agent.model_tokens_spent)?;
     Ok((owner, agent.model_tokens_spent.max(floor)))
 }
 
@@ -680,10 +686,14 @@ pub(crate) fn charge_model_spend(
     ceiling: u64,
     offer_id: Option<&str>,
 ) -> Result<(u64, u64), SpendRefusal> {
+    if !build_allows_for_home(data_dir) {
+        return Err(SpendRefusal::Name(FEATURE_OFF));
+    }
     let opened = open(data_dir, true).map_err(|err| SpendRefusal::Name(reason_of(&err)))?;
     let agent = agent_of(&opened.file, agent_id, Some(owner)).map_err(SpendRefusal::Name)?;
     let floor =
-        crate::model_budget::signed_spend_floor(data_dir, agent_id).map_err(SpendRefusal::Name)?;
+        crate::model_budget::signed_spend_floor(data_dir, agent_id, agent.model_tokens_spent)
+            .map_err(SpendRefusal::Name)?;
     let stored = agent.model_tokens_spent.max(floor);
     let is_owner = |record: &&PrincipalRecord| record.principal_id == owner;
     let person = opened.owner_file.iter().find(is_owner);
@@ -694,9 +704,7 @@ pub(crate) fn charge_model_spend(
     // The agent lock is held. A hosted offer is read again here, before the
     // file write and before this charge returns to the send.
     if !hosted_owner_still_approved(data_dir, agent_id, offer_id) {
-        return Err(SpendRefusal::Name(
-            crate::api::gateway::HOSTED_AGENT_RUN_SENTENCE,
-        ));
+        return Err(SpendRefusal::HostedRun);
     }
     let Some(total) = raised else {
         return Ok((next, charged));
