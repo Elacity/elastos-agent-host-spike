@@ -192,7 +192,7 @@ pub(super) fn prepare(
 /// descriptor (both at least 3, with FD_CLOEXEC), and writes any returned
 /// failure to the report descriptor before exiting the child. Tests use -1
 /// when there is no executable descriptor.
-pub(super) unsafe fn install(
+pub(in crate::provider) unsafe fn install(
     prepared: &Prepared,
     keep: i32,
     executable: i32,
@@ -338,7 +338,7 @@ pub(super) unsafe fn install(
     result
 }
 
-pub(super) fn prepare_path_allow(
+pub(in crate::provider) fn prepare_path_allow(
     provider: RuntimeProviderId,
     admitted: &AdmittedRights,
     plan: landlock_plan::Plan,

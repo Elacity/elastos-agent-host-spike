@@ -953,7 +953,11 @@ mod tests {
     /// A copied tree under the test root, found through an injected directory
     /// list that is not the multiarch directory. The child installs that one
     /// file rule and can open the file.
-    #[cfg(all(target_os = "linux", not(elastos_unsupported_os_check)))]
+    #[cfg(all(
+        not(elastos_unsupported_os_check),
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))]
     #[test]
     fn a_linux_child_opens_a_library_found_outside_the_multiarch_directory() {
         let root = tempfile::tempdir().unwrap();
@@ -989,7 +993,7 @@ mod tests {
             root_ino: Vec::new(),
         };
         // The child calls the installer directly, as the installer's own tests do.
-        use super::super::preexec_installer::{install, prepare_path_allow};
+        use super::super::os_entry::preexec_installer::{install, prepare_path_allow};
         let prepared = prepare_path_allow(Localhost, &admitted, plan).unwrap();
         use std::os::fd::AsRawFd;
         use std::os::unix::ffi::OsStrExt;
