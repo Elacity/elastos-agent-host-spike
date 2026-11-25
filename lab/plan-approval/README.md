@@ -26,7 +26,7 @@ The Runtime earns no A15 credit from this lab result. RA-4 and RA-5 remain open.
 
 ## Layout
 
-- `src/lib.rs`: `Preview`, `preview`, `approve`, `execute` and their journey tests.
+- `src/lib.rs`: `Preview`, `preview`, `plan_sha256`, `approve`, `execute` and their journey tests.
 - `falsifiers.json`: the binding-compare plant and its named failing test.
 
 ## Checks

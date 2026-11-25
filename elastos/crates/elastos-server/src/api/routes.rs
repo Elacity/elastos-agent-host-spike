@@ -2703,6 +2703,8 @@ pub(crate) mod tests {
         assert_eq!(b_launch.session_id, b_launch.id);
         assert_ne!(a_launch.id, b_launch.id, "two instances, two ids");
         home.wait_pending(&b_launch.id).await;
+        // A pending call shows before the row's status moves from starting.
+        home.wait_running(&b_launch.id).await;
 
         let a_now = home.wait_running(&a_launch.id).await;
         assert_eq!(a_now.status, "running", "A still runs after B's launch");
