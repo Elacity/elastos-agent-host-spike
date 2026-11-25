@@ -118,11 +118,19 @@ impl RuntimeProviderId {
     /// base path and on later paths, inside the fence. Object calls it for
     /// the auth-state cache key, also inside the fence. Chain does not, and
     /// its Linux run already passed, so `readlink` stays off the chain row.
+    ///
+    /// `stat` and `lstat` are the x86_64 musl 1.2.5 forms of `statx` and
+    /// `newfstatat`, which these three helpers already allow. On x86_64,
+    /// `kstat.st_atime_sec` is `long` (the same width as `time_t`), so
+    /// `fstatat` does not try `statx` first and `fstatat_kstat` issues
+    /// `SYS_stat` or `SYS_lstat`. They let metadata and realpath see a path.
+    /// Landlock does not mediate stat, the same as the `statx` row. aarch64
+    /// musl has no `stat` or `lstat` number, so those names drop there.
     pub(super) fn measured_syscalls(self) -> &'static str {
         match self {
-            Self::Localhost => "readlink rmdir",
-            Self::Object => "flock getpid readlink rename renameat rmdir",
-            Self::Chain => "connect recvfrom sendmmsg epoll_create1 epoll_ctl epoll_pwait epoll_wait eventfd2 exit rseq rt_sigprocmask rename renameat",
+            Self::Localhost => "readlink rmdir stat lstat",
+            Self::Object => "flock getpid readlink rename renameat rmdir stat lstat",
+            Self::Chain => "connect recvfrom sendmmsg epoll_create1 epoll_ctl epoll_pwait epoll_wait eventfd2 exit rseq rt_sigprocmask rename renameat stat lstat",
             Self::Did | Self::Wallet | Self::Model => "",
         }
     }

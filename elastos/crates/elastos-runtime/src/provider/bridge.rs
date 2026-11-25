@@ -1643,6 +1643,38 @@ fn pipe_pair() -> Result<(OwnedFd, OwnedFd), BridgeError> {
     unsafe { Ok((OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1]))) }
 }
 
+/// The chain settings `config.rs` and `rpc.rs` used to read. Runtime copies
+/// only these names from its own environment. Empty values are left out.
+/// Nothing here is logged.
+const CHAIN_OPERATOR_KEYS: &[&str] = &[
+    "BASE_RPC_URL",
+    "BITCOIN_REST_URL",
+    "BITCOIN_RPC_USER",
+    "BITCOIN_RPC_PASSWORD",
+];
+
+fn chain_operator_settings_from(lookup: impl Fn(&str) -> Option<String>) -> serde_json::Value {
+    let mut map = serde_json::Map::new();
+    for key in CHAIN_OPERATOR_KEYS {
+        if let Some(value) = lookup(key) {
+            if !value.is_empty() {
+                map.insert((*key).to_string(), serde_json::Value::String(value));
+            }
+        }
+    }
+    serde_json::Value::Object(map)
+}
+
+fn insert_chain_operator_settings(config: &mut ProviderConfig) {
+    let settings = chain_operator_settings_from(|key| std::env::var(key).ok());
+    if config.extra.is_null() {
+        config.extra = serde_json::json!({});
+    }
+    if let Some(object) = config.extra.as_object_mut() {
+        object.insert("operator_settings".to_string(), settings);
+    }
+}
+
 impl ProviderBridge {
     async fn force_child_reap(
         child: &mut Child,
@@ -1905,6 +1937,9 @@ impl ProviderBridge {
         config.base_path = data_dir.to_string_lossy().into_owned();
         if component_key == "chain-provider" {
             Self::ensure_chain_provider_root(data_dir)?;
+            // Closed list from this process. The helper applies it in Init.
+            // The values are not logged.
+            insert_chain_operator_settings(&mut config);
         }
         let (stdin_read, stdout_write, stdio) = Self::protocol_pipes()?;
         let launched = super::os_entry::start_path_allow(
@@ -2704,8 +2739,13 @@ impl ProviderBridge {
     /// Name omitted optional libraries when the helper exits before it answers.
     /// An empty list stays the plain process-exited text.
     pub(super) fn early_exit_detail(error: &BridgeError, omitted: &[String]) -> String {
+        let early = match error {
+            BridgeError::ProcessExited => true,
+            BridgeError::Io(err) if err.kind() == std::io::ErrorKind::BrokenPipe => true,
+            _ => false,
+        };
         let mut detail = error.to_string();
-        if matches!(error, BridgeError::ProcessExited) && !omitted.is_empty() {
+        if early && !omitted.is_empty() {
             detail.push_str("; ");
             detail.push_str(&omitted.join("; "));
         }
@@ -6533,5 +6573,51 @@ int main(void) {
             ProviderBridge::early_exit_detail(&BridgeError::ProcessExited, &[]),
             "provider process exited unexpectedly"
         );
+        let broken = ProviderBridge::early_exit_detail(
+            &BridgeError::Io(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "broken pipe",
+            )),
+            &["omitted library libgcc_s.so.1, tried /lib/libgcc_s.so.1".to_string()],
+        );
+        assert!(broken.contains("libgcc_s.so.1"), "{broken}");
+        assert!(broken.contains("omitted library"), "{broken}");
+        let other = ProviderBridge::early_exit_detail(
+            &BridgeError::Io(std::io::Error::new(std::io::ErrorKind::NotFound, "missing")),
+            &["omitted library libgcc_s.so.1, tried /lib/libgcc_s.so.1".to_string()],
+        );
+        assert!(!other.contains("omitted library"), "{other}");
+    }
+
+    #[test]
+    fn chain_operator_settings_are_the_closed_list() {
+        let settings = chain_operator_settings_from(|key| match key {
+            "BASE_RPC_URL" => Some("https://base.example.test".to_string()),
+            "BITCOIN_RPC_PASSWORD" => Some("secret-value".to_string()),
+            "BITCOIN_REST_URL" => Some(String::new()),
+            "OTHER" => Some("no".to_string()),
+            _ => None,
+        });
+        let object = settings.as_object().unwrap();
+        assert_eq!(
+            object.get("BASE_RPC_URL").and_then(|value| value.as_str()),
+            Some("https://base.example.test")
+        );
+        assert_eq!(
+            object
+                .get("BITCOIN_RPC_PASSWORD")
+                .and_then(|value| value.as_str()),
+            Some("secret-value")
+        );
+        assert!(object.get("BITCOIN_REST_URL").is_none());
+        assert!(object.get("OTHER").is_none());
+        assert_eq!(object.len(), 2);
+        let source = include_str!("bridge.rs");
+        let function = source
+            .split("fn chain_operator_settings_from")
+            .nth(1)
+            .unwrap();
+        let body = &function[..function.find("\nfn ").unwrap_or(function.len())];
+        assert!(!body.contains("tracing") && !body.contains("eprintln") && !body.contains("log::"));
     }
 }

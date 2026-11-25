@@ -9,7 +9,7 @@
 
 use super::rights::AdmittedRights;
 use super::rights_table::RuntimeProviderId;
-use std::os::unix::fs::MetadataExt;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 /// One rendered helper confinement. `landlock` is the path-beneath plan.
@@ -19,20 +19,41 @@ pub(crate) struct HelperConfinement {
     pub landlock_abi: u32,
     pub landlock_handled: u64,
     pub landlock: Vec<super::landlock_plan::PathRule>,
-    /// Data directory and its ancestors. Seatbelt `file-read-metadata` literals
-    /// only. They are not Landlock rules: a path-beneath rule here would include
+    /// Data directory, its ancestors, and for object the `ElastOS` directory
+    /// itself. Seatbelt `file-read-metadata` literals only. They are not
+    /// Landlock rules: a path-beneath rule here would include
     /// `identity/device.key`.
     pub metadata: Vec<PathBuf>,
 }
 
-/// Object file roots. `Users` and `UsersAI` hold caller-chosen object names,
-/// so each is one directory. `ElastOS` stays one directory too. The helper's
-/// auth operations create `audit-chain-required.json.lock` and a randomly
-/// named `.{file}.{pid}.{nanos}.tmp` beside the target, both in
-/// `ElastOS/System/Auth`. `recovery-archive.key` is in that same directory.
-/// Landlock cannot exclude one child of a directory rule, and `auth.rs` is
-/// not moved. A literal file grant cannot name the temp.
-const OBJECT_ROOTS: &[&str] = &["ElastOS", "Users", "UsersAI"];
+/// Object file roots. The seatbelt parameter is the first name. The directory
+/// is the second. Seatbelt parameter names cannot contain `/`, so
+/// `ElastOS_System` is the parameter for `ElastOS/System`.
+///
+/// `Users` and `UsersAI` hold caller-chosen object names. Object's ElastOS
+/// root is `ElastOS/System`, the directory its auth state, lock file, and
+/// temp files use. A Home that does not have that directory yet gets it
+/// created at 0700, owned by the current user.
+///
+/// Linux Landlock cannot exclude a child of a granted directory. Localhost
+/// still grants `ElastOS`, so `ElastOS/SystemServices/Wallet` stays inside
+/// that grant on Linux. macOS adds a Seatbelt deny for that wallet directory
+/// after the `ElastOS` allow.
+const OBJECT_ROOTS: &[(&str, &str)] = &[
+    ("ElastOS_System", "ElastOS/System"),
+    ("Users", "Users"),
+    ("UsersAI", "UsersAI"),
+];
+
+/// macOS localhost deny. Not a Landlock rule: Linux cannot exclude this child.
+/// Seatbelt rejects a `subpath` whose directory does not exist, so the macOS
+/// launch creates this directory before `sandbox-exec` when it is missing.
+const LOCALHOST_WALLET_DENY: &str =
+    "(deny file-read* file-write* (subpath (param \"ELASTOS_WALLET\")))\n";
+#[cfg(test)]
+const LOCALHOST_WALLET_PARAM: &str = "ELASTOS_WALLET";
+#[cfg(target_os = "macos")]
+const LOCALHOST_WALLET_RELATIVE: &str = "ElastOS/SystemServices/Wallet";
 
 /// `node_lifecycle_state_path` joins this directory under the data directory.
 const CHAIN_ROOTS: &[&str] = &["chain-provider"];
@@ -40,13 +61,34 @@ const CHAIN_ROOTS: &[&str] = &["chain-provider"];
 /// Localhost serves a caller-chosen path under any file-backed root, so it
 /// needs all seven: AppCapsules, ElastOS, Local, MyWebSite, Public, Users,
 /// and UsersAI.
-fn file_roots(provider: RuntimeProviderId) -> &'static [&'static str] {
+/// `(seatbelt parameter, directory under the data directory)`.
+fn root_specs(provider: RuntimeProviderId) -> Vec<(&'static str, &'static str)> {
     match provider {
-        RuntimeProviderId::Localhost => elastos_common::localhost::FILE_BACKED_ROOTS,
-        RuntimeProviderId::Object => OBJECT_ROOTS,
-        RuntimeProviderId::Chain => CHAIN_ROOTS,
-        RuntimeProviderId::Did | RuntimeProviderId::Wallet | RuntimeProviderId::Model => &[],
+        RuntimeProviderId::Localhost => elastos_common::localhost::FILE_BACKED_ROOTS
+            .iter()
+            .map(|name| (*name, *name))
+            .collect(),
+        RuntimeProviderId::Object => OBJECT_ROOTS.to_vec(),
+        RuntimeProviderId::Chain => CHAIN_ROOTS.iter().map(|name| (*name, *name)).collect(),
+        RuntimeProviderId::Did | RuntimeProviderId::Wallet | RuntimeProviderId::Model => Vec::new(),
     }
+}
+
+/// The wallet directory localhost's macOS profile denies. Linux does not use
+/// this path as an exclusion. The macOS launch creates it when it is missing.
+#[cfg(target_os = "macos")]
+pub(super) fn localhost_wallet_dir(data_dir: &Path) -> PathBuf {
+    data_dir.join(LOCALHOST_WALLET_RELATIVE)
+}
+
+/// Create `ElastOS/SystemServices/Wallet` when it is missing, at mode 0700.
+/// Seatbelt will not install a `subpath` deny for a path that does not exist,
+/// and that abort would stop localhost. An existing directory is left as it
+/// is. A symlink or a non-directory on the path is refused.
+#[cfg(target_os = "macos")]
+pub(super) fn ensure_localhost_wallet_dir(data_dir: &Path) -> Result<PathBuf, String> {
+    ensure_nested_directory(data_dir, LOCALHOST_WALLET_RELATIVE)?;
+    Ok(localhost_wallet_dir(data_dir))
 }
 
 /// The data directory and every ancestor except `/`, for both the path the
@@ -100,6 +142,7 @@ fn require_real_root(
     data_dir: &Path,
     name: &str,
     path: &Path,
+    nested: bool,
 ) -> Result<(u64, u64, std::os::fd::OwnedFd), String> {
     let metadata = std::fs::symlink_metadata(path)
         .map_err(|_| format!("provider start is refused: {name} is missing. Create a directory named {name} that you own in the data directory, then start Home again."))?;
@@ -122,7 +165,12 @@ fn require_real_root(
             "provider start is refused: {name} reaches identity/device.key"
         ));
     }
-    if resolved.parent() != Some(data_resolved.as_path()) {
+    let inside = if nested {
+        resolved.starts_with(&data_resolved) && resolved != data_resolved
+    } else {
+        resolved.parent() == Some(data_resolved.as_path())
+    };
+    if !inside {
         return Err(format!(
             "provider start is refused: {name} resolves outside the data directory"
         ));
@@ -161,16 +209,20 @@ fn resolve_roots(
             "provider start is refused: the data directory path is not absolute".to_string(),
         );
     }
-    let names = file_roots(provider);
-    if names.is_empty() {
+    let specs = root_specs(provider);
+    if specs.is_empty() {
         return Err("provider start is refused: the path allow-list has no file roots".to_string());
     }
-    let mut resolved: Vec<super::landlock_plan::AllowRoot> = Vec::with_capacity(names.len());
-    for name in names {
-        let path = data_dir.join(name);
-        let (dev, ino, held) = require_real_root(data_dir, name, &path)?;
+    let mut resolved: Vec<super::landlock_plan::AllowRoot> = Vec::with_capacity(specs.len());
+    for (param, relative) in specs {
+        if relative.contains('/') {
+            ensure_nested_directory(data_dir, relative)?;
+        }
+        let path = data_dir.join(relative);
+        let (dev, ino, held) =
+            require_real_root(data_dir, relative, &path, relative.contains('/'))?;
         resolved.push(super::landlock_plan::AllowRoot {
-            name,
+            name: param,
             path,
             dev,
             ino,
@@ -178,6 +230,51 @@ fn resolve_roots(
         });
     }
     Ok(resolved)
+}
+
+/// Create each missing component of `relative` at mode 0700. A symlink or a
+/// non-directory on that path is refused. An existing directory is left as it
+/// is, including its mode.
+fn ensure_nested_directory(data_dir: &Path, relative: &str) -> Result<(), String> {
+    let mut current = data_dir.to_path_buf();
+    for part in relative.split('/') {
+        if part.is_empty() || part == "." || part == ".." {
+            return Err(format!(
+                "provider start is refused: {relative} resolves outside the data directory"
+            ));
+        }
+        current.push(part);
+        match std::fs::symlink_metadata(&current) {
+            Ok(meta) if meta.file_type().is_symlink() => {
+                return Err(format!(
+                    "provider start is refused: {relative} is a symlink"
+                ));
+            }
+            Ok(meta) if !meta.is_dir() => {
+                return Err(format!(
+                    "provider start is refused: {relative} is not a directory. Replace it with a directory you own, then start Home again."
+                ));
+            }
+            Ok(_) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                std::fs::create_dir(&current).map_err(|error| {
+                    format!("provider start is refused: {relative} could not be created: {error}")
+                })?;
+                std::fs::set_permissions(&current, std::fs::Permissions::from_mode(0o700))
+                    .map_err(|error| {
+                        format!(
+                            "provider start is refused: {relative} could not be created: {error}"
+                        )
+                    })?;
+            }
+            Err(err) => {
+                return Err(format!(
+                    "provider start is refused: {relative} could not be created: {err}"
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 pub(super) fn render_with_plan(
@@ -205,18 +302,35 @@ pub(super) fn render_with_plan(
     // Chain's measured profile has no ancestor metadata. The data directory
     // stays out of the Seatbelt text, so identity/device.key stays unreadable.
     // A grant without storage has no file roots and no metadata literals.
-    let metadata = if chain || !storage {
+    let mut metadata = if chain || !storage {
         Vec::new()
     } else {
         metadata_literals(data_dir)?
     };
-    let seatbelt = super::macos_profile::render_path_allow_profile(
+    if matches!(provider, RuntimeProviderId::Object) && storage {
+        // The auth-state walk stats `ElastOS` on the way to `ElastOS/System/Auth`.
+        // That directory is not a root. A metadata literal lets the walk reject
+        // a symlink there. It does not grant the other children of `ElastOS`.
+        // Linux Landlock does not mediate stat, so the Landlock plan stays
+        // `ElastOS/System` and still cannot exclude a child of a granted directory.
+        let elast = data_dir.join("ElastOS");
+        if !metadata.iter().any(|path| path == &elast) {
+            metadata.push(elast);
+        }
+    }
+    let mut seatbelt = super::macos_profile::render_path_allow_profile(
         &names,
         metadata.len(),
         chain,
         storage,
         executable_right,
     )?;
+    if matches!(provider, RuntimeProviderId::Localhost) {
+        // After the ElastOS allow. Last-match Seatbelt denies the wallet
+        // directory. Linux Landlock cannot exclude that child; this line is
+        // macOS only and is not a Landlock rule.
+        seatbelt.push_str(LOCALHOST_WALLET_DENY);
+    }
     let plan = super::landlock_plan::build_path_allow_plan(
         provider,
         admitted,
@@ -258,6 +372,8 @@ pub(super) fn render_with_plan(
 #[cfg(test)]
 mod tests {
     use std::path::Path;
+    #[cfg(target_os = "macos")]
+    use std::path::PathBuf;
 
     const EXE: &str = "/opt/elastos/helper-provider";
 
@@ -336,7 +452,7 @@ mod tests {
                 "localhost-provider",
                 elastos_common::localhost::FILE_BACKED_ROOTS,
             ),
-            ("object-provider", &["ElastOS", "Users", "UsersAI"]),
+            ("object-provider", &["ElastOS_System", "Users", "UsersAI"]),
             ("chain-provider", &["chain-provider"]),
         ];
         let did = super::super::landlock_plan::build(
@@ -404,6 +520,15 @@ mod tests {
                     "{component_key} metadata literals"
                 );
                 assert!(rendered.metadata.iter().any(|path| path == data_dir));
+                if *component_key == "object-provider" {
+                    assert!(
+                        rendered
+                            .metadata
+                            .iter()
+                            .any(|path| path == &data_dir.join("ElastOS")),
+                        "object stats ElastOS itself so the auth walk can reject a symlink"
+                    );
+                }
             }
             assert!(rendered
                 .metadata
@@ -442,6 +567,48 @@ mod tests {
                     };
                     assert!(allowed, "{component_key} literal {path}");
                 }
+            }
+            if *component_key == "localhost-provider" {
+                assert!(
+                    rendered
+                        .seatbelt
+                        .contains(super::LOCALHOST_WALLET_DENY.trim()),
+                    "localhost macOS profile denies the wallet directory"
+                );
+                assert_eq!(
+                    subpaths.last().copied(),
+                    Some(super::LOCALHOST_WALLET_PARAM)
+                );
+                subpaths.pop();
+                assert!(
+                    rendered
+                        .landlock
+                        .iter()
+                        .any(|rule| rule.1.ends_with("ElastOS")),
+                    "Linux still grants ElastOS; Landlock cannot exclude the wallet child"
+                );
+                assert!(
+                    !rendered
+                        .landlock
+                        .iter()
+                        .any(|rule| rule.0 == super::LOCALHOST_WALLET_PARAM),
+                    "the wallet deny is not a Landlock rule"
+                );
+            }
+            if *component_key == "object-provider" {
+                assert!(
+                    rendered.landlock.iter().any(
+                        |rule| rule.0 == "ElastOS_System" && rule.1.ends_with("ElastOS/System")
+                    ),
+                    "object grants ElastOS/System"
+                );
+                assert!(
+                    !rendered
+                        .landlock
+                        .iter()
+                        .any(|rule| rule.1 == data_dir.join("ElastOS")),
+                    "object no longer grants all of ElastOS"
+                );
             }
             assert_eq!(subpaths, *expected, "{component_key} seatbelt roots");
             assert_eq!(literals.first().copied(), Some("PROVIDER_EXECUTABLE"));
@@ -488,15 +655,27 @@ mod tests {
             }
             assert_eq!(roots.len(), expected.len(), "{component_key} root count");
             for (rule, name) in roots.iter().zip(expected.iter()) {
-                let path = data_dir.join(name);
+                let relative = if *name == "ElastOS_System" {
+                    "ElastOS/System"
+                } else {
+                    *name
+                };
+                let path = data_dir.join(relative);
                 assert_eq!(rule.0, *name, "{component_key}");
                 assert_eq!(rule.1, path, "{component_key}");
-                assert_eq!(
-                    rule.1.parent(),
-                    Some(data_dir),
+                assert!(
+                    rule.1.starts_with(data_dir) && rule.1 != data_dir,
                     "allow list grew to the whole data directory: {:?}",
                     rule.1
                 );
+                if *name == "ElastOS_System" {
+                    assert_eq!(
+                        rule.1.parent().and_then(|parent| parent.parent()),
+                        Some(data_dir)
+                    );
+                } else {
+                    assert_eq!(rule.1.parent(), Some(data_dir));
+                }
                 assert!(
                     !reaches(&rule.1, &key) && !reaches(&rule.1, &identity),
                     "{component_key} reaches the device key through {}",
@@ -558,6 +737,153 @@ mod tests {
     }
 
     #[test]
+    fn object_system_root_is_created_when_the_home_has_no_elastos_directory() {
+        use std::os::unix::fs::PermissionsExt;
+        let held = tempfile::tempdir().expect("data directory");
+        let data = held.path();
+        std::fs::create_dir(data.join("Users")).unwrap();
+        std::fs::create_dir(data.join("UsersAI")).unwrap();
+        assert!(!data.join("ElastOS").exists());
+        let rendered = render("object-provider", data, Path::new(EXE), 5)
+            .expect("a missing ElastOS/System is created");
+        let system = data.join("ElastOS/System");
+        let meta = std::fs::symlink_metadata(&system).unwrap();
+        assert!(meta.is_dir());
+        assert_eq!(meta.permissions().mode() & 0o777, 0o700);
+        assert!(rendered.landlock.iter().any(|rule| rule.1 == system));
+        let docs = include_str!("../../../../../docs/WALLET_PROVIDER.md");
+        let source = include_str!("path_allow.rs");
+        let sentence = "Linux Landlock cannot exclude a child of a granted directory.";
+        assert!(source.contains(sentence) && docs.contains(sentence));
+    }
+
+    #[cfg(target_os = "macos")]
+    fn seatbelt_defines(
+        rendered: &super::HelperConfinement,
+        data: &Path,
+        wallet: &Path,
+    ) -> Vec<(String, PathBuf)> {
+        let mut names = Vec::new();
+        for line in rendered.seatbelt.lines() {
+            if let Some(name) = quoted(line, "(param \"") {
+                if !names.iter().any(|seen| seen == name) {
+                    names.push(name.to_string());
+                }
+            }
+        }
+        names
+            .into_iter()
+            .map(|name| {
+                let path = if name == "ElastOS_System" {
+                    data.join("ElastOS/System")
+                } else if name == "ELASTOS_WALLET" {
+                    wallet.to_path_buf()
+                } else if name == "PROVIDER_EXECUTABLE" {
+                    PathBuf::from("/bin/cat")
+                } else if let Some(rest) = name.strip_prefix("META_") {
+                    rendered.metadata[rest.parse::<usize>().unwrap()].clone()
+                } else {
+                    data.join(&name)
+                };
+                (name, path)
+            })
+            .collect()
+    }
+
+    #[cfg(target_os = "macos")]
+    fn sandboxed_cat(
+        rendered: &super::HelperConfinement,
+        defines: &[(String, PathBuf)],
+        file: &Path,
+    ) -> std::process::Output {
+        let mut command = std::process::Command::new("/usr/bin/sandbox-exec");
+        command.arg("-p").arg(&rendered.seatbelt);
+        for (name, path) in defines {
+            command.arg("-D").arg(format!("{name}={}", path.display()));
+        }
+        command
+            .arg("/bin/cat")
+            .arg(file)
+            .output()
+            .expect("sandbox-exec")
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn localhost_seatbelt_denies_the_wallet_directory() {
+        let held = real_data_dir();
+        let data = held.path();
+        let note_dir = data.join("ElastOS/System");
+        std::fs::create_dir_all(&note_dir).unwrap();
+        let note = note_dir.join("note.txt");
+        std::fs::write(&note, b"readable").unwrap();
+        let wallet = super::localhost_wallet_dir(data);
+        std::fs::create_dir_all(&wallet).unwrap();
+        let secret = wallet.join("wallet-key.hex");
+        std::fs::write(&secret, b"wallet-secret").unwrap();
+        let data = std::fs::canonicalize(data).unwrap();
+        let note = data.join("ElastOS/System/note.txt");
+        let wallet = super::localhost_wallet_dir(&data);
+        let secret = wallet.join("wallet-key.hex");
+        let rendered = render("localhost-provider", &data, Path::new(EXE), 5).unwrap();
+        let defines = seatbelt_defines(&rendered, &data, &wallet);
+        let denied = sandboxed_cat(&rendered, &defines, &secret);
+        assert!(
+            !denied.status.success(),
+            "wallet file was readable: {}",
+            String::from_utf8_lossy(&denied.stdout)
+        );
+        assert_eq!(std::fs::read(&secret).unwrap(), b"wallet-secret");
+        let allowed = sandboxed_cat(&rendered, &defines, &note);
+        assert!(
+            allowed.status.success(),
+            "ElastOS/System/note.txt must stay readable: {} {}",
+            String::from_utf8_lossy(&allowed.stderr),
+            String::from_utf8_lossy(&allowed.stdout)
+        );
+        assert_eq!(allowed.stdout, b"readable");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn localhost_seatbelt_creates_a_missing_wallet_directory_and_denies_it() {
+        use std::os::unix::fs::PermissionsExt;
+        let held = real_data_dir();
+        let data = std::fs::canonicalize(held.path()).unwrap();
+        let note_dir = data.join("ElastOS/System");
+        std::fs::create_dir_all(&note_dir).unwrap();
+        let note = note_dir.join("note.txt");
+        std::fs::write(&note, b"readable").unwrap();
+        let wallet = super::localhost_wallet_dir(&data);
+        assert!(!wallet.exists(), "the row starts with no wallet directory");
+        let created = super::ensure_localhost_wallet_dir(&data).unwrap();
+        assert_eq!(created, wallet);
+        let meta = std::fs::symlink_metadata(&wallet).unwrap();
+        assert!(meta.is_dir());
+        assert_eq!(meta.permissions().mode() & 0o777, 0o700);
+        let secret = wallet.join("wallet-key.hex");
+        std::fs::write(&secret, b"wallet-secret").unwrap();
+        let rendered = render("localhost-provider", &data, Path::new(EXE), 5).unwrap();
+        let defines = seatbelt_defines(&rendered, &data, &wallet);
+        let denied = sandboxed_cat(&rendered, &defines, &secret);
+        assert!(
+            !denied.status.success(),
+            "a created wallet directory stayed readable"
+        );
+        let allowed = sandboxed_cat(&rendered, &defines, &note);
+        assert!(
+            allowed.status.success(),
+            "ElastOS/System/note.txt must stay readable: {}",
+            String::from_utf8_lossy(&allowed.stderr)
+        );
+        let launcher = include_str!("os_entry.rs");
+        assert!(
+            launcher.contains("ensure_localhost_wallet_dir"),
+            "deleting the macOS launch call leaves a missing wallet path able to abort sandbox-exec"
+        );
+    }
+
+    #[test]
     fn a_root_that_is_a_symlink_to_data_dir_or_to_data_dir_identity_is_refused_at_render() {
         let providers: &[(&str, &str)] = &[
             ("localhost-provider", "ElastOS"),
@@ -591,7 +917,11 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         let data = parent.join("data");
         std::fs::create_dir_all(data.join("ElastOS")).unwrap();
-        for relative in ["ElastOS/kept.txt", "chain-provider/kept.txt"] {
+        for relative in [
+            "ElastOS/kept.txt",
+            "ElastOS/System/kept.txt",
+            "chain-provider/kept.txt",
+        ] {
             let path = data.join(relative);
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
             std::fs::write(&path, b"kept-from-the-old-home").unwrap();
@@ -617,10 +947,10 @@ mod tests {
         for key in ["localhost-provider", "object-provider", "chain-provider"] {
             let rendered = render(key, data, Path::new(EXE), 5)
                 .unwrap_or_else(|err| panic!("{key} at {}: {err}", data.display()));
-            let file = if key == "chain-provider" {
-                data.join("chain-provider/kept.txt")
-            } else {
-                data.join("ElastOS/kept.txt")
+            let file = match key {
+                "chain-provider" => data.join("chain-provider/kept.txt"),
+                "object-provider" => data.join("ElastOS/System/kept.txt"),
+                _ => data.join("ElastOS/kept.txt"),
             };
             assert!(
                 rendered
@@ -632,7 +962,11 @@ mod tests {
                 rendered.landlock
             );
         }
-        for relative in ["ElastOS/kept.txt", "chain-provider/kept.txt"] {
+        for relative in [
+            "ElastOS/kept.txt",
+            "ElastOS/System/kept.txt",
+            "chain-provider/kept.txt",
+        ] {
             let path = data.join(relative);
             let meta = std::fs::symlink_metadata(&path).unwrap();
             assert_eq!(meta.mode() & 0o777, 0o640, "{}", path.display());
@@ -777,7 +1111,7 @@ mod tests {
         }
         let (parent, name, path) =
             found.expect("this machine has no directory owned by another user");
-        let error = super::require_real_root(std::path::Path::new(parent), name, &path)
+        let error = super::require_real_root(std::path::Path::new(parent), name, &path, false)
             .expect_err("a root owned by someone else is refused");
         assert!(error.contains(name), "{error}");
         assert!(error.contains("not owned by the current user"), "{error}");

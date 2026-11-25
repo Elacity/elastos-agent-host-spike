@@ -1,5 +1,4 @@
 //! Linux provider attachment. Prepare owned buffers before fork; install in the child.
-#![allow(dead_code)] // The spawn caller arrives in a later B3 slice.
 
 use super::super::{
     landlock_plan, rights::AdmittedRights, rights_table::RuntimeProviderId,
@@ -89,20 +88,9 @@ struct PathAttr {
     parent_fd: i32,
 }
 
-#[derive(Clone, Copy)]
-struct RootPin {
-    index: usize,
-    dev: u64,
-    ino: u64,
-}
-
 pub(super) struct Prepared {
     plan: landlock_plan::Plan,
-    paths: Vec<CString>,
     filters: Vec<libc::sock_filter>,
-    /// Every directory root. The child opens each one with no-follow and
-    /// compares its device and inode before adding that Landlock rule.
-    root_pins: Vec<RootPin>,
 }
 
 impl Prepared {
@@ -111,6 +99,13 @@ impl Prepared {
             .rules
             .get(index)
             .map(|rule| (rule.0, rule.1.as_path()))
+    }
+
+    #[cfg(test)]
+    pub(super) fn drop_held_for_test(&mut self, index: usize) {
+        if let Some(slot) = self.plan.held.get_mut(index) {
+            slot.take();
+        }
     }
 }
 
@@ -150,27 +145,23 @@ fn assemble(
     provider: RuntimeProviderId,
     admitted: &AdmittedRights,
     plan: landlock_plan::Plan,
-    root_pins: Vec<RootPin>,
 ) -> Result<Prepared, String> {
-    let paths = plan
+    // Refuse a NUL path before fork. The child never reads these strings.
+    let _paths = plan
         .rules
         .iter()
         .map(|rule| {
             CString::new(std::os::unix::ffi::OsStrExt::as_bytes(rule.1.as_os_str()))
                 .map_err(|_| format!("Landlock path contains NUL: {}", rule.0))
         })
-        .collect::<Result<Vec<_>, _>>()?;
+        .collect::<Result<Vec<CString>, _>>()?;
+    std::mem::drop(_paths);
     let filters = to_sock_filters(seccomp_program::program(
         provider,
         admitted,
         host_audit_arch(),
     ))?;
-    Ok(Prepared {
-        plan,
-        paths,
-        filters,
-        root_pins,
-    })
+    Ok(Prepared { plan, filters })
 }
 
 pub(super) fn prepare(
@@ -181,18 +172,7 @@ pub(super) fn prepare(
     let plan = landlock_plan::build(provider, admitted, bindings, landlock_plan::kernel_abi()?)?;
     // The single-root plan has one directory root, named STORAGE_ROOT.
     // Allow-list plans pin every root in `prepare_path_allow`.
-    let root_pins = plan
-        .rules
-        .iter()
-        .enumerate()
-        .filter(|(_, rule)| rule.0 == "STORAGE_ROOT")
-        .map(|(index, _)| RootPin {
-            index,
-            dev: plan.storage_dev,
-            ino: plan.storage_ino,
-        })
-        .collect();
-    assemble(provider, admitted, plan, root_pins)
+    assemble(provider, admitted, plan)
 }
 
 /// Close every descriptor from 3 up except `keep`, which is sorted and unique.
@@ -337,15 +317,7 @@ pub(super) fn prepare_path_allow(
                 .into(),
         );
     }
-    let root_pins = plan
-        .root_dev
-        .iter()
-        .copied()
-        .zip(plan.root_ino.iter().copied())
-        .enumerate()
-        .map(|(index, (dev, ino))| RootPin { index, dev, ino })
-        .collect();
-    assemble(provider, admitted, plan, root_pins)
+    assemble(provider, admitted, plan)
 }
 
 #[cfg(test)]
@@ -551,44 +523,6 @@ mod tests {
         );
     }
 
-    /// The child adds the rule from the descriptor held at the check. A name
-    /// swapped after that check is not the rule. A successful install exits 0.
-    /// The marker sits in the data directory, which is not a granted root.
-    #[cfg(target_os = "linux")]
-    fn install_exit(prepared: &Prepared, root_index: usize, marker: &std::ffi::CStr) -> i32 {
-        let report = std::fs::File::open("/dev/null").unwrap();
-        assert!(report.as_raw_fd() >= 3);
-        let pid = unsafe { libc::fork() };
-        assert!(pid >= 0);
-        if pid == 0 {
-            let code = match unsafe { install(prepared, report.as_raw_fd(), -1) } {
-                Err(Failure(Step::Add(index), errno)) if index == root_index => errno,
-                Err(_) => 91,
-                Ok(()) => {
-                    let created = unsafe {
-                        libc::open(
-                            marker.as_ptr(),
-                            libc::O_CREAT | libc::O_WRONLY | libc::O_EXCL,
-                            0o600,
-                        )
-                    };
-                    if created >= 0 {
-                        unsafe { libc::close(created) };
-                    }
-                    0
-                }
-            };
-            unsafe { libc::_exit(code) };
-        }
-        let mut status = 0;
-        assert_eq!(unsafe { libc::waitpid(pid, &mut status, 0) }, pid);
-        assert!(
-            libc::WIFEXITED(status),
-            "the child exited before it could run the program (wait status {status})"
-        );
-        libc::WEXITSTATUS(status)
-    }
-
     /// Install, then open `path` and exit with that errno. Exit 91 when
     /// install itself fails. Exit 0 when the open succeeds.
     #[cfg(target_os = "linux")]
@@ -741,6 +675,79 @@ mod tests {
             "a helper path swapped for a symlink to the data folder does not let the child read identity/device.key (exit {code})"
         );
         assert_eq!(std::fs::read(&key).unwrap(), b"device-key");
+    }
+
+    /// The loader rule is the descriptor held at the check. Replacing
+    /// libc.so.6 after that check does not grant the new file.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_loader_replaced_after_the_check_stays_unreadable() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("loaders");
+        std::fs::create_dir_all(root.join("lib")).unwrap();
+        std::fs::set_permissions(tmp.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::set_permissions(root.join("lib"), std::fs::Permissions::from_mode(0o755)).unwrap();
+        for name in [
+            "ld-linux-x86-64.so.2",
+            "ld-linux-aarch64.so.1",
+            "ld-musl-x86_64.so.1",
+            "ld-musl-aarch64.so.1",
+            "libc.so.6",
+            "libgcc_s.so.1",
+        ] {
+            let path = root.join("lib").join(name);
+            std::fs::write(&path, b"original-loader").unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let data = tmp.path().join("data");
+        std::fs::create_dir(&data).unwrap();
+        std::fs::set_permissions(&data, std::fs::Permissions::from_mode(0o700)).unwrap();
+        for name in elastos_common::localhost::FILE_BACKED_ROOTS {
+            std::fs::create_dir(data.join(name)).unwrap();
+        }
+        let helper = data.join("localhost-provider");
+        std::fs::write(&helper, b"helper").unwrap();
+        std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o755)).unwrap();
+        struct Clear;
+        impl Drop for Clear {
+            fn drop(&mut self) {
+                landlock_plan::set_loader_fixture(None);
+            }
+        }
+        let _clear = Clear;
+        landlock_plan::set_loader_fixture(Some((root.clone(), unsafe { libc::geteuid() })));
+        let abi = landlock_plan::kernel_abi().expect("this kernel has no Landlock");
+        let admitted = helper_grant(RuntimeProviderId::Localhost);
+        let (_confinement, plan) = path_allow::render_with_plan(
+            RuntimeProviderId::Localhost,
+            &admitted,
+            &data,
+            &helper,
+            abi,
+        )
+        .unwrap_or_else(|err| panic!("render: {err}"));
+        let libc_path = plan
+            .rules
+            .iter()
+            .find(|rule| rule.0 == "LANDLOCK_LOADER_PATHS" && rule.1.ends_with("libc.so.6"))
+            .map(|rule| rule.1.clone())
+            .expect("libc.so.6 is a held loader");
+        let aside = libc_path.with_file_name("libc.so.6.aside");
+        std::fs::rename(&libc_path, &aside).unwrap();
+        std::fs::write(&libc_path, b"replaced-loader").unwrap();
+        std::fs::set_permissions(&libc_path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let prepared = prepare_path_allow(RuntimeProviderId::Localhost, &admitted, plan).unwrap();
+        let libc_c = std::ffi::CString::new(libc_path.as_os_str().as_bytes()).unwrap();
+        let code = install_then_open(&prepared, &libc_c);
+        assert_eq!(
+            code,
+            libc::EACCES,
+            "the held loader descriptor is the original libc, so the file swapped in at the same name stays unreadable (exit {code})"
+        );
+        assert_eq!(std::fs::read(&libc_path).unwrap(), b"replaced-loader");
+        assert_eq!(std::fs::read(&aside).unwrap(), b"original-loader");
     }
 
     /// `libc::sock_filter` has no `PartialEq` in libc 0.2.189, so the Linux

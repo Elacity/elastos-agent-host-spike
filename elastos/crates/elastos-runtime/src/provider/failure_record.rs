@@ -6,7 +6,7 @@ use super::super::{landlock_plan, rights::AdmittedRights, rights_table::RuntimeP
 use super::preexec_installer;
 use std::{
     ffi::{CStr, CString},
-    os::fd::{AsRawFd, FromRawFd, OwnedFd},
+    os::fd::{AsRawFd, OwnedFd},
     os::unix::ffi::OsStrExt,
     os::unix::fs::MetadataExt,
     path::Path,
@@ -80,14 +80,16 @@ pub(super) fn start(
     stdin_read: Option<i32>,
     stdout_write: Option<i32>,
 ) -> Result<libc::pid_t, LaunchError> {
-    let verified = executable
-        .verify_at_spawn()
-        .map_err(LaunchError::BeforeFork)?;
+    // The NUL check is the before-fork reason this row names. It runs before
+    // the executable check, which refuses a path that cannot be opened.
     let _path = CString::new(executable.path().as_os_str().as_bytes()).map_err(|_| {
         LaunchError::BeforeFork(
             "landlock probe refused: PROVIDER_EXECUTABLE path contains NUL".into(),
         )
     })?;
+    let verified = executable
+        .verify_at_spawn()
+        .map_err(LaunchError::BeforeFork)?;
     let (dev, ino, held) = directory_identity(checked.path).map_err(LaunchError::BeforeFork)?;
     if dev != checked.dev || ino != checked.ino {
         return Err(LaunchError::BeforeFork(
@@ -96,6 +98,9 @@ pub(super) fn start(
         ));
     }
     landlock_plan::set_checked_directory(held);
+    // prepare takes the descriptor on success. An error before that take
+    // drops it here, so the thread-local slot does not keep the fd.
+    let _clear_checked = ClearCheckedDirectory;
     let storage = landlock_plan::StorageRoot {
         path: checked.path,
         dev,
@@ -165,7 +170,13 @@ fn directory_identity(path: &Path) -> Result<(u64, u64, OwnedFd), String> {
             std::io::Error::last_os_error()
         ));
     }
-    let file = unsafe { std::fs::File::from(OwnedFd::from_raw_fd(fd)) };
+    let held = super::super::root_pin::owned_fd_above_stdio(fd).map_err(|errno| {
+        format!(
+            "provider start is refused: the storage root could not be opened: {}",
+            std::io::Error::from_raw_os_error(errno)
+        )
+    })?;
+    let file = std::fs::File::from(held);
     let meta = file.metadata().map_err(|error| {
         format!("provider start is refused: the storage root could not be stated: {error}")
     })?;
@@ -193,40 +204,78 @@ fn open_dev_null() -> Result<OwnedFd, String> {
             std::io::Error::last_os_error()
         ));
     }
-    if fd < 3 {
-        unsafe { libc::close(fd) };
-        return Err(
-            "provider start is refused: the standard error descriptor is below fd 3".into(),
-        );
-    }
+    let held = super::super::root_pin::owned_fd_above_stdio(fd).map_err(|errno| {
+        format!(
+            "provider start is refused: /dev/null could not be opened: {}",
+            std::io::Error::from_raw_os_error(errno)
+        )
+    })?;
+    let fd = held.as_raw_fd();
     let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
     if flags < 0 || flags & libc::FD_CLOEXEC == 0 {
-        unsafe { libc::close(fd) };
+        drop(held);
         return Err(
             "provider start is refused: the standard error descriptor lacks FD_CLOEXEC".into(),
         );
     }
-    Ok(unsafe { OwnedFd::from_raw_fd(fd) })
+    Ok(held)
 }
 
 /// Kill an unconfined child and reap it. A deleted `kill` or `waitpid`
 /// leaves the child running, and the row that calls this turns red.
+/// `ESRCH` means the child is already dead. This still calls `waitpid`:
+/// a zombie is not reaped until that call, and `ECHILD` means it was
+/// already reaped.
 fn reap_unconfined(pid: libc::pid_t) -> bool {
+    let mut already_dead = false;
     if unsafe { libc::kill(pid, libc::SIGKILL) } < 0 {
-        return false;
+        let err = std::io::Error::last_os_error().raw_os_error();
+        if err != Some(libc::ESRCH) {
+            return false;
+        }
+        already_dead = true;
     }
+    let finished = |status: i32| {
+        already_dead || (libc::WIFSIGNALED(status) && libc::WTERMSIG(status) == libc::SIGKILL)
+    };
+    let gone = |err: Option<i32>| already_dead && err == Some(libc::ECHILD);
     for _ in 0..100 {
         let mut status = 0;
         let waited = unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) };
         if waited == pid {
-            return libc::WIFSIGNALED(status) && libc::WTERMSIG(status) == libc::SIGKILL;
+            return finished(status);
         }
-        if waited < 0 && std::io::Error::last_os_error().raw_os_error() != Some(libc::EINTR) {
-            return false;
+        if waited < 0 {
+            let err = std::io::Error::last_os_error().raw_os_error();
+            if err == Some(libc::EINTR) {
+                continue;
+            }
+            return gone(err);
         }
         std::thread::sleep(std::time::Duration::from_millis(1));
     }
-    false
+    loop {
+        let mut status = 0;
+        let waited = unsafe { libc::waitpid(pid, &mut status, 0) };
+        if waited == pid {
+            return finished(status);
+        }
+        if waited < 0 {
+            let err = std::io::Error::last_os_error().raw_os_error();
+            if err == Some(libc::EINTR) {
+                continue;
+            }
+            return gone(err);
+        }
+    }
+}
+
+struct ClearCheckedDirectory;
+
+impl Drop for ClearCheckedDirectory {
+    fn drop(&mut self) {
+        landlock_plan::clear_checked_directory();
+    }
 }
 
 fn launch(
@@ -419,7 +468,19 @@ fn launch(
                             "provider start is refused: the child is not confined (NoNewPrivs and Seccomp)",
                         )
                         .to_string();
-                    let _ = reap_unconfined(pid);
+                    if !reap_unconfined(pid) {
+                        let mut status = 0;
+                        loop {
+                            let waited = unsafe { libc::waitpid(pid, &mut status, 0) };
+                            if waited == pid
+                                || (waited < 0
+                                    && std::io::Error::last_os_error().raw_os_error()
+                                        != Some(libc::EINTR))
+                            {
+                                break;
+                            }
+                        }
+                    }
                     return Err(LaunchError::ChildFailed { pid, reason });
                 }
                 // The writer closed before exec, the executable changed, or
@@ -560,6 +621,19 @@ mod tests {
     use std::os::unix::ffi::OsStrExt;
     use std::os::unix::fs::PermissionsExt;
 
+    fn static_elf_header() -> [u8; 64] {
+        let mut header = [0u8; 64];
+        header[0..4].copy_from_slice(&[0x7f, b'E', b'L', b'F']);
+        header[4] = 2;
+        header[5] = 1;
+        header[6] = 1;
+        header[16] = 2;
+        header[18] = 0x3e;
+        header[20] = 1;
+        header[52] = 64;
+        header
+    }
+
     fn did_rows() -> super::super::super::rights::AdmittedRights {
         super::super::super::rights::admit_runtime_grant(RuntimeProviderId::Did)
     }
@@ -669,9 +743,13 @@ mod tests {
         .iter()
         .position(|rule| rule.0 == "STORAGE_ROOT")
         .expect("storage rule");
-        let prepared =
+        let mut prepared =
             preexec_installer::prepare(RuntimeProviderId::Did, &rows, &bindings).unwrap();
-        std::fs::remove_dir(root.path()).unwrap();
+        // The child adds the descriptor held at prepare. Removing the
+        // directory leaves that descriptor valid, so the add succeeds.
+        // Dropping the held descriptor is the installer failure inside the
+        // child: errno 9, EBADF, still naming this rule and this path.
+        prepared.drop_held_for_test(expected_rule);
         let (pid, reason) = match launch(
             &prepared,
             &CheckedExecutable::for_test(Path::new("/bin/true")),
@@ -695,7 +773,7 @@ mod tests {
         assert_eq!(
             reason,
             format!(
-                "landlock install refused: {name} {} could not be added with errno 2",
+                "landlock install refused: {name} {} could not be added with errno 9",
                 path.display()
             ),
             "the failed installer must name the rule and its path"
@@ -716,7 +794,12 @@ mod tests {
     fn exec_refusal_crosses_pipe_and_child_is_reaped() {
         let root = tempfile::tempdir().unwrap();
         let executable = root.path().join("not-executable");
-        std::fs::write(&executable, b"not an executable").unwrap();
+        // A 64-bit little-endian ELF with no program headers is Static, so
+        // the ELF check does not refuse it before fork. Mode 0644 makes
+        // fexecve return EACCES (errno 13). The report still crosses the pipe
+        // and the child is reaped.
+        std::fs::write(&executable, static_elf_header()).unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o644)).unwrap();
         let rows = did_rows();
         let (pid, reason) = match start(
             RuntimeProviderId::Did,
@@ -1053,6 +1136,54 @@ mod tests {
         assert!(
             after_accept.contains("reap_unconfined"),
             "an unconfined child is killed and reaped before its error returns"
+        );
+    }
+
+    #[test]
+    fn reap_unconfined_waits_when_kill_says_esrch() {
+        let pid = unsafe { libc::fork() };
+        assert!(pid >= 0);
+        if pid == 0 {
+            unsafe { libc::_exit(0) };
+        }
+        let mut status = 0;
+        assert_eq!(unsafe { libc::waitpid(pid, &mut status, 0) }, pid);
+        // The child is already reaped, so kill returns ESRCH and waitpid
+        // returns ECHILD. The reap still calls both.
+        assert!(
+            reap_unconfined(pid),
+            "ESRCH from kill still waits for the child"
+        );
+        assert_eq!(
+            unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) },
+            -1
+        );
+        assert_eq!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::ECHILD)
+        );
+    }
+
+    #[test]
+    fn an_error_before_take_clears_the_checked_directory() {
+        let root = tempfile::tempdir().unwrap();
+        let (_dev, _ino, held) = directory_identity(root.path()).unwrap();
+        landlock_plan::set_checked_directory(held);
+        let failed: Result<(), String> = {
+            let _clear = ClearCheckedDirectory;
+            Err("prepare stopped before take".into())
+        };
+        assert!(failed.is_err());
+        assert!(
+            !landlock_plan::checked_directory_is_held(),
+            "the directory fd stayed in the thread-local slot"
+        );
+        let body = include_str!("failure_record.rs");
+        let start = body.split("pub(super) fn start(").nth(1).unwrap();
+        let start = start.split("pub(super) fn start_prepared").next().unwrap();
+        assert!(
+            start.contains("ClearCheckedDirectory"),
+            "start clears the checked directory when prepare fails"
         );
     }
 }

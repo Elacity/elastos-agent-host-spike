@@ -40,12 +40,27 @@ fn stat_identity(info: &libc::stat) -> (u64, u64) {
 ///
 /// `DIRECTORY_OPEN_FLAGS` does not follow a symlink. The caller holds this
 /// descriptor until the rule is added, so the inode cannot be reused.
+/// Dup `fd` to a descriptor at or above 3 and close `fd`. A held descriptor
+/// in 0, 1, or 2 is replaced when the child dup2s its standard streams.
+pub(super) fn owned_fd_above_stdio(fd: i32) -> Result<OwnedFd, i32> {
+    if fd < 0 {
+        return Err(last_errno());
+    }
+    let dup = unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 3) };
+    let err = last_errno();
+    unsafe { libc::close(fd) };
+    if dup < 0 {
+        return Err(err);
+    }
+    Ok(unsafe { OwnedFd::from_raw_fd(dup) })
+}
+
 pub(super) fn hold_directory(path: &CStr) -> Result<OwnedFd, i32> {
     let fd = unsafe { libc::open(path.as_ptr(), DIRECTORY_OPEN_FLAGS) };
     if fd < 0 {
         return Err(last_errno());
     }
-    let directory = unsafe { OwnedFd::from_raw_fd(fd) };
+    let directory = owned_fd_above_stdio(fd)?;
     let mut info = MaybeUninit::<libc::stat>::uninit();
     if unsafe { libc::fstat(directory.as_raw_fd(), info.as_mut_ptr()) } < 0 {
         return Err(last_errno());
@@ -105,7 +120,7 @@ pub(super) fn open_pinned_directory(
         return Err(last_errno());
     }
     // The descriptor was just opened and is not owned by anyone else.
-    let directory = unsafe { OwnedFd::from_raw_fd(fd) };
+    let directory = owned_fd_above_stdio(fd)?;
     let mut info = MaybeUninit::<libc::stat>::uninit();
     if unsafe { libc::fstat(directory.as_raw_fd(), info.as_mut_ptr()) } < 0 {
         return Err(last_errno());
@@ -395,6 +410,36 @@ mod tests {
         assert_eq!(
             super::open_pinned_regular_file(&path, file.dev, file.ino).unwrap_err(),
             libc::EISDIR
+        );
+    }
+
+    #[test]
+    fn a_held_directory_stays_above_the_standard_descriptors() {
+        use std::os::fd::AsRawFd;
+        let dir = tempfile::tempdir().unwrap();
+        let name = std::ffi::CString::new(dir.path().as_os_str().as_bytes()).unwrap();
+        let pid = unsafe { libc::fork() };
+        assert!(pid >= 0);
+        if pid == 0 {
+            unsafe {
+                libc::close(0);
+                libc::close(1);
+                libc::close(2);
+            }
+            let code = match super::hold_directory(&name) {
+                Ok(held) if held.as_raw_fd() >= 3 => 0,
+                Ok(held) => 40 + held.as_raw_fd(),
+                Err(_) => 90,
+            };
+            unsafe { libc::_exit(code) };
+        }
+        let mut status = 0;
+        assert_eq!(unsafe { libc::waitpid(pid, &mut status, 0) }, pid);
+        assert!(libc::WIFEXITED(status), "wait status {status}");
+        assert_eq!(
+            libc::WEXITSTATUS(status),
+            0,
+            "the held directory fd was below 3"
         );
     }
 }

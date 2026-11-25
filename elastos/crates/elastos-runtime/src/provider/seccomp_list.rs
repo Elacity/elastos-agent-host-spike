@@ -280,6 +280,11 @@ mod tests {
             assert!(!local_x86.contains(&name) && !object_x86.contains(&name), "{name} leaked onto another helper");
         }
         assert!(!local_x86.contains(&"sendmmsg") && !object_x86.contains(&"sendmmsg"));
+        assert!(local_x86.contains(&"stat") && local_x86.contains(&"lstat"));
+        assert!(!local_x86.contains(&"open"), "open is argument-checked, not unconditional");
+        assert!(object_x86.contains(&"stat") && chain_x86.contains(&"lstat"));
+        assert!(!chain_arm.contains(&"stat") && !chain_arm.contains(&"lstat"));
+        assert!(!did_x86.contains(&"stat") && !did_x86.contains(&"lstat") && !did_x86.contains(&"open"));
         assert!(local_x86.contains(&"rmdir"));
         assert!(local_x86.contains(&"readlink"), "x86_64 realpath uses syscall readlink");
         assert!(local_x86.contains(&"readlinkat"));
@@ -316,6 +321,8 @@ mod tests {
         assert!(object_arm.contains(&"renameat"));
         assert!(!object_arm.contains(&"chmod"));
         assert!(!object_arm.contains(&"rename"));
+        assert!(!local_arm.contains(&"stat") && !local_arm.contains(&"lstat"));
+        assert!(!object_arm.contains(&"stat") && !object_arm.contains(&"lstat"));
         assert_ne!(object_x86, local_x86);
         assert_ne!(object_arm, local_arm);
     }
@@ -346,6 +353,16 @@ mod tests {
                 "readlink",
                 AuditArch::Aarch64,
                 "aarch64 glibc uses readlinkat, which the baseline allows; the number table has no readlink there",
+            ),
+            (
+                "stat",
+                AuditArch::Aarch64,
+                "aarch64 has no stat syscall; newfstatat and statx are the calls, and musl 1.2.5 uses those",
+            ),
+            (
+                "lstat",
+                AuditArch::Aarch64,
+                "aarch64 has no lstat syscall; newfstatat with AT_SYMLINK_NOFOLLOW is the call",
             ),
             (
                 "arch_prctl",

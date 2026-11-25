@@ -21,7 +21,10 @@ const NUMBERS: &str = concat!(
     // have no AArch64 syscall or libc::SYS_* constant; '-' excludes each there.
     "accept4:288:242 bind:49:200 connect:42:203 dup2:33:- getpgrp:111:- getpid:39:172 getsockopt:55:209 kill:62:129 listen:50:201 pipe2:293:59 readlink:89:- recvfrom:45:207 rt_sigprocmask:14:135 sendto:44:206 setpgid:109:154 socket:41:198 waitid:247:95 ",
     // Chain network stack. `sendmmsg` is glibc DNS; `setsockopt` is argument-checked.
-    "sendmmsg:307:269 setsockopt:54:208",
+    // `open`, `stat`, and `lstat` are the x86_64 musl 1.2.5 forms of `openat`,
+    // `statx`, and `newfstatat`. aarch64 musl has none of those three.
+    // `recvmsg` is musl 1.2.5 `res_msend` (UDP and its TCP fallback, flags 0).
+    "sendmmsg:307:269 setsockopt:54:208 open:2:- stat:4:- lstat:6:- recvmsg:47:212",
 );
 
 // An absent cell excludes that call by policy on this architecture. An absent
@@ -77,6 +80,14 @@ pub(super) fn program(
     for name in linux_seccomp_list(provider, admitted, arch) {
         let nr = number(name, arch).expect("listed syscall needs an architecture number");
         code.extend([jump(0x15, nr, 0, 1), stmt(6, ALLOW)]);
+    }
+    // Localhost, object, and chain already allow `openat`. x86_64 musl issues
+    // `open` for the same calls. Did, wallet, and model do not get this row.
+    if matches!(
+        provider,
+        RuntimeProviderId::Localhost | RuntimeProviderId::Object | RuntimeProviderId::Chain
+    ) {
+        code.extend(musl_open_rule(arch));
     }
     if matches!(provider, RuntimeProviderId::Model) {
         code.extend(measured_argument_rules(arch));
@@ -171,17 +182,20 @@ fn chain_argument_rules(arch: AuditArch) -> Vec<Instruction> {
         stmt(6, ALLOW),
         stmt(6, DENY),
     ]);
-    // setsockopt: IP_RECVERR and IPV6_RECVERR only. TCP options stay denied.
+    // setsockopt: IP_RECVERR, IPV6_RECVERR, and IPV6_V6ONLY. Musl 1.2.5
+    // `res_msend` sets IPV6_V6ONLY to 0 on an AF_INET6 UDP socket before bind.
+    // TCP_NODELAY and SO_KEEPALIVE stay denied.
     code.extend([
-        jump(0x15, nr("setsockopt"), 0, 10),
+        jump(0x15, nr("setsockopt"), 0, 11),
         stmt(0x20, 24),
         jump(0x15, 0, 0, 3),
         stmt(0x20, 32),
-        jump(0x15, 11, 0, 5),
+        jump(0x15, 11, 0, 6),
         stmt(6, ALLOW),
-        jump(0x15, 41, 0, 3),
+        jump(0x15, 41, 0, 4),
         stmt(0x20, 32),
-        jump(0x15, 25, 0, 1),
+        jump(0x15, 25, 1, 0),
+        jump(0x15, 26, 0, 1),
         stmt(6, ALLOW),
         stmt(6, DENY),
     ]);
@@ -195,8 +209,75 @@ fn chain_argument_rules(arch: AuditArch) -> Vec<Instruction> {
         stmt(6, ALLOW),
         stmt(6, DENY),
     ]);
+    // Musl 1.2.5 `res_msend` binds an ephemeral UDP socket (addrlen 16 or 28),
+    // sends with MSG_NOSIGNAL to that same length, and receives with flags 0.
+    // listen, accept, and AF_UNIX stay denied. These three are chain only.
+    code.extend(chain_dns_rules(&nr));
     code.push(stmt(6, DENY));
     code
+}
+
+/// `bind`, `sendto`, and `recvmsg` for chain DNS. Each block denies every
+/// other shape of that syscall.
+fn chain_dns_rules(nr: &dyn Fn(&str) -> u32) -> Vec<Instruction> {
+    const MSG_NOSIGNAL: u32 = 0x4000;
+    let mut code = Vec::new();
+    // bind(fd, addr, addrlen): addrlen is 16 (IPv4) or 28 (IPv6).
+    code.extend([
+        jump(0x15, nr("bind"), 0, 5),
+        stmt(0x20, 32),
+        jump(0x15, 16, 1, 0),
+        jump(0x15, 28, 0, 1),
+        stmt(6, ALLOW),
+        stmt(6, DENY),
+    ]);
+    // sendto(fd, buf, len, flags, addr, addrlen): flags MSG_NOSIGNAL, addrlen 16 or 28.
+    code.extend([
+        jump(0x15, nr("sendto"), 0, 7),
+        stmt(0x20, 40),
+        jump(0x15, MSG_NOSIGNAL, 0, 4),
+        stmt(0x20, 56),
+        jump(0x15, 16, 1, 0),
+        jump(0x15, 28, 0, 1),
+        stmt(6, ALLOW),
+        stmt(6, DENY),
+    ]);
+    // recvmsg(fd, msg, flags): musl passes flags 0.
+    code.extend([
+        jump(0x15, nr("recvmsg"), 0, 4),
+        stmt(0x20, 32),
+        jump(0x15, 0, 0, 1),
+        stmt(6, ALLOW),
+        stmt(6, DENY),
+    ]);
+    code
+}
+
+/// x86_64 musl `open` is the older form of `openat` for `AT_FDCWD`.
+/// Rust 1.95.0's musl target is musl 1.2.5: `src/internal/syscall.h`
+/// `__sys_open` uses `SYS_open` when that number exists, and ORs `O_LARGEFILE`
+/// (0 on this check; the bit is allowed). aarch64 has no `open` and uses
+/// `openat`, which these helpers already allow.
+///
+/// `O_PATH` (0x200000) and `__O_TMPFILE` (0x400000) are denied. Landlock does
+/// not check `O_PATH`, and a tmpfile has no path for Landlock to check.
+/// `O_CREAT` stays allowed: Landlock checks `MAKE_REG` on `open` the same way
+/// it checks `openat`. This row lets the helper open a file the way musl
+/// opens one on x86_64. It does not add a path Landlock does not already see.
+fn musl_open_rule(arch: AuditArch) -> Vec<Instruction> {
+    let Some(nr) = number("open", arch) else {
+        return Vec::new();
+    };
+    const O_PATH: u32 = 0x0020_0000;
+    const O_TMPFILE_BIT: u32 = 0x0040_0000;
+    vec![
+        jump(0x15, nr, 0, 5),
+        stmt(0x20, 24),
+        jump(0x45, O_PATH, 2, 0),
+        jump(0x45, O_TMPFILE_BIT, 1, 0),
+        stmt(6, ALLOW),
+        stmt(6, DENY),
+    ]
 }
 
 #[cfg(test)]
@@ -454,11 +535,22 @@ mod tests {
             ("setsockopt ipv6 recverr", "setsockopt", [6, 41, 25, 0, 0, 0], super::ALLOW),
             ("setsockopt keepalive", "setsockopt", [6, 1, 9, 0, 0, 0], super::DENY),
             ("setsockopt nodelay", "setsockopt", [6, 6, 1, 0, 0, 0], super::DENY),
+            ("setsockopt ipv6 v6only", "setsockopt", [6, 41, 26, 0, 0, 0], super::ALLOW),
             ("getsockopt so_error", "getsockopt", [6, 1, 4, 0, 0, 0], super::ALLOW),
             ("getsockopt other", "getsockopt", [6, 1, 7, 0, 0, 0], super::DENY),
             ("connect", "connect", [6, 0, 0, 0, 0, 0], super::ALLOW),
             ("sendmmsg", "sendmmsg", [6, 0, 0, 0, 0, 0], super::ALLOW),
             ("sendto", "sendto", [6, 0, 0, 0, 0, 0], super::DENY),
+            ("sendto musl dns", "sendto", [6, 0, 0, 0x4000, 0, 16], super::ALLOW),
+            ("sendto musl dns v6", "sendto", [6, 0, 0, 0x4000, 0, 28], super::ALLOW),
+            ("sendto other length", "sendto", [6, 0, 0, 0x4000, 0, 110], super::DENY),
+            ("bind ipv4", "bind", [6, 0, 16, 0, 0, 0], super::ALLOW),
+            ("bind ipv6", "bind", [6, 0, 28, 0, 0, 0], super::ALLOW),
+            ("bind other length", "bind", [6, 0, 110, 0, 0, 0], super::DENY),
+            ("recvmsg flags 0", "recvmsg", [6, 0, 0, 0, 0, 0], super::ALLOW),
+            ("recvmsg other flags", "recvmsg", [6, 0, 1, 0, 0, 0], super::DENY),
+            ("listen", "listen", [6, 1, 0, 0, 0, 0], super::DENY),
+            ("accept4", "accept4", [6, 0, 0, 0, 0, 0], super::DENY),
             ("pipe2", "pipe2", [0, 0, 0, 0, 0, 0], super::DENY),
         ];
         for arch in [AuditArch::X86_64, AuditArch::Aarch64] {
@@ -573,5 +665,69 @@ mod tests {
                 "{name} is not a helper syscall number"
             );
         }
+    }
+
+    /// x86_64 musl `open` for the three helpers. `O_PATH` and `__O_TMPFILE`
+    /// stay denied. `O_CREAT` stays allowed because Landlock checks it.
+    /// aarch64 has no `open`. Did does not get the row. `stat` and `lstat`
+    /// are the older metadata calls and are not on Did.
+    #[test]
+    fn musl_open_stat_and_lstat_are_only_the_three_helpers() {
+        const O_CLOEXEC: u64 = 0x80000;
+        const O_CREAT: u64 = 0x40;
+        const O_PATH: u64 = 0x200000;
+        const O_TMPFILE: u64 = 0x400000;
+        let audit = 0xc000_003e;
+        let chain = super::super::rights::admit_runtime_grant(RuntimeProviderId::Chain);
+        let did = super::super::rights::admit_runtime_grant(RuntimeProviderId::Did);
+        assert_eq!(number("open", AuditArch::Aarch64), None);
+        assert_eq!(number("stat", AuditArch::Aarch64), None);
+        assert_eq!(number("lstat", AuditArch::Aarch64), None);
+        let open_nr = number("open", AuditArch::X86_64).unwrap();
+        let shapes: &[(&str, [u64; 6], u32)] = &[
+            ("read", [0, O_CLOEXEC, 0, 0, 0, 0], super::ALLOW),
+            ("create", [0, O_CREAT | O_CLOEXEC, 0o644, 0, 0, 0], super::ALLOW),
+            ("path", [0, O_PATH, 0, 0, 0, 0], super::DENY),
+            ("tmpfile", [0, O_TMPFILE | 0x10000, 0o644, 0, 0, 0], super::DENY),
+        ];
+        for provider in [
+            RuntimeProviderId::Localhost,
+            RuntimeProviderId::Object,
+            RuntimeProviderId::Chain,
+        ] {
+            let admitted = super::super::rights::admit_runtime_grant(provider);
+            let prog = program(provider, &admitted, AuditArch::X86_64);
+            for (label, args, want) in shapes {
+                assert_eq!(
+                    interpret(&prog, open_nr, *args, audit),
+                    *want,
+                    "{provider:?} open {label}"
+                );
+            }
+            for name in ["stat", "lstat"] {
+                let nr = number(name, AuditArch::X86_64).unwrap();
+                assert_eq!(
+                    interpret(&prog, nr, [0; 6], audit),
+                    super::ALLOW,
+                    "{provider:?} {name}"
+                );
+            }
+        }
+        let chain_prog = program(RuntimeProviderId::Chain, &chain, AuditArch::X86_64);
+        let did_prog = program(RuntimeProviderId::Did, &did, AuditArch::X86_64);
+        assert_eq!(
+            interpret(&did_prog, open_nr, [0, O_CLOEXEC, 0, 0, 0, 0], audit),
+            super::DENY
+        );
+        for name in ["stat", "lstat"] {
+            let nr = number(name, AuditArch::X86_64).unwrap();
+            assert_eq!(interpret(&did_prog, nr, [0; 6], audit), super::DENY, "did {name}");
+        }
+        let bind_nr = number("bind", AuditArch::X86_64).unwrap();
+        let recv_nr = number("recvmsg", AuditArch::X86_64).unwrap();
+        assert_eq!(interpret(&chain_prog, bind_nr, [0; 6], audit), super::DENY);
+        assert_eq!(interpret(&did_prog, bind_nr, [6, 0, 16, 0, 0, 0], audit), super::DENY);
+        assert_eq!(interpret(&did_prog, recv_nr, [0; 6], audit), super::DENY);
+        assert_eq!(interpret(&chain_prog, recv_nr, [6, 0, 1, 0, 0, 0], audit), super::DENY);
     }
 }

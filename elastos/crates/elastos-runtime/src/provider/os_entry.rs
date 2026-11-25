@@ -284,6 +284,14 @@ fn launch_macos_path_allow(
             .map(|(index, path)| (format!("META_{index}"), path.clone())),
     );
     defines.push(("PROVIDER_EXECUTABLE".to_string(), binary.clone()));
+    if confinement.seatbelt.contains("(param \"ELASTOS_WALLET\")") {
+        // macOS only. Linux Landlock cannot exclude this child of ElastOS.
+        // The directory has to exist or sandbox-exec aborts on the subpath.
+        defines.push((
+            "ELASTOS_WALLET".to_string(),
+            super::path_allow::ensure_localhost_wallet_dir(data_dir)?,
+        ));
+    }
     let bound: Vec<(&str, &Path)> = defines
         .iter()
         .map(|(name, path)| (name.as_str(), path.as_path()))

@@ -7,7 +7,7 @@
 
 use super::rights::AdmittedRights;
 use super::rights_table::RuntimeProviderId;
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::os::fd::{AsRawFd, OwnedFd};
 use std::{
     io,
     path::{Path, PathBuf},
@@ -173,6 +173,17 @@ pub(super) fn with_interpreter_fd<T>(fd: i32, body: impl FnOnce() -> T) -> T {
 /// The directory opened at the check. `build` takes it for `STORAGE_ROOT`.
 pub(super) fn set_checked_directory(directory: OwnedFd) {
     CHECKED_DIRECTORY.with(|slot| *slot.borrow_mut() = Some(directory));
+}
+
+pub(super) fn clear_checked_directory() {
+    CHECKED_DIRECTORY.with(|slot| {
+        slot.borrow_mut().take();
+    });
+}
+
+#[cfg(test)]
+pub(super) fn checked_directory_is_held() -> bool {
+    CHECKED_DIRECTORY.with(|slot| slot.borrow().is_some())
 }
 
 fn take_checked_directory() -> Option<OwnedFd> {
@@ -543,7 +554,8 @@ fn open_loader_stat(path: &Path) -> std::io::Result<(libc::stat, OwnedFd)> {
     if fd < 0 {
         return Err(std::io::Error::last_os_error());
     }
-    let held = unsafe { OwnedFd::from_raw_fd(fd) };
+    let held =
+        super::root_pin::owned_fd_above_stdio(fd).map_err(std::io::Error::from_raw_os_error)?;
     let mut info = std::mem::MaybeUninit::<libc::stat>::uninit();
     if unsafe { libc::fstat(held.as_raw_fd(), info.as_mut_ptr()) } < 0 {
         return Err(std::io::Error::last_os_error());
@@ -564,7 +576,7 @@ fn hold_regular_nofollow(path: &Path) -> Option<OwnedFd> {
     if fd < 0 {
         return None;
     }
-    let held = unsafe { OwnedFd::from_raw_fd(fd) };
+    let held = super::root_pin::owned_fd_above_stdio(fd).ok()?;
     let mut info = std::mem::MaybeUninit::<libc::stat>::uninit();
     if unsafe { libc::fstat(held.as_raw_fd(), info.as_mut_ptr()) } < 0 {
         return None;
@@ -588,7 +600,7 @@ fn hold_regular_follow(path: &Path) -> Option<OwnedFd> {
     if fd < 0 {
         return None;
     }
-    let held = unsafe { OwnedFd::from_raw_fd(fd) };
+    let held = super::root_pin::owned_fd_above_stdio(fd).ok()?;
     let mut info = std::mem::MaybeUninit::<libc::stat>::uninit();
     if unsafe { libc::fstat(held.as_raw_fd(), info.as_mut_ptr()) } < 0 {
         return None;
@@ -608,7 +620,7 @@ fn hold_directory_path(path: &Path) -> Option<OwnedFd> {
     if fd < 0 {
         return None;
     }
-    let held = unsafe { OwnedFd::from_raw_fd(fd) };
+    let held = super::root_pin::owned_fd_above_stdio(fd).ok()?;
     let mut info = std::mem::MaybeUninit::<libc::stat>::uninit();
     if unsafe { libc::fstat(held.as_raw_fd(), info.as_mut_ptr()) } < 0 {
         return None;
