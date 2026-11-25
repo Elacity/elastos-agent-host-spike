@@ -179,9 +179,21 @@ the agent's public identity, private persona, or memory.
 
 ## One live run
 
-One agent has one live run. A second Start while that run is live is refused, and the refusal says "this agent is already running". The run ends when the owner stops it, when the guest fails or crashes, when that run is cancelled, or when the Home process starts again, and a later Start can then begin. Retire refuses a later Start because the agent is retired. Two different agents may run at the same time, and two Starts of one agent at the same moment produce one run.
+One Home process: one agent has one live run. A second `elastos serve` or `elastos gateway` on that data root is refused by the exclusive host lock (`elastos/crates/elastos-server/src/host_lock.rs:120`, called from `serve_cmd.rs:46` and `gateway_cmd.rs:71`). A process started with `ELASTOS_ALLOW_SUBORDINATE_RUNTIME_HOST=1` does not take that lock (`serve_cmd.rs:39`).
 
-A journal under `.AppData/Agents` is written as a whole object. The write carries `create_only` when the object is new, or `if_revision` with the revision last read, and append is refused. A write whose revision is not the stored revision is a conflict, so a run that has ended cannot replace the journal after a later run has stored a new revision. Outside `.AppData/Agents`, a plain write replaces the object and an append extends a file that is already there. One live run does not change those writes.
+The gateway sets that variable on a managed child (`runtime_control.rs:1497`). `require_home_runtime` (`agent_admission.rs:65`) admits an agent launch only when the sign-in store is this process's data folder (`agent_admission.rs:66`, called from `agent_admission.rs:192`). The managed child's sign-in store is the parent data folder (`runtime_control.rs:1504`, read at `gateway_home_token.rs:1787`) and its data folder is the nested home (`runtime_control.rs:1510`), so the child does not start agents.
+
+A hand-started subordinate host on the Home's own root keeps running. Its live-run token is its own. The journal revision lock is also its own (`auth.rs:495`, one mutex in the process at `auth.rs:446`). That host can hold a live run of an agent the first process also holds, and each process can write the journal.
+
+A second Start while that run is live is refused, and the refusal says "this agent is already running", including when that Start presents the same grant. A Start while a Stop still holds its token is refused, and the refusal says "this agent is stopping". A Stop that has not finished answers "stopping" (`routes.rs:580`) and leaves the run live.
+
+The run ends when that Stop finishes, when the guest fails, when the guest crashes, when that run is cancelled, or when the Home process starts again, and a later Start can then begin. An effect already in flight keeps the live-run token after that end is decided. A later Start stays refused until that effect is settled or its record is unknown, and is then allowed. When an end cannot run (`OwedEnd::Lost`, `runtime.rs:969`), the live-run token is released while the registry row may still show the run as live.
+
+Retire refuses a later Start because the agent is retired. The launch answers "the caller owns no agent with that id" (`a_retired_or_unknown_agent_refuses_its_launch`).
+
+Two different agents may run at the same time, and two Starts of one agent at the same moment produce one run.
+
+A journal under `.AppData/Agents` is written as a whole object. The write carries `create_only` when the object is new, or `if_revision` with the revision last read. Append is refused (`an_append_to_a_journal_is_refused`, `resource_bridge.rs:1441`). An ended run cannot write that journal: its manifest ceiling is gone, so the bridge answers `manifest_capability_denied` (`an_ended_run_cannot_write_after_the_next_run_starts`). A write whose revision is not the stored revision is a `revision_conflict`, the second check (`auth.rs:7626`). Journals keep the revision check. An ended run's plan step that was claimed before the end may still write (`resource_bridge.rs:477`). Outside `.AppData/Agents`, on a protected root, a plain write replaces an existing file and an append of a file that is not there creates it (`resource_bridge.rs:1476`); an append extends a file that is already there (`resource_bridge.rs:1468`). On a root with no principal-root protection, a plain write or an append is handled by the provider (`resource_bridge.rs:1387`). One live run does not change those writes.
 
 ## Runtime and provider architecture
 
@@ -343,6 +355,63 @@ system beside Runtime.
   audit records.
 - A public profile projection exposes only fields the principal explicitly
   publishes; a route or visible page does not grant access to private state.
+
+### Agent storage protection
+
+The wrap key seals an agent's data key. Runtime derives that wrap key from
+the owner's data key. The derivation inputs are the owner, the agent id, and
+the agent's root. The same derivation binds the agent's data key id.
+`a_new_agent_protection_opens_under_its_own_derived_key_only` shows that a
+key derived for another id, another root, or another data key id does not
+open the wrap. A rename keeps the agent id, the root, and the wrap, and
+changes the display name. Opening the same Home again reads that same
+record, and the stored note opens under the same wrap. Owner recovery on
+the same Home, with the same owner key, reopens every agent of that owner.
+Another person's agents stay closed to the recovered owner, and those agents
+still open for their own owner.
+
+These limits are part of the property:
+
+- A new Home has no agents.
+- Storing a replaced protection does not re-wrap. A replaced owner data key
+  makes existing agent data unopenable on this Home. The row covers an active
+  agent and a retired agent.
+- A replaced, rolled-back or deleted agent file is not detected on load yet.
+- The sealed file holds none of the object's content in plaintext. This
+  protection makes no claim against a process of the same operating-system
+  user outside the agent's sandbox.
+
+`the_wrap_key_binds_each_input`, `the_wrap_key_binds_the_owner_id`, and
+`the_wrap_key_is_the_owners_alone` show the wrap key's inputs.
+`a_new_agent_protection_opens_under_its_own_derived_key_only` is named in
+the paragraph above. `rename_changes_display_name_only` shows a
+rename leaves the wrap in place. `stable_id_after_rename_and_reopen` shows
+the id, the root, and the note after a rename and a reopen.
+`owner_recovery_reopens_agent_data` shows one agent's note after recovery on
+this Home with the same owner key.
+`owner_recovery_reopens_every_agents_data_and_no_other_persons` shows every
+agent of that owner, and the other person's agent.
+`a_missing_file_means_no_agents` shows a new Home has no agents.
+`a_replaced_owner_data_key_does_not_rewrap_agent_data` shows that storing a
+replaced protection does not re-wrap, and that the replaced key leaves an
+active agent's data and a retired agent's data unopenable on this Home.
+`the_sealed_file_holds_none_of_the_objects_content_in_plaintext` shows the
+sealed file holds none of the object's content in plaintext. The doc comment
+on `the_wrap_key_binds_each_input` names the same tests.
+
+### Instance access to agent storage
+
+Each running instance gets fresh, limited access to its agent's storage, and
+that access ends when the instance stops. A step whose dispatch hasn't reached
+its effect is refused; an effect already begun is tracked, and Stop says
+stopping until it ends. When settlement records that effect as unknown, the
+effect is resolved for Stop: the instance is reaped, Stop answers stopped and
+names the step, and the record stays unknown. A late landing can still store
+the bytes that effect had already begun. That store is the same effect, not a
+new action, and the record is not changed to done or refused. A journal write
+still has to pass its revision check.
+
+Stop says stopped only when that session has ended and nothing of it is still landing. A refusal (409) stays a refusal when an earlier step is unknown, and a session that is stopping is not also listed as stopped. A Start during a landing effect answers "this agent is stopping", and that mark stays until the effect is settled or its record is unknown. The plan instance is bound before the guest runs. Unknown steps are capped per agent and dropped when that session's row is evicted. A provider stop that fails leaves the run able to act. Unknown steps are carried through the Runtime hop to the owner. A one-use grant is counted only after the plan admit. A one-use grant the effect spent is settled in the pending store, so a later Stop can still save that session's revocations. A settlement record write is retried a bounded number of times; if it still fails, the flight resolves as unknown and the stored record is not updated to a stronger status. Plans approved in the gateway process while the guest runs in a separate managed Runtime process are outside this branch.
 
 This document does not freeze the exact path layout below `Users/...` or
 `UsersAI/...`. Those paths require their own versioned object contract before

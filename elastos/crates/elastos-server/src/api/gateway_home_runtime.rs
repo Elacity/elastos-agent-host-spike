@@ -765,9 +765,16 @@ pub(super) struct StoppedRuntimeAgent {
 
 /// What the Runtime's stop route answered. `already` is set when the route
 /// found the sessions already ending and stopped nothing further.
+pub(super) struct UnknownRuntimeStep {
+    pub(super) session_id: String,
+    pub(super) request_id: String,
+    pub(super) outcome: String,
+}
+
 pub(super) struct RuntimeAgentStop {
     pub(super) stopped: Vec<StoppedRuntimeAgent>,
     pub(super) stopping: Vec<StoppedRuntimeAgent>,
+    pub(super) unknown: Vec<UnknownRuntimeStep>,
     pub(super) already: Option<String>,
 }
 
@@ -777,6 +784,8 @@ struct RuntimeAgentStopResponse {
     stopped: Vec<RuntimeStoppedSession>,
     #[serde(default)]
     stopping: Vec<RuntimeStoppedSession>,
+    #[serde(default)]
+    unknown: Vec<RuntimeUnknownStep>,
     #[serde(default)]
     already: Option<String>,
 }
@@ -798,6 +807,18 @@ struct RuntimeAgentStopRequest<'a> {
     agent_id: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
     session_id: Option<&'a str>,
+}
+
+#[derive(Deserialize)]
+struct RuntimeUnknownStep {
+    session_id: String,
+    request_id: String,
+    #[serde(default = "unknown_step_outcome")]
+    outcome: String,
+}
+
+fn unknown_step_outcome() -> String {
+    "unknown".to_string()
 }
 
 fn stopped_agent(session: RuntimeStoppedSession) -> StoppedRuntimeAgent {
@@ -876,6 +897,15 @@ async fn stop_runtime_agent_rows(
     Ok(RuntimeAgentStop {
         stopped: payload.stopped.into_iter().map(stopped_agent).collect(),
         stopping: payload.stopping.into_iter().map(stopped_agent).collect(),
+        unknown: payload
+            .unknown
+            .into_iter()
+            .map(|step| UnknownRuntimeStep {
+                session_id: step.session_id,
+                request_id: step.request_id,
+                outcome: step.outcome,
+            })
+            .collect(),
         already: payload.already,
     })
 }

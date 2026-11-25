@@ -285,6 +285,29 @@ async fn start(
     .await
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn unknown_steps_reach_the_owner() {
+    let world = world().await;
+    let session = "session-unknown-hop";
+    let request = "request-unknown-hop";
+    world
+        .runtime
+        .runtime
+        .remember_unknown_for_test(session, &world.agent_a, request);
+    let (status, body) = stop(&world, &world.admin, &world.agent_a).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let parsed: Value = serde_json::from_str(&body).unwrap();
+    let named = parsed["unknown"]
+        .as_array()
+        .and_then(|steps| steps.first())
+        .cloned()
+        .unwrap_or_default();
+    assert_eq!(named["session_id"], session, "{body}");
+    assert_eq!(named["request_id"], request, "{body}");
+    assert_eq!(named["outcome"], "unknown", "{body}");
+}
+
 async fn stop(world: &World, person: &Person, agent_id: &str) -> (StatusCode, String) {
     call(
         &world.app,

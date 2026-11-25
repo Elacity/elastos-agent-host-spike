@@ -105,7 +105,13 @@ pub(crate) use gateway_inspect_actions::close_home_plans;
 pub(crate) use gateway_inspect_actions::close_instance_plans;
 pub(crate) use gateway_inspect_actions::expire_pending_agent_plans;
 pub(crate) use gateway_inspect_actions::reconcile_lost_plan_receipts;
+#[cfg(test)]
+pub(in crate::api) use gateway_inspect_actions::dispatch_approved_agent_plan;
 pub(crate) use gateway_inspect_actions::submit_pending_agent_plan;
+#[cfg(all(test, unix))]
+pub(in crate::api) use gateway_inspect_actions::{
+    clear_plan_dispatch_wait_for_test, set_plan_dispatch_wait_for_test,
+};
 #[path = "gateway_model_remote.rs"]
 mod gateway_model_remote;
 #[path = "gateway_model_service.rs"]

@@ -241,6 +241,25 @@ impl ComponentProvider {
         *self.bus_hostcall.write().unwrap() = Some(hostcall);
     }
 
+    /// The hostcall `set_provider_registry` installed. A row uses it so the
+    /// plan book is the one that closure wires in. Dependency tests do not
+    /// see `cfg(test)` on this crate, so the method stays available.
+    #[doc(hidden)]
+    pub fn call_bus_hostcall_for_test(
+        &self,
+        line: &str,
+        capsule_id: &str,
+        principal_id: Option<&str>,
+    ) -> std::result::Result<String, String> {
+        let hostcall = self
+            .bus_hostcall
+            .read()
+            .unwrap_or_else(|err| err.into_inner())
+            .clone()
+            .ok_or_else(|| "component bridge is not configured".to_string())?;
+        hostcall(line, capsule_id, principal_id)
+    }
+
     pub async fn set_bridge_principal(&self, capsule_id: &CapsuleId, principal_id: Option<String>) {
         self.bridge_principals
             .write()

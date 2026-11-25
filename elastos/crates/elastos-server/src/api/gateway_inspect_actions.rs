@@ -615,9 +615,46 @@ fn test_provider_step_outcome(step_id: &str) -> Option<String> {
     }
 }
 
+/// The spawned dispatch owns this. `finish` is called once a settlement was
+/// attempted. A drop before that, including a panic after the caller's future
+/// was dropped, stores unknown and resolves the flight.
+struct UnsettledDispatch {
+    data_dir: std::path::PathBuf,
+    record: InspectActionRequestRecord,
+    request_id: String,
+    finished: bool,
+}
+
+impl UnsettledDispatch {
+    fn finish(&mut self) {
+        self.finished = true;
+    }
+}
+
+impl Drop for UnsettledDispatch {
+    fn drop(&mut self) {
+        if self.finished {
+            return;
+        }
+        let record = self.record.clone();
+        let _ = settle_agent_plan_dispatch(
+            &self.data_dir,
+            record,
+            "unknown",
+            serde_json::json!({"status": "unknown", "code": "dispatch_lost"}),
+        );
+        crate::runtime::resolve_unknown_plan_effect(&self.request_id);
+        let request_id = self.request_id.clone();
+        tokio::spawn(async move {
+            crate::resource_bridge::revoke_abandoned_plan_grant(&request_id).await;
+        });
+    }
+}
+
+
 /// Claim the stored step, audit the claim, then let its settlement outlive the
 /// Inbox request. A stopped process still leaves a one-way claim.
-pub(super) async fn dispatch_approved_agent_plan(
+pub(in crate::api) async fn dispatch_approved_agent_plan(
     state: &GatewayState,
     context: &HomeLaunchTokenContext,
     request_id: &str,
@@ -647,9 +684,23 @@ pub(super) async fn dispatch_approved_agent_plan(
         )?;
         return Err(err);
     }
+    let record_if_lost = record.clone();
+    let data_dir_if_lost = data_dir.clone();
+    let request_id = record.request_id.clone();
     let task = tokio::spawn(async move {
+        // Lives in this task. Dropping the caller's future detaches this
+        // task; if the task then ends without a settlement, this guard
+        // records unknown and resolves the flight.
+        let mut cleanup = UnsettledDispatch {
+            data_dir: data_dir.clone(),
+            record: record.clone(),
+            request_id: request_id.clone(),
+            finished: false,
+        };
+        #[cfg(test)]
+        wait_plan_task_gate(&request_id).await;
         let response = tokio::time::timeout(
-            std::time::Duration::from_secs(120),
+            plan_dispatch_wait(&request_id),
             crate::resource_bridge::dispatch_agent_plan_step(
                 &record.request_id,
                 &record.principal_id,
@@ -661,36 +712,224 @@ pub(super) async fn dispatch_approved_agent_plan(
             ),
         )
         .await;
-        let (status, result) = match response {
+        let (status, result, guard) = match response {
             Ok(response)
                 if response["type"] == "resource_result"
                     && response["result"]["status"]
                         .as_str()
                         .is_none_or(|status| status == "ok") =>
             {
-                ("completed", response["result"].clone())
+                (
+                    "completed",
+                    response["result"].clone(),
+                    crate::resource_bridge::take_parked_plan_guard(&request_id),
+                )
             }
             Ok(response) if response["code"] == "provider_error" => (
                 "unknown",
                 serde_json::json!({"status": "unknown", "code": "provider_transport_error"}),
+                crate::resource_bridge::take_parked_plan_guard(&request_id),
             ),
             Ok(response) if response["type"] == "resource_result" => (
                 "failed",
                 serde_json::json!({"status": "error", "code": "provider_result_error"}),
+                crate::resource_bridge::take_parked_plan_guard(&request_id),
             ),
             Ok(response) => (
                 "refused",
                 serde_json::json!({"status": "refused", "code": response["code"].as_str().unwrap_or("authority_refused")}),
+                crate::resource_bridge::take_parked_plan_guard(&request_id),
             ),
-            Err(_) => (
-                "unknown",
-                serde_json::json!({"status": "unknown", "code": "provider_timeout"}),
-            ),
+            Err(_) => {
+                // The dispatch future is gone. The one-use grant does not stay.
+                // A guard already parked is dropped here without release, so
+                // the flight stays until this settlement records unknown.
+                drop(crate::resource_bridge::take_parked_plan_guard(&request_id));
+                crate::resource_bridge::revoke_abandoned_plan_grant(&request_id).await;
+                (
+                    "unknown",
+                    serde_json::json!({"status": "unknown", "code": "provider_timeout"}),
+                    None,
+                )
+            }
         };
-        settle_agent_plan_dispatch(&data_dir, record, status, result)
+        // The effect has returned. The record is still `dispatching` until the
+        // settle below, and this guard still holds the flight. Stop cannot
+        // answer stopped in this window. Release comes after the record write.
+        #[cfg(test)]
+        crate::resource_bridge::pause_plan_dispatch_for_test(
+            &request_id,
+            crate::resource_bridge::PlanDispatchPoint::BeforeSettle,
+        )
+        .await;
+        let settled = settle_agent_plan_dispatch(&data_dir, record, status, result);
+        // A later drop must not write over a settlement this task already
+        // attempted, including one whose record write did not land.
+        cleanup.finish();
+        if settled.is_err() || status == "unknown" {
+            crate::runtime::resolve_unknown_plan_effect(&request_id);
+        }
+        if settled.is_ok() && status != "unknown" {
+            if let Some(guard) = guard {
+                guard.release();
+            }
+        }
+        settled
     });
-    task.await
-        .map_err(|err| anyhow::anyhow!("agent plan settlement task failed: {err}"))?
+    match task.await {
+        Ok(settled) => settled,
+        Err(err) => {
+            drop(crate::resource_bridge::take_parked_plan_guard(
+                &record_if_lost.request_id,
+            ));
+            crate::resource_bridge::revoke_abandoned_plan_grant(&record_if_lost.request_id).await;
+            let code = if err.is_cancelled() {
+                "dispatch_cancelled"
+            } else {
+                "dispatch_panic"
+            };
+            let settled = settle_agent_plan_dispatch(
+                &data_dir_if_lost,
+                record_if_lost.clone(),
+                "unknown",
+                serde_json::json!({"status": "unknown", "code": code}),
+            );
+            if settled.is_ok() {
+                crate::runtime::resolve_unknown_plan_effect(&record_if_lost.request_id);
+            }
+            settled
+        }
+    }
+}
+
+#[cfg(test)]
+fn plan_dispatch_waits(
+) -> &'static std::sync::Mutex<std::collections::HashMap<String, std::time::Duration>> {
+    static WAITS: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<String, std::time::Duration>>,
+    > = std::sync::OnceLock::new();
+    WAITS.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+fn plan_dispatch_wait(request_id: &str) -> std::time::Duration {
+    #[cfg(test)]
+    if let Some(wait) = plan_dispatch_waits()
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+        .get(request_id)
+        .copied()
+    {
+        return wait;
+    }
+    let _ = request_id;
+    std::time::Duration::from_secs(120)
+}
+
+#[cfg(all(test, unix))]
+pub(crate) fn set_plan_dispatch_wait_for_test(request_id: &str, wait: std::time::Duration) {
+    plan_dispatch_waits()
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+        .insert(request_id.to_string(), wait);
+}
+
+#[cfg(all(test, unix))]
+pub(crate) fn clear_plan_dispatch_wait_for_test(request_id: &str) {
+    plan_dispatch_waits()
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+        .remove(request_id);
+}
+
+#[cfg(test)]
+struct PlanTaskGate {
+    entered: std::sync::Arc<tokio::sync::Notify>,
+    release: std::sync::Arc<tokio::sync::Notify>,
+}
+
+#[cfg(test)]
+fn plan_task_gates() -> &'static std::sync::Mutex<Vec<(String, PlanTaskGate)>> {
+    static GATES: std::sync::OnceLock<std::sync::Mutex<Vec<(String, PlanTaskGate)>>> =
+        std::sync::OnceLock::new();
+    GATES.get_or_init(|| std::sync::Mutex::new(Vec::new()))
+}
+
+/// The spawned dispatch task waits here until the test releases it.
+#[cfg(all(test, unix))]
+pub(crate) struct PlanTaskPause {
+    pub(crate) entered: std::sync::Arc<tokio::sync::Notify>,
+    pub(crate) release: std::sync::Arc<tokio::sync::Notify>,
+}
+
+#[cfg(all(test, unix))]
+pub(crate) fn arm_plan_task_gate(request_id: &str) -> PlanTaskPause {
+    let entered = std::sync::Arc::new(tokio::sync::Notify::new());
+    let release = std::sync::Arc::new(tokio::sync::Notify::new());
+    plan_task_gates()
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+        .push((
+            request_id.to_string(),
+            PlanTaskGate {
+                entered: std::sync::Arc::clone(&entered),
+                release: std::sync::Arc::clone(&release),
+            },
+        ));
+    PlanTaskPause { entered, release }
+}
+
+#[cfg(test)]
+async fn wait_plan_task_gate(request_id: &str) {
+    let gate = {
+        let mut gates = plan_task_gates()
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        let pos = gates.iter().rposition(|(id, _)| id == request_id);
+        pos.map(|pos| gates.swap_remove(pos).1)
+    };
+    if let Some(gate) = gate {
+        gate.entered.notify_one();
+        gate.release.notified().await;
+    }
+}
+
+#[cfg(test)]
+fn plan_settle_faults() -> &'static std::sync::Mutex<Vec<&'static str>> {
+    static FAULTS: std::sync::OnceLock<std::sync::Mutex<Vec<&'static str>>> =
+        std::sync::OnceLock::new();
+    FAULTS.get_or_init(|| std::sync::Mutex::new(Vec::new()))
+}
+
+/// The next settle fails at `which`: `"record"` or `"audit"`.
+#[cfg(all(test, unix))]
+pub(crate) fn arm_plan_settle_fault(which: &'static str) {
+    arm_plan_settle_faults(which, 1);
+}
+
+/// `count` failures of `which`, consumed one per settle attempt.
+#[cfg(all(test, unix))]
+pub(crate) fn arm_plan_settle_faults(which: &'static str, count: usize) {
+    let mut faults = plan_settle_faults()
+        .lock()
+        .unwrap_or_else(|err| err.into_inner());
+    for _ in 0..count {
+        faults.push(which);
+    }
+}
+
+fn take_plan_settle_fault(which: &str) -> bool {
+    #[cfg(test)]
+    {
+        let mut faults = plan_settle_faults()
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        if let Some(pos) = faults.iter().rposition(|fault| *fault == which) {
+            faults.swap_remove(pos);
+            return true;
+        }
+    }
+    let _ = which;
+    false
 }
 
 fn settle_agent_plan_dispatch(
@@ -699,13 +938,61 @@ fn settle_agent_plan_dispatch(
     status: &str,
     result: serde_json::Value,
 ) -> anyhow::Result<String> {
+    // A late landing does not become a new action. The stored unknown stays
+    // unknown: nothing here calls it done, completed, or refused.
+    if let Ok(stored) = read_inspect_action_record(data_dir, &record.request_id) {
+        if stored.status == "unknown" && status != "unknown" {
+            return Ok("Agent plan dispatch unknown.".to_string());
+        }
+    }
+    // The stored record is the answer. A failed record write returns Err and
+    // leaves the previous record, and the flight stays held. A failed audit
+    // append does not change that answer: the record already states the
+    // outcome, so this call still returns Ok.
     record.status = status.to_string();
     record.result = Some(result);
     record.updated_at = now_ts();
-    write_inspect_action_record(data_dir, &record)?;
+    // Three attempts. A fault or a write error spends one. When none land,
+    // the stored record stays as it was (still `dispatching` when the claim
+    // is the last write) and the caller resolves the flight as unknown.
+    let mut wrote = false;
+    for _ in 0..3 {
+        if take_plan_settle_fault("record") {
+            continue;
+        }
+        if write_inspect_action_record(data_dir, &record).is_ok() {
+            wrote = true;
+            break;
+        }
+    }
+    if !wrote {
+        anyhow::bail!("plan record write failed");
+    }
     crate::resource_bridge::notify_plan_waiters();
-    append_agent_plan_dispatch_audit(data_dir, &record, status)?;
+    if take_plan_settle_fault("audit") {
+        tracing::warn!(
+            "agent plan dispatch audit was not stored: injected plan audit write failure"
+        );
+    } else if let Err(err) = append_agent_plan_dispatch_audit(data_dir, &record, status) {
+        tracing::warn!("agent plan dispatch audit was not stored: {err}");
+    }
     Ok(format!("Agent plan dispatch {status}."))
+}
+
+/// A second settlement after unknown. The stored record stays unknown.
+#[cfg(test)]
+pub(crate) fn resettle_plan_for_test(
+    data_dir: &FsPath,
+    request_id: &str,
+    status: &str,
+) -> anyhow::Result<String> {
+    let record = read_inspect_action_record(data_dir, request_id)?;
+    settle_agent_plan_dispatch(
+        data_dir,
+        record,
+        status,
+        serde_json::json!({"status": status, "code": "late"}),
+    )
 }
 
 fn append_agent_plan_dispatch_audit(

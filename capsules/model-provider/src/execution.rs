@@ -479,6 +479,7 @@ mod tests {
 
     struct TestServer {
         base_url: String,
+        marker: String,
         requests: Arc<Mutex<Vec<String>>>,
         request_active: Arc<AtomicBool>,
         shutdown: Arc<AtomicBool>,
@@ -488,7 +489,7 @@ mod tests {
     impl Drop for TestServer {
         fn drop(&mut self) {
             self.shutdown.store(true, Ordering::Relaxed);
-            let _ = TcpStream::connect(self.base_url.strip_prefix("http://").unwrap_or(""));
+            let _ = TcpStream::connect(test_server_authority(&self.base_url));
             if let Some(join) = self.join.take() {
                 if let Err(err) = join.join() {
                     if !thread::panicking() {
@@ -560,16 +561,102 @@ mod tests {
         }
     }
 
+    static TEST_SERVER_MARKER_COUNTER: std::sync::atomic::AtomicU64 =
+        std::sync::atomic::AtomicU64::new(0);
+
+    // A unique token carried in this server's base URL path. The server only
+    // answers scripted responses to requests that carry it, so a stray
+    // request from another test's provider (reused ephemeral port) can
+    // neither consume a scripted response nor trip the unexpected-request
+    // panic. Time nanos keep tokens unique across test processes that share
+    // the same port space.
+    fn next_test_server_marker() -> String {
+        let unique = TEST_SERVER_MARKER_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::SystemTime::UNIX_EPOCH)
+            .map(|since| since.as_nanos() as u64)
+            .unwrap_or_default();
+        let mut mixed = unique ^ nanos.rotate_left(32);
+        mixed ^= mixed >> 33;
+        mixed = mixed.wrapping_mul(0xff51_afd7_ed55_8ccd);
+        mixed ^= mixed >> 33;
+        format!("test-server-{mixed:016x}")
+    }
+
+    fn test_server_authority(base_url: &str) -> &str {
+        base_url
+            .strip_prefix("http://")
+            .unwrap_or(base_url)
+            .split('/')
+            .next()
+            .unwrap_or(base_url)
+    }
+
+    fn request_target_is_marked(target: &str, marker: &str) -> bool {
+        let Some(rest) = target.strip_prefix('/') else {
+            return false;
+        };
+        match rest.strip_prefix(marker) {
+            Some("") => true,
+            Some(remainder) => remainder.starts_with('/'),
+            None => false,
+        }
+    }
+
+    fn request_is_marked(request: &str, marker: &str) -> bool {
+        let line_end = request.find("\r\n").unwrap_or(request.len());
+        let mut parts = request[..line_end].splitn(3, ' ');
+        let (Some(_), Some(target), Some(_)) = (parts.next(), parts.next(), parts.next()) else {
+            return false;
+        };
+        request_target_is_marked(target, marker)
+    }
+
+    // The marker only routes a request to this server; recorded requests
+    // keep the backend path the request assertions check.
+    fn request_without_marker(request: &str, marker: &str) -> String {
+        let line_end = request.find("\r\n").unwrap_or(request.len());
+        let (line, rest) = request.split_at(line_end);
+        let mut parts = line.splitn(3, ' ');
+        let (Some(method), Some(target), Some(version)) =
+            (parts.next(), parts.next(), parts.next())
+        else {
+            return request.to_string();
+        };
+        if !request_target_is_marked(target, marker) {
+            return request.to_string();
+        }
+        let marked = format!("/{marker}");
+        let stripped = target.strip_prefix(&marked).unwrap_or(target);
+        let stripped = if stripped.is_empty() { "/" } else { stripped };
+        format!("{method} {stripped} {version}{rest}")
+    }
+
+    fn stray_request_action() -> ResponseAction {
+        ResponseAction {
+            status_line: "404 Not Found",
+            headers: vec![("Content-Type".to_string(), "text/plain".to_string())],
+            body: b"not this test server's client".to_vec(),
+            stalled_prefix: None,
+            stalled_suffix: None,
+            hold_open: None,
+            stalled_body_started: None,
+            stalled_response_entered: None,
+        }
+    }
+
     fn start_server(actions: Vec<ResponseAction>) -> TestServer {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
-        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let marker = next_test_server_marker();
+        let base_url = format!("http://{}/{marker}", listener.local_addr().unwrap());
         let requests = Arc::new(Mutex::new(Vec::new()));
         let request_active = Arc::new(AtomicBool::new(false));
         let request_active_clone = Arc::clone(&request_active);
         let shutdown = Arc::new(AtomicBool::new(false));
         let requests_clone = Arc::clone(&requests);
         let shutdown_clone = Arc::clone(&shutdown);
+        let marker_clone = marker.clone();
         let join = thread::spawn(move || {
             let mut actions = actions.into_iter();
             loop {
@@ -593,8 +680,17 @@ mod tests {
                 }
                 let request = read_request(&mut stream);
                 // Another test's wake-up connect can reach this reused
-                // ephemeral port; only a request takes a scripted response.
+                // ephemeral port; an empty connect takes no response.
                 if request.is_empty() {
+                    continue;
+                }
+                // Only this test's own client sends requests that carry the
+                // server marker (it rides in the offer base URL). Any other
+                // request is a stray from a foreign client: answer 404
+                // without consuming a scripted response, recording it, or
+                // tripping the unexpected-request panic.
+                if !request_is_marked(&request, &marker_clone) {
+                    write_response(&mut stream, &stray_request_action());
                     continue;
                 }
                 let Some(action) = actions.next() else {
@@ -603,7 +699,10 @@ mod tests {
                     }
                     panic!("unexpected test server request");
                 };
-                requests_clone.lock().unwrap().push(request);
+                requests_clone
+                    .lock()
+                    .unwrap()
+                    .push(request_without_marker(&request, &marker_clone));
                 request_active_clone.store(true, Ordering::SeqCst);
                 write_response(&mut stream, &action);
                 if let Some(release) = action.hold_open {
@@ -624,6 +723,7 @@ mod tests {
         });
         TestServer {
             base_url,
+            marker,
             requests,
             request_active,
             shutdown,
@@ -2111,6 +2211,41 @@ mod tests {
     }
 
     #[test]
+    fn stray_request_without_the_server_marker_is_answered_404_and_keeps_the_script() {
+        let server = start_server(vec![json_action(json!({"job_id": "job-123"}))]);
+        let address = test_server_authority(&server.base_url);
+
+        // A foreign client (another test's provider reaching this reused
+        // ephemeral port) sends a request without the server marker.
+        let mut stray = TcpStream::connect(address).unwrap();
+        stray
+            .write_all(b"GET /status?job_id=job-123 HTTP/1.1\r\nHost: elsewhere\r\n\r\n")
+            .unwrap();
+        let mut stray_response = String::new();
+        stray.read_to_string(&mut stray_response).unwrap();
+        assert!(stray_response.starts_with("HTTP/1.1 404 Not Found"));
+        assert!(server.requests.lock().unwrap().is_empty());
+
+        // The server's own marked request still reaches the scripted action.
+        let mut own = TcpStream::connect(address).unwrap();
+        own.write_all(
+            format!(
+                "GET /{}/status?job_id=job-123 HTTP/1.1\r\nHost: own\r\n\r\n",
+                server.marker
+            )
+            .as_bytes(),
+        )
+        .unwrap();
+        let mut own_response = String::new();
+        own.read_to_string(&mut own_response).unwrap();
+        assert!(own_response.starts_with("HTTP/1.1 200 OK"));
+        assert!(own_response.contains("{\"job_id\":\"job-123\"}"));
+        let requests = server.requests.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        assert!(requests[0].starts_with("GET /status?job_id=job-123 "));
+    }
+
+    #[test]
     fn stored_run_inspection_is_passive_and_rejects_corrupt_disk() {
         let server = start_server(vec![]);
         let offer = artifact_offer(&server.base_url);
@@ -2959,7 +3094,7 @@ mod tests {
 
         provider.shutdown_on_eof();
         server.shutdown.store(true, Ordering::Relaxed);
-        let _ = TcpStream::connect(server.base_url.strip_prefix("http://").unwrap_or(""));
+        let _ = TcpStream::connect(test_server_authority(&server.base_url));
         server
             .join
             .take()

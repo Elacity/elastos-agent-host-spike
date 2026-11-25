@@ -68,8 +68,8 @@ from this directory with `cargo test -p wasm-capsule-audit --locked`. `tools/`
 is the `wasm-capsule-tools` crate, the lab's host-side library (the lab name
 the verifier and the runner, below).
 
-Run the lane gate from this folder so rustup selects this lane's pinned Rust
-1.91.0 toolchain. From the repository root:
+Run the lane gate from this folder: the byte pin holds only under this
+folder's `rust-toolchain.toml`, which pins Rust 1.91.0. From the repository root:
 
 ```bash
 cd lab/wasm-capsule
