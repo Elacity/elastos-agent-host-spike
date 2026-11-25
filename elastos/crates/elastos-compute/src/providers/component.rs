@@ -74,7 +74,8 @@ const V2_STOP_GRACE: Duration = Duration::from_millis(200);
 const V2_STOP_GRACE: Duration = Duration::from_millis(20);
 /// Every v2 read and every v2 bridge call that is not a person's approval.
 /// The guest waits this long, then the call is a timeout. A stop joins within
-/// this too.
+/// this too. Host code that blocks cannot be cut, the same limit
+/// `COMPONENT_RUN_DEADLINE` carries: the timeout lands on the next yield.
 const V2_HOST_DEADLINE: Duration = Duration::from_secs(2);
 /// How long the frame route's client waits. A frame read that cannot check
 /// the book in this time answers empty, never the stored frame.
@@ -397,6 +398,7 @@ impl ComponentProvider {
     }
 
     /// Records `grant` on a loaded guest. A test uses this before the guest runs.
+    #[cfg(any(test, feature = "test-fixtures"))]
     pub async fn testing_hold_grant(
         &self,
         id: &CapsuleId,
@@ -503,6 +505,7 @@ impl ComponentProvider {
     /// Stores one frame so a same-process test can read it back through a
     /// live guest. A guest present is the production writer. This store does
     /// not answer a read: [`Self::read_v2_frame`] requires that guest's book.
+    #[cfg(any(test, feature = "test-fixtures"))]
     pub fn testing_store_v2_frame(
         &self,
         id: &str,
@@ -1873,8 +1876,9 @@ fn arm_host_wait(
 }
 
 /// A v2 bridge on the guest runtime. An async host call is awaited and dropped
-/// when `deadline` passes, so a timeout keeps no thread. A sync host call, used
-/// by tests, runs on this thread and adds none.
+/// when `deadline` passes, so a timeout keeps no thread. A call that blocks
+/// this poll runs to the end first. A sync host call, used by tests, runs on
+/// this thread and adds none.
 async fn await_v2_bridge(
     async_host: &Option<BridgeHostcallAsync>,
     sync_host: &Option<BridgeHostcall>,
@@ -3063,6 +3067,46 @@ mod tests {
         assert!(task_threads(std::path::Path::new("/no/such/task/dir")).is_none());
         let here = std::env::current_dir().expect("cwd");
         assert!(task_threads(&here).unwrap() > 0);
+    }
+
+    /// A poll that blocks the worker runs past the deadline and still returns.
+    /// A poll that yields is cut, and the answer is `timeout`.
+    #[tokio::test]
+    async fn a_blocking_host_call_is_not_cut_by_the_deadline() {
+        let blocking: super::BridgeHostcallAsync = std::sync::Arc::new(|_, _, _| {
+            Box::pin(async {
+                std::thread::sleep(Duration::from_millis(80));
+                Ok("kept".to_string())
+            })
+        });
+        let started = Instant::now();
+        let kept = super::await_v2_bridge(
+            &Some(blocking),
+            &None,
+            "",
+            "",
+            None,
+            Duration::from_millis(20),
+        )
+        .await;
+        assert!(started.elapsed() >= Duration::from_millis(80));
+        assert_eq!(kept.unwrap(), "kept");
+        let yielding: super::BridgeHostcallAsync = std::sync::Arc::new(|_, _, _| {
+            Box::pin(async {
+                tokio::time::sleep(Duration::from_millis(80)).await;
+                Ok("cut".to_string())
+            })
+        });
+        let cut = super::await_v2_bridge(
+            &Some(yielding),
+            &None,
+            "",
+            "",
+            None,
+            Duration::from_millis(20),
+        )
+        .await;
+        assert_eq!(cut.unwrap_err(), "timeout");
     }
 
     fn json_line(line: &str) -> serde_json::Value {

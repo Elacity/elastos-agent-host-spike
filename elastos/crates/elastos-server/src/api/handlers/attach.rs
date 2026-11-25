@@ -9,66 +9,43 @@ use std::sync::Arc;
 use axum::{extract::State, http::StatusCode, response::IntoResponse, Json};
 use elastos_runtime::session::{SessionRegistry, SessionType};
 
-/// How many attach shells this process remembers. The next note drops the oldest.
-pub(crate) const ATTACH_SHELL_CAP: usize = 8;
+/// Frame shells this process keeps. The gateway frame slot uses this same cap.
+pub(crate) const FRAME_SHELL_CAP: usize = 32;
 
 #[derive(Default)]
 struct NotedShells {
-    held: std::collections::VecDeque<String>,
-    evicted: std::collections::VecDeque<String>,
     /// Frame shells, each bound to the principal named when it was minted.
-    /// Other attach callers do not take these slots.
+    /// An ordinary attach is not recorded: it answers the frame route as it
+    /// does without this list.
     frame: Vec<(String, String)>,
 }
 
-/// Shell tokens minted by attach with the secret. A shell created another way
-/// is not in this set. A validate miss drops the token. The cap names the one it drops.
+/// Frame shells minted by attach with the secret. A shell created another way
+/// is not in this set. A validate miss drops the token. Past the cap, the
+/// oldest token is returned so attach can end that session.
 #[derive(Clone, Default)]
 pub struct AttachShells {
     inner: Arc<std::sync::Mutex<NotedShells>>,
 }
 
 impl AttachShells {
-    pub fn note(&self, token: &str) {
+    /// Records a frame shell. Returns the token that lost its slot, if the
+    /// cap was already full. That token is no longer a frame shell.
+    pub fn note_frame(&self, token: &str, principal: &str) -> Option<String> {
         let Ok(mut set) = self.inner.lock() else {
-            return;
+            return None;
         };
-        set.evicted.retain(|old| old != token);
-        if set.held.iter().any(|kept| kept == token) {
-            return;
-        }
-        if set.held.len() >= ATTACH_SHELL_CAP {
-            if let Some(old) = set.held.pop_front() {
-                if set.evicted.len() >= ATTACH_SHELL_CAP {
-                    set.evicted.pop_front();
-                }
-                set.evicted.push_back(old);
-            }
-        }
-        set.held.push_back(token.to_string());
-    }
-
-    /// A frame shell. It is not one of the eight ordinary attach slots.
-    pub fn note_frame(&self, token: &str, principal: &str) {
-        let Ok(mut set) = self.inner.lock() else {
-            return;
-        };
-        set.held.retain(|kept| kept != token);
-        set.evicted.retain(|old| old != token);
         if let Some(found) = set.frame.iter_mut().find(|(kept, _)| kept == token) {
             found.1 = principal.to_string();
-            return;
+            return None;
         }
-        if set.frame.len() >= ATTACH_SHELL_CAP {
-            if let Some((old, _)) = set.frame.first().cloned() {
-                set.frame.remove(0);
-                if set.evicted.len() >= ATTACH_SHELL_CAP {
-                    set.evicted.pop_front();
-                }
-                set.evicted.push_back(old);
-            }
-        }
+        let dropped = if set.frame.len() >= FRAME_SHELL_CAP {
+            Some(set.frame.remove(0).0)
+        } else {
+            None
+        };
         set.frame.push((token.to_string(), principal.to_string()));
+        dropped
     }
 
     /// The principal bound to this frame shell. An ordinary shell has none.
@@ -81,30 +58,18 @@ impl AttachShells {
         })
     }
 
-    pub fn evicted(&self, token: &str) -> bool {
-        self.inner
-            .lock()
-            .is_ok_and(|set| set.evicted.iter().any(|old| old == token))
-    }
-
     pub fn forget(&self, token: &str) {
         let Ok(mut set) = self.inner.lock() else {
             return;
         };
-        set.held.retain(|kept| kept != token);
-        set.evicted.retain(|old| old != token);
         set.frame.retain(|(kept, _)| kept != token);
     }
 
     #[cfg(test)]
-    pub(crate) fn held(&self) -> Vec<String> {
+    pub(crate) fn frame_tokens(&self) -> Vec<String> {
         self.inner
             .lock()
-            .map(|set| {
-                let mut tokens: Vec<_> = set.held.iter().cloned().collect();
-                tokens.extend(set.frame.iter().map(|(token, _)| token.clone()));
-                tokens
-            })
+            .map(|set| set.frame.iter().map(|(token, _)| token.clone()).collect())
             .unwrap_or_default()
     }
 }
@@ -180,11 +145,11 @@ pub async fn attach(
         .session_registry
         .create_session(session_type, None)
         .await;
-    if session.is_shell() {
-        if body.principal.is_empty() {
-            state.shells.note(&session.token);
-        } else {
-            state.shells.note_frame(&session.token, &body.principal);
+    if session.is_shell() && !body.principal.is_empty() {
+        // The dropped shell is a dead session. The next poll is 401 and
+        // attaches once more. An ordinary shell is not in this list.
+        if let Some(old) = state.shells.note_frame(&session.token, &body.principal) {
+            state.session_registry.invalidate_session(&old).await;
         }
     }
 

@@ -168,7 +168,7 @@ async fn home_frame_comes_from_the_managed_runtime() {
         ignored.contains("<script>alert(1)</script>"),
         "a query principal is ignored, got {ignored}"
     );
-    let bound = frame_shells.held();
+    let bound = frame_shells.frame_tokens();
     let owner_shells: Vec<_> = bound
         .iter()
         .filter(|token| {
@@ -442,12 +442,12 @@ async fn a_frame_poll_that_gets_401_attaches_once_more() {
     let (status, body) = frame_body(&app, &owner.home_token, "app=app-frame").await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(shell_created(&audit), 1);
-    let token = shells.held()[0].clone();
+    let token = shells.frame_tokens()[0].clone();
     sessions.invalidate_session(&token).await;
     let (status, body) = frame_body(&app, &owner.home_token, "app=app-frame").await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(shell_created(&audit), 2, "a 401 mints one new shell");
-    assert_eq!(shells.held().len(), 1);
+    assert_eq!(shells.frame_tokens().len(), 1);
     let (status, _) = frame_body(&app, &owner.home_token, "app=app-frame").await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(shell_created(&audit), 2, "the new shell is reused");
@@ -480,7 +480,7 @@ async fn a_thousand_frame_polls_keep_one_shell_and_a_restart_mints_once() {
         let (status, body) = frame_body(&app, &owner.home_token, "app=app-frame").await;
         assert_eq!(status, StatusCode::OK, "{body}");
     }
-    let first = shells.held();
+    let first = shells.frame_tokens();
     assert_eq!(
         first.len(),
         1,
@@ -501,7 +501,7 @@ async fn a_thousand_frame_polls_keep_one_shell_and_a_restart_mints_once() {
     );
     let frame_token = first[0].clone();
     let client = reqwest::Client::new();
-    for _ in 0..crate::api::handlers::attach::ATTACH_SHELL_CAP {
+    for _ in 0..9 {
         client
             .post(format!("{api_url}/api/auth/attach"))
             .json(&json!({ "secret": secret, "scope": "shell" }))
@@ -530,7 +530,7 @@ async fn a_thousand_frame_polls_keep_one_shell_and_a_restart_mints_once() {
         let (status, body) = frame_body(&app, &owner.home_token, "app=app-frame").await;
         assert_eq!(status, StatusCode::OK, "{body}");
     }
-    let second = next_shells.held();
+    let second = next_shells.frame_tokens();
     assert_eq!(
         second.len(),
         1,
@@ -552,7 +552,7 @@ async fn a_thousand_frame_polls_keep_one_shell_and_a_restart_mints_once() {
     ));
     let (evict_url, evict_task, evict_shells, _, _) =
         spawn_frame_runtime(third, "frame-attach-evict").await;
-    evict_shells.note("not-a-session");
+    evict_shells.note_frame("not-a-session", "person");
     let missed = reqwest::Client::new()
         .get(format!("{evict_url}/api/residents/frame?app=a&principal=p"))
         .header(AUTHORIZATION, "Bearer not-a-session")
@@ -561,15 +561,12 @@ async fn a_thousand_frame_polls_keep_one_shell_and_a_restart_mints_once() {
         .unwrap();
     assert_eq!(missed.status(), StatusCode::UNAUTHORIZED);
     assert!(
-        !evict_shells
-            .held()
-            .iter()
-            .any(|token| token == "not-a-session"),
+        evict_shells.frame_principal("not-a-session").is_none(),
         "a validate miss drops the token"
     );
     let client = reqwest::Client::new();
     let mut tokens = Vec::new();
-    for _ in 0..=crate::api::handlers::attach::ATTACH_SHELL_CAP {
+    for _ in 0..9 {
         let value = client
             .post(format!("{evict_url}/api/auth/attach"))
             .json(&json!({ "secret": "frame-attach-evict", "scope": "shell" }))
@@ -581,15 +578,16 @@ async fn a_thousand_frame_polls_keep_one_shell_and_a_restart_mints_once() {
             .unwrap();
         tokens.push(value["token"].as_str().unwrap().to_string());
     }
-    let refused = client
-        .get(format!("{evict_url}/api/residents/frame?app=a&principal=p"))
-        .header(AUTHORIZATION, format!("Bearer {}", tokens[0]))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(refused.status(), StatusCode::UNAUTHORIZED);
-    assert_eq!(refused.text().await.unwrap(), "evicted");
-    assert!(evict_shells.held().contains(tokens.last().unwrap()));
+    for token in [tokens[0].as_str(), tokens.last().unwrap().as_str()] {
+        let refused = client
+            .get(format!("{evict_url}/api/residents/frame?app=a&principal=p"))
+            .header(AUTHORIZATION, format!("Bearer {token}"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(refused.status(), StatusCode::FORBIDDEN);
+        assert_eq!(refused.text().await.unwrap(), "no session");
+    }
     evict_task.abort();
 }
 
@@ -743,9 +741,9 @@ async fn an_evicted_frame_shell_gets_401_and_the_poll_attaches_once() {
     let app = gateway_router(test_state(dir.path()));
     let (status, body) = frame_body(&app, &owner.home_token, "app=kept").await;
     assert_eq!(status, StatusCode::OK, "{body}");
-    let old = shells.held()[0].clone();
+    let old = shells.frame_tokens()[0].clone();
     let client = reqwest::Client::new();
-    for n in 0..crate::api::handlers::attach::ATTACH_SHELL_CAP {
+    for n in 0..crate::api::handlers::attach::FRAME_SHELL_CAP {
         client
             .post(format!("{api_url}/api/auth/attach"))
             .json(&json!({
@@ -766,7 +764,7 @@ async fn an_evicted_frame_shell_gets_401_and_the_poll_attaches_once() {
         .await
         .unwrap();
     assert_eq!(refused.status(), StatusCode::UNAUTHORIZED);
-    assert_eq!(refused.text().await.unwrap(), "evicted");
+    assert_eq!(refused.text().await.unwrap(), "no session");
     let minted = shell_created(&audit);
     let (status, body) = frame_body(&app, &owner.home_token, "app=kept").await;
     assert_eq!(status, StatusCode::OK, "{body}");
@@ -778,6 +776,229 @@ async fn an_evicted_frame_shell_gets_401_and_the_poll_attaches_once() {
     let (status, body) = frame_body(&app, &owner.home_token, "app=kept").await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(shell_created(&audit), minted + 1, "the new shell is reused");
+    task.abort();
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn thirty_three_principals_each_get_their_frame_again() {
+    use elastos_compute::ComputeProvider;
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut people = Vec::new();
+    for n in 0..33 {
+        people.push(passkey_authority_with_name_role_credential(
+            dir.path(),
+            Some(&format!("Person {n}")),
+            crate::auth::RuntimePrincipalRole::Admin,
+            &format!("frame-slot-{n}"),
+        ));
+    }
+    let provider = Arc::new(elastos_compute::providers::ComponentProvider::new());
+    let bytes = wat::parse_str(include_str!(
+        "../../../../../tests/fixtures/components/v2-resident.wat"
+    ))
+    .unwrap();
+    let manifest_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tests/fixtures/components/bus-v1/capsule.json");
+    let mut manifest: elastos_common::CapsuleManifest =
+        serde_json::from_slice(&std::fs::read(manifest_path).unwrap()).unwrap();
+    manifest.bus_contract = Some(elastos_common::ELASTOS_BUS_V2_CONTRACT.into());
+    manifest.wit_world_sha256 = Some(elastos_common::elastos_bus_v2_wit_sha256());
+    let handle = provider.load_admitted(bytes, manifest).await.unwrap();
+    ComputeProvider::start(provider.as_ref(), &handle)
+        .await
+        .unwrap();
+    let app_id = handle.id.0.clone();
+    let storage = elastos_storage::providers::LocalFSProvider::new(dir.path().join("storage"));
+    let runtime = Arc::new(crate::runtime::Runtime::with_providers_and_component(
+        Arc::new(storage.await.unwrap()),
+        Vec::new(),
+        Some(provider.clone()),
+    ));
+    let secret = "frame-thirty-three";
+    let (api_url, task, shells, audit, sessions) = spawn_frame_runtime(runtime, secret).await;
+    write_frame_coords(dir.path(), &api_url, secret);
+    let app = gateway_router(test_state(dir.path()));
+    let query = format!("app={app_id}");
+    let show = |text: &str, principal: &str| {
+        provider.testing_store_v2_frame(
+            &app_id,
+            Some(principal),
+            vec![elastos_compute::providers::bus2_ui::FrameNode::Text(
+                text.to_string(),
+            )],
+        );
+    };
+    for (n, person) in people.iter().enumerate() {
+        let text = format!("own-{n}");
+        show(&text, person.principal_id.as_str());
+        let (status, body) = frame_body(&app, &person.home_token, &query).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert!(
+            body.contains(&text),
+            "principal {n} did not get their frame, got {body}"
+        );
+    }
+    assert_eq!(
+        crate::api::handlers::attach::FRAME_SHELL_CAP,
+        32,
+        "the frame cap is the gateway slot count"
+    );
+    assert_eq!(sessions.session_count().await, 32);
+    assert_eq!(shells.frame_tokens().len(), 32);
+    let minted = shell_created(&audit);
+    show("kept-1", people[1].principal_id.as_str());
+    let (status, body) = frame_body(&app, &people[1].home_token, &query).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body.contains("kept-1"), "{body}");
+    assert_eq!(
+        shell_created(&audit),
+        minted,
+        "a shell still inside the 32 is not minted again"
+    );
+    show("back-0", people[0].principal_id.as_str());
+    let (first, second) = tokio::join!(
+        frame_body(&app, &people[0].home_token, &query),
+        frame_body(&app, &people[0].home_token, &query),
+    );
+    assert_eq!(first.0, StatusCode::OK, "{}", first.1);
+    assert_eq!(second.0, StatusCode::OK, "{}", second.1);
+    assert!(first.1.contains("back-0"), "{}", first.1);
+    assert!(second.1.contains("back-0"), "{}", second.1);
+    assert_eq!(
+        shell_created(&audit),
+        minted + 1,
+        "two polls mint one shell"
+    );
+    assert_eq!(sessions.session_count().await, 32);
+    for (n, person) in people.iter().enumerate() {
+        let text = format!("back-{n}");
+        show(&text, person.principal_id.as_str());
+        let (status, body) = frame_body(&app, &person.home_token, &query).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert!(
+            body.contains(&text),
+            "principal {n} did not get their frame after the slot was taken, got {body}"
+        );
+    }
+    assert_eq!(sessions.session_count().await, 32);
+    ComputeProvider::stop(provider.as_ref(), &handle)
+        .await
+        .unwrap();
+    task.abort();
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn ordinary_attaches_do_not_change_a_frame_answer() {
+    use elastos_compute::ComputeProvider;
+
+    let dir = tempfile::tempdir().unwrap();
+    let owner = passkey_authority(dir.path());
+    let provider = Arc::new(elastos_compute::providers::ComponentProvider::new());
+    let bytes = wat::parse_str(include_str!(
+        "../../../../../tests/fixtures/components/v2-resident.wat"
+    ))
+    .unwrap();
+    let manifest_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tests/fixtures/components/bus-v1/capsule.json");
+    let mut manifest: elastos_common::CapsuleManifest =
+        serde_json::from_slice(&std::fs::read(manifest_path).unwrap()).unwrap();
+    manifest.bus_contract = Some(elastos_common::ELASTOS_BUS_V2_CONTRACT.into());
+    manifest.wit_world_sha256 = Some(elastos_common::elastos_bus_v2_wit_sha256());
+    let handle = provider.load_admitted(bytes, manifest).await.unwrap();
+    ComputeProvider::start(provider.as_ref(), &handle)
+        .await
+        .unwrap();
+    let app_id = handle.id.0.clone();
+    provider.testing_store_v2_frame(
+        &app_id,
+        Some(owner.principal_id.as_str()),
+        vec![elastos_compute::providers::bus2_ui::FrameNode::Text(
+            "owner-frame".into(),
+        )],
+    );
+    let storage = elastos_storage::providers::LocalFSProvider::new(dir.path().join("storage"));
+    let runtime = Arc::new(crate::runtime::Runtime::with_providers_and_component(
+        Arc::new(storage.await.unwrap()),
+        Vec::new(),
+        Some(provider.clone()),
+    ));
+    let secret = "frame-ordinary-attach";
+    let (api_url, task, shells, _audit, _sessions) = spawn_frame_runtime(runtime, secret).await;
+    write_frame_coords(dir.path(), &api_url, secret);
+    let app = gateway_router(test_state(dir.path()));
+    let query = format!("app={app_id}");
+    let (status, first_body) = frame_body(&app, &owner.home_token, &query).await;
+    assert_eq!(status, StatusCode::OK, "{first_body}");
+    assert!(first_body.contains("owner-frame"), "{first_body}");
+    let frame_token = shells.frame_tokens()[0].clone();
+    let client = reqwest::Client::new();
+    let mut ordinary = Vec::new();
+    for _ in 0..9 {
+        let value = client
+            .post(format!("{api_url}/api/auth/attach"))
+            .json(&json!({ "secret": secret, "scope": "shell" }))
+            .send()
+            .await
+            .unwrap()
+            .json::<serde_json::Value>()
+            .await
+            .unwrap();
+        ordinary.push(value["token"].as_str().unwrap().to_string());
+    }
+    let (status, body) = frame_body(&app, &owner.home_token, &query).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        body, first_body,
+        "ordinary attaches do not change the frame"
+    );
+    assert!(shells.frame_principal(&frame_token).is_some());
+    async fn ordinary_answer(
+        client: &reqwest::Client,
+        api_url: &str,
+        token: &str,
+    ) -> (StatusCode, String) {
+        let response = client
+            .get(format!(
+                "{api_url}/api/residents/frame?app=app-frame&principal=p"
+            ))
+            .header(AUTHORIZATION, format!("Bearer {token}"))
+            .send()
+            .await
+            .unwrap();
+        let status = response.status();
+        let text = response.text().await.unwrap();
+        (status, text)
+    }
+    let first_ordinary = ordinary_answer(&client, &api_url, &ordinary[0]).await;
+    let last_ordinary = ordinary_answer(&client, &api_url, ordinary.last().unwrap()).await;
+    assert_eq!(first_ordinary, last_ordinary);
+    assert_eq!(first_ordinary.0, StatusCode::FORBIDDEN);
+    assert_eq!(first_ordinary.1, "no session");
+    for n in 0..9 {
+        client
+            .post(format!("{api_url}/api/auth/attach"))
+            .json(&json!({
+                "secret": secret,
+                "scope": "shell",
+                "principal": format!("person:local:frame-{n}"),
+            }))
+            .send()
+            .await
+            .unwrap();
+    }
+    let after_frames = ordinary_answer(&client, &api_url, &ordinary[0]).await;
+    assert_eq!(
+        after_frames, first_ordinary,
+        "frame attaches do not change an ordinary shell"
+    );
+    let (status, body) = frame_body(&app, &owner.home_token, &query).await;
+    assert_eq!(body, first_body, "{status}");
+    ComputeProvider::stop(provider.as_ref(), &handle)
+        .await
+        .unwrap();
     task.abort();
 }
 

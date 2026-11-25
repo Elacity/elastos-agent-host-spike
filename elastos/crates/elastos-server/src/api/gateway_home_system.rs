@@ -1476,8 +1476,12 @@ fn frame_slot() -> &'static tokio::sync::Mutex<FrameSlot> {
     })
 }
 
+fn frame_runtime_prefix(api_url: &str, secret: &str) -> String {
+    format!("{}\n{secret}\n", api_url.trim_end_matches('/'))
+}
+
 fn frame_key(api_url: &str, secret: &str, principal: &str) -> String {
-    format!("{}\n{secret}\n{principal}", api_url.trim_end_matches('/'))
+    format!("{}{principal}", frame_runtime_prefix(api_url, secret))
 }
 
 #[derive(Deserialize)]
@@ -1525,8 +1529,20 @@ async fn frame_shell(
         .await
         .ok()?;
     slot.shells.retain(|(saved, _)| saved != &key);
-    if slot.shells.len() >= 32 {
-        slot.shells.remove(0);
+    let prefix = frame_runtime_prefix(api_url, secret);
+    let kept = slot
+        .shells
+        .iter()
+        .filter(|(saved, _)| saved.starts_with(&prefix))
+        .count();
+    if kept >= crate::api::handlers::attach::FRAME_SHELL_CAP {
+        if let Some(index) = slot
+            .shells
+            .iter()
+            .position(|(saved, _)| saved.starts_with(&prefix))
+        {
+            slot.shells.remove(index);
+        }
     }
     slot.shells.push((key, token.clone()));
     Some((client, token))

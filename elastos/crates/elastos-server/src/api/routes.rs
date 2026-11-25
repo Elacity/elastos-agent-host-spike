@@ -109,10 +109,8 @@ pub(crate) async fn resident_frame(
                 let _query_names = query.principal.as_str();
                 return resident_frame_body(&runtime, &query.app, &principal).await;
             }
-            if shells.evicted(&token) {
-                // 401, so the frame poll drops this shell and attaches once more.
-                return (StatusCode::UNAUTHORIZED, "evicted").into_response();
-            }
+            // An ordinary shell stays forbidden. A frame shell that lost its
+            // slot is already gone from the registry, so that poll is 401.
             return (StatusCode::FORBIDDEN, "no session").into_response();
         }
         return (StatusCode::FORBIDDEN, "guest session").into_response();
