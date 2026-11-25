@@ -9272,6 +9272,30 @@ pub async fn production_after() {
         );
     }
 
+    /// A macOS test item is dropped. The production items around it stay.
+    #[test]
+    fn production_text_ignoring_cfg_test_drops_a_macos_test_item() {
+        let source = "\
+fn kept() {
+    stay();
+}
+
+#[cfg(all(test, target_os = \"macos\"))]
+fn dropped() {
+    go();
+}
+
+fn after() {
+    stay();
+}
+";
+        let text = production_text_ignoring_cfg_test(source);
+        assert!(!text.contains("fn dropped"), "{text}");
+        assert!(!text.contains("go()"), "{text}");
+        assert!(text.contains("fn kept()"), "{text}");
+        assert!(text.contains("fn after()"), "{text}");
+    }
+
     /// Shared detector 1 for the gateway fence cells: source pins over the
     /// production text of `elastos/crates`. Each `tests` module is dropped by
     /// brace match, `#[cfg(test)]` items and statement-level `#[cfg(test)]` are

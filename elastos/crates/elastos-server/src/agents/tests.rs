@@ -3321,3 +3321,12 @@ fn with_the_feature_off_the_owner_load_carries_no_agent_record() {
             .is_none()
     );
 }
+
+/// This thread already holds the agent file lock. A second write lock is refused.
+#[test]
+fn lock_for_write_refuses_when_this_thread_already_holds_it() {
+    let home = Home::new();
+    let _held = hold_agent_file_lock_for_test(home.path()).unwrap();
+    let err = open(home.path(), true).unwrap_err();
+    assert!(err.to_string().contains(LOCK_ORDER), "{err}");
+}

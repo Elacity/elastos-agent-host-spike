@@ -447,6 +447,9 @@ struct WriteLock {
 /// this one. The model budget mutex is taken before this lock. Holding this
 /// lock and then that mutex is refused (`LOCK_ORDER`).
 fn lock_for_write(data_dir: &Path) -> anyhow::Result<WriteLock> {
+    if agent_file_lock_held() {
+        anyhow::bail!(LOCK_ORDER);
+    }
     let process = AGENT_WRITE
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
