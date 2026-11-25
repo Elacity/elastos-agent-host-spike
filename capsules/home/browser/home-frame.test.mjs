@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
+import fs from "node:fs";
 import test from "node:test";
-import { paintFrame, startHomeFrame } from "./home-frame.js";
+import { bindV2App, clearV2App, paintFrame, startHomeFrame } from "./home-frame.js";
 
 function root() {
   const children = [];
@@ -126,6 +127,49 @@ test("a deadline aborts the fetch", async () => {
   try {
     await new Promise((resolve) => setTimeout(resolve, 80));
     assert.equal(signal.aborted, true);
+  } finally {
+    clearInterval(timer);
+  }
+});
+
+test("the running app is the only frame requested", async () => {
+  const page = fs.readFileSync(new URL("./index.html", import.meta.url), "utf8");
+  const host = fs.readFileSync(new URL("./home-shell-host.js", import.meta.url), "utf8");
+  assert.match(page, /id="home-v2-frame"/);
+  assert.match(host, /bindV2App\(homeV2Frame/);
+  assert.match(host, /clearV2App\(homeV2Frame/);
+  assert.match(host, /launched\?\.capsule_id/);
+  const panel = root();
+  panel.dataset = {};
+  const asked = [];
+  bindV2App(panel, "app-a");
+  const timer = startHomeFrame(
+    panel,
+    () => {
+      const app = panel.dataset.app || "";
+      asked.push(app);
+      if (!app) return Promise.resolve({ nodes: [] });
+      return Promise.resolve({ nodes: [{ kind: "text", text: app }] });
+    },
+    15,
+    { deadlineMs: 200 },
+  );
+  try {
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    assert.ok(asked.includes("app-a"));
+    assert.ok(asked.every((id) => id === "app-a"));
+    asked.length = 0;
+    bindV2App(panel, "app-b");
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    assert.ok(asked.includes("app-b"));
+    assert.ok(!asked.includes("app-a"), "another app's frame was requested");
+    asked.length = 0;
+    clearV2App(panel);
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    assert.equal(panel.dataset.app, undefined);
+    assert.equal(panel.children.length, 0);
+    assert.ok(asked.every((id) => id === ""));
+    assert.ok(!asked.includes("app-b"));
   } finally {
     clearInterval(timer);
   }

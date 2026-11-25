@@ -1,6 +1,18 @@
 // The owner's Home paints one stored frame. Text is text. An image is its
 // resource name. Nothing here builds a script, a link, or a byte URL.
 
+export function bindV2App(root, appId) {
+  if (!root) return;
+  const id = typeof appId === "string" ? appId : "";
+  if (id) root.dataset.app = id;
+  else delete root.dataset.app;
+  if (!id) root.replaceChildren();
+}
+
+export function clearV2App(root) {
+  bindV2App(root, "");
+}
+
 export function paintFrame(root, frame) {
   root.replaceChildren();
   const nodes = frame && Array.isArray(frame.nodes) ? frame.nodes : [];

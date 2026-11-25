@@ -20,7 +20,7 @@ import {
   createHomeBackgroundImageReader,
   targetById,
 } from "./shell-core.js?v=home-wallpaper-20261030b";
-import { startHomeFrame } from "./home-frame.js?v=home-frame-20261125c";
+import { bindV2App, clearV2App, startHomeFrame } from "./home-frame.js?v=home-frame-20261125d";
 import {
   addAccountPasskey,
   bindHomeUnlock,
@@ -226,11 +226,20 @@ async function launchWalletConnectorFromTrustedSource(context, target) {
   }
 }
 
+let shownV2App = "";
+
+function showV2App(id) {
+  shownV2App = typeof id === "string" ? id : "";
+  if (shownV2App) bindV2App(homeV2Frame, shownV2App);
+  else clearV2App(homeV2Frame);
+}
+
 function retireLaunchedAppContext(homeToken) {
   const context = launchedAppContexts.get(homeToken);
   if (!context) {
     return false;
   }
+  if (context.capsuleId && context.capsuleId === shownV2App) showV2App("");
   cancelBrowserAuthorityRenewalsForToken(homeToken);
   cancelFrameRenewal(context);
   cancelLibraryPicker(context);
@@ -249,6 +258,7 @@ function clearLaunchedAppContexts() {
   }
   launchedAppContexts.clear();
   homeExternalLinkPrompt.clear();
+  showV2App("");
 }
 
 function cancelFrameRenewal(context) {
@@ -576,6 +586,7 @@ async function launchHomeTarget(target, query = {}) {
     method: "POST",
     body: JSON.stringify(body),
   });
+  const capsuleId = typeof launched?.capsule_id === "string" ? launched.capsule_id : "";
   if (launched?.attach_kind === "iframe") {
     rememberLaunchedAppContext(launched, readBackgroundImage);
     if (pickerOwner) {
@@ -588,6 +599,9 @@ async function launchHomeTarget(target, query = {}) {
       launchedAppContexts.get(token).pickerOwner = pickerOwner;
     }
   }
+  // The launch line already carries the capsule id. A launch with none
+  // clears the frame so another app is not left on screen.
+  showV2App(capsuleId);
   return launched;
 }
 
@@ -999,6 +1013,7 @@ function rememberLaunchedAppContext(launched, readBackgroundImage) {
       inFlight: false,
       requestIds: new Set(),
     },
+    capsuleId: typeof launched.capsule_id === "string" ? launched.capsule_id : "",
   });
 }
 
