@@ -12,7 +12,7 @@ use std::{
 // `handled_fs` is the filesystem mask that ABI defines. ABI 4's TCP rights and
 // ABI 6's scope stay in other ruleset fields, which this plan leaves unset.
 const STORAGE: u64 = 0x41be;
-const BINARY: u64 = 0x5;
+pub(super) const BINARY: u64 = 0x5;
 /// `LANDLOCK_ACCESS_FS_READ_FILE` (1 << 2). A resolver file is not a storage root.
 const READ_FILE: u64 = 4;
 /// glibc NSS and the resolver. Optional files stay closed: the note measured
@@ -22,13 +22,13 @@ const CHAIN_RESOLVER_FILES: &[&str] = &["/etc/nsswitch.conf", "/etc/hosts", "/et
 const NO_LANDLOCK: &str = "linux confinement refused: the kernel has no Landlock";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum LoaderArch {
+pub(super) enum LoaderArch {
     X86_64,
     Aarch64,
 }
 
 impl LoaderArch {
-    fn host() -> Self {
+    pub(super) fn host() -> Self {
         if cfg!(target_arch = "x86_64") {
             Self::X86_64
         } else {
@@ -121,7 +121,7 @@ fn plan_loaders(provider: RuntimeProviderId, arch: LoaderArch) -> Result<Vec<Pat
 /// same directories. Symlinks are resolved for the owner and mode check. The
 /// returned path is the path that existed, one file.
 #[cfg(unix)]
-fn resolve_loader_paths(
+pub(super) fn resolve_loader_paths(
     provider: RuntimeProviderId,
     arch: LoaderArch,
     root: &Path,
@@ -948,93 +948,5 @@ mod tests {
         let err = resolve_loader_paths(Localhost, LoaderArch::X86_64, linked.path(), None, uid)
             .unwrap_err();
         assert_eq!(err, "provider start is refused: libc.so.6");
-    }
-
-    /// A copied tree under the test root, found through an injected directory
-    /// list that is not the multiarch directory. The child installs that one
-    /// file rule and can open the file.
-    #[cfg(all(
-        not(elastos_unsupported_os_check),
-        target_os = "linux",
-        any(target_arch = "x86_64", target_arch = "aarch64")
-    ))]
-    #[test]
-    fn a_linux_child_opens_a_library_found_outside_the_multiarch_directory() {
-        let root = tempfile::tempdir().unwrap();
-        let uid = unsafe { libc::geteuid() };
-        let mut paths = Vec::new();
-        for name in names_for(Localhost, LoaderArch::host()) {
-            paths.push(plant(root.path(), &format!("/lib/{name}"), 0o755));
-        }
-        let got = resolve_loader_paths(
-            Localhost,
-            LoaderArch::host(),
-            root.path(),
-            Some(&["/lib"]),
-            uid,
-        )
-        .unwrap();
-        assert_eq!(got, paths);
-        assert!(got
-            .iter()
-            .all(|path| !path.to_string_lossy().contains("linux-gnu")));
-        let abi = kernel_abi().expect("this kernel has no Landlock");
-        let admitted = super::super::rights::admit_runtime_grant(Localhost);
-        let plan = Plan {
-            abi,
-            handled: handled_fs(abi),
-            rules: got
-                .iter()
-                .map(|path| PathRule("LANDLOCK_LOADER_PATHS", path.clone(), BINARY))
-                .collect(),
-            storage_dev: 0,
-            storage_ino: 0,
-            root_dev: Vec::new(),
-            root_ino: Vec::new(),
-        };
-        // The child calls the installer directly, as the installer's own tests do.
-        use super::super::os_entry::preexec_installer::{install, prepare_path_allow};
-        let prepared = prepare_path_allow(Localhost, &admitted, plan).unwrap();
-        use std::os::fd::AsRawFd;
-        use std::os::unix::ffi::OsStrExt;
-        let library = std::ffi::CString::new(got[1].as_os_str().as_bytes()).unwrap();
-        let hidden = plant(root.path(), "/lib/hidden.so", 0o755);
-        let hidden = std::ffi::CString::new(hidden.as_os_str().as_bytes()).unwrap();
-        let report = std::fs::File::open("/dev/null").unwrap();
-        assert!(
-            report.as_raw_fd() > 3,
-            "the report fd must survive close_range"
-        );
-        let pid = unsafe { libc::fork() };
-        assert!(pid >= 0);
-        if pid == 0 {
-            let code = match unsafe { install(&prepared, report.as_raw_fd(), -1) } {
-                Err(_) => 80,
-                Ok(()) => {
-                    // The filter admits openat and answers any other open with
-                    // EACCES, the same errno Landlock uses for a missing rule.
-                    let allowed =
-                        unsafe { libc::openat(libc::AT_FDCWD, library.as_ptr(), libc::O_RDONLY) };
-                    let denied =
-                        unsafe { libc::openat(libc::AT_FDCWD, hidden.as_ptr(), libc::O_RDONLY) };
-                    let denied_errno = unsafe { *libc::__errno_location() };
-                    if allowed >= 0 {
-                        unsafe { libc::close(allowed) };
-                    }
-                    if allowed >= 0 && denied < 0 && denied_errno == libc::EACCES {
-                        0
-                    } else {
-                        81
-                    }
-                }
-            };
-            unsafe { libc::_exit(code) };
-        }
-        let mut status = 0;
-        assert_eq!(unsafe { libc::waitpid(pid, &mut status, 0) }, pid);
-        assert!(
-            libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0,
-            "status {status}"
-        );
     }
 }

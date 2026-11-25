@@ -192,7 +192,7 @@ pub(super) fn prepare(
 /// descriptor (both at least 3, with FD_CLOEXEC), and writes any returned
 /// failure to the report descriptor before exiting the child. Tests use -1
 /// when there is no executable descriptor.
-pub(in crate::provider) unsafe fn install(
+pub(super) unsafe fn install(
     prepared: &Prepared,
     keep: i32,
     executable: i32,
@@ -338,7 +338,7 @@ pub(in crate::provider) unsafe fn install(
     result
 }
 
-pub(in crate::provider) fn prepare_path_allow(
+pub(super) fn prepare_path_allow(
     provider: RuntimeProviderId,
     admitted: &AdmittedRights,
     plan: landlock_plan::Plan,
@@ -993,5 +993,104 @@ mod tests {
             kept_status, 0,
             "localhost plan must open an existing ElastOS/kept.txt (exit 89 install failed, exit 90 open failed, status {kept_status})"
         );
+    }
+
+    /// A copied tree under the test root, found through an injected directory
+    /// list that is not the multiarch directory. This child installs that one
+    /// file rule. The installer's signature stays the entry's.
+    #[test]
+    fn a_linux_child_opens_a_library_found_outside_the_multiarch_directory() {
+        let root = tempfile::tempdir().unwrap();
+        let uid = unsafe { libc::geteuid() };
+        let arch = landlock_plan::LoaderArch::host();
+        let names: &[&str] = if cfg!(target_arch = "x86_64") {
+            &["ld-linux-x86-64.so.2", "libc.so.6", "libgcc_s.so.1"]
+        } else {
+            &["ld-linux-aarch64.so.1", "libc.so.6", "libgcc_s.so.1"]
+        };
+        let mut paths = Vec::new();
+        for name in names {
+            paths.push(plant_library(root.path(), &format!("/lib/{name}")));
+        }
+        let got = landlock_plan::resolve_loader_paths(
+            RuntimeProviderId::Localhost,
+            arch,
+            root.path(),
+            Some(&["/lib"]),
+            uid,
+        )
+        .unwrap();
+        assert_eq!(got, paths);
+        assert!(got
+            .iter()
+            .all(|path| !path.to_string_lossy().contains("linux-gnu")));
+        let abi = landlock_plan::kernel_abi().expect("this kernel has no Landlock");
+        let admitted = helper_grant(RuntimeProviderId::Localhost);
+        let plan = landlock_plan::Plan {
+            abi,
+            handled: landlock_plan::handled_fs(abi),
+            rules: got
+                .iter()
+                .map(|path| {
+                    landlock_plan::PathRule(
+                        "LANDLOCK_LOADER_PATHS",
+                        path.clone(),
+                        landlock_plan::BINARY,
+                    )
+                })
+                .collect(),
+            storage_dev: 0,
+            storage_ino: 0,
+            root_dev: Vec::new(),
+            root_ino: Vec::new(),
+        };
+        let prepared = prepare_path_allow(RuntimeProviderId::Localhost, &admitted, plan).unwrap();
+        let library = CString::new(got[1].as_os_str().as_bytes()).unwrap();
+        let hidden = plant_library(root.path(), "/lib/hidden.so");
+        let hidden = CString::new(hidden.as_os_str().as_bytes()).unwrap();
+        let report = std::fs::File::open("/dev/null").unwrap();
+        assert!(
+            report.as_raw_fd() > 3,
+            "the report fd must survive close_range"
+        );
+        let pid = unsafe { libc::fork() };
+        assert!(pid >= 0);
+        if pid == 0 {
+            let code = match unsafe { install(&prepared, report.as_raw_fd(), -1) } {
+                Err(_) => 80,
+                Ok(()) => {
+                    // The filter admits openat and answers any other open with
+                    // EACCES, the same errno Landlock uses for a missing rule.
+                    let allowed =
+                        unsafe { libc::openat(libc::AT_FDCWD, library.as_ptr(), libc::O_RDONLY) };
+                    let denied =
+                        unsafe { libc::openat(libc::AT_FDCWD, hidden.as_ptr(), libc::O_RDONLY) };
+                    let denied_errno = unsafe { *libc::__errno_location() };
+                    if allowed >= 0 {
+                        unsafe { libc::close(allowed) };
+                    }
+                    if allowed >= 0 && denied < 0 && denied_errno == libc::EACCES {
+                        0
+                    } else {
+                        81
+                    }
+                }
+            };
+            unsafe { libc::_exit(code) };
+        }
+        let mut status = 0;
+        assert_eq!(unsafe { libc::waitpid(pid, &mut status, 0) }, pid);
+        assert!(
+            libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0,
+            "status {status}"
+        );
+    }
+
+    fn plant_library(root: &Path, rel: &str) -> std::path::PathBuf {
+        let path = root.join(rel.trim_start_matches('/'));
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, b"library").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        path
     }
 }

@@ -67,7 +67,7 @@ mod failure_record;
     any(target_arch = "x86_64", target_arch = "aarch64")
 ))]
 #[path = "preexec_installer.rs"]
-pub(super) mod preexec_installer;
+mod preexec_installer;
 
 #[cfg(any(
     test,
