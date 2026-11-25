@@ -1,6 +1,9 @@
 //! Seatbelt text for Runtime-owned provider grants. The launcher binds paths with -D.
 
-#[cfg(not(elastos_unsupported_os_check))]
+// The same cfg as `render_macos_profile`, the only user of these names.
+// A Linux release build, including musl, does not compile that renderer, so
+// the import is absent there too. An allow would hide the unused-import error.
+#[cfg(all(not(elastos_unsupported_os_check), any(target_os = "macos", test)))]
 use super::{rights::AdmittedRights, rights_table::RuntimeProviderId};
 
 #[cfg(not(elastos_unsupported_os_check))]
@@ -190,6 +193,7 @@ mod tests {
         arguments
     }
 
+    #[cfg(not(elastos_unsupported_os_check))]
     #[rustfmt::skip]
     #[test]
     fn rendered_profiles_match_committed_oracles() {
@@ -279,6 +283,7 @@ mod tests {
         }
     }
 
+    #[cfg(not(elastos_unsupported_os_check))]
     #[test]
     fn model_gpu_right_is_separate_and_narrow() {
         let row = super::super::rights_table::RIGHTS
@@ -391,6 +396,16 @@ mod tests {
         assert_eq!(disk["platform_baseline"]["rules"][1], pinned["platform_baseline"]["rules"][1], "pin d0dd5693 model sysctl");
     }
 
+    #[cfg(all(
+        not(elastos_unsupported_os_check),
+        any(
+            target_os = "macos",
+            all(
+                target_os = "linux",
+                any(target_arch = "x86_64", target_arch = "aarch64")
+            )
+        )
+    ))]
     #[test]
     fn chain_seatbelt_is_the_measured_outbound_set() {
         let chain = render_path_allow_profile(&["chain-provider"], 0, true, true, true).unwrap();
