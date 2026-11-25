@@ -18,6 +18,7 @@ import {
   agentsInGatewayChange,
   behaviourInputsDir,
   bindsPort,
+  gatewayOwnsListener,
   carrierConfigOk,
   elastosSubcommand,
   executableInsideHome,
@@ -553,7 +554,8 @@ function routeReadRefused(attempt) {
   if (typeof attempt.marker !== "string" || attempt.marker.length === 0) return false;
   if (attempt.runtime !== LIVE_SESSION_COORDS) return false;
   if (String(attempt.body ?? "").includes(attempt.marker)) return false;
-  return attempt.status === 403 || attempt.status === 404;
+  // A missing route is not a refusal. Only a 403 whose body names the cause.
+  return attempt.status === 403 && String(attempt.body || "").length > 0;
 }
 
 // Both calls use the capsule provider route. A refusal here is the route
@@ -1620,17 +1622,21 @@ async function main() {
 
   const routeReads = await attemptUserAreaRoute();
   if (!userAreaRouteRefused(routeReads)) {
-    halt("u4_route_refuses_user_area", {
+    // The plane does not mount this provider route. A 404 is the gap, not a
+    // pass, and the later rows still run.
+    mark("u4_route_refuses_user_area", "fail", {
+      own: routeAttemptDetail(routeReads.own),
+      other: routeAttemptDetail(routeReads.other),
+      gap: "the agent plane does not mount the provider read",
+      isolation_not_covered: U4_ISOLATION_NOT_COVERED,
+    });
+  } else {
+    pass("u4_route_refuses_user_area", {
       own: routeAttemptDetail(routeReads.own),
       other: routeAttemptDetail(routeReads.other),
       isolation_not_covered: U4_ISOLATION_NOT_COVERED,
     });
   }
-  pass("u4_route_refuses_user_area", {
-    own: routeAttemptDetail(routeReads.own),
-    other: routeAttemptDetail(routeReads.other),
-    isolation_not_covered: U4_ISOLATION_NOT_COVERED,
-  });
 
   const inboxLaunch = await launchApp(state.homeToken, "inbox");
   if (!inboxLaunch.token) halt("journal_in_agent_root", inboxLaunch.reply.text.slice(0, 240));
@@ -1771,10 +1777,11 @@ async function main() {
     mark("step_up_approve", "fail", String(error.message || error));
   }
   let stopDuringStep = null;
+  let runnerStoppedTooLate = false;
   if (state.approveBody) {
-    // The installed Stop is sent once the note file is on disk. Holding the
-    // write open needs a pause the release does not have. Mid-step stop is
-    // the unit row, not this installed row.
+    // Stop once, while the guest that wrote the note is still live. A note
+    // with no live session means the runner stopped too late. There is no
+    // second Stop.
     const approvedPromise = call("POST", "/api/apps/inbox/actions", state.inboxToken, state.approveBody);
     const stopDeadline = Date.now() + 20000;
     while (Date.now() < stopDeadline) {
@@ -1783,20 +1790,23 @@ async function main() {
         file.path.includes(rootSuffix(state.rootA)) && file.path.endsWith("Documents/note.txt")
       ));
       if (wrote || (record && record.status === "completed" && record.result?.status === "ok")) {
+        const live = liveSessions(await capsules(), [state.launchA]);
+        if (live.length !== 1) {
+          runnerStoppedTooLate = true;
+          break;
+        }
         stopDuringStep = await call("POST", "/api/apps/system/agents/stop", state.systemToken, {
           agent_id: state.agentA,
         });
+        if (stopDuringStep.status === 409 && String(stopDuringStep.text || "").includes("agent_no_session")) {
+          runnerStoppedTooLate = true;
+        }
         break;
       }
       await sleep(5);
     }
     const approved = await approvedPromise;
     keep("step_up_approve", approved.status === 200, approved.text.slice(0, 300));
-    if (!stopDuringStep) {
-      stopDuringStep = await call("POST", "/api/apps/system/agents/stop", state.systemToken, {
-        agent_id: state.agentA,
-      });
-    }
   }
   let settled = null;
   const settleDeadline = Date.now() + 30000;
@@ -1814,7 +1824,14 @@ async function main() {
   const namedStop = stopRows.find((event) => (
     event.result === "ok" || event.result === "failed" || event.result === "stopping"
   ));
-  if ((stopDuringStep?.status === 200 || stopDuringStep?.status === 202) && namedStop && stepOutcome) {
+  if (runnerStoppedTooLate) {
+    mark("stop_after_the_note_lands", "fail", {
+      http: stopDuringStep?.status || 0,
+      body: "the runner stopped too late",
+      step_outcome: stepOutcome,
+      rows: stopRows.map((event) => event.result),
+    });
+  } else if ((stopDuringStep?.status === 200 || stopDuringStep?.status === 202) && namedStop && stepOutcome) {
     pass("stop_after_the_note_lands", {
       http: stopDuringStep.status,
       session_id: namedStop.session_id,
@@ -1867,7 +1884,7 @@ async function main() {
     before_sha256: ownerDocBefore ? crypto.createHash("sha256").update(ownerDocBefore).digest("hex") : "",
     after_sha256: ownerDocAfter ? crypto.createHash("sha256").update(ownerDocAfter).digest("hex") : "",
   });
-  const ownReceipts = inspectRecords().filter((record) => record.request_id === state.requestId);
+  const ownReceipts = inspectRecords().filter((record) => record.requester_id === state.agentA);
   const receiptOk = Boolean(settled
     && settled.principal_id
     && settled.requester_id === state.agentA
@@ -1876,19 +1893,33 @@ async function main() {
     && settled.status === "completed"
     && ownReceipts.length === 1);
   const planeCoords = path.join(data, "agent-runtime-coords.json");
-  const planePid = fs.existsSync(planeCoords) ? Number(readJson(planeCoords).pid) : 0;
+  const planeFile = fs.existsSync(planeCoords) ? readJson(planeCoords) : {};
+  const planePid = Number(planeFile.pid) || 0;
   const gatewayPid = fs.existsSync(pidFile) ? Number(String(fs.readFileSync(pidFile, "utf8")).trim()) : 0;
-  const sameProcess = planePid > 0 && planePid === gatewayPid;
+  let listenPort = 0;
+  try {
+    listenPort = Number(new URL(String(planeFile.api_url || "")).port) || 0;
+  } catch {
+    listenPort = 0;
+  }
+  const ownsListener = gatewayOwnsListener(gatewayPid, listenPort);
+  const childList = await listRuntimeCapsules();
+  const childAgents = guestCapsuleCount(childList.capsules, [state.agentA, state.agentB]);
+  const sameProcess = planePid > 0 && planePid === gatewayPid && ownsListener
+    && childList.listed === true && childAgents === 0;
   if (authorised && receiptOk && marks.get("step_up_approve")?.status === "pass" && sameProcess) {
     pass("card_step_up_approve_one_write_one_receipt", {
       admission_pid: planePid,
       dispatch_pid: gatewayPid,
       pids_equal: true,
+      listener_owned: ownsListener,
+      child_agent_capsules: childAgents,
       source_commit: process.env.A15R_SOURCE_COMMIT || "",
     });
   } else {
     halt("card_step_up_approve_one_write_one_receipt", {
       authorised, receiptOk, admission_pid: planePid, dispatch_pid: gatewayPid,
+      listener_owned: ownsListener, child_listed: childList.listed, child_agent_capsules: childAgents,
     });
   }
   keep("one_result_and_receipt", receiptOk, {

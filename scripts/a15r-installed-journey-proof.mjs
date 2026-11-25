@@ -268,20 +268,85 @@ export function judgeCreatingOwner(input) {
 }
 
 // The launch route is the agents-in-gateway change when the gateway starts
-// the guest through the in-process agent plane.
+// the guest through the in-process agent plane. The home runtime must call
+// the plane's live coordinates and define a launch function with a body.
+// The gateway source must dispatch the approved plan.
 export function agentsInGatewayChange(gatewaySource, launchSource, homeRuntimeSource) {
   const route = "/api/apps/system/agents/launch";
-  const registered = String(gatewaySource || "").includes(`"${route}"`);
+  const gateway = String(gatewaySource || "");
+  const registered = gateway.includes(`"${route}"`);
+  const dispatch = gateway.includes("dispatch_approved_agent_plan");
   const text = String(launchSource || "");
   const asksPlane = text.includes("launch_runtime_agent") && text.includes("agent_plane::");
   const home = String(homeRuntimeSource || "");
-  const hop = home.includes("async fn launch_runtime_agent");
-  const ok = registered && asksPlane && hop;
+  const liveCoords = home.includes("agent_plane::live_coords");
+  const emptyLaunch = /async fn launch_runtime_agent\s*\([^)]*\)\s*\{\s*\}/.test(home);
+  const hop = home.includes("async fn launch_runtime_agent") && !emptyLaunch;
+  const ok = registered && dispatch && asksPlane && liveCoords && hop;
   let reason = "";
   if (!registered) reason = "the launch route is not registered";
+  else if (!dispatch) reason = "the gateway does not dispatch the approved plan";
   else if (!asksPlane) reason = "the launch route does not start the agent on the in-process plane";
+  else if (!liveCoords) reason = "the launch does not call the plane's live coordinates";
+  else if (emptyLaunch) reason = "launch_runtime_agent is empty";
   else if (!hop) reason = "gateway_home_runtime.rs does not define launch_runtime_agent";
   return { ok, route, reason };
+}
+
+// The gateway process owns the port named in agent-runtime-coords.json.
+// macOS asks lsof. Linux reads /proc. The arguments are fixed. No shell.
+export function gatewayOwnsListener(pid, port) {
+  const id = Number(pid);
+  const listen = Number(port);
+  if (!Number.isInteger(id) || id <= 0 || !Number.isInteger(listen) || listen <= 0 || listen > 65535) {
+    return false;
+  }
+  if (process.platform === "darwin") {
+    const result = spawnSync("lsof", [
+      "-nP", "-a", "-p", String(id), `-iTCP:${listen}`, "-sTCP:LISTEN",
+    ], { encoding: "utf8" });
+    return result.status === 0;
+  }
+  if (process.platform === "linux") return linuxOwnsListener(id, listen);
+  return false;
+}
+
+function linuxOwnsListener(pid, port) {
+  const portHex = port.toString(16).toUpperCase().padStart(4, "0");
+  const inodes = new Set();
+  for (const name of ["tcp", "tcp6"]) {
+    let text = "";
+    try {
+      text = fs.readFileSync(`/proc/net/${name}`, "utf8");
+    } catch {
+      continue;
+    }
+    for (const line of text.split("\n").slice(1)) {
+      const parts = line.trim().split(/\s+/);
+      if (parts.length < 10 || parts[3] !== "0A") continue;
+      const hexPort = (parts[1] || "").split(":")[1] || "";
+      if (hexPort.toUpperCase() !== portHex) continue;
+      inodes.add(parts[9]);
+    }
+  }
+  if (inodes.size === 0) return false;
+  let fds = [];
+  try {
+    fds = fs.readdirSync(`/proc/${pid}/fd`);
+  } catch {
+    return false;
+  }
+  for (const fd of fds) {
+    let link = "";
+    try {
+      link = fs.readlinkSync(`/proc/${pid}/fd/${fd}`);
+    } catch {
+      continue;
+    }
+    const match = /^socket:\[(\d+)\]$/.exec(link);
+    if (match && inodes.has(match[1])) return true;
+  }
+  return false;
 }
 
 export const FULL_MODE_NOTICE = "Full mode needs the agents-in-gateway change. It is not proof of anything until that change is in the gateway.";

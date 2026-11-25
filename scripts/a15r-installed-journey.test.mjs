@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import crypto from "node:crypto";
 import fs from "node:fs";
+import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
@@ -46,6 +47,7 @@ import {
 import {
   agentsInGatewayChange,
   bindsPort,
+  gatewayOwnsListener,
   carrierConfigOk,
   elastosSubcommand,
   executableInsideHome,
@@ -266,7 +268,11 @@ test("user-area route row requires both reads refused", () => {
   assert.equal(userAreaRouteRefused({
     own: { ...pair.own, status: 404, body: "" },
     other: { ...pair.other, status: 404, body: "" },
-  }), true);
+  }), false);
+  assert.equal(userAreaRouteRefused({
+    own: { ...pair.own, status: 403, body: "" },
+    other: pair.other,
+  }), false);
   assert.equal(userAreaRouteRefused({
     own: { ...pair.own, runtime: "home-runtime-coords.json" },
     other: pair.other,
@@ -529,17 +535,34 @@ test("full mode notice names the missing agents-in-gateway route", () => {
   );
   assert.equal(child.ok, false);
   const ready = agentsInGatewayChange(
-    'route("/api/apps/system/agents/launch", post(agents_launch))',
+    'route("/api/apps/system/agents/launch", post(agents_launch))\ndispatch_approved_agent_plan',
     "agent_plane::ensure_running(); launch_runtime_agent();",
-    "async fn launch_runtime_agent() {}",
+    "agent_plane::live_coords\nasync fn launch_runtime_agent() {}",
   );
-  assert.equal(ready.ok, true);
+  assert.equal(ready.ok, false);
+  assert.match(ready.reason, /empty/);
+  const filled = agentsInGatewayChange(
+    'route("/api/apps/system/agents/launch", post(agents_launch))\ndispatch_approved_agent_plan',
+    "agent_plane::ensure_running(); launch_runtime_agent();",
+    "agent_plane::live_coords\nasync fn launch_runtime_agent() {\n  return;\n}",
+  );
+  assert.equal(filled.ok, true, filled.reason);
   const noHop = agentsInGatewayChange(
     'route("/api/apps/system/agents/launch", post(agents_launch))',
     "agent_plane::ensure_running(); launch_runtime_agent();",
     "fn something_else() {}",
   );
   assert.equal(noHop.ok, false);
+});
+
+test("the gateway pid owns the listening port", async () => {
+  const server = net.createServer();
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const { port } = server.address();
+  assert.equal(gatewayOwnsListener(process.pid, port), true);
+  assert.equal(gatewayOwnsListener(1, port), false);
+  assert.equal(gatewayOwnsListener(process.pid, 0), false);
+  await new Promise((resolve) => server.close(resolve));
 });
 
 test("playwright pin is the version in test-behaviour.sh", () => {
