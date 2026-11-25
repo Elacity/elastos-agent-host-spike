@@ -1816,6 +1816,7 @@ dependencies = [
  "iroh-mdns-address-lookup",
  "k256",
  "libc",
+ "localhost-provider",
  "memchr",
  "qrcodegen",
  "rand 0.8.8",
@@ -3341,6 +3342,19 @@ name = "litrs"
 version = "1.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4744e383959f0db86ede514b809b1c53251889093803c05267acc7d4e7030d70"
+
+[[package]]
+name = "localhost-provider"
+version = "0.1.0"
+dependencies = [
+ "aes-gcm",
+ "elastos-common",
+ "elastos-guest",
+ "hex",
+ "rand 0.8.8",
+ "serde",
+ "serde_json",
+]
 
 [[package]]
 name = "lock_api"
