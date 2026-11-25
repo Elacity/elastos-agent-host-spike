@@ -15,17 +15,23 @@
 //! header. If that header cannot start an envelope, the file is left alone,
 //! whatever its size. If it can, the file is refused by name and its body is
 //! not read. The cap is for envelopes. The walk logs a count every few seconds. A waiter on
-//! `identity/localhost-file-key.lock` logs that. `elastos serve` and
-//! `elastos gateway`, including `elastos home --browser`, take `host_lock.rs`
-//! `acquire_host_process_lock` before setup (`serve_cmd.rs` `run_serve`,
-//! `gateway_cmd.rs`). A second one stops with "another ElastOS host already
-//! owns" and does not walk. `elastos serve` skips that lock when
-//! `ELASTOS_ALLOW_SUBORDINATE_RUNTIME_HOST=1`. `elastos run` of a data capsule
-//! starts these providers without that lock (`main.rs` `serve_web_capsule`).
-//! `elastos capsule` attaches to a running runtime and does not walk. `elastos run`
-//! and a host can therefore overlap. They cannot mix keys: the file key is
-//! HKDF-SHA256 of the device key (info `elastos-localhost-file-v1`), and the
-//! migration lock lets one walk write at a time.
+//! `identity/localhost-file-key.lock` logs that. The walk runs only from
+//! `setup_server_infrastructure` (`spawn_host_providers`). `elastos serve`
+//! takes `host_lock.rs` `acquire_host_process_lock` before that
+//! (`serve_cmd.rs` `run_serve`) and skips the lock when
+//! `ELASTOS_ALLOW_SUBORDINATE_RUNTIME_HOST=1`. `elastos gateway`, including
+//! its public mode, and `elastos home --browser` also take that lock
+//! (`gateway_cmd.rs`). A second one of these stops with "another ElastOS
+//! host already owns". Gateway and `home --browser` call
+//! `setup_gateway_infrastructure` or `setup_control_plane_infrastructure`
+//! (`spawn_host_providers` is false), so they do not walk. Update and the
+//! provider host take the same lock and do not run this walk. `elastos run`
+//! of a data capsule calls `serve_web_capsule` (`main.rs`), which walks and
+//! does not take the host lock. `elastos capsule` attaches to a running
+//! runtime and does not walk. `elastos run` and a host can therefore overlap.
+//! They cannot mix keys: the file key is HKDF-SHA256 of the device key (info
+//! `elastos-localhost-file-v1`), and the migration lock lets one walk write
+//! at a time.
 //! `two_homes_on_one_data_folder_finish_on_one_key` runs two processes on one
 //! folder and both finish on that same file key. A helper already running in
 //! the other process is not stopped. A new inode keeps a mode that is a subset
