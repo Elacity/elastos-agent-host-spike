@@ -3107,6 +3107,93 @@ pub(crate) fn clear_install_cid(data_dir: &Path, dir: &Path) -> anyhow::Result<(
     write_install_cid_ledger(data_dir, dir, None)
 }
 
+/// Finish a capsule install a crash left half-done, then drop its leftovers.
+///
+/// Before the exchange: the installed folder and its record stay, and a
+/// `.capsule-stage-*` tree is left. This removes that tree.
+/// A failed exchange leaves the installed folder and its record, and the
+/// commit already removed the staged tree.
+/// After the exchange and before the record: the new folder is installed, the
+/// previous tree is the staged path, and the record is still the previous
+/// one. This rewrites the record from the installed folder and removes the
+/// leftover.
+/// After the record and before cleanup: the record is already the new folder.
+/// This removes the leftover.
+/// An older two-step crash can leave the installed folder missing and one
+/// `.capsule-retired-*` tree. When exactly one ledger folder is missing and
+/// exactly one retired tree remains, this puts that tree back. Any other
+/// count is not guessed: the missing record is cleared and the leftover is
+/// removed.
+#[cfg(unix)]
+pub(crate) fn reconcile_capsule_install(data_dir: &Path) -> anyhow::Result<()> {
+    let capsules = data_dir.join("capsules");
+    if !capsules.is_dir() {
+        return Ok(());
+    }
+    let mut staged = Vec::new();
+    let mut retired = Vec::new();
+    let mut folders = Vec::new();
+    for entry in fs::read_dir(&capsules)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let text = name.to_string_lossy();
+        if text.starts_with('.') {
+            if text.starts_with(".capsule-stage-") {
+                staged.push(entry.path());
+            } else if text.starts_with(".capsule-retired-") {
+                retired.push(entry.path());
+            }
+            continue;
+        }
+        if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+            folders.push(entry.path());
+        }
+    }
+    let ledger = read_install_cid_ledger(data_dir);
+    let missing: Vec<String> = ledger
+        .keys()
+        .filter(|key| !Path::new(key).is_dir())
+        .cloned()
+        .collect();
+    let mut restored = false;
+    if missing.len() == 1 && retired.len() == 1 && staged.is_empty() {
+        fs::rename(&retired[0], Path::new(&missing[0]))?;
+        retired.clear();
+        restored = true;
+    }
+    for path in staged.iter().chain(retired.iter()) {
+        match fs::remove_dir_all(path) {
+            Err(err) if err.kind() != std::io::ErrorKind::NotFound => return Err(err.into()),
+            _ => {}
+        }
+    }
+    let removed_leftover = !staged.is_empty() || !retired.is_empty();
+    if !restored {
+        for key in &missing {
+            clear_install_cid(data_dir, Path::new(key))?;
+        }
+    }
+    if restored || removed_leftover {
+        for key in read_install_cid_ledger(data_dir).keys() {
+            let dir = Path::new(key);
+            if dir.is_dir() {
+                record_install_cid(data_dir, dir, dir);
+            }
+        }
+    }
+    for dir in folders {
+        if dir.join("capsule.json").is_file() && recorded_install_cid(data_dir, &dir).is_none() {
+            record_install_cid(data_dir, &dir, &dir);
+        }
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+pub(crate) fn reconcile_capsule_install(_data_dir: &Path) -> anyhow::Result<()> {
+    Ok(())
+}
+
 /// Records the walk CID of an installed component folder after an install wrote
 /// it. A destination that is not a capsule folder keeps no record.
 pub(crate) fn record_installed_capsule_folder(data_dir: &Path, dest: &Path) {
@@ -5444,7 +5531,7 @@ fn remove_path(path: &Path) -> anyhow::Result<()> {
 /// Moves `staged` to `dest` in one step: a rename when `dest` is absent, else an
 /// exchange that leaves the previous entry at `staged`.
 #[cfg(unix)]
-fn replace_directory(staged: &Path, dest: &Path) -> anyhow::Result<()> {
+pub(crate) fn replace_directory(staged: &Path, dest: &Path) -> anyhow::Result<()> {
     if fs::symlink_metadata(dest).is_err() {
         fs::rename(staged, dest)?;
         return Ok(());
