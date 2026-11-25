@@ -1483,10 +1483,19 @@ fn finish_component_invoke(
     response
 }
 
-async fn authorize_and_dispatch_resource_invoke(
+struct CheckedInvoke {
+    dispatch: ResourceInvokeDispatch,
+    audit_id: String,
+    token: CapabilityToken,
+}
+
+/// The checks before the plan admit. An effect does not run here: the only
+/// await is the capability check. A new effect belongs in
+/// [`dispatch_admitted_effect`], after [`admit_plan_effect`].
+async fn checks_before_plan_admit(
     request: &serde_json::Value,
     bridge_ctx: &BridgeContext,
-) -> serde_json::Value {
+) -> Result<CheckedInvoke, serde_json::Value> {
     let token_b64 = request["token"].as_str().unwrap_or("");
     let dispatch = match resource_invoke_dispatch(
         request,
@@ -1495,7 +1504,7 @@ async fn authorize_and_dispatch_resource_invoke(
     ) {
         Ok(dispatch) => dispatch,
         Err(err) => {
-            return resource_error_response(err.code, &err.message);
+            return Err(resource_error_response(err.code, &err.message));
         }
     };
     let audit_id = format!(
@@ -1511,7 +1520,7 @@ async fn authorize_and_dispatch_resource_invoke(
         bridge_ctx.principal_id.as_deref(),
         bridge_ctx.data_dir.as_deref(),
     ) {
-        return finish_component_invoke(
+        return Err(finish_component_invoke(
             bridge_ctx,
             &audit_id,
             &dispatch,
@@ -1521,23 +1530,23 @@ async fn authorize_and_dispatch_resource_invoke(
                 &dispatch.resource,
                 &dispatch.required_action.to_string(),
             ),
-        );
+        ));
     }
 
     if let Err(message) = reject_localhost_user_area_root(&dispatch.resource)
         .and_then(|_| reject_localhost_parent_segments(&dispatch.resource))
     {
-        return finish_component_invoke(
+        return Err(finish_component_invoke(
             bridge_ctx,
             &audit_id,
             &dispatch,
             "denied",
             resource_error_response("invalid_resource_invoke", &message),
-        );
+        ));
     }
 
     if token_b64.is_empty() {
-        return finish_component_invoke(
+        return Err(finish_component_invoke(
             bridge_ctx,
             &audit_id,
             &dispatch,
@@ -1546,19 +1555,19 @@ async fn authorize_and_dispatch_resource_invoke(
                 "missing_token",
                 "resource_invoke requires a capability token",
             ),
-        );
+        ));
     }
 
     let token = match CapabilityToken::from_base64(token_b64) {
         Ok(token) => token,
         Err(_) => {
-            return finish_component_invoke(
+            return Err(finish_component_invoke(
                 bridge_ctx,
                 &audit_id,
                 &dispatch,
                 "denied",
                 resource_error_response("invalid_token", "Invalid capability token"),
-            )
+            ))
         }
     };
     let resource_id = ResourceId::new(&dispatch.resource);
@@ -1574,18 +1583,39 @@ async fn authorize_and_dispatch_resource_invoke(
         .await
         .is_err()
     {
-        return finish_component_invoke(
+        return Err(finish_component_invoke(
             bridge_ctx,
             &audit_id,
             &dispatch,
             "denied",
             resource_error_response("capability_denied", "Capability validation failed"),
-        );
+        ));
     }
 
     if let Some(refusal) = agents_area_dispatch_refusal(&dispatch) {
-        return finish_component_invoke(bridge_ctx, &audit_id, &dispatch, "denied", refusal);
+        return Err(finish_component_invoke(
+            bridge_ctx, &audit_id, &dispatch, "denied", refusal,
+        ));
     }
+    Ok(CheckedInvoke {
+        dispatch,
+        audit_id,
+        token,
+    })
+}
+
+async fn authorize_and_dispatch_resource_invoke(
+    request: &serde_json::Value,
+    bridge_ctx: &BridgeContext,
+) -> serde_json::Value {
+    let CheckedInvoke {
+        dispatch,
+        audit_id,
+        token,
+    } = match checks_before_plan_admit(request, bridge_ctx).await {
+        Ok(checked) => checked,
+        Err(response) => return response,
+    };
 
     // Every effect of an approved step passes this one check-and-mark: a
     // protected-root write, a provider call, inspect and submit, a launch
@@ -9886,9 +9916,18 @@ pub async fn production_after() {
             "the admit witness is built in one place"
         );
         let authorize = function_body(&source, "authorize_and_dispatch_resource_invoke");
+        let checks = function_body(&source, "checks_before_plan_admit");
         let effect = function_body(&source, "dispatch_admitted_effect");
+        assert_eq!(authorize.matches("checks_before_plan_admit(").count(), 1);
         assert_eq!(authorize.matches("admit_plan_effect(").count(), 1);
         assert_eq!(authorize.matches("dispatch_admitted_effect(").count(), 1);
+        assert_eq!(
+            checks.matches(".await").count(),
+            1,
+            "the checks before the plan admit run one capability check and no effect"
+        );
+        assert!(!checks.contains("admit_plan_effect("));
+        assert!(!checks.contains("dispatch_admitted_effect("));
         assert!(effect.contains("_effect: &AdmittedEffect"));
         for name in [
             "submit_agent_plan_response",
@@ -9899,10 +9938,7 @@ pub async fn production_after() {
             "bus_model_provider_request",
         ] {
             assert!(effect.contains(name), "{name} left the admitted effect");
-            assert!(
-                !authorize.contains(name),
-                "{name} runs before the plan admit"
-            );
+            assert!(!checks.contains(name), "{name} runs before the plan admit");
         }
         // A capability ask is not an approved-step effect. It stays in the
         // bridge's own request handler, and neither effect function calls it.
