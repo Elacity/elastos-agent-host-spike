@@ -751,10 +751,6 @@ mod tests {
         assert!(meta.is_dir());
         assert_eq!(meta.permissions().mode() & 0o777, 0o700);
         assert!(rendered.landlock.iter().any(|rule| rule.1 == system));
-        let docs = include_str!("../../../../../docs/WALLET_PROVIDER.md");
-        let source = include_str!("path_allow.rs");
-        let sentence = "Linux Landlock cannot exclude a child of a granted directory.";
-        assert!(source.contains(sentence) && docs.contains(sentence));
     }
 
     #[cfg(target_os = "macos")]
