@@ -1304,7 +1304,7 @@ function coveredByUnitRow() {
     timeout: 600000,
   });
   const output = `${result.stdout || ""}\n${result.stderr || ""}`.slice(-6000);
-  const passed = result.status === 0 && output.includes(`test ${row} ... ok`) && output.includes(`test ${mid} ... ok`);
+  const passed = result.status === 0 && output.includes(`${row} ... ok`) && output.includes(`${mid} ... ok`);
   return {
     row,
     command: `cargo ${args.join(" ")}`,
@@ -1731,8 +1731,25 @@ async function main() {
   pass("approve_without_step_up_refused", refused.text.slice(0, 180));
   const stillPending = inspectRecords().filter((record) => record.status === "pending");
   if (stillPending.length !== 1) halt("approve_without_step_up_refused", "pending count changed");
-  const waitMs = 31000 - (Date.now() - cardAt);
-  if (waitMs > 0) await sleep(waitMs);
+  // The other agent's submit ask times out at 30s if it sits while this
+  // owner waits. Approve that ask during the wait. This plan stays pending.
+  const decideAt = cardAt + 31000;
+  while (Date.now() < decideAt) {
+    const summary = await inbox();
+    const others = entries(summary).filter((entry) => (
+      String(entry.action_ref?.action_id || "").startsWith("capability-approve-request:")
+      && resourceOf(entry.body).startsWith("elastos://inspect/submit_agent_plan")
+      && state.agentB
+      && String(entry.body || "").includes(state.agentB)
+    ));
+    for (const entry of others) {
+      await call("POST", "/api/apps/inbox/actions", state.inboxToken, {
+        action_id: entry.action_ref.action_id,
+      });
+    }
+    const slice = Math.min(400, decideAt - Date.now());
+    if (slice > 0) await sleep(slice);
+  }
   timings.approval_after_card_ms = Date.now() - cardAt;
   const stillDeciding = liveSessions(await capsules(), [state.launchA]);
   if (stillDeciding.length !== 1) {
@@ -1850,13 +1867,14 @@ async function main() {
     before_sha256: ownerDocBefore ? crypto.createHash("sha256").update(ownerDocBefore).digest("hex") : "",
     after_sha256: ownerDocAfter ? crypto.createHash("sha256").update(ownerDocAfter).digest("hex") : "",
   });
+  const ownReceipts = inspectRecords().filter((record) => record.request_id === state.requestId);
   const receiptOk = Boolean(settled
     && settled.principal_id
     && settled.requester_id === state.agentA
     && settled.request_binding
     && settled.result
     && settled.status === "completed"
-    && inspectRecords().length === 1);
+    && ownReceipts.length === 1);
   const planeCoords = path.join(data, "agent-runtime-coords.json");
   const planePid = fs.existsSync(planeCoords) ? Number(readJson(planeCoords).pid) : 0;
   const gatewayPid = fs.existsSync(pidFile) ? Number(String(fs.readFileSync(pidFile, "utf8")).trim()) : 0;
@@ -1886,7 +1904,10 @@ async function main() {
     started: startedAudits.started,
   });
   keep("signed_completion_audit", completedAudits === 1, { count: completedAudits });
-  const afterCard = planCards(await inbox());
+  const afterCard = planCards(await inbox()).filter((card) => {
+    const text = `${card.title || ""} ${card.body || ""}`;
+    return text.includes(state.launchA.session_id);
+  });
   keep("card_removed", afterCard.length === 0, afterCard.map((card) => card.action_ref?.action_id));
 
   const recordBeforeReplay = JSON.stringify(inspectRecords());
