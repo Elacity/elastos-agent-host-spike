@@ -233,7 +233,10 @@ impl ChainProvider {
             "method": method,
             "params": params,
         }));
-        if let Some((user, password)) = bitcoin_rpc_auth(&network.id) {
+        if let Some((user, password)) = bitcoin_rpc_auth(
+            self.bitcoin_rpc_user.as_deref(),
+            self.bitcoin_rpc_password.as_deref(),
+        ) {
             request = request.basic_auth(user, Some(password));
         }
         let response = request

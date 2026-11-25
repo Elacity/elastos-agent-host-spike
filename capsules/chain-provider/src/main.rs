@@ -62,6 +62,8 @@ struct ChainProvider {
     node_lifecycle_state: NodeLifecycleStateFile,
     node_lifecycle_state_error: Option<String>,
     protected_content_runtime_issuer: Option<RuntimeOperationIssuerKeyV1>,
+    bitcoin_rpc_user: Option<String>,
+    bitcoin_rpc_password: Option<String>,
     now_unix_seconds: fn() -> u64,
 }
 
@@ -89,6 +91,8 @@ impl ChainProvider {
             node_lifecycle_state,
             node_lifecycle_state_error,
             protected_content_runtime_issuer: None,
+            bitcoin_rpc_user: None,
+            bitcoin_rpc_password: None,
             now_unix_seconds: now_ts,
         }
     }
@@ -361,11 +365,81 @@ impl ChainProvider {
         }
         self.protected_content_network_id = next_protected_content_network_id;
         self.protected_content_runtime_issuer = next_runtime_issuer;
+        if let Err(response) = self.apply_operator_settings(extra.get("operator_settings")) {
+            return response;
+        }
         Response::ok(json!({
             "provider": "chain",
             "protocol_version": "1.0",
             "network_count": self.networks.len(),
         }))
+    }
+
+    /// Closed list. Runtime copies these from its own environment into Init.
+    /// This function does not read the process environment and does not log
+    /// the values.
+    fn apply_operator_settings(&mut self, settings: Option<&Value>) -> Result<(), Response> {
+        const KEYS: &[&str] = &[
+            "BASE_RPC_URL",
+            "BITCOIN_REST_URL",
+            "BITCOIN_RPC_USER",
+            "BITCOIN_RPC_PASSWORD",
+        ];
+        let Some(settings) = settings else {
+            return Ok(());
+        };
+        let Some(map) = settings.as_object() else {
+            return Err(Response::error(
+                "invalid_config",
+                "operator_settings must be an object",
+            ));
+        };
+        for key in map.keys() {
+            if !KEYS.contains(&key.as_str()) {
+                return Err(Response::error(
+                    "invalid_config",
+                    "operator_settings has an unknown key",
+                ));
+            }
+        }
+        if let Some(url) = map.get("BASE_RPC_URL").and_then(Value::as_str) {
+            if let Some(network) = self
+                .networks
+                .iter_mut()
+                .find(|network| network.id == "base-mainnet")
+            {
+                network.rpc_url = url.to_string();
+            }
+        }
+        if let Some(url) = map.get("BITCOIN_REST_URL").and_then(Value::as_str) {
+            if let Some(network) = self
+                .networks
+                .iter_mut()
+                .find(|network| network.id == "btc-mainnet")
+            {
+                network.rpc_url = url.to_string();
+            }
+        }
+        let user = map.get("BITCOIN_RPC_USER").and_then(Value::as_str);
+        let password = map.get("BITCOIN_RPC_PASSWORD").and_then(Value::as_str);
+        if let Some((user, password)) = bitcoin_rpc_auth(user, password) {
+            self.bitcoin_rpc_user = Some(user);
+            self.bitcoin_rpc_password = Some(password);
+        }
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn rpc_url_for(&self, id: &str) -> Option<&str> {
+        self.networks
+            .iter()
+            .find(|network| network.id == id)
+            .map(|network| network.rpc_url.as_str())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn bitcoin_rpc_user_for_test(&self) -> Option<&str> {
+        self.bitcoin_rpc_user.as_deref()
     }
 
     fn status(&self, network_id: &str) -> Response {

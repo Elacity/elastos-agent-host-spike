@@ -70,6 +70,47 @@ fn provider_with_rpc(rpc_url: String) -> ChainProvider {
 }
 
 #[test]
+fn operator_settings_arrive_through_init_and_are_not_in_the_reply() {
+    let config = include_str!("config.rs");
+    let rpc = include_str!("rpc.rs");
+    assert!(!config.contains("env::var"), "{config}");
+    assert!(!rpc.contains("env::var"), "{rpc}");
+    let mut provider = ChainProvider::new();
+    let secret = "rpc-password-must-not-appear";
+    let init = provider.handle(Request::Init {
+        config: json!({
+            "extra": {
+                "operator_settings": {
+                    "BASE_RPC_URL": "https://base.example.test",
+                    "BITCOIN_REST_URL": "https://btc.example.test",
+                    "BITCOIN_RPC_USER": "rpc-user",
+                    "BITCOIN_RPC_PASSWORD": secret
+                }
+            }
+        }),
+    });
+    let text = serde_json::to_string(&init).unwrap();
+    assert!(!text.contains(secret), "{text}");
+    assert!(!text.contains("base.example.test"), "{text}");
+    assert_eq!(
+        provider.rpc_url_for("base-mainnet"),
+        Some("https://base.example.test")
+    );
+    assert_eq!(
+        provider.rpc_url_for("btc-mainnet"),
+        Some("https://btc.example.test")
+    );
+    assert_eq!(provider.bitcoin_rpc_user_for_test(), Some("rpc-user"));
+    let unknown = provider.handle(Request::Init {
+        config: json!({
+            "extra": { "operator_settings": { "OTHER": "no" } }
+        }),
+    });
+    let unknown = serde_json::to_string(&unknown).unwrap();
+    assert!(unknown.contains("unknown key"), "{unknown}");
+}
+
+#[test]
 fn chain_provider_rejects_hidden_prepare_transaction_fields() {
     let request = json!({
         "op": "prepare_transaction",
