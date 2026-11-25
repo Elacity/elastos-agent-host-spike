@@ -553,6 +553,16 @@ async fn a_later_run_cannot_use_the_earlier_runs_storage_grant() {
     grants.abort();
 }
 
+/// The planted session sits behind the live run's manifest ceiling.
+#[cfg(unix)]
+fn copy_manifest_ceiling(runtime: &crate::runtime::Runtime, from: &str, to: &str) {
+    let ceilings = runtime.manifest_ceilings_for_test();
+    let mut bounds = ceilings.write().unwrap_or_else(|err| err.into_inner());
+    if let Some(ceiling) = bounds.get(from).cloned() {
+        bounds.insert(to.to_string(), ceiling);
+    }
+}
+
 /// Two live sessions of one agent keep separate storage grants. The second
 /// session is a resident row and did not Start. Before the refusal, the first
 /// grant still validates for the first run. The refusal is the session check
@@ -592,8 +602,7 @@ async fn two_runs_of_one_agent_at_once_keep_separate_storage_grants() {
             session_id: second_id.to_string(),
         })
         .await;
-    home.runtime
-        .copy_manifest_ceiling_for_test(&used.session, second_id);
+    copy_manifest_ceiling(&home.runtime, &used.session, second_id);
     assert_eq!(
         used.token.capsule(),
         used.session,

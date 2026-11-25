@@ -2961,6 +2961,15 @@ impl Runtime {
         }
     }
 
+    /// Test only: the manifest ceilings, so a planted session can copy the
+    /// live run's ceiling. The copy itself lives with the storage rows.
+    #[cfg(test)]
+    pub(crate) fn manifest_ceilings_for_test(
+        &self,
+    ) -> Arc<StdRwLock<HashMap<String, Vec<AuthorityBound>>>> {
+        Arc::clone(&self.bridge_manifest_capabilities)
+    }
+
     /// Test only: the tables the installed bridge host call reads for a call
     /// from `id`, as it reads them: the manifest ceiling, the launch content,
     /// the model-token ceiling and the stop request. A row builds the context
@@ -2968,7 +2977,7 @@ impl Runtime {
     #[cfg(test)]
     pub(crate) fn bridge_tables_for_test(&self, id: &str) -> BridgeTables {
         let manifest_capabilities = self
-            .bridge_manifest_capabilities
+            .manifest_ceilings_for_test()
             .read()
             .ok()
             .and_then(|guard| guard.get(id).cloned())
@@ -2996,18 +3005,6 @@ impl Runtime {
             launch,
             model_token_ceiling,
             stop,
-        }
-    }
-
-    /// Test only: the planted session sits behind the live run's manifest ceiling.
-    #[cfg(all(test, feature = "prototype-agents"))]
-    pub(crate) fn copy_manifest_ceiling_for_test(&self, from: &str, to: &str) {
-        let mut bounds = self
-            .bridge_manifest_capabilities
-            .write()
-            .unwrap_or_else(|err| err.into_inner());
-        if let Some(ceiling) = bounds.get(from).cloned() {
-            bounds.insert(to.to_string(), ceiling);
         }
     }
 
