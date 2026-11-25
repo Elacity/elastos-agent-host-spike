@@ -84,6 +84,7 @@ pub(crate) const FEATURE_OFF: &str = "agents are not built into this Runtime";
 pub(crate) const AGENTS_FILE_UNREADABLE: &str =
     "This Home has an agents file this build cannot read, so a root-key change is refused.";
 /// The open lock file was not the file at the path when the lock was taken.
+#[cfg(unix)]
 pub(crate) const AGENTS_LOCK_CHANGED: &str =
     "The agents lock changed while this Home was taking it, so the write is refused.";
 /// The most bytes a root-key change reads from the agent file.
@@ -503,6 +504,7 @@ fn acquire_agent_lock(data_dir: &Path, create_when_absent: bool) -> anyhow::Resu
 }
 
 /// How many times a writer opens and locks the agents file before refusing.
+#[cfg(unix)]
 const AGENT_LOCK_IDENTITY_TRIES: u32 = 8;
 
 /// Locks `path` and keeps the lock only when that open file is still the
@@ -1149,7 +1151,7 @@ pub(crate) fn opening_agent_count(data_dir: &Path, owner_id: &str) -> anyhow::Re
     for agent in &opened.file.agents {
         if owned_by(agent, owner)
             && agent.record.retired_at.is_none()
-            && data_key_opens(data_dir, &agent.protection)?
+            && data_key_opens(data_dir, &owner.principal_id, &agent.protection)?
         {
             count += 1;
         }
@@ -1231,44 +1233,34 @@ fn named_in_plain_file(
         .count())
 }
 
-fn data_key_opens(data_dir: &Path, protection: &PrincipalRootProtectionV1) -> anyhow::Result<bool> {
-    match crate::auth::open_agent_root_data_key(data_dir, protection) {
-        Ok(_) => Ok(true),
-        Err(err) => {
-            let text = err.to_string();
-            // A protection with no archive cannot be opened. That is a
-            // named refusal: the import must not answer 500, and it must
-            // not treat the agent as closed and store a new key over it.
-            if text.contains("no recoverable data key archive") {
-                return Err(Refused(CANNOT_OPEN_THE_WRAP.to_string()).into());
-            }
-            let closed = matches!(
-                text.as_str(),
-                "agent file holds no record for this principal root"
-                    | "principal-root protection is not the agent file's stored one"
-                    | "agent's owner holds no storage protection"
-                    | "agent data key does not match its protection"
-                    | "agent data key has the wrong length"
-            ) || (text.starts_with("principal-root ") && text.ends_with(" failed"));
-            if closed {
-                Ok(false)
-            } else {
-                Err(err)
-            }
-        }
-    }
+fn data_key_opens(
+    data_dir: &Path,
+    owner_id: &str,
+    protection: &PrincipalRootProtectionV1,
+) -> anyhow::Result<bool> {
+    crate::api::auth_gateway::agent_key_open(data_dir, owner_id, protection)
+        .ok_or_else(|| Refused(CANNOT_OPEN_THE_WRAP.to_string()).into())
 }
 
 pub(crate) const CANNOT_OPEN_THE_WRAP: &str =
     "This Home cannot open the key that wraps an agent's data, so a root-key change is refused.";
 
+pub(crate) const PASSKEY_NO_LONGER_NAMES: &str = "This passkey no longer names the account this recovery started with, so the recovery is refused.";
+
 pub(crate) fn agents_would_stop_opening(count: usize) -> String {
-    let (word, retire) = if count == 1 {
-        ("agent", "Retire that agent first")
+    let (word, whom) = if count == 1 {
+        ("agent", "that agent")
     } else {
-        ("agents", "Retire them first")
+        ("agents", "them")
     };
-    format!("{count} {word} on this Home would stop opening. {retire}, or import on another Home.")
+    let place = if build_allows() {
+        "on this Home"
+    } else {
+        "in a Runtime that includes agents"
+    };
+    format!(
+        "{count} {word} on this Home would stop opening. Retire {whom} {place}, or import on another Home."
+    )
 }
 
 pub(crate) fn agents_would_belong_to_nobody(count: usize) -> String {
@@ -1306,7 +1298,7 @@ pub(crate) fn hold_agent_writer_for_root_change(
     #[cfg(all(test, unix))]
     pause_agent_writer(data_dir, PAUSE_BEFORE_STORE);
     if current_owner_id != next_owner_id {
-        let named = agents_naming_owner(data_dir, current_owner_id)?;
+        let named = agents_naming_owner(data_dir, current_owner_id, false)?;
         if named > 0 {
             return Err(Refused(agents_would_belong_to_nobody(named)).into());
         }
@@ -1319,10 +1311,22 @@ pub(crate) fn hold_agent_writer_for_root_change(
     Ok(AgentWriterGuard { _lock: lock })
 }
 
-/// Records whose owner field is this id, retired records included.
-fn agents_naming_owner(data_dir: &Path, owner_id: &str) -> anyhow::Result<usize> {
+pub(crate) fn hold_unarchived(data_dir: &Path, owner_id: &str) -> anyhow::Result<AgentWriterGuard> {
+    let guard = hold_agent_writer_for_root_change(data_dir, owner_id, owner_id, || Ok(false))?;
+    let named = agents_naming_owner(data_dir, owner_id, true)?;
+    if named > 0 {
+        return Err(Refused(agents_would_stop_opening(named)).into());
+    }
+    Ok(guard)
+}
+
+fn agents_naming_owner(
+    data_dir: &Path,
+    owner_id: &str,
+    unretired_only: bool,
+) -> anyhow::Result<usize> {
     if !build_allows() {
-        return named_in_plain_file(data_dir, owner_id, false);
+        return named_in_plain_file(data_dir, owner_id, unretired_only);
     }
     let Some(opened) = open_for_root_change(data_dir)? else {
         return Ok(0);
@@ -1331,7 +1335,10 @@ fn agents_naming_owner(data_dir: &Path, owner_id: &str) -> anyhow::Result<usize>
         .file
         .agents
         .iter()
-        .filter(|agent| agent.record.owner.as_deref() == Some(owner_id))
+        .filter(|agent| {
+            agent.record.owner.as_deref() == Some(owner_id)
+                && (!unretired_only || agent.record.retired_at.is_none())
+        })
         .count())
 }
 

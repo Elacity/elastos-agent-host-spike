@@ -1518,13 +1518,18 @@ fn a_plain_file_of_today_still_names_its_owner() {
 
 #[test]
 fn the_refusal_names_the_count_and_what_to_do() {
+    let place = if build_allows() {
+        "on this Home"
+    } else {
+        "in a Runtime that includes agents"
+    };
     assert_eq!(
         agents_would_stop_opening(1),
-        "1 agent on this Home would stop opening. Retire that agent first, or import on another Home."
+        format!("1 agent on this Home would stop opening. Retire that agent {place}, or import on another Home.")
     );
     assert_eq!(
         agents_would_stop_opening(2),
-        "2 agents on this Home would stop opening. Retire them first, or import on another Home."
+        format!("2 agents on this Home would stop opening. Retire them {place}, or import on another Home.")
     );
     assert_eq!(
         agents_would_belong_to_nobody(1),

@@ -108,10 +108,6 @@ function recoveryPage(agentsBuilt) {
     },
     success: (response) => context.recoveryImportSuccessMessage(response, agentsBuilt),
     refusal: (error) => context.recoveryRefusal(error),
-    builds: (fetchJson) => {
-      context.fetchJson = fetchJson;
-      return context.runtimeBuildsAgents();
-    },
   };
 }
 
@@ -123,8 +119,10 @@ test("recovery text says agents stay on the Home where they were created", async
   assert.equal(off.pendingText(plan).includes(STAY), false);
   assert.equal(on.success({}).endsWith(STAY), true);
   assert.equal(off.success({}), "Recovery Kit imported.");
-  const sentence = "1 agent on this Home would stop opening. Retire that agent first, or import on another Home.";
-  assert.equal(on.refusal({ message: `request failed: 409 ${sentence}` }), sentence);
+  const onHome = "1 agent on this Home would stop opening. Retire that agent on this Home, or import on another Home.";
+  const otherRuntime = "1 agent on this Home would stop opening. Retire that agent in a Runtime that includes agents, or import on another Home.";
+  assert.equal(on.refusal({ message: `request failed: 409 ${onHome}` }), onHome);
+  assert.equal(on.refusal({ message: `request failed: 409 ${otherRuntime}` }), otherRuntime);
   const orphan = "1 agent on this Home would belong to nobody. This recovery changes the owner id its record names.";
   assert.equal(on.refusal({ message: `request failed: 409 ${orphan}` }), orphan);
   const orphans = "2 agents on this Home would belong to nobody. This recovery changes the owner id their records name.";
@@ -133,35 +131,37 @@ test("recovery text says agents stay on the Home where they were created", async
   assert.equal(on.refusal({ message: `request failed: 409 ${unreadable}` }), unreadable);
   const wrap = "This Home cannot open the key that wraps an agent's data, so a root-key change is refused.";
   assert.equal(on.refusal({ message: `request failed: 409 ${wrap}` }), wrap);
-  assert.equal(await on.builds(() => Promise.resolve({ agents_built: true })), true);
-  assert.equal(await on.builds(() => Promise.resolve({ agents: [] })), false);
-  assert.equal(
-    await off.builds(() => Promise.reject(new Error("request failed: 409 agents are not built into this Runtime"))),
-    false,
-  );
   const rust = readFileSync(new URL("../elastos/crates/elastos-server/src/api/auth_gateway.rs", import.meta.url), "utf8");
   assert.equal(rust.includes(`const AGENTS_STAY_ON_THIS_HOME: &str = "${STAY}";`), true);
 });
 
 test("the agents sentence is shown only for a confirmed agents answer", async () => {
-  const page = recoveryPage(false);
   const plan = { kitRoot: "localhost://Users/ab" };
-  const failures = [
-    () => Promise.reject(new Error("request failed: 409 agents are not built into this Runtime")),
-    () => Promise.reject(new Error("request failed: 401")),
-    () => Promise.reject(new Error("network")),
-    () => Promise.resolve({}),
-    () => Promise.resolve(null),
-  ];
-  for (const failure of failures) {
-    assert.equal(await page.builds(failure), false);
+  assert.equal(recoveryPage(false).pendingText(plan).includes(STAY), false);
+  assert.equal(recoveryPage(false).success({}).includes(STAY), false);
+  assert.equal(recoveryPage(true).pendingText(plan).endsWith(STAY), true);
+  assert.equal(recoveryPage(true).success({}).endsWith(STAY), true);
+  for (const fetchJson of [
+    async () => {
+      throw new Error("request failed: 409 agents are not built into this Runtime");
+    },
+    async () => {
+      throw new Error("network");
+    },
+    async () => ({}),
+    async () => null,
+  ]) {
+    const hidden = recoveryFlow({ fetchJson });
+    await hidden.context.submitRecoveryImport({
+      schema: "elastos.full-recovery-bundle.import.request/v1",
+    });
+    assert.equal(hidden.note.textContent.includes(STAY), false);
   }
-  assert.equal(page.pendingText(plan).includes(STAY), false);
-  assert.equal(page.success({}).includes(STAY), false);
-  const confirmed = recoveryPage(true);
-  assert.equal(await confirmed.builds(() => Promise.resolve({ agents_built: true })), true);
-  assert.equal(confirmed.pendingText(plan).endsWith(STAY), true);
-  assert.equal(confirmed.success({}).endsWith(STAY), true);
+  const shown = recoveryFlow({ agentsBuilt: true });
+  await shown.context.submitRecoveryImport({
+    schema: "elastos.full-recovery-bundle.import.request/v1",
+  });
+  assert.equal(shown.note.textContent.endsWith(STAY), true);
 });
 
 const flowSource = source.slice(
@@ -190,6 +190,9 @@ function recoveryFlow(options = {}) {
         throw new Error(agentsError);
       }
       if (String(url).includes("/api/auth/recovery/status")) {
+        if (options.fetchJson) {
+          return options.fetchJson(url);
+        }
         return {
           principal_id: "person:current",
           localhost_root: "localhost://Users/current",
@@ -220,12 +223,17 @@ function recoveryFlow(options = {}) {
     recoveryAttachButton: button,
     recoveryDownloadButton: null,
     recoveryExportBusy: false,
-    refreshRecoveryStatus: async () => ({ agents_built: options.agentsBuilt === true }),
+    setRecoveryStatus: () => {},
+    focusRequestedSettingsAction: () => {},
     refreshSystemSummary: async () => {},
     refreshAccountList: async () => {},
     notifyHomeSummaryChanged: () => {},
   });
-  vm.runInContext(flowSource, context);
+  const refreshSource = source.slice(
+    source.indexOf("async function refreshRecoveryStatus("),
+    source.indexOf("const RECOVERY_ROOT_CHECKED_SENTENCE"),
+  );
+  vm.runInContext(`${refreshSource}\n${flowSource}`, context);
   return { context, calls, pending, note };
 }
 
@@ -238,24 +246,6 @@ function kitFile(principalId, root) {
     }),
   };
 }
-
-test("a 409 that agents are not turned on and a 403 do not mean agents are not built", async () => {
-  const page = recoveryPage(false);
-  const notTurnedOn = await page.builds((url) => {
-    if (String(url).includes("/api/apps/system/agents")) {
-      return Promise.reject(new Error("request failed: 409 agents are not turned on for this Home"));
-    }
-    return Promise.resolve({ agents_built: true });
-  });
-  assert.equal(notTurnedOn, true);
-  const forbidden = await page.builds((url) => {
-    if (String(url).includes("/api/apps/system/agents")) {
-      return Promise.reject(new Error("request failed: 403 admin passkey required"));
-    }
-    return Promise.resolve({ agents_built: true });
-  });
-  assert.equal(forbidden, true);
-});
 
 test("onRecoveryImport reads agents_built and does not decide from a 409", async () => {
   const hidden = recoveryFlow();
@@ -295,7 +285,7 @@ test("submitRecoveryImport reads agents_built and does not decide from a 403", a
     schema: "elastos.full-recovery-bundle.import.request/v1",
   });
   assert.equal(shown.calls.includes("/api/apps/system/agents"), false);
-  assert.equal(shown.calls.filter((url) => String(url).includes("/api/auth/recovery/status")).length, 0);
+  assert.equal(shown.calls.filter((url) => String(url).includes("/api/auth/recovery/status")).length, 1);
   assert.equal(shown.note.textContent.endsWith(STAY), true);
 });
 

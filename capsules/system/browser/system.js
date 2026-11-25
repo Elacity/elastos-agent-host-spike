@@ -3099,19 +3099,10 @@ function fullRecoveryImportRequest(principalId, localhostRoot, bundle, recoveryP
 
 const AGENTS_STAY_ON_THIS_HOME = "Agents and their data stay on the Home where you created them; this bundle does not carry them.";
 
-function runtimeBuildsAgents() {
-  // `agents_built` on the recovery status is the build answer. A 409 that
-  // agents are not turned on, and a 403 from the agents list, are not it.
-  return fetchJson("/api/auth/recovery/status", { headers: shellHeaders() }).then(
-    (body) => Boolean(body && body.agents_built === true),
-    () => false,
-  );
-}
-
 function recoveryRefusal(error) {
   const message = String((error && error.message) || error || "");
   const patterns = [
-    /(\d+ agents? on this Home would stop opening\. Retire (?:that agent|them) first, or import on another Home\.)/,
+    /(\d+ agents? on this Home would stop opening\. Retire (?:that agent|them) (?:on this Home|in a Runtime that includes agents), or import on another Home\.)/,
     /(\d+ agents? on this Home would belong to nobody\. This recovery changes the owner id (?:its record names|their records name)\.)/,
     /(This Home has an agents file this build cannot read, so a root-key change is refused\.)/,
     /(This Home cannot open the key that wraps an agent's data, so a root-key change is refused\.)/,

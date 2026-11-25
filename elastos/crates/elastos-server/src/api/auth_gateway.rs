@@ -1704,6 +1704,18 @@ fn full_recovery_bundle_establish_kit(
         "label": input.label,
         "download_password": input.download_password,
     });
+    let _agent_writer = if crate::auth::load_principal_root_protection(
+        &state.data_dir,
+        &principal.principal_id,
+        &principal.localhost_root,
+    )?
+    .is_some_and(|protection| recovery_archive_from_protection(&protection).is_none())
+    {
+        let guard = crate::agents::hold_unarchived(&state.data_dir, &principal.principal_id)?;
+        Some(guard)
+    } else {
+        None
+    };
     // The approval is validated and consumed before the scan, so a scan of
     // any length cannot outlive it. A refusal after this point costs one
     // more passkey approval: nothing was written yet, and the used approval
@@ -3184,6 +3196,13 @@ pub(crate) async fn recovery_kit_import_inner(
             .map(|stored| stored.is_some_and(|stored| stored.data_key_id != kit.data_key_id))
         },
     )?;
+    if !crate::auth::load_principal_for_proof_binding(&state.data_dir, &principal.proof_binding_id)
+        .is_ok_and(|record| record.principal_id == principal.principal_id)
+    {
+        return Err(
+            crate::agents::Refused(crate::agents::PASSKEY_NO_LONGER_NAMES.to_string()).into(),
+        );
+    }
     let protected_object_inventory =
         principal_root_protected_object_inventory(&state.data_dir, &kit.localhost_root);
     let _protection_activation =
@@ -3544,6 +3563,38 @@ async fn verify_did_recovery_import_proof(
     protector.verified_at = Some(now);
     protector.archive = None;
     Ok(protector)
+}
+
+pub(crate) fn agent_key_open(
+    data_dir: &std::path::Path,
+    owner_id: &str,
+    protection: &PrincipalRootProtectionV1,
+) -> Option<bool> {
+    let root = crate::auth::principal_stored_localhost_root(Some(data_dir), owner_id).ok()?;
+    let owner = crate::auth::load_principal_root_protection(data_dir, owner_id, &root).ok()??;
+    let archive = recovery_archive_from_protection(&owner)?;
+    let path =
+        elastos_common::localhost::rooted_localhost_fs_path(data_dir, "ElastOS/System/Auth")?
+            .join("recovery-archive.key");
+    let meta = std::fs::symlink_metadata(&path).ok()?;
+    if !meta.is_file() || meta.len() != 32 {
+        return None;
+    }
+    let kit = crate::auth::recovery_kit_from_archive(data_dir, archive).ok()?;
+    crate::auth::verify_recovery_kit_material(&kit).ok()?;
+    if kit.principal_id != owner.principal_id
+        || kit.localhost_root != owner.localhost_root
+        || kit.data_key_id != owner.data_key_id
+    {
+        return None;
+    }
+    crate::auth::recovery_kit_data_key(&kit).ok()?;
+    let (_, nonce, wrapped) = crate::agents::stored_wrap(data_dir, protection).ok()?;
+    let key = crate::auth::owner_root_wrap_key(data_dir, owner_id, &root, protection).ok()??;
+    let opened = crate::auth::decrypt_aes256_gcm_bytes(key.as_slice(), &nonce, &wrapped).ok();
+    Some(opened.is_some_and(|bytes| {
+        bytes.len() == 32 && crate::auth::principal_data_key_id(&bytes) == protection.data_key_id
+    }))
 }
 
 fn recovery_archive_from_protection(

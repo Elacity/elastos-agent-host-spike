@@ -1076,6 +1076,276 @@ async fn a_missing_archive_does_not_turn_the_import_into_a_server_error() {
     assert_eq!(std::fs::read(&planted.path).unwrap(), note);
 }
 
+fn archive_key_path(dir: &std::path::Path) -> std::path::PathBuf {
+    elastos_common::localhost::rooted_localhost_fs_path(dir, "ElastOS/System/Auth")
+        .unwrap()
+        .join("recovery-archive.key")
+}
+
+fn home_whose_agent_opens(
+    label: &str,
+) -> (
+    ImportedHome,
+    crate::agents::tests::PlantedAgent,
+    elastos_runtime::auth::RecoveryKitV1,
+) {
+    let home = imported_home();
+    let planted =
+        crate::agents::tests::plant_opening_agent(home.temp.path(), &home.principal_id, label);
+    let kit = different_root_key(&home);
+    (home, planted, kit)
+}
+
+async fn refused_without_touching_the_key_file(
+    home: &ImportedHome,
+    planted: &crate::agents::tests::PlantedAgent,
+    kit: elastos_runtime::auth::RecoveryKitV1,
+    key_before: &[u8],
+) {
+    let key_id = stored_key_id(home);
+    let agents = agent_bytes(home.temp.path());
+    let note_file = std::fs::read(&planted.path).unwrap();
+    let err = import_kit(home, kit, false)
+        .await
+        .expect_err("the owner's key did not open");
+    assert_eq!(err.to_string(), crate::agents::CANNOT_OPEN_THE_WRAP);
+    assert_eq!(stored_key_id(home), key_id);
+    assert_eq!(agent_bytes(home.temp.path()), agents);
+    assert_eq!(std::fs::read(&planted.path).unwrap(), note_file);
+    let path = archive_key_path(home.temp.path());
+    if key_before.is_empty() {
+        assert!(
+            !path.exists(),
+            "a missing recovery archive key stays missing"
+        );
+    } else {
+        assert_eq!(std::fs::read(&path).unwrap(), key_before);
+    }
+}
+
+/// The owner's archive key, tried by itself. Missing, damaged, and wrong are
+/// not "this agent is closed", and the decision creates no key file.
+#[tokio::test]
+async fn the_owners_archive_key_is_not_read_as_an_agent_already_closed() {
+    let (home, planted, kit) = home_whose_agent_opens("plant-key-missing");
+    let path = archive_key_path(home.temp.path());
+    assert!(path.is_file());
+    std::fs::remove_file(&path).unwrap();
+    refused_without_touching_the_key_file(&home, &planted, kit, b"").await;
+
+    let (home, planted, kit) = home_whose_agent_opens("plant-key-damaged");
+    let path = archive_key_path(home.temp.path());
+    let damaged = b"short".to_vec();
+    std::fs::write(&path, &damaged).unwrap();
+    refused_without_touching_the_key_file(&home, &planted, kit, &damaged).await;
+
+    let (home, planted, kit) = home_whose_agent_opens("plant-key-wrong");
+    let path = archive_key_path(home.temp.path());
+    let wrong = vec![7u8; 32];
+    std::fs::write(&path, &wrong).unwrap();
+    refused_without_touching_the_key_file(&home, &planted, kit, &wrong).await;
+}
+
+/// The owner's key opens. The agent's wrap was made under another key, so the
+/// agent counts as closed and the import is not the cannot-open refusal.
+#[tokio::test]
+async fn an_agent_wrapped_under_another_key_counts_as_closed() {
+    let (home, planted, kit) = home_whose_agent_opens("plant-other-wrap");
+    let path = crate::agents::agent_file_path(home.temp.path()).unwrap();
+    let mut value: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    let slot =
+        &mut value["agents"][0]["protection"]["protectors"][0]["envelope"]["wrapped_data_key"];
+    let mut text = slot.as_str().unwrap().to_string().into_bytes();
+    text[0] = if text[0] == b'A' { b'B' } else { b'A' };
+    *slot = serde_json::Value::String(String::from_utf8(text).unwrap());
+    std::fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+    assert_eq!(
+        crate::agents::opening_agent_count(home.temp.path(), &home.principal_id).unwrap(),
+        0,
+        "the wrap does not open, and the owner's key did"
+    );
+    let new_key = kit.data_key_id.clone();
+    let response = import_kit(&home, kit, false)
+        .await
+        .expect("an agent already closed does not refuse the import");
+    assert_eq!(response.status, "imported");
+    assert_eq!(stored_key_id(&home), new_key);
+    let file: serde_json::Value = serde_json::from_slice(&agent_bytes(home.temp.path())).unwrap();
+    assert_eq!(
+        file["agents"][0]["record"]["principal_id"],
+        planted.agent_id
+    );
+}
+
+/// Two reassignments of one passkey. The first pauses under the writer. The
+/// second is waiting. When the first rebinds the passkey, the second looks
+/// the passkey up again and refuses by name.
+#[tokio::test]
+async fn two_reassignments_paused_at_the_seam_refuse_when_the_passkey_moves() {
+    let home = imported_home();
+    let binding = crate::auth::stored_principal_record(home.temp.path(), &home.principal_id)
+        .unwrap()
+        .unwrap()
+        .proof_binding_id;
+    let second = passkey_authority_with_name_role_credential(
+        home.temp.path(),
+        None,
+        crate::auth::RuntimePrincipalRole::Admin,
+        "race-reassign-p2",
+    );
+    let second_protection =
+        crate::auth::store_test_principal_root_protection(home.temp.path(), &second.principal_id);
+    let second_kit = crate::auth::recovery_kit_from_archive(
+        home.temp.path(),
+        second_protection.protectors[0].archive.as_ref().unwrap(),
+    )
+    .unwrap();
+    let planted = crate::agents::tests::plant_opening_agent(
+        home.temp.path(),
+        &second.principal_id,
+        "plant-race-reassign",
+    );
+    let third = passkey_authority_with_name_role_credential(
+        home.temp.path(),
+        None,
+        crate::auth::RuntimePrincipalRole::Guest,
+        "race-reassign-p3",
+    );
+    let third_protection =
+        crate::auth::store_test_principal_root_protection(home.temp.path(), &third.principal_id);
+    let third_kit = crate::auth::recovery_kit_from_archive(
+        home.temp.path(),
+        third_protection.protectors[0].archive.as_ref().unwrap(),
+    )
+    .unwrap();
+    let home_ref = &home;
+    let (first, second_result) = std::thread::scope(|scope| {
+        let pause = crate::agents::arm_agent_writer_pause(
+            home_ref.temp.path(),
+            crate::agents::PAUSE_BEFORE_STORE,
+        );
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let tx = done_tx.clone();
+        let first = scope.spawn(move || {
+            let result = drive(import_kit(home_ref, second_kit, true));
+            let _ = tx.send(format!("{result:?}"));
+            result
+        });
+        wait_for_the_pause(home_ref.temp.path(), &done_rx);
+        let second_import = scope.spawn(move || drive(import_kit(home_ref, third_kit, true)));
+        assert!(
+            still_running(&second_import),
+            "the second reassignment did not wait for the writer"
+        );
+        drop(pause);
+        let first = first.join().unwrap();
+        let second_result = second_import.join().unwrap();
+        (first, second_result)
+    });
+    let response = first.expect("the first reassignment binds the passkey to the agent owner");
+    assert_eq!(response.status, "reassigned");
+    assert_eq!(response.principal_id, second.principal_id);
+    assert_eq!(
+        second_result
+            .expect_err("the passkey no longer names the account the request started with")
+            .to_string(),
+        crate::agents::PASSKEY_NO_LONGER_NAMES
+    );
+    let bound = crate::auth::load_principal_for_proof_binding(home.temp.path(), &binding).unwrap();
+    assert_eq!(bound.principal_id, second.principal_id);
+    assert_ne!(bound.principal_id, third.principal_id);
+    assert_eq!(
+        crate::auth::read_principal_root_object(
+            home.temp.path(),
+            &planted.agent_id,
+            &planted.root,
+            &planted.uri,
+            &planted.path
+        )
+        .unwrap(),
+        planted.note,
+        "the agent's note still opens for the owner the first reassignment kept"
+    );
+}
+
+/// Create Recovery Kit, through the export route. A protection with no archive
+/// and an agent of this owner is refused with the same sentence, and the key
+/// stays.
+#[tokio::test]
+async fn create_recovery_kit_refuses_when_an_unarchived_key_would_seal_an_agent() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = gateway_router(wallet_test_state(dir.path()).await);
+    let owner = passkey_authority(dir.path());
+    crate::auth::store_test_principal_root_protection(dir.path(), &owner.principal_id);
+    let principal =
+        crate::auth::load_principal_for_proof_binding(dir.path(), &owner.proof_binding_id).unwrap();
+    let planted = crate::agents::tests::plant_opening_agent(
+        dir.path(),
+        &owner.principal_id,
+        "plant-create-kit",
+    );
+    let mut stored = crate::auth::load_principal_root_protection(
+        dir.path(),
+        &owner.principal_id,
+        &principal.localhost_root,
+    )
+    .unwrap()
+    .unwrap();
+    let key_before = stored.data_key_id.clone();
+    stored.protectors[0].archive = None;
+    crate::auth::store_principal_root_protection(dir.path(), stored).unwrap();
+    let agents = agent_bytes(dir.path());
+    let note_file = std::fs::read(&planted.path).unwrap();
+    let intent = json!({
+        "principal_id": owner.principal_id,
+        "localhost_root": principal.localhost_root,
+        "label": "Kit",
+        "download_password": null,
+    });
+    let token = step_up_token_for_app_context(
+        dir.path(),
+        SYSTEM_CAPSULE_ID,
+        &owner.system_token,
+        "auth.full-recovery-bundle.export",
+        &intent,
+    );
+    let mut request = intent.clone();
+    request["schema"] = json!("elastos.full-recovery-bundle.export.request/v1");
+    request["step_up_token"] = json!(token);
+    let response = app
+        .oneshot(
+            test_browser_request("localhost:61180", "null")
+                .method("POST")
+                .uri("/api/auth/recovery/full-export")
+                .header("x-elastos-home-token", owner.system_token.as_str())
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(request.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert_eq!(
+        String::from_utf8(body.to_vec()).unwrap(),
+        crate::agents::agents_would_stop_opening(1)
+    );
+    let after = crate::auth::load_principal_root_protection(
+        dir.path(),
+        &owner.principal_id,
+        &principal.localhost_root,
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(after.data_key_id, key_before);
+    assert!(after.protectors[0].archive.is_none());
+    assert_eq!(agent_bytes(dir.path()), agents);
+    assert_eq!(std::fs::read(&planted.path).unwrap(), note_file);
+}
+
 /// Add a replacement passkey, revoke the first, and the owner still lists
 /// and opens every agent with the same id and the same data.
 #[tokio::test]
