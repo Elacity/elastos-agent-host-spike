@@ -485,7 +485,14 @@ impl Verifier {
     }
 
     /// Returns one hold's amount to the ceiling and drops the hold.
-    fn return_unused_hold(ledger: &mut Ledger, reservation: Reservation, amount: u64) {
+    /// The guest's request is at hand and is not read: a hold never shrinks
+    /// by what the guest reports.
+    fn return_unused_hold(
+        ledger: &mut Ledger,
+        reservation: Reservation,
+        amount: u64,
+        _request: &GuestRequest,
+    ) {
         ledger.open.remove(&reservation.id);
         ledger.held -= amount;
     }
@@ -515,7 +522,7 @@ impl Verifier {
         if uncertain {
             return Err(ReleaseRefuse::Uncertain);
         }
-        Self::return_unused_hold(&mut ledger, reservation, amount);
+        Self::return_unused_hold(&mut ledger, reservation, amount, request);
         // The ended binding left with its last hold.
         Self::clear_gone(&mut ledger, bound);
         Ok(())
