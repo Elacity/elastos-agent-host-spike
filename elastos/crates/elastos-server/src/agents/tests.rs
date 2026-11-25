@@ -1244,6 +1244,182 @@ fn a_writer_pause_is_armed_until_its_guard_drops() {
     assert!(!agent_writer_pause_arrived(dir.path()));
 }
 
+const REMOVED_LOCK_TEST: &str = "agents::tests::a_waiter_does_not_hold_a_removed_agents_lock";
+
+fn trace_opened_agents_lock(file: &std::fs::File) {
+    let Ok(path) = std::env::var("U5_AGENT_LOCK_OPENED") else {
+        return;
+    };
+    if std::fs::symlink_metadata(&path).is_ok() {
+        return;
+    }
+    use std::os::unix::fs::MetadataExt;
+    let meta = file.metadata().expect("opened agents lock");
+    std::fs::write(path, format!("{} {}", meta.dev(), meta.ino())).expect("record opened lock");
+}
+
+fn parse_lock_identity(text: &str) -> (u64, u64) {
+    let mut parts = text.split_whitespace();
+    (
+        parts.next().expect("device").parse().expect("device"),
+        parts.next().expect("inode").parse().expect("inode"),
+    )
+}
+
+/// The re-exec'd half of the removed-lock row. It is a create: it takes the
+/// same lock an import holds, and it keeps that lock until the parent says
+/// to drop it.
+fn removed_lock_waiter() {
+    set_agent_lock_opened_trace(Some(trace_opened_agents_lock));
+    let home = PathBuf::from(std::env::var("U5_LOCK_HOME").expect("home"));
+    let held_path = std::env::var("U5_LOCK_HELD").expect("held");
+    let release = PathBuf::from(std::env::var("U5_LOCK_RELEASE").expect("release"));
+    let lock = acquire_agent_lock(&home, true).expect("the waiter takes the agents lock");
+    let (dev, ino) = agent_lock_identity(&lock);
+    std::fs::write(&held_path, format!("{dev} {ino}")).expect("record the held lock");
+    let started = std::time::Instant::now();
+    while started.elapsed() < std::time::Duration::from_secs(30) {
+        if release.is_file() {
+            drop(lock);
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    panic!("the remover did not release the waiter");
+}
+
+struct StopChild(std::process::Child);
+
+impl Drop for StopChild {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+fn wait_for_lock_note(path: &Path, child: &mut std::process::Child) -> String {
+    let started = std::time::Instant::now();
+    while started.elapsed() < std::time::Duration::from_secs(15) {
+        if let Ok(text) = std::fs::read_to_string(path) {
+            if !text.is_empty() {
+                return text;
+            }
+        }
+        match child.try_wait() {
+            Ok(Some(status)) => panic!("waiter exited early: {status}"),
+            Ok(None) => std::thread::sleep(std::time::Duration::from_millis(20)),
+            Err(error) => panic!("waiter status: {error}"),
+        }
+    }
+    panic!("timed out waiting for {}", path.display());
+}
+
+/// One process holds the import lock and removes it while another process is
+/// waiting on that file. The waiter is a create. The two do not hold the
+/// lock together afterwards: the waiter's file is the one at the path, and
+/// a second open cannot lock it.
+#[test]
+fn a_waiter_does_not_hold_a_removed_agents_lock() {
+    if std::env::var("U5_LOCK_ROLE").ok().as_deref() == Some("waiter") {
+        removed_lock_waiter();
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path().join("home");
+    std::fs::create_dir(&home).unwrap();
+    let opened = root.path().join("opened");
+    let held = root.path().join("held");
+    let release = root.path().join("release");
+    let remover = acquire_agent_lock(&home, false).expect("the import takes the agents lock");
+    let remover_id = agent_lock_identity(&remover);
+    let mut child = StopChild(
+        std::process::Command::new(std::env::current_exe().expect("test binary"))
+            .args(["--exact", REMOVED_LOCK_TEST])
+            .env("U5_LOCK_ROLE", "waiter")
+            .env("U5_LOCK_HOME", &home)
+            .env("U5_AGENT_LOCK_OPENED", &opened)
+            .env("U5_LOCK_HELD", &held)
+            .env("U5_LOCK_RELEASE", &release)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("re-exec the waiter"),
+    );
+    let opened_text = wait_for_lock_note(&opened, &mut child.0);
+    assert_eq!(
+        parse_lock_identity(&opened_text),
+        remover_id,
+        "the waiter opened the lock the import holds"
+    );
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    assert!(
+        !held.is_file(),
+        "the waiter took the lock while the import still held it"
+    );
+    assert!(
+        child.0.try_wait().expect("waiter status").is_none(),
+        "the waiter exited before the import removed the lock"
+    );
+    drop(remover);
+    let held_text = wait_for_lock_note(&held, &mut child.0);
+    let (dev, ino) = parse_lock_identity(&held_text);
+    let path = agent_file_path(&home)
+        .unwrap()
+        .with_file_name(format!("{AGENT_RECORDS_FILE}.lock"));
+    use std::os::unix::fs::MetadataExt;
+    let current = std::fs::symlink_metadata(&path)
+        .ok()
+        .filter(|meta| meta.is_file());
+    let same = current
+        .as_ref()
+        .is_some_and(|meta| meta.dev() == dev && meta.ino() == ino);
+    let second_took_it = if same {
+        crate::host_lock::FileLock::try_exclusive(std::fs::File::open(&path).unwrap()).is_ok()
+    } else {
+        crate::auth_state_files::open_regular_lock_file(&path, "agent records")
+            .ok()
+            .and_then(|file| crate::host_lock::FileLock::try_exclusive(file).ok())
+            .is_some()
+    };
+    assert!(
+        same && !second_took_it,
+        "the waiter and a second process hold the agents lock together (same={same}, second={second_took_it}, waiter={dev}:{ino})"
+    );
+    std::fs::write(&release, b"go").unwrap();
+    let status = child.0.wait().expect("waiter");
+    assert!(status.success(), "waiter failed: {status}");
+}
+
+struct ClearDisplace;
+
+impl Drop for ClearDisplace {
+    fn drop(&mut self) {
+        displace_agent_lock_on_the_next_tries(0);
+    }
+}
+
+#[test]
+fn a_lock_that_keeps_changing_is_refused_by_name() {
+    let _clear = ClearDisplace;
+    let dir = tempfile::tempdir().unwrap();
+    displace_agent_lock_on_the_next_tries(AGENT_LOCK_IDENTITY_TRIES);
+    let error = match acquire_agent_lock(dir.path(), true) {
+        Ok(_lock) => panic!("the lock settled"),
+        Err(error) => error,
+    };
+    assert_eq!(error.to_string(), AGENTS_LOCK_CHANGED);
+    let settled = acquire_agent_lock(dir.path(), false).expect("a settled lock is taken");
+    drop(settled);
+    assert!(
+        agent_file_path(dir.path())
+            .unwrap()
+            .symlink_metadata()
+            .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound),
+        "the agents file stays absent"
+    );
+}
+
 #[test]
 fn the_refusal_names_the_count_and_what_to_do() {
     assert_eq!(

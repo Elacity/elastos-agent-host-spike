@@ -36,7 +36,10 @@
 //!   key the store left. When the agents file is absent, the in-process
 //!   mutex does not stop another process from creating the first agent, so
 //!   the change also holds the file lock a create takes and removes that
-//!   lock file afterwards while the agents file is still absent.
+//!   lock file afterwards while the agents file is still absent. After the
+//!   lock is taken, the open file is still the one at that path. A missing
+//!   or different file is opened and locked again, and a write that cannot
+//!   settle on that file is refused by name.
 //! - Every write is one of a closed list of operations, and each operation
 //!   may change only what `permits` lists for it.
 //! - This module never holds the owner's data key. It asks `auth` for a key
@@ -77,6 +80,9 @@ pub(crate) const FEATURE_OFF: &str = "agents are not built into this Runtime";
 /// A root-key change in a build that cannot read the agent file it found.
 pub(crate) const AGENTS_FILE_UNREADABLE: &str =
     "This Home has an agents file this build cannot read, so a root-key change is refused.";
+/// The open lock file was not the file at the path when the lock was taken.
+pub(crate) const AGENTS_LOCK_CHANGED: &str =
+    "The agents lock changed while this Home was taking it, so the write is refused.";
 /// The most bytes a root-key change reads from the agent file.
 pub(crate) const MAX_AGENT_FILE_BYTES: u64 = 256 * 1024;
 
@@ -419,11 +425,15 @@ static AGENT_WRITE: Mutex<()> = Mutex::new(());
 /// a different key over the new agent. A root-key change therefore takes the
 /// same file lock a create takes. It removes that lock file on the way out
 /// when the agents file is still absent, so a finished change leaves no new
-/// file. A crash while the lock is held can leave the lock file; the next
-/// writer reuses it. A build without agents cannot create an agent itself,
-/// and it takes this same file lock because another process built with
-/// agents can create the first one. A platform without that file lock holds
-/// only the in-process mutex, and a second process is not excluded there.
+/// file. After the lock is taken, the open file must still be the one at
+/// that path: the same device and inode. A missing or different file is
+/// opened and locked again. A bounded run of those tries ends in a named
+/// refusal, so a waiter does not keep a file the other process removed.
+/// A crash while the lock is held can leave the lock file; the next writer
+/// reuses it. A build without agents cannot create an agent itself, and it
+/// takes this same file lock because another process built with agents can
+/// create the first one. A platform without that file lock holds only the
+/// in-process mutex, and a second process is not excluded there.
 struct WriteLock {
     _file: Option<FileLock>,
     _process: MutexGuard<'static, ()>,
@@ -455,7 +465,8 @@ fn lock_for_write(data_dir: &Path) -> anyhow::Result<WriteLock> {
 /// `create_when_absent` keeps the lock file when the agents file is missing,
 /// which is what a writer of that file does. A root-key change passes false:
 /// on Unix it still takes the file lock, then `WriteLock` removes that file
-/// if the agents file is still absent.
+/// if the agents file is still absent. Create and import both check that the
+/// locked file is still the one at the path.
 fn acquire_agent_lock(data_dir: &Path, create_when_absent: bool) -> anyhow::Result<WriteLock> {
     let process = AGENT_WRITE
         .lock()
@@ -475,17 +486,105 @@ fn acquire_agent_lock(data_dir: &Path, create_when_absent: bool) -> anyhow::Resu
     if let Some(parent) = path.parent() {
         crate::auth_state_files::ensure_regular_auth_parent(data_dir, parent)?;
     }
-    let file = crate::auth_state_files::open_regular_lock_file(&path, "agent records")?;
+    let file = lock_the_agents_file(&path)?;
     let temporary_lock = if absent && !create_when_absent {
         Some(path)
     } else {
         None
     };
     Ok(WriteLock {
-        _file: Some(FileLock::exclusive(file).context("failed to lock agent records")?),
+        _file: Some(file),
         _process: process,
         temporary_lock,
     })
+}
+
+/// How many times a writer opens and locks the agents file before refusing.
+const AGENT_LOCK_IDENTITY_TRIES: u32 = 8;
+
+/// Locks `path` and keeps the lock only when that open file is still the
+/// file at the path. A removed or replaced file is opened and locked again.
+#[cfg(unix)]
+fn lock_the_agents_file(path: &Path) -> anyhow::Result<FileLock> {
+    use std::os::unix::fs::MetadataExt;
+    for _ in 0..AGENT_LOCK_IDENTITY_TRIES {
+        let file = crate::auth_state_files::open_regular_lock_file(path, "agent records")?;
+        #[cfg(test)]
+        note_agent_lock_opened(&file);
+        let held = file
+            .metadata()
+            .context("failed to inspect the agents lock")?;
+        let lock = FileLock::exclusive(file).context("failed to lock agent records")?;
+        #[cfg(test)]
+        displace_agent_lock_for_test(path);
+        let same = std::fs::symlink_metadata(path).is_ok_and(|current| {
+            current.is_file() && current.dev() == held.dev() && current.ino() == held.ino()
+        });
+        if same {
+            return Ok(lock);
+        }
+        drop(lock);
+    }
+    refused(AGENTS_LOCK_CHANGED)
+}
+
+#[cfg(not(unix))]
+fn lock_the_agents_file(path: &Path) -> anyhow::Result<FileLock> {
+    let file = crate::auth_state_files::open_regular_lock_file(path, "agent records")?;
+    FileLock::exclusive(file).context("failed to lock agent records")
+}
+
+#[cfg(all(test, unix))]
+thread_local! {
+    static AGENT_LOCK_OPENED_TRACE: std::cell::Cell<Option<fn(&std::fs::File)>> =
+        const { std::cell::Cell::new(None) };
+    static DISPLACE_AGENT_LOCK: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(all(test, unix))]
+fn note_agent_lock_opened(file: &std::fs::File) {
+    AGENT_LOCK_OPENED_TRACE.with(|hook| {
+        if let Some(hook) = hook.get() {
+            hook(file);
+        }
+    });
+}
+
+/// The next opens of the agents lock call `hook` before they wait.
+#[cfg(all(test, unix))]
+pub(crate) fn set_agent_lock_opened_trace(hook: Option<fn(&std::fs::File)>) {
+    AGENT_LOCK_OPENED_TRACE.with(|slot| slot.set(hook));
+}
+
+/// The next `count` locks remove the path after the lock is taken, so the
+/// identity check has to open it again.
+#[cfg(all(test, unix))]
+pub(crate) fn displace_agent_lock_on_the_next_tries(count: u32) {
+    DISPLACE_AGENT_LOCK.with(|left| left.set(count));
+}
+
+#[cfg(all(test, unix))]
+fn displace_agent_lock_for_test(path: &Path) {
+    DISPLACE_AGENT_LOCK.with(|left| {
+        let count = left.get();
+        if count == 0 {
+            return;
+        }
+        left.set(count - 1);
+        let _ = std::fs::remove_file(path);
+    });
+}
+
+#[cfg(all(test, unix))]
+fn agent_lock_identity(lock: &WriteLock) -> (u64, u64) {
+    use std::os::unix::fs::MetadataExt;
+    let metadata = lock
+        ._file
+        .as_ref()
+        .expect("the agents lock holds a file")
+        .metadata()
+        .expect("the agents lock can be inspected");
+    (metadata.dev(), metadata.ino())
 }
 
 /// Every change to the agent file is one of these.
