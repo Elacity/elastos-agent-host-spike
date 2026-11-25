@@ -133,6 +133,10 @@ pub struct AttachRequest {
     #[serde(default = "default_scope")]
     pub scope: String,
     /// The principal a frame shell is bound to. Empty for every other attach.
+    /// The attach secret's holder names this principal. The verified Home
+    /// launch context binds it in the gateway and does not reach this handler.
+    /// This runtime's session owner is the device DID, not the Home person, so
+    /// a different name is not refused here.
     #[serde(default)]
     pub principal: String,
 }

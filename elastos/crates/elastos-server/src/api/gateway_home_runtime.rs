@@ -2070,8 +2070,11 @@ pub(super) async fn home_attach_frame_shell(
     client: &reqwest::Client,
     api_url: &str,
     attach_secret: &str,
-    principal: &str,
+    context: &HomeLaunchTokenContext,
 ) -> anyhow::Result<String> {
+    // The mint names the principal this verified launch resolved. A caller
+    // cannot pass a different one into this function.
+    let principal = context.principal_id();
     Ok(client
         .post(format!("{}/api/auth/attach", api_url))
         .json(&serde_json::json!({

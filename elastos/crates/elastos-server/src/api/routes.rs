@@ -78,8 +78,12 @@ pub(crate) struct ResidentFrameQuery {
     principal: String,
 }
 
-/// One stored frame. A shell minted from the attach secret may read it.
-/// A guest session, a Home app session, and no session are refused by name.
+/// One stored frame. The shell's principal is the one named when the attach
+/// secret's holder minted it. A second process that holds the secret can name
+/// a principal here: the verified Home launch context does not reach attach,
+/// and this runtime's session owner is the device DID, not that Home person.
+/// The query principal is ignored. A guest session, a Home app session, and
+/// no session are refused by name.
 pub(crate) async fn resident_frame(
     Extension(runtime): Extension<Arc<Runtime>>,
     Extension(sessions): Extension<Arc<elastos_runtime::session::SessionRegistry>>,

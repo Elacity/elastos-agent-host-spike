@@ -1437,7 +1437,7 @@ pub(super) async fn home_v2_frame(
     let nodes = if app.is_empty() || app.len() > 128 {
         Vec::new()
     } else {
-        managed_frame_nodes(&state.data_dir, context.principal_id(), &app).await
+        managed_frame_nodes(&state.data_dir, &context, &app).await
     };
     Json(serde_json::json!({ "nodes": nodes })).into_response()
 }
@@ -1483,15 +1483,16 @@ fn frame_key(api_url: &str, secret: &str, principal: &str) -> String {
 async fn frame_shell(
     api_url: &str,
     secret: &str,
-    principal: &str,
+    context: &HomeLaunchTokenContext,
 ) -> Option<(reqwest::Client, String)> {
+    let principal = context.principal_id();
     let key = frame_key(api_url, secret, principal);
     let mut slot = frame_slot().lock().await;
     if let Some((_, token)) = slot.shells.iter().find(|(saved, _)| saved == &key) {
         return Some((slot.client.clone(), token.clone()));
     }
     let client = slot.client.clone();
-    let token = home_attach_frame_shell(&client, api_url, secret, principal)
+    let token = home_attach_frame_shell(&client, api_url, secret, context)
         .await
         .ok()?;
     slot.shells.retain(|(saved, _)| saved != &key);
@@ -1531,14 +1532,15 @@ async fn frame_bytes(mut response: reqwest::Response) -> Vec<u8> {
 /// Runtime, a stopped app, or a bad answer is an empty panel.
 async fn managed_frame_nodes(
     data_dir: &std::path::Path,
-    principal: &str,
+    context: &HomeLaunchTokenContext,
     app: &str,
 ) -> Vec<serde_json::Value> {
+    let principal = context.principal_id();
     let Some(coords) = load_live_runtime_coords(data_dir).await else {
         return Vec::new();
     };
     let Some((client, shell)) =
-        frame_shell(&coords.api_url, &coords.attach_secret, principal).await
+        frame_shell(&coords.api_url, &coords.attach_secret, context).await
     else {
         return Vec::new();
     };
