@@ -187,6 +187,13 @@ fn places() -> Vec<Place> {
             "B3 S10: admitted rights, checked root identity, bound executable",
         ),
         place(
+            "elastos-runtime/src/provider/chain_resolver.rs",
+            "restart_once",
+            spawn.clone(),
+            1,
+            "chain path allow-list; same checked binary and inputs",
+        ),
+        place(
             "elastos-server/src/setup/verified_executable.rs",
             "attach_std",
             "libc::fexecve".to_string(),

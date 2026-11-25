@@ -49,10 +49,10 @@ const HELPER_RIGHT_IDS: &[&str] = DID_RIGHT_IDS;
 
 /// The caller derives this id from the Runtime's `components.json` key,
 /// never from the package manifest's `name`.
-// This module is `#[cfg(unix)]`, so Windows never compiles it. The allow
-// is for macOS: the Linux seccomp installer is not compiled there, and the
-// ids that installer constructs are otherwise unused on that cfg.
-#[allow(dead_code)]
+///
+/// macOS reads every variant: `path_allow` and `from_component_key` construct
+/// them, and the Seatbelt renderer matches them. Linux reads them again when
+/// it builds the filter.
 #[derive(Clone, Copy, Debug)]
 pub(super) enum RuntimeProviderId {
     Did,
@@ -106,8 +106,8 @@ impl RuntimeProviderId {
     /// inert unless `socket` is allowed: `seccomp_program::chain_argument_rules`
     /// allows `socket` for `AF_INET` and `AF_INET6` only, and denies `AF_UNIX`
     /// and `AF_NETLINK`. `fcntl`, `clone`, `socket`, `setsockopt`, and
-    /// `getsockopt` are argument-checked, so they stay off this list. Object's
-    /// check allows only `F_GETFL` and `F_SETFD` of `FD_CLOEXEC`: glibc
+    /// `getsockopt` are argument-checked, so they stay off this list. Object
+    /// and localhost allow only `F_GETFL` and `F_SETFD` of `FD_CLOEXEC`:
     /// `fdopendir` needs those for `remove_dir_all`.
     ///
     /// `readlink` is x86_64 glibc `realpath`: `__readlink` is syscall
@@ -126,11 +126,19 @@ impl RuntimeProviderId {
     /// `SYS_stat` or `SYS_lstat`. They let metadata and realpath see a path.
     /// Landlock does not mediate stat, the same as the `statx` row. aarch64
     /// musl has no `stat` or `lstat` number, so those names drop there.
+    ///
+    /// `set_tid_address` lets musl `__init_tp` store this thread's
+    /// clear_child_tid and read its own thread id back. A refused call leaves
+    /// the id wrong and joins fail. It does not name another thread.
+    /// `munmap` lets musl `free` return an mmap group to the kernel. Without
+    /// it a helper that stays up keeps every large allocation. The call
+    /// unmaps only an address in this process. Both numbers exist on x86_64
+    /// and aarch64. Did, wallet, and model do not gain either name here.
     pub(super) fn measured_syscalls(self) -> &'static str {
         match self {
-            Self::Localhost => "readlink rmdir stat lstat",
-            Self::Object => "flock getpid readlink rename renameat rmdir stat lstat",
-            Self::Chain => "connect recvfrom sendmmsg epoll_create1 epoll_ctl epoll_pwait epoll_wait eventfd2 exit rseq rt_sigprocmask rename renameat stat lstat",
+            Self::Localhost => "munmap readlink rmdir set_tid_address stat lstat",
+            Self::Object => "flock getpid munmap readlink rename renameat rmdir set_tid_address stat lstat",
+            Self::Chain => "connect recvfrom sendmmsg epoll_create1 epoll_ctl epoll_pwait epoll_wait eventfd2 exit munmap rseq rt_sigprocmask rename renameat set_tid_address stat lstat",
             Self::Did | Self::Wallet | Self::Model => "",
         }
     }

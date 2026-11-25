@@ -47,4 +47,5 @@
 # +285: round 18 pins the planned loader file, maps the optional libraries, and tightens an older chain directory
 # +295: round 20 holds each checked file and directory until its rule is added, reads PT_INTERP, and names an omitted library
 # +206: round 22 admits the x86_64 musl open, stat, and lstat calls for localhost, object, and chain, the chain DNS bind, sendto, recvmsg, and IPV6_V6ONLY shapes, copies the closed chain settings into Init, names a BrokenPipe by the omitted libraries, finishes the unconfined reap, clears the checked directory when prepare stops early, creates the macOS wallet directory so its Seatbelt deny can be installed, and lets the object helper stat the ElastOS directory itself so the auth walk can reject a symlink. Measured 25 Nov 2026.
-14909
+# +314: round 23 admits set_tid_address and munmap for localhost, object, and chain, gives localhost the same fdopendir fcntl commands as object, and restarts chain once when /etc/resolv.conf's device and inode change. Measured 25 Nov 2026.
+15223

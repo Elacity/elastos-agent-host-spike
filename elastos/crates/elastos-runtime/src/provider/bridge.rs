@@ -457,6 +457,9 @@ pub struct ProviderBridge {
     /// Optional libraries the plan left out. Named when init sees the helper
     /// exit before it answers.
     omitted_libraries: std::sync::Mutex<Vec<String>>,
+    /// Chain's resolver file. Empty for every other helper. A restart keeps
+    /// the new helper here, on the bridge the caller already holds.
+    chain_resolver: std::sync::Mutex<Option<Arc<super::chain_resolver::ChainResolver>>>,
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     _local_brokers: Mutex<BrokerTasks>,
     #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -467,6 +470,12 @@ pub struct ProviderBridge {
     _local_provider_birth: Arc<AtomicU64>,
     #[cfg(target_os = "macos")]
     hosted_run_bindings: Arc<StdMutex<BTreeMap<String, HostedRunBinding>>>,
+}
+
+struct ChainHop {
+    observed: u64,
+    resolver: Option<Arc<super::chain_resolver::ChainResolver>>,
+    target: Option<Arc<ProviderBridge>>,
 }
 
 #[cfg(target_os = "macos")]
@@ -1754,6 +1763,7 @@ impl ProviderBridge {
             shutdown_completed: std::sync::atomic::AtomicBool::new(false),
             shutdown_timeout: SHUTDOWN_TIMEOUT,
             omitted_libraries: std::sync::Mutex::new(launched.omitted_libraries),
+            chain_resolver: std::sync::Mutex::new(None),
             #[cfg(any(target_os = "macos", target_os = "linux"))]
             _local_ipc_dir: Mutex::new(None),
             #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -1920,13 +1930,37 @@ impl ProviderBridge {
 
     /// Start localhost, object, or chain on that provider's path allow-list.
     ///
-    /// There is no single storage root. A refusal starts nothing.
+    /// There is no single storage root. A refusal starts nothing. Chain keeps
+    /// the start inputs beside this bridge so a resolver change can start the
+    /// same helper again.
     pub async fn spawn_path_allow(
         component_key: &str,
         authority: &ProviderAuthority,
         binary_path: &CheckedExecutable,
         data_dir: &Path,
+        config: ProviderConfig,
+    ) -> Result<Confined, BridgeError> {
+        Self::spawn_path_allow_with(
+            component_key,
+            authority,
+            binary_path,
+            data_dir,
+            config,
+            true,
+        )
+        .await
+    }
+
+    /// `attach_resolver` is set for the bridge the caller holds. A restart
+    /// passes false: the replacement stays beside that bridge and does not
+    /// watch the file again.
+    pub(super) async fn spawn_path_allow_with(
+        component_key: &str,
+        authority: &ProviderAuthority,
+        binary_path: &CheckedExecutable,
+        data_dir: &Path,
         mut config: ProviderConfig,
+        attach_resolver: bool,
     ) -> Result<Confined, BridgeError> {
         // Admission is the first refusal, before a chain directory is created.
         super::os_entry::admit_path_allow(component_key, authority)
@@ -1953,10 +1987,58 @@ impl ProviderBridge {
         drop(stdin_read);
         drop(stdout_write);
         let bridge = Self::bridge_from_launch(launched)?;
+        if attach_resolver && component_key == "chain-provider" {
+            bridge.install_chain_resolver(super::chain_resolver::ChainResolver::prepare(
+                component_key,
+                authority,
+                binary_path,
+                data_dir,
+                &config,
+            ));
+        }
         bridge.init_provider(config, INIT_TIMEOUT).await?;
         Ok(Confined {
             bridge: Arc::new(bridge),
         })
+    }
+
+    fn install_chain_resolver(&self, resolver: Arc<super::chain_resolver::ChainResolver>) {
+        *self
+            .chain_resolver
+            .lock()
+            .unwrap_or_else(|err| err.into_inner()) = Some(resolver);
+    }
+
+    fn chain_resolver(&self) -> Option<Arc<super::chain_resolver::ChainResolver>> {
+        self.chain_resolver
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .clone()
+    }
+
+    #[cfg(test)]
+    pub(super) fn chain_resolver_restarts(&self) -> u64 {
+        self.chain_resolver()
+            .map(|resolver| resolver.restarts())
+            .unwrap_or(0)
+    }
+
+    /// Kill the forked helper without a protocol shutdown. A call that is
+    /// already on the pipe then ends, and the caller retries.
+    pub(super) async fn abandon_child_for_restart(&self) {
+        let mut slot = self.fork.lock().await;
+        let Some(mut child) = slot.take() else {
+            return;
+        };
+        child.force_kill();
+        match tokio::time::timeout(self.shutdown_timeout, &mut child.status).await {
+            Ok(_) => child.reaped = true,
+            Err(_) => {
+                child.reaped = (&mut child.status).await.is_ok();
+            }
+        }
+        self.shutdown_completed
+            .store(true, std::sync::atomic::Ordering::Release);
     }
 
     /// Admit only Runtime-selected private engine sockets for the native model provider.
@@ -2659,6 +2741,7 @@ impl ProviderBridge {
             shutdown_completed: std::sync::atomic::AtomicBool::new(false),
             shutdown_timeout,
             omitted_libraries: std::sync::Mutex::new(Vec::new()),
+            chain_resolver: std::sync::Mutex::new(None),
             #[cfg(any(target_os = "macos", target_os = "linux"))]
             _local_ipc_dir: Mutex::new(None),
             #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -2831,6 +2914,7 @@ impl ProviderBridge {
             shutdown_completed: std::sync::atomic::AtomicBool::new(false),
             shutdown_timeout: SHUTDOWN_TIMEOUT,
             omitted_libraries: std::sync::Mutex::new(Vec::new()),
+            chain_resolver: std::sync::Mutex::new(None),
             #[cfg(any(target_os = "macos", target_os = "linux"))]
             _local_ipc_dir: Mutex::new(None),
             #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -2846,9 +2930,16 @@ impl ProviderBridge {
 
     /// Send a request and receive a response (with timeout).
     pub async fn request(&self, req: ProviderRequest) -> Result<ProviderResponse, BridgeError> {
-        tokio::time::timeout(REQUEST_TIMEOUT, self.request_raw(req))
-            .await
-            .map_err(|_| BridgeError::Timeout)?
+        let hop = self.prepare_chain_dispatch().await?;
+        let result = match hop.target.clone() {
+            Some(bridge) => tokio::time::timeout(REQUEST_TIMEOUT, bridge.request_raw(req)).await,
+            None => tokio::time::timeout(REQUEST_TIMEOUT, self.request_raw(req)).await,
+        };
+        let result = match result {
+            Ok(response) => response,
+            Err(_) => Err(BridgeError::Timeout),
+        };
+        self.finish_chain_dispatch(hop, result)
     }
 
     /// Send a request and receive a response (no timeout).
@@ -2871,10 +2962,28 @@ impl ProviderBridge {
         let dispatch_run = recorded_run.clone();
         #[cfg(not(target_os = "macos"))]
         let dispatch_run = None;
-        let line = match self
-            .send_json_line(request.clone(), dispatch_run, super::dispatch::current())
-            .await
-        {
+        let hop = match self.prepare_chain_dispatch().await {
+            Ok(hop) => hop,
+            Err(error) => {
+                #[cfg(target_os = "macos")]
+                if let Some(run_id) = &recorded_run {
+                    self.settle_confined_model_run(run_id, false);
+                }
+                return Err(error);
+            }
+        };
+        let line = match hop.target.clone() {
+            Some(bridge) => {
+                bridge
+                    .send_json_line(request.clone(), dispatch_run, super::dispatch::current())
+                    .await
+            }
+            None => {
+                self.send_json_line(request.clone(), dispatch_run, super::dispatch::current())
+                    .await
+            }
+        };
+        let line = match self.finish_chain_dispatch(hop, line) {
             Ok(line) => line,
             Err(error) => {
                 #[cfg(target_os = "macos")]
@@ -2901,6 +3010,36 @@ impl ProviderBridge {
         #[cfg(target_os = "macos")]
         self.retire_terminal_model_run(&response);
         Ok(response)
+    }
+
+    /// Chain compares `/etc/resolv.conf` before a caller dispatch. Init and
+    /// the protocol shutdown stay on the pipe they already hold.
+    async fn prepare_chain_dispatch(&self) -> Result<ChainHop, BridgeError> {
+        let Some(resolver) = self.chain_resolver() else {
+            return Ok(ChainHop {
+                observed: 0,
+                resolver: None,
+                target: None,
+            });
+        };
+        let observed = resolver.generation();
+        let target = resolver.before(self).await?;
+        Ok(ChainHop {
+            observed,
+            resolver: Some(resolver),
+            target,
+        })
+    }
+
+    fn finish_chain_dispatch<T>(
+        &self,
+        hop: ChainHop,
+        result: Result<T, BridgeError>,
+    ) -> Result<T, BridgeError> {
+        match hop.resolver {
+            Some(resolver) => resolver.map_transport(hop.observed, result),
+            None => result,
+        }
     }
 
     /// Write one request and always drain exactly one response line.
@@ -3033,6 +3172,9 @@ impl ProviderBridge {
 
     /// Gracefully shut down the provider.
     pub async fn shutdown(&self) -> Result<(), BridgeError> {
+        if let Some(resolver) = self.chain_resolver() {
+            resolver.shutdown_replacement().await;
+        }
         #[cfg(unix)]
         self.helper_owner.lock().await.take();
         if let Some(mut fork) = self.fork.lock().await.take() {

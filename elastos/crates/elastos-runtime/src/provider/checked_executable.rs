@@ -315,6 +315,18 @@ impl CheckedExecutable {
         &self.path
     }
 
+    /// A second owned pin with the same path, digest, and Home. Chain restart
+    /// keeps this beside the running bridge and passes it to the same start.
+    pub(super) fn duplicate(&self) -> Self {
+        Self {
+            path: self.path.clone(),
+            digest: self.digest,
+            refusal: self.refusal.clone(),
+            siblings: self.siblings.clone(),
+            home_data_dir: self.home_data_dir.clone(),
+        }
+    }
+
     pub fn verify_at_spawn(&self) -> Result<PreparedExecutable, String> {
         if let Some(reason) = &self.refusal {
             return Err(reason.clone());

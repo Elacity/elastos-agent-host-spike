@@ -13,6 +13,8 @@ pub mod bridge;
 pub mod bridge;
 mod bridge_protocol;
 #[cfg(unix)]
+mod chain_resolver;
+#[cfg(unix)]
 mod checked_executable;
 #[cfg(windows)]
 #[path = "checked_executable_windows.rs"]

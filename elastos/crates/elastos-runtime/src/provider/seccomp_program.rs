@@ -12,6 +12,10 @@ const NUMBERS: &str = concat!(
     "fchmod:91:52 fcntl:72:25 fdatasync:75:83 flock:73:32 fstat:5:80 fsync:74:82 ",
     "ftruncate:77:46 futex:202:98 getdents64:217:61 geteuid:107:175 getrandom:318:278 linkat:265:37 ",
     "lseek:8:62 mkdir:83:- mkdirat:258:34 mmap:9:222 mprotect:10:226 munmap:11:215 ",
+    // `set_tid_address` is musl 1.2.5 `__init_tp` on both arches. It stores this
+    // thread's clear_child_tid and returns the thread id. Localhost, object, and
+    // chain list it. Did, wallet, and model do not, so their goldens stay put.
+    "set_tid_address:218:96 ",
     "newfstatat:262:79 openat:257:56 openat2:437:437 poll:7:- ppoll:271:73 pread64:17:67 ",
     "prlimit64:302:261 pwrite64:18:68 read:0:63 readlinkat:267:78 readv:19:65 rename:82:- ",
     "renameat:-:38 renameat2:316:276 rmdir:84:- rseq:334:293 rt_sigaction:13:134 socketpair:53:199 statx:332:291 ",
@@ -94,9 +98,12 @@ pub(super) fn program(
     } else if matches!(provider, RuntimeProviderId::Chain) {
         code.extend(chain_argument_rules(arch));
     } else {
-        // Object only. Localhost deletes an empty directory with rmdir, which
-        // does not call fcntl. Chain keeps its own fcntl commands.
-        if matches!(provider, RuntimeProviderId::Object) {
+        // Localhost and object `remove_dir_all` pass the directory fd to
+        // `fdopendir`. Chain keeps its own fcntl commands.
+        if matches!(
+            provider,
+            RuntimeProviderId::Localhost | RuntimeProviderId::Object
+        ) {
             code.extend(object_directory_fcntl(arch));
         }
         code.push(stmt(6, DENY));
@@ -106,8 +113,8 @@ pub(super) fn program(
 
 /// `fcntl` commands glibc `fdopendir` uses for Rust `remove_dir_all`.
 ///
-/// On x86_64 and aarch64, glibc 2.35 and 2.39 `fdopendir` calls `F_GETFL`,
-/// then `__alloc_dir` with `close_fd = false` calls `F_SETFD` of `FD_CLOEXEC`.
+/// On x86_64 and aarch64, glibc 2.35 and 2.39 and musl 1.2.5 `fdopendir` call
+/// `F_GETFL`, then `F_SETFD` of `FD_CLOEXEC`.
 /// Rust 1.95 `remove_dir_all` opens with `openat(O_DIRECTORY|O_NOFOLLOW)` and
 /// passes that descriptor to `fdopendir`. `opendir` (list, and `rmdir` of an
 /// empty directory) sets `close_fd` and does not call `fcntl`, which is why
@@ -534,7 +541,15 @@ mod tests {
             ("setsockopt ip recverr", "setsockopt", [6, 0, 11, 0, 0, 0], super::ALLOW),
             ("setsockopt ipv6 recverr", "setsockopt", [6, 41, 25, 0, 0, 0], super::ALLOW),
             ("setsockopt keepalive", "setsockopt", [6, 1, 9, 0, 0, 0], super::DENY),
-            ("setsockopt nodelay", "setsockopt", [6, 6, 1, 0, 0, 0], super::DENY),
+            // Denied on purpose. hyper-util sets TCP_NODELAY per connection,
+            // logs the error, and continues with Nagle left on. Admitting it
+            // would not change what the helper can reach.
+            (
+                "setsockopt tcp_nodelay denied on purpose",
+                "setsockopt",
+                [6, 6, 1, 0, 0, 0],
+                super::DENY,
+            ),
             ("setsockopt ipv6 v6only", "setsockopt", [6, 41, 26, 0, 0, 0], super::ALLOW),
             ("getsockopt so_error", "getsockopt", [6, 1, 4, 0, 0, 0], super::ALLOW),
             ("getsockopt other", "getsockopt", [6, 1, 7, 0, 0, 0], super::DENY),
@@ -605,9 +620,11 @@ mod tests {
 
     /// Names the fcntl commands `remove_dir_all` needs. Seccomp's deny is
     /// EACCES and the kernel does not put the syscall number in that errno,
-    /// so this interpreter is the name. `--nocapture` prints each decision.
+    /// so this interpreter is the name. Localhost uses the same two commands
+    /// as object. Deleting `RuntimeProviderId::Localhost` from the fcntl arm
+    /// turns the localhost allow red. `--nocapture` prints each decision.
     #[test]
-    fn object_directory_delete_names_the_fdopendir_fcntl_commands() {
+    fn localhost_and_object_directory_delete_name_the_fdopendir_fcntl_commands() {
         let admitted = super::super::rights::admit_runtime_grant(RuntimeProviderId::Object);
         let local = super::super::rights::admit_runtime_grant(RuntimeProviderId::Localhost);
         let cases: &[(&str, [u64; 6], bool)] = &[
@@ -632,16 +649,13 @@ mod tests {
             );
             for (label, args, allow) in cases {
                 let nr = number("fcntl", arch).expect("fcntl");
-                let got = interpret(&object, nr, *args, audit);
                 let want = if *allow { super::ALLOW } else { super::DENY };
-                let decision = if got == super::ALLOW { "allow" } else { "deny" };
-                eprintln!("{arch:?} object {label}: {decision}");
-                assert_eq!(got, want, "{arch:?} object {label} returned {got:#x}");
-                assert_eq!(
-                    interpret(&localhost, nr, *args, audit),
-                    super::DENY,
-                    "{arch:?} localhost {label} must stay denied"
-                );
+                for (who, prog) in [("object", &object), ("localhost", &localhost)] {
+                    let got = interpret(prog, nr, *args, audit);
+                    let decision = if got == super::ALLOW { "allow" } else { "deny" };
+                    eprintln!("{arch:?} {who} {label}: {decision}");
+                    assert_eq!(got, want, "{arch:?} {who} {label} returned {got:#x}");
+                }
             }
             let unlinkat = number("unlinkat", arch).expect("unlinkat");
             assert_eq!(
@@ -729,5 +743,48 @@ mod tests {
         assert_eq!(interpret(&did_prog, bind_nr, [6, 0, 16, 0, 0, 0], audit), super::DENY);
         assert_eq!(interpret(&did_prog, recv_nr, [0; 6], audit), super::DENY);
         assert_eq!(interpret(&chain_prog, recv_nr, [6, 0, 1, 0, 0, 0], audit), super::DENY);
+    }
+
+    /// `set_tid_address` records this thread's id. `munmap` returns this
+    /// process's mappings. Both are localhost, object, and chain, on both
+    /// arches. Deleting either name from those three `measured_syscalls`
+    /// turns the allow red. Did, wallet, and model goldens do not gain
+    /// `set_tid_address`. Model already has `munmap`.
+    #[test]
+    fn helper_set_tid_address_and_munmap_are_only_the_three_helpers() {
+        for arch in [AuditArch::X86_64, AuditArch::Aarch64] {
+            let audit = match arch {
+                AuditArch::X86_64 => 0xc000_003e,
+                AuditArch::Aarch64 => 0xc000_00b7,
+            };
+            let tid = number("set_tid_address", arch).expect("set_tid_address");
+            let unmap = number("munmap", arch).expect("munmap");
+            assert_eq!(
+                (number("set_tid_address", AuditArch::X86_64), number("set_tid_address", AuditArch::Aarch64)),
+                (Some(218), Some(96))
+            );
+            for provider in [
+                RuntimeProviderId::Localhost,
+                RuntimeProviderId::Object,
+                RuntimeProviderId::Chain,
+            ] {
+                let admitted = super::super::rights::admit_runtime_grant(provider);
+                let prog = program(provider, &admitted, arch);
+                assert_eq!(interpret(&prog, tid, [0; 6], audit), super::ALLOW, "{provider:?} set_tid_address");
+                assert_eq!(interpret(&prog, unmap, [0; 6], audit), super::ALLOW, "{provider:?} munmap");
+            }
+            for provider in [RuntimeProviderId::Did, RuntimeProviderId::Wallet, RuntimeProviderId::Model] {
+                let admitted = super::super::rights::admit_runtime_grant(provider);
+                let prog = program(provider, &admitted, arch);
+                assert_eq!(interpret(&prog, tid, [0; 6], audit), super::DENY, "{provider:?} set_tid_address");
+            }
+            for provider in [RuntimeProviderId::Did, RuntimeProviderId::Wallet] {
+                let admitted = super::super::rights::admit_runtime_grant(provider);
+                let prog = program(provider, &admitted, arch);
+                assert_eq!(interpret(&prog, unmap, [0; 6], audit), super::DENY, "{provider:?} munmap");
+            }
+            assert!(number("madvise", arch).is_none(), "madvise stays out of the number table");
+            assert!(number("brk", arch).is_none(), "brk stays out of the number table");
+        }
     }
 }

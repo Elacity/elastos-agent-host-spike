@@ -325,9 +325,10 @@ pub(super) fn render_with_plan(
         storage,
         executable_right,
     )?;
-    if matches!(provider, RuntimeProviderId::Localhost) {
+    if storage && matches!(provider, RuntimeProviderId::Localhost) {
         // After the ElastOS allow. Last-match Seatbelt denies the wallet
-        // directory. Linux Landlock cannot exclude that child; this line is
+        // directory. An exec-only grant has no file root, so it does not get
+        // this subpath. Linux Landlock cannot exclude that child; this line is
         // macOS only and is not a Landlock rule.
         seatbelt.push_str(LOCALHOST_WALLET_DENY);
     }

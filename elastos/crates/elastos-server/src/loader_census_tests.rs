@@ -101,6 +101,15 @@ fn rows() -> Vec<Row> {
             1,
         ),
         row(
+            "elastos-runtime/src/provider/chain_resolver.rs",
+            "restart_once",
+            "ProviderBridge::spawn",
+            "native provider",
+            "admitted rights+checked directory+bound executable",
+            "P2-8",
+            1,
+        ),
+        row(
             "elastos-server/src/setup/verified_executable.rs",
             "attach_std",
             "libc::fexecve",

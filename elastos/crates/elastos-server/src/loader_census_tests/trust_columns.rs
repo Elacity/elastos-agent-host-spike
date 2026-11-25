@@ -759,6 +759,19 @@ fn columns() -> Vec<TrustColumn> {
             evidence: ["ProviderBr", "idge::spawn"].concat(),
             os_path: "",
         },
+        // Chain restart calls spawn_path_allow again. The scanner's label is
+        // ProviderBridge::spawn because that name is the prefix. verify_at_spawn
+        // checks the pinned digest before the new process starts.
+        TrustColumn {
+            file: "elastos-runtime/src/provider/chain_resolver.rs",
+            function: "restart_once",
+            call: "ProviderBridge::spawn",
+            class: "n/a",
+            trust_root: "release-signature",
+            verified_when: "at-every-start",
+            evidence: ["ProviderBr", "idge::spawn"].concat(),
+            os_path: "",
+        },
         // spawn_path_allow calls verify_at_spawn before the chain process starts.
         TrustColumn {
             file: "elastos-server/src/server_infra.rs",
@@ -1726,11 +1739,11 @@ fn trust_column_counts_and_chokepoint_queue() {
     // never and do not join at-every-start.
     // release-signature is only that exact root. The separate root
     // "release-signature or source Home dev-pinned image" stays one row
-    // and is not added into this number. On this host the exact root is 31.
-    // Windows keeps that exact root at 26.
+    // and is not added into this number. On this host the exact root is 32.
+    // Windows keeps that exact root at 27. Round 23 adds the chain restart.
     println!("loader trust rows={} classes={classes:?} roots={roots:?} verified_when={times:?} to_gate={to_gate}", columns.len());
-    assert_eq!(columns.len(), 106);
-    assert_eq!(classes.get("n/a"), Some(&57));
+    assert_eq!(columns.len(), 107);
+    assert_eq!(classes.get("n/a"), Some(&58));
     assert_eq!(classes.get("os-tool"), Some(&2));
     assert_eq!(classes.get("other"), Some(&37));
     assert_eq!(classes.get("own-binary"), Some(&5));
@@ -1741,12 +1754,12 @@ fn trust_column_counts_and_chokepoint_queue() {
     #[cfg(not(windows))]
     {
         assert_eq!(roots.get("none"), Some(&50));
-        assert_eq!(roots.get("release-signature"), Some(&31));
+        assert_eq!(roots.get("release-signature"), Some(&32));
     }
     #[cfg(windows)]
     {
         assert_eq!(roots.get("none"), Some(&55));
-        assert_eq!(roots.get("release-signature"), Some(&26));
+        assert_eq!(roots.get("release-signature"), Some(&27));
     }
     assert_eq!(
         roots.get("release-signature or source Home dev-pinned image"),
@@ -1754,10 +1767,10 @@ fn trust_column_counts_and_chokepoint_queue() {
     );
     assert_eq!(roots.get("staged-cid"), Some(&8));
     #[cfg(not(windows))]
-    assert_eq!(times.get("at-every-start"), Some(&40));
+    assert_eq!(times.get("at-every-start"), Some(&41));
     #[cfg(windows)]
     {
-        assert_eq!(times.get("at-every-start"), Some(&35));
+        assert_eq!(times.get("at-every-start"), Some(&36));
         assert_eq!(times.get(own_command_verified_when()), Some(&3));
         assert_eq!(times.get(managed_runtime_verified_when()), Some(&2));
     }

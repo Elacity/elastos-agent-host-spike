@@ -323,6 +323,12 @@ mod tests {
         assert!(!object_arm.contains(&"rename"));
         assert!(!local_arm.contains(&"stat") && !local_arm.contains(&"lstat"));
         assert!(!object_arm.contains(&"stat") && !object_arm.contains(&"lstat"));
+        for name in ["munmap", "set_tid_address"] {
+            assert!(local_x86.contains(&name) && local_arm.contains(&name), "{name}");
+            assert!(object_x86.contains(&name) && object_arm.contains(&name), "{name}");
+            assert!(chain_x86.contains(&name) && chain_arm.contains(&name), "{name}");
+            assert!(!did_x86.contains(&name), "did does not get {name}");
+        }
         assert_ne!(object_x86, local_x86);
         assert_ne!(object_arm, local_arm);
     }

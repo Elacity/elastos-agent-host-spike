@@ -1323,14 +1323,23 @@ mod tests {
         assert!(prepare_body.contains("landlock_plan::build(provider,admitted,"));
         assert!(prepare_body.contains("assemble(provider,admitted,"));
         assert!(!prepare_body.contains("for_provider"));
-        let production_installer: String = installer
-            .split("#[cfg(test)]")
-            .next()
-            .unwrap()
+        // `assemble` is the production installer. A `#[cfg(test)]` helper now
+        // sits above it, so the prefix before the first test attribute is no
+        // longer the whole production function. The call still has to pass
+        // the admitted rows.
+        let assemble = installer.find("fn assemble(").expect("assemble");
+        let assemble_end = installer[assemble..]
+            .find("pub(super) fn prepare(")
+            .expect("prepare follows assemble")
+            + assemble;
+        let assemble_body: String = installer[assemble..assemble_end]
             .chars()
             .filter(|c| !c.is_whitespace())
             .collect();
-        assert!(production_installer.contains("seccomp_program::program(provider,admitted,"));
+        assert!(
+            assemble_body.contains("seccomp_program::program(provider,admitted,"),
+            "assemble installs the admitted filter"
+        );
     }
 
     #[test]
@@ -1484,6 +1493,11 @@ mod tests {
         let chain = data.join("chain-provider");
         std::fs::create_dir(&chain).unwrap();
         std::fs::write(chain.join("own.txt"), b"chain").unwrap();
+        // Object's own root is ElastOS/System, not ElastOS. The file directly
+        // under ElastOS is outside that grant.
+        let system = data.join("ElastOS/System");
+        std::fs::create_dir(&system).unwrap();
+        std::fs::write(system.join("own.txt"), b"own").unwrap();
         let identity = data.join("identity");
         std::fs::create_dir(&identity).unwrap();
         let device_key = identity.join("device.key");
@@ -1497,9 +1511,9 @@ mod tests {
             ),
             (
                 "object-provider",
+                data.join("ElastOS/System/own.txt"),
                 data.join("ElastOS/own.txt"),
-                data.join("AppCapsules/own.txt"),
-                data.join("ElastOS/result.txt"),
+                data.join("ElastOS/System/result.txt"),
             ),
             (
                 "chain-provider",
