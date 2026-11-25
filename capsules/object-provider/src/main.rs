@@ -65,8 +65,8 @@ impl ObjectProviderProcess {
             );
         }
         #[cfg(unix)]
-        if let Err(message) = install_public_runtime_did(&config) {
-            return response_error("no_public_runtime_did", &message);
+        if let Err((code, message)) = install_public_runtime_did(&config) {
+            return response_error(code, &message);
         }
         self.data_dir = Some(data_dir.clone());
         response_ok(json!({
@@ -106,9 +106,11 @@ fn device_key_is_closed(data_dir: &std::path::Path) -> bool {
 }
 
 /// The public runtime DID from init config. A missing or non-canonical DID
-/// refuses init. The value is kept in memory. There is no runtime-did file.
+/// refuses init with `no_public_runtime_did`. A different DID already stored
+/// in this process keeps its own code and the install message. The value is
+/// kept in memory. There is no runtime-did file.
 #[cfg(unix)]
-fn install_public_runtime_did(config: &Value) -> Result<(), String> {
+fn install_public_runtime_did(config: &Value) -> Result<(), (&'static str, String)> {
     let did = config
         .get("extra")
         .and_then(|extra| extra.get("runtime_did"))
@@ -116,9 +118,13 @@ fn install_public_runtime_did(config: &Value) -> Result<(), String> {
         .unwrap_or("")
         .trim();
     if elastos_identity::decode_did_key(did).is_err() {
-        return Err("object helper spawn refused: no public runtime DID".to_string());
+        return Err((
+            "no_public_runtime_did",
+            "object helper spawn refused: no public runtime DID".to_string(),
+        ));
     }
-    elastos_identity::install_object_helper_runtime_did(did).map_err(|err| err.to_string())
+    elastos_identity::install_object_helper_runtime_did(did)
+        .map_err(|err| ("runtime_did_install_failed", err.to_string()))
 }
 
 fn response_ok(data: Value) -> Value {
@@ -235,6 +241,39 @@ mod tests {
         assert_eq!(response["code"], "no_public_runtime_did");
         assert_eq!(
             response["message"],
+            "object helper spawn refused: no public runtime DID"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_different_runtime_did_keeps_its_install_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut provider = ObjectProviderProcess::new();
+        let first = provider.handle(json!({
+            "op": "init",
+            "config": init_config(dir.path())
+        }));
+        assert_eq!(first["status"], "ok", "{first}");
+        let same = provider.handle(json!({
+            "op": "init",
+            "config": init_config(dir.path())
+        }));
+        assert_eq!(same["status"], "ok", "{same}");
+        let other = elastos_identity::derive_did(&[0x22; 32]).1;
+        let again = tempfile::tempdir().unwrap();
+        let response = provider.handle(json!({
+            "op": "init",
+            "config": {
+                "base_path": again.path().to_string_lossy().to_string(),
+                "extra": { "runtime_did": other }
+            }
+        }));
+        assert_eq!(response["code"], "runtime_did_install_failed");
+        let message = response["message"].as_str().unwrap();
+        assert!(message.contains("already set"), "{message}");
+        assert_ne!(
+            message,
             "object helper spawn refused: no public runtime DID"
         );
     }

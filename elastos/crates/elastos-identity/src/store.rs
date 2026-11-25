@@ -241,9 +241,13 @@ pub fn install_object_helper_runtime_did(did: &str) -> anyhow::Result<()> {
         }
         anyhow::bail!("the object helper runtime DID is already set");
     }
-    OBJECT_HELPER_RUNTIME_DID
-        .set(did.to_string())
-        .map_err(|_| anyhow::anyhow!("the object helper runtime DID is already set"))
+    if OBJECT_HELPER_RUNTIME_DID.set(did.to_string()).is_err() {
+        if OBJECT_HELPER_RUNTIME_DID.get().map(String::as_str) == Some(did) {
+            return Ok(());
+        }
+        anyhow::bail!("the object helper runtime DID is already set");
+    }
+    Ok(())
 }
 
 /// The public runtime DID, and a signing key that is not the device key.
