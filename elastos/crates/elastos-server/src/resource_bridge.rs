@@ -648,7 +648,7 @@ async fn register_one_use_grant(
             .pending_store
             .deny_request_by(
                 &id,
-                PLAN_INSTANCE_ENDED,
+                "grant not registered",
                 elastos_runtime::capability::pending::Settler::Runtime,
             )
             .await;
@@ -934,7 +934,7 @@ pub(crate) async fn dispatch_agent_plan_step(
             Err(()) => {
                 let _ = ctx
                     .capability_manager
-                    .revoke(*token.id(), PLAN_INSTANCE_ENDED)
+                    .revoke(*token.id(), "grant not registered")
                     .await;
                 return resource_error_response(
                     "capability_denied",
@@ -9828,6 +9828,20 @@ pub async fn production_after() {
             assert!(!authorize.contains(name), "{name}");
             assert!(!effect.contains(name), "{name}");
         }
+    }
+
+    /// A one-use grant that cannot be registered is not the instance ending.
+    #[test]
+    fn a_grant_that_cannot_be_registered_is_not_called_instance_ended() {
+        let body = function_body(include_str!("resource_bridge.rs"), "register_one_use_grant");
+        assert!(
+            body.contains("\"grant not registered\""),
+            "a failed registration needs a neutral reason"
+        );
+        assert!(
+            !body.contains("instance ended"),
+            "a failed registration is not the instance ending"
+        );
     }
 
     fn function_body(source: &str, name: &str) -> String {

@@ -523,8 +523,9 @@ static PLAN_DECISION_HOOK: std::sync::LazyLock<StdMutex<HashMap<String, PlanDeci
 
 /// Runs under the plan lock, before the check-and-mark, and only for this
 /// session, so a test can close the instance in the same hold. Each session
-/// keeps its own hook: one test cannot replace another's. The two-step plant
-/// drops the lock here.
+/// keeps its own hook: one test cannot replace another's. The hook is given
+/// `&mut PlanBook` while the caller still holds the lock, so it cannot drop
+/// that lock.
 #[cfg(test)]
 pub(crate) fn arm_plan_decision_hook(
     session_id: &str,
