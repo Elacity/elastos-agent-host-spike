@@ -145,10 +145,21 @@ impl std::fmt::Debug for AgentPlane {
     }
 }
 
+/// One guest Off asked the plane to end, and what was true afterwards.
+pub(crate) struct EndedGuest {
+    pub(crate) agent_id: String,
+    pub(crate) session_id: String,
+    pub(crate) status: String,
+    pub(crate) ended: bool,
+    pub(crate) effect_inflight: bool,
+}
+
 impl AgentPlane {
     /// Stop every live guest first, so each end revokes that guest's grants
-    /// and closes its pending plans, then stop the listener.
-    pub(crate) async fn shutdown(mut self) -> Vec<(String, String)> {
+    /// and closes its pending plans, then stop the listener. The report says
+    /// whether that session actually ended and whether a plan effect is still
+    /// in flight. A caller signs `ok` only from those two facts.
+    pub(crate) async fn shutdown(mut self) -> Vec<EndedGuest> {
         let live: Vec<String> = self
             .runtime
             .list_capsules()
@@ -165,11 +176,23 @@ impl AgentPlane {
                 .await
                 .map(|record| record.agent_id)
                 .unwrap_or_default();
-            ended.push((agent_id, id.clone()));
             let _ = self
                 .runtime
                 .stop_capsule_with_reason(&id, "agents off")
                 .await;
+            let info = self.runtime.get_capsule(&id).await;
+            let effect_inflight = self.runtime.plan_effect_inflight(&id);
+            let (status, session_ended) = match &info {
+                Some(info) => (info.status.clone(), info.ended_at.is_some()),
+                None => ("stopped".to_string(), true),
+            };
+            ended.push(EndedGuest {
+                agent_id,
+                session_id: id,
+                status,
+                ended: session_ended,
+                effect_inflight,
+            });
         }
         self.server.abort();
         let _ = tokio::time::timeout(Duration::from_secs(2), &mut self.watcher).await;
@@ -266,9 +289,30 @@ pub(crate) async fn revoke_agent_grants(data_dir: &Path, agent_id: &str) {
     }
 }
 
+/// The agent Runtime this process is running for `data_dir`, when it has one.
+pub(crate) fn plane_runtime(data_dir: &Path) -> Option<Arc<crate::runtime::Runtime>> {
+    let held = planes().lock().ok()?;
+    held.get(data_dir).map(|plane| Arc::clone(&plane.runtime))
+}
+
+/// Whether a `stopping` row may be closed. No plane in this process means the
+/// session is not running here: a Home that just restarted, or a plane that
+/// has already shut down. A live plane confirms the session only when its
+/// capsule has ended and no plan effect is still in flight.
+pub(crate) async fn stopping_session_has_ended(data_dir: &Path, session_id: &str) -> bool {
+    let Some(runtime) = plane_runtime(data_dir) else {
+        return true;
+    };
+    let still_running = runtime
+        .get_capsule(session_id)
+        .await
+        .is_some_and(|info| info.ended_at.is_none());
+    !still_running && !runtime.plan_effect_inflight(session_id)
+}
+
 /// Stop the agent Runtime for this Home. Live guests end first, inside
 /// [`AgentPlane::shutdown`], so their grants and pending plans end with them.
-pub(crate) async fn stop_running(data_dir: &Path) -> Vec<(String, String)> {
+pub(crate) async fn stop_running(data_dir: &Path) -> Vec<EndedGuest> {
     let plane = planes()
         .lock()
         .ok()

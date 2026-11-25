@@ -96,11 +96,28 @@ fn append_agent_lifecycle_audit(
     )
 }
 
-/// A `stopping` row is confirmed once. The next list, Stop, or Home start
-/// appends `agent.stopped` with result `ok` for that session when no final
-/// row has followed it.
-pub(in crate::api) fn confirm_stopping_rows(data_dir: &std::path::Path) -> anyhow::Result<()> {
-    crate::agent_record_audit::confirm_stopping_rows(data_dir)
+/// A `stopping` row is confirmed once the owner and the build have already
+/// been checked. `ok` is written when this process's agent plane says the
+/// session ended and no plan effect is in flight, or when this process has
+/// no plane, which is a Home that restarted. A session that is still running
+/// stays `stopping`.
+pub(in crate::api) async fn confirm_stopping_rows(
+    data_dir: &std::path::Path,
+) -> anyhow::Result<()> {
+    let open = crate::agent_record_audit::open_stopping_sessions(data_dir)?;
+    let mut ended = std::collections::HashSet::new();
+    for session in open {
+        if crate::api::agent_plane::stopping_session_has_ended(data_dir, &session).await {
+            ended.insert(session);
+        }
+    }
+    let runtime = crate::api::agent_plane::plane_runtime(data_dir);
+    crate::agent_record_audit::confirm_stopping_rows(data_dir, |session| {
+        ended.contains(session)
+            && runtime
+                .as_ref()
+                .is_none_or(|runtime| !runtime.plan_effect_inflight(session))
+    })
 }
 
 fn record_caller_denial(
@@ -291,21 +308,30 @@ pub(super) async fn agents_disable(
     if disabled.is_ok() {
         let ended = crate::api::agent_plane::stop_running(&state.data_dir).await;
         if let Ok(owner) = agents_owner(&state, &headers) {
-            for (agent_id, session_id) in &ended {
-                if agent_id.is_empty() || session_id.is_empty() {
+            for guest in &ended {
+                if guest.agent_id.is_empty() || guest.session_id.is_empty() {
                     continue;
                 }
+                // `ok` only when the plane left the session ended and no
+                // plan effect is still landing. Anything still running is
+                // `stopping`, the same rule Stop uses.
+                let result = if session_ended(&guest.status, guest.ended) && !guest.effect_inflight
+                {
+                    "ok"
+                } else {
+                    "stopping"
+                };
                 let _ = append_agent_lifecycle_audit(
                     &state.data_dir,
                     "agent.stopped",
                     &owner,
                     AgentAuditIds {
                         challenge_id: None,
-                        capsule_id: Some(agent_id),
-                        session_id: Some(session_id),
+                        capsule_id: Some(&guest.agent_id),
+                        session_id: Some(&guest.session_id),
                     },
-                    "ok",
-                    serde_json::json!({ "agent_id": agent_id, "cause": "agents off" }),
+                    result,
+                    serde_json::json!({ "agent_id": guest.agent_id, "cause": "agents off" }),
                 );
             }
         }
@@ -330,10 +356,15 @@ pub(super) async fn agents_create(
 }
 
 pub(super) async fn agents_list(State(state): State<GatewayState>, headers: HeaderMap) -> Response {
-    let _ = confirm_stopping_rows(&state.data_dir);
+    let owner = match agents_owner(&state, &headers) {
+        Ok(owner) => owner,
+        Err(error) => {
+            return agents_response(Err(error) as anyhow::Result<serde_json::Value>);
+        }
+    };
+    let _ = confirm_stopping_rows(&state.data_dir).await;
     agents_response(
-        agents_owner(&state, &headers)
-            .and_then(|owner| crate::agents::list(&state.data_dir, &owner.caller()))
+        crate::agents::list(&state.data_dir, &owner.caller())
             .map(|agents| serde_json::json!({ "agents": agents })),
     )
 }
@@ -951,7 +982,6 @@ async fn stop_agent(
     headers: &HeaderMap,
     body: &Bytes,
 ) -> anyhow::Result<AgentStopResponse> {
-    let _ = confirm_stopping_rows(&state.data_dir);
     let caller = match owner_may_stop(state, headers, None) {
         Ok(owner) => owner,
         Err(error) => {
@@ -981,6 +1011,7 @@ async fn stop_agent(
             return Err(error);
         }
     };
+    let _ = confirm_stopping_rows(&state.data_dir).await;
     let host = crate::agents::stored_agent_for_stop(
         &state.data_dir,
         &owner.principal.principal_id,

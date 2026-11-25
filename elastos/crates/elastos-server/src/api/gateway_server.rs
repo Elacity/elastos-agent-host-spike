@@ -145,9 +145,11 @@ pub(super) async fn start_gateway_server_with_shutdown(
         eprintln!(
             "[gateway] another live gateway owns this data directory; left its plans unchanged"
         );
-    } else if let Err(error) =
-        super::gateway_inspect_actions::settle_agent_plans_lost_before_start(&data_dir)
-            .and_then(|_| super::gateway_agents::confirm_stopping_rows(&data_dir))
+    } else if let Err(error) = async {
+        super::gateway_inspect_actions::settle_agent_plans_lost_before_start(&data_dir)?;
+        super::gateway_agents::confirm_stopping_rows(&data_dir).await
+    }
+    .await
     {
         browser_lifecycle_reconciler.cancel();
         let _ = browser_lifecycle_reconciler.join().await;

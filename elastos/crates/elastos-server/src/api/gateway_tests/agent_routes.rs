@@ -923,4 +923,62 @@ mod on {
             crate::agents::NOT_ACTIVE
         );
     }
+
+    /// A guest list fails the owner check and leaves a stopping row open.
+    /// The owner's list, with no plane running, confirms that row once.
+    #[tokio::test]
+    async fn a_guest_list_does_not_confirm_a_stopping_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = dir.path();
+        let app = gateway_router(test_state(data));
+        let owner = protected_owner(data);
+        let session = "session-guest-cannot-confirm";
+        crate::auth::append_audit_event(
+            data,
+            elastos_runtime::auth::RuntimeAuditEventV1 {
+                schema: elastos_runtime::auth::RuntimeAuditEventV1::SCHEMA.to_string(),
+                event_id: "audit:stop-plant:guest".to_string(),
+                event_type: "agent.stopped".to_string(),
+                principal_id: Some(owner.principal_id.clone()),
+                proof_binding_id: Some(owner.proof_binding_id.clone()),
+                session_id: Some(session.to_string()),
+                challenge_id: None,
+                capsule_id: None,
+                result: "stopping".to_string(),
+                reason: "planted stopping row".to_string(),
+                occurred_at: 10,
+                signer_did: None,
+                signature: None,
+            },
+        )
+        .unwrap();
+        let ok_rows = || {
+            crate::auth::load_auth_state(data)
+                .unwrap()
+                .audit
+                .into_iter()
+                .filter(|event| {
+                    event.event_type == "agent.stopped"
+                        && event.session_id.as_deref() == Some(session)
+                        && event.result == "ok"
+                })
+                .count()
+        };
+        let guest = passkey_authority_with_name_role(
+            data,
+            Some("Guest"),
+            crate::auth::RuntimePrincipalRole::Guest,
+        );
+        crate::auth::store_test_principal_root_protection(data, &guest.principal_id);
+        assert_eq!(
+            call(&app, LIST, &guest.system_token, None).await.0,
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(ok_rows(), 0, "a guest list writes no ok row");
+        let (status, body) = call(&app, LIST, &owner.system_token, None).await;
+        assert_ne!(status, StatusCode::FORBIDDEN, "{body}");
+        assert_eq!(ok_rows(), 1, "the owner's list confirms the ended session");
+        let _ = call(&app, LIST, &owner.system_token, None).await;
+        assert_eq!(ok_rows(), 1, "a second list does not confirm it again");
+    }
 }

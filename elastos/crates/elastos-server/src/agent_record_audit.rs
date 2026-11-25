@@ -59,14 +59,17 @@ pub(crate) fn repair_missing_retire(
     )
 }
 
-/// A `stopping` row is confirmed once. The next list, Stop, or Home start
-/// appends `agent.stopped` with result `ok` for that session when no final
-/// row has followed it.
-pub(crate) fn confirm_stopping_rows(data_dir: &Path) -> anyhow::Result<()> {
+/// Sessions whose latest `agent.stopped` row is still `stopping`.
+pub(crate) fn open_stopping_sessions(data_dir: &Path) -> anyhow::Result<Vec<String>> {
     let state = crate::auth::load_auth_state(data_dir)?;
-    let mut open: std::collections::HashMap<String, &RuntimeAuditEventV1> =
-        std::collections::HashMap::new();
-    for event in &state.audit {
+    Ok(open_stopping(&state.audit).into_keys().collect())
+}
+
+fn open_stopping<'a>(
+    audit: &'a [RuntimeAuditEventV1],
+) -> std::collections::HashMap<String, &'a RuntimeAuditEventV1> {
+    let mut open = std::collections::HashMap::new();
+    for event in audit {
         if event.event_type != "agent.stopped" {
             continue;
         }
@@ -79,11 +82,32 @@ pub(crate) fn confirm_stopping_rows(data_dir: &Path) -> anyhow::Result<()> {
             open.remove(&session);
         }
     }
+    open
+}
+
+/// A `stopping` row is confirmed once, and only when `session_has_ended`
+/// says that session is no longer running and has no plan effect in flight.
+/// Two callers cannot both append: the check and the append share one lock.
+pub(crate) fn confirm_stopping_rows(
+    data_dir: &Path,
+    session_has_ended: impl Fn(&str) -> bool,
+) -> anyhow::Result<()> {
+    use std::sync::Mutex;
+    static CONFIRM: Mutex<()> = Mutex::new(());
+    let _guard = CONFIRM.lock().unwrap_or_else(|error| error.into_inner());
+    let state = crate::auth::load_auth_state(data_dir)?;
+    let open = open_stopping(&state.audit);
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|duration| duration.as_secs())
         .unwrap_or(0);
     for event in open.into_values() {
+        let Some(session) = event.session_id.as_deref() else {
+            continue;
+        };
+        if !session_has_ended(session) {
+            continue;
+        }
         crate::auth::append_audit_event(
             data_dir,
             RuntimeAuditEventV1 {

@@ -1703,7 +1703,7 @@ fn a_stopping_row_is_confirmed_once_from_the_file() {
         },
     )
     .unwrap();
-    crate::agent_record_audit::confirm_stopping_rows(home.path()).unwrap();
+    crate::agent_record_audit::confirm_stopping_rows(home.path(), |_| true).unwrap();
     let stopped: Vec<_> = home
         .audit()
         .into_iter()
@@ -1721,7 +1721,7 @@ fn a_stopping_row_is_confirmed_once_from_the_file() {
         stopped.iter().filter(|event| event.result == "ok").count(),
         1
     );
-    crate::agent_record_audit::confirm_stopping_rows(home.path()).unwrap();
+    crate::agent_record_audit::confirm_stopping_rows(home.path(), |_| true).unwrap();
     let finals = home
         .audit()
         .into_iter()
@@ -1732,6 +1732,49 @@ fn a_stopping_row_is_confirmed_once_from_the_file() {
         })
         .count();
     assert_eq!(finals, 1, "a second read does not append another final row");
+}
+
+/// A session the plane still holds is not signed `ok`. The same file confirms
+/// once the caller says the session has ended.
+#[test]
+fn a_stopping_row_stays_open_while_the_session_has_not_ended() {
+    let home = Home::new();
+    let session = "session-still-running";
+    crate::auth::append_audit_event(
+        home.path(),
+        elastos_runtime::auth::RuntimeAuditEventV1 {
+            schema: elastos_runtime::auth::RuntimeAuditEventV1::SCHEMA.to_string(),
+            event_id: "audit:stop-plant:live".to_string(),
+            event_type: "agent.stopped".to_string(),
+            principal_id: Some(home.owner.principal_id.clone()),
+            proof_binding_id: Some(home.owner.proof_binding_id.clone()),
+            session_id: Some(session.to_string()),
+            challenge_id: None,
+            capsule_id: None,
+            result: "stopping".to_string(),
+            reason: "planted live stopping row".to_string(),
+            occurred_at: 10,
+            signer_did: None,
+            signature: None,
+        },
+    )
+    .unwrap();
+    crate::agent_record_audit::confirm_stopping_rows(home.path(), |_| false).unwrap();
+    let ok = |home: &Home| {
+        home.audit()
+            .into_iter()
+            .filter(|event| {
+                event.event_type == "agent.stopped"
+                    && event.session_id.as_deref() == Some(session)
+                    && event.result == "ok"
+            })
+            .count()
+    };
+    assert_eq!(ok(&home), 0, "a live session is not confirmed");
+    crate::agent_record_audit::confirm_stopping_rows(home.path(), |_| true).unwrap();
+    assert_eq!(ok(&home), 1, "the ended session is confirmed once");
+    crate::agent_record_audit::confirm_stopping_rows(home.path(), |_| true).unwrap();
+    assert_eq!(ok(&home), 1, "a second confirm does not append another ok");
 }
 
 #[test]
