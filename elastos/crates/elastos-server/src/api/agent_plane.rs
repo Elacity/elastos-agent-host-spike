@@ -145,6 +145,16 @@ pub(crate) struct AgentPlane {
     pub(crate) runtime: Arc<crate::runtime::Runtime>,
 }
 
+impl std::fmt::Debug for AgentPlane {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("AgentPlane")
+            .field("coords_path", &self.coords_path)
+            .field("data_dir", &self.data_dir)
+            .finish_non_exhaustive()
+    }
+}
+
 impl AgentPlane {
     /// Stop every live guest first, so each end revokes that guest's grants
     /// and closes its pending plans, then stop the listener.
