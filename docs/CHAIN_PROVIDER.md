@@ -171,11 +171,11 @@ capability:
 - `control_available`: stays false. Admission refuses `node_supervisor`.
 - `control_reason`: human-readable reason control is unavailable.
 
-Start, stop, and restart use explicit argv command config. The provider never
-accepts shell strings, never returns the command path, and never persists or
-returns raw node RPC URLs, credentials, ports, or process handles. A set
-`node_supervisor` is refused at init with `node_supervisor_refused`, before
-any stored network or supervisor changes. The fence does not run that program.
+Start, stop, and restart are refused with `managed_node_unavailable`. The
+provider does not run an operator program, does not accept shell strings, and
+does not return a command path, raw node RPC URLs, credentials, ports, or
+process handles. A set `node_supervisor` is refused at init with
+`node_supervisor_refused`, before any stored network or supervisor changes.
 The example below is the shape that refusal matches. Null leaves the key unset.
 
 System may render Start, Stop, and Restart controls only from a

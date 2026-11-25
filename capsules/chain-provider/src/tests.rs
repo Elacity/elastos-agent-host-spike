@@ -1810,6 +1810,18 @@ fn node_supervisor_is_refused_at_admission_and_does_not_run() {
 }
 
 #[test]
+fn a_null_node_supervisor_leaves_the_key_unset() {
+    let mut provider = ChainProvider::new();
+    let init = provider.handle(Request::Init {
+        config: json!({ "node_supervisor": null }),
+    });
+    assert!(
+        matches!(init, Response::Ok { .. }),
+        "null is unset, not invalid_config or node_supervisor_refused: {init:?}"
+    );
+}
+
+#[test]
 fn node_supervisor_on_a_remote_network_is_refused_at_admission() {
     let data_dir = TestDataDir::new();
     let mut provider = provider_with_rpc("https://example.invalid/rpc".to_string());
@@ -1822,11 +1834,7 @@ fn node_supervisor_on_a_remote_network_is_refused_at_admission() {
     .unwrap();
     fs::set_permissions(&program, fs::Permissions::from_mode(0o755)).unwrap();
 
-    let init = init_with_node_supervisor(
-        &mut provider,
-        "esc-local",
-        &program.to_string_lossy(),
-    );
+    let init = init_with_node_supervisor(&mut provider, "esc-local", &program.to_string_lossy());
     assert_eq!(error_code(init), "node_supervisor_refused");
     assert!(!marker.exists(), "admission ran the supervisor");
 }
