@@ -35,6 +35,37 @@ fn stat_identity(info: &libc::stat) -> (u64, u64) {
     (dev, info.st_ino)
 }
 
+/// Open the file the plan checked and require that same device and inode.
+///
+/// The open follows a symlink, because the plan recorded the resolved file.
+/// A directory, or a different file swapped in after the plan, is not that
+/// inode. The caller refuses by the library name.
+#[cfg(any(test, target_os = "linux"))]
+pub(super) fn open_pinned_regular_file(path: &CStr, dev: u64, ino: u64) -> Result<OwnedFd, i32> {
+    #[cfg(target_os = "linux")]
+    let flags = libc::O_PATH | libc::O_CLOEXEC;
+    #[cfg(not(target_os = "linux"))]
+    let flags = libc::O_RDONLY | libc::O_CLOEXEC;
+    let fd = unsafe { libc::open(path.as_ptr(), flags) };
+    if fd < 0 {
+        return Err(last_errno());
+    }
+    let file = unsafe { OwnedFd::from_raw_fd(fd) };
+    let mut info = MaybeUninit::<libc::stat>::uninit();
+    if unsafe { libc::fstat(file.as_raw_fd(), info.as_mut_ptr()) } < 0 {
+        return Err(last_errno());
+    }
+    let info = unsafe { info.assume_init() };
+    if info.st_mode & libc::S_IFMT != libc::S_IFREG {
+        return Err(libc::EISDIR);
+    }
+    let (got_dev, got_ino) = stat_identity(&info);
+    if got_dev != dev || got_ino != ino {
+        return Err(libc::ESTALE);
+    }
+    Ok(file)
+}
+
 /// Open `path` with `flags` and require the pinned device and inode.
 ///
 /// The caller passes [`DIRECTORY_OPEN_FLAGS`]. The returned descriptor is the
@@ -156,7 +187,7 @@ mod tests {
 
         let installer = include_str!("preexec_installer.rs");
         let add = installer
-            .split_once("let directory = if let Some(pin) = pinned")
+            .split_once("else if let Some(pin) = pinned")
             .expect("pinned root open")
             .1;
         let add = add
@@ -247,5 +278,55 @@ mod tests {
         )
         .expect_err("a changed root_dev is refused");
         assert_eq!(error, libc::ESTALE, "errno {error}");
+    }
+
+    #[test]
+    fn a_loader_swapped_to_another_file_or_a_directory_is_refused() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().unwrap();
+        let uid = unsafe { libc::geteuid() };
+        let arch = super::super::landlock_plan::LoaderArch::host();
+        let names: &[&str] = if cfg!(target_arch = "x86_64") {
+            &["ld-linux-x86-64.so.2", "libc.so.6", "libgcc_s.so.1"]
+        } else {
+            &["ld-linux-aarch64.so.1", "libc.so.6", "libgcc_s.so.1"]
+        };
+        for name in names {
+            let path = root.path().join("lib").join(name);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, b"library").unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let planned = super::super::landlock_plan::resolve_loader_paths(
+            super::super::rights_table::RuntimeProviderId::Localhost,
+            arch,
+            root.path(),
+            Some(&["/lib"]),
+            uid,
+        )
+        .unwrap();
+        let file = planned
+            .files
+            .iter()
+            .find(|file| file.path.ends_with("libc.so.6"))
+            .unwrap();
+        let path = CString::new(file.path.as_os_str().as_bytes()).unwrap();
+        assert!(
+            super::open_pinned_regular_file(&path, file.dev, file.ino).is_ok(),
+            "the planned file opens"
+        );
+        std::fs::remove_file(&file.path).unwrap();
+        std::fs::write(&file.path, b"other-file").unwrap();
+        std::fs::set_permissions(&file.path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(
+            super::open_pinned_regular_file(&path, file.dev, file.ino).unwrap_err(),
+            libc::ESTALE
+        );
+        std::fs::remove_file(&file.path).unwrap();
+        std::fs::create_dir(&file.path).unwrap();
+        assert_eq!(
+            super::open_pinned_regular_file(&path, file.dev, file.ino).unwrap_err(),
+            libc::EISDIR
+        );
     }
 }

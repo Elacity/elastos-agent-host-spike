@@ -105,6 +105,15 @@ pub(super) struct Prepared {
     root_pins: Vec<RootPin>,
 }
 
+impl Prepared {
+    pub(super) fn added_rule(&self, index: usize) -> Option<(&'static str, &std::path::Path)> {
+        self.plan
+            .rules
+            .get(index)
+            .map(|rule| (rule.0, rule.1.as_path()))
+    }
+}
+
 #[cfg(all(
     target_os = "linux",
     not(any(target_arch = "x86_64", target_arch = "aarch64"))
@@ -280,7 +289,13 @@ pub(super) unsafe fn install(
                     .iter()
                     .find(|pin| pin.index == index)
                     .copied();
-                let directory = if let Some(pin) = pinned {
+                let file_pin = prepared.plan.file_pins.get(index).copied().flatten();
+                let directory = if let Some((dev, ino)) = file_pin {
+                    match super::super::root_pin::open_pinned_regular_file(path, dev, ino) {
+                        Ok(file) => file,
+                        Err(errno) => return Err(errno),
+                    }
+                } else if let Some(pin) = pinned {
                     match super::super::root_pin::open_pinned_directory(
                         path,
                         super::super::root_pin::DIRECTORY_OPEN_FLAGS,
@@ -1020,8 +1035,9 @@ mod tests {
             uid,
         )
         .unwrap();
-        assert_eq!(got, paths);
-        assert!(got
+        let got_paths: Vec<_> = got.files.iter().map(|file| file.path.clone()).collect();
+        assert_eq!(got_paths, paths);
+        assert!(got_paths
             .iter()
             .all(|path| !path.to_string_lossy().contains("linux-gnu")));
         let abi = landlock_plan::kernel_abi().expect("this kernel has no Landlock");
@@ -1030,11 +1046,12 @@ mod tests {
             abi,
             handled: landlock_plan::handled_fs(abi),
             rules: got
+                .files
                 .iter()
-                .map(|path| {
+                .map(|file| {
                     landlock_plan::PathRule(
                         "LANDLOCK_LOADER_PATHS",
-                        path.clone(),
+                        file.path.clone(),
                         landlock_plan::BINARY,
                     )
                 })
@@ -1043,9 +1060,15 @@ mod tests {
             storage_ino: 0,
             root_dev: Vec::new(),
             root_ino: Vec::new(),
+            file_pins: got
+                .files
+                .iter()
+                .map(|file| file.pinned.then_some((file.dev, file.ino)))
+                .collect(),
+            omitted_libraries: got.omitted,
         };
         let prepared = prepare_path_allow(RuntimeProviderId::Localhost, &admitted, plan).unwrap();
-        let library = CString::new(got[1].as_os_str().as_bytes()).unwrap();
+        let library = CString::new(got_paths[1].as_os_str().as_bytes()).unwrap();
         let hidden = plant_library(root.path(), "/lib/hidden.so");
         let hidden = CString::new(hidden.as_os_str().as_bytes()).unwrap();
         let report = std::fs::File::open("/dev/null").unwrap();
