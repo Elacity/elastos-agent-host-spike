@@ -359,7 +359,26 @@ fn launch(
                     && requested_exe.is_some()
                     && requested_exe != launcher_exe
                 {
-                    return Ok(pid);
+                    let proc_status =
+                        std::fs::read_to_string(format!("/proc/{pid}/status")).unwrap_or_default();
+                    if super::super::landlock_plan::child_confinement_refusal(&proc_status)
+                        .is_none()
+                    {
+                        return Ok(pid);
+                    }
+                    unsafe { libc::kill(pid, libc::SIGKILL) };
+                    let reason = super::super::landlock_plan::child_confinement_refusal(&proc_status)
+                        .unwrap_or(
+                            "provider start is refused: the child is not confined (NoNewPrivs and Seccomp)",
+                        )
+                        .to_string();
+                    let mut reaped = 0;
+                    while unsafe { libc::waitpid(pid, &mut reaped, 0) } < 0 {
+                        if std::io::Error::last_os_error().raw_os_error() != Some(libc::EINTR) {
+                            break;
+                        }
+                    }
+                    return Err(LaunchError::ChildFailed { pid, reason });
                 }
                 // The writer closed before exec, the executable changed, or
                 // the child exited while /proc was read. Refuse and own cleanup.
@@ -369,13 +388,13 @@ fn launch(
             if waited == pid {
                 return Err(LaunchError::ChildFailed {
                     pid,
-                    reason: decode(&[]),
+                    reason: decode(&[], Some(prepared)),
                 });
             }
             if std::io::Error::last_os_error().raw_os_error() != Some(libc::EINTR) {
                 return Err(LaunchError::ChildFailed {
                     pid,
-                    reason: decode(&[]),
+                    reason: decode(&[], Some(prepared)),
                 });
             }
         }
@@ -386,14 +405,14 @@ fn launch(
         }
         return Err(LaunchError::ChildFailed {
             pid,
-            reason: decode(&[]),
+            reason: decode(&[], Some(prepared)),
         });
     }
     let reason = match read_failure {
         Some(ref error) => {
             format!("seccomp install report refused: the child report could not be read: {error}")
         }
-        None => decode(&bytes[..length]),
+        None => decode(&bytes[..length], Some(prepared)),
     };
     let mut status = 0;
     if read_failure.is_some() {
@@ -465,7 +484,7 @@ fn write_record_and_exit(fd: i32, record: &[u8; RECORD_LEN]) -> ! {
     unsafe { libc::_exit(127) }
 }
 
-fn decode(bytes: &[u8]) -> String {
+fn decode(bytes: &[u8], prepared: Option<&preexec_installer::Prepared>) -> String {
     if bytes.len() != RECORD_LEN {
         return format!("seccomp install report refused: the child reported {} bytes and one record is {RECORD_LEN}", bytes.len());
     }
@@ -477,6 +496,16 @@ fn decode(bytes: &[u8]) -> String {
     }
     if tag == DUP2_TAG {
         return format!("provider start is refused: dup2 failed with errno {errno}");
+    }
+    if tag == 3 {
+        if let Some((name, path)) =
+            prepared.and_then(|prepared| prepared.added_rule(index as usize))
+        {
+            return format!(
+                "landlock install refused: {name} {} could not be added with errno {errno}",
+                path.display()
+            );
+        }
     }
     preexec_installer::Failure::from_record(tag, index, errno)
         .map(|failure| failure.to_string())
@@ -530,18 +559,56 @@ mod tests {
     fn decoder_refuses_invalid_records_and_names_dup2() {
         for length in [RECORD_LEN - 1, RECORD_LEN + 1] {
             assert_eq!(
-                decode(&vec![0; length]),
+                decode(&vec![0; length], None),
                 format!("seccomp install report refused: the child reported {length} bytes and one record is {RECORD_LEN}")
             );
         }
         assert_eq!(
-            decode(&error_record(9, libc::EACCES)),
+            decode(&error_record(9, libc::EACCES), None),
             "seccomp install report refused: the child named step 9, which is no install step"
         );
         assert_eq!(
-            decode(&error_record(DUP2_TAG, libc::EBADF)),
+            decode(&error_record(DUP2_TAG, libc::EBADF), None),
             "provider start is refused: dup2 failed with errno 9"
         );
+    }
+
+    #[test]
+    fn an_add_refusal_names_the_rule_and_its_path() {
+        let root = tempfile::tempdir().unwrap();
+        let bindings = bindings_for(root.path(), Path::new("/bin/true"));
+        let rows = did_rows();
+        let prepared =
+            preexec_installer::prepare(RuntimeProviderId::Did, &rows, &bindings).unwrap();
+        let (name, path) = prepared.added_rule(0).expect("rule 0");
+        let text = decode(&error_record(3, libc::EACCES), Some(&prepared));
+        assert!(text.contains(name), "{text}");
+        assert!(text.contains(&path.display().to_string()), "{text}");
+        assert!(text.contains("could not be added"), "{text}");
+    }
+
+    #[test]
+    fn an_unconfined_child_is_refused_by_name_and_killed() {
+        let pid = unsafe { libc::fork() };
+        assert!(pid >= 0);
+        if pid == 0 {
+            loop {
+                unsafe { libc::pause() };
+            }
+        }
+        let text = std::fs::read_to_string(format!("/proc/{pid}/status")).unwrap_or_default();
+        let reason = super::super::landlock_plan::child_confinement_refusal(&text);
+        unsafe { libc::kill(pid, libc::SIGKILL) };
+        let mut status = 0;
+        while unsafe { libc::waitpid(pid, &mut status, 0) } < 0 {
+            if std::io::Error::last_os_error().raw_os_error() != Some(libc::EINTR) {
+                break;
+            }
+        }
+        let reason = reason.expect("an unconfined child is refused");
+        assert!(reason.contains("NoNewPrivs"), "{reason}");
+        assert!(reason.contains("Seccomp"), "{reason}");
+        assert!(!text.contains("NoNewPrivs:\t1") || !text.contains("Seccomp:\t2"));
     }
 
     #[test]
@@ -580,10 +647,16 @@ mod tests {
             }
             other => panic!("the failed installer must refuse the launch: {other:?}"),
         };
+        let (name, path) = prepared
+            .added_rule(expected_rule)
+            .expect("the storage rule has a name and a path");
         assert_eq!(
             reason,
-            format!("landlock install refused: the path rule {expected_rule} could not be added with errno 2"),
-            "the failed installer must report its step"
+            format!(
+                "landlock install refused: {name} {} could not be added with errno 2",
+                path.display()
+            ),
+            "the failed installer must name the rule and its path"
         );
         let mut status = 0;
         assert_eq!(
@@ -876,13 +949,23 @@ mod tests {
         assert_eq!(mode, 0o755, "the canary and its permissions stay unchanged");
         match result {
             Err(LaunchError::ChildFailed { reason, .. }) => {
+                let prepared = preexec_installer::prepare(
+                    RuntimeProviderId::Did,
+                    &rows,
+                    &bindings_for(&root, Path::new("/bin/true")),
+                )
+                .unwrap();
+                let (name, path) = prepared
+                    .added_rule(index)
+                    .expect("the storage rule has a name and a path");
                 assert_eq!(
                     reason,
                     format!(
-                        "landlock install refused: the path rule {index} could not be added with errno {}",
+                        "landlock install refused: {name} {} could not be added with errno {}",
+                        path.display(),
                         libc::ESTALE
                     ),
-                    "a swapped storage root must refuse"
+                    "a swapped storage root must name the rule and its path"
                 );
             }
             Ok(pid) => {
