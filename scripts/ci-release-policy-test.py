@@ -1813,6 +1813,13 @@ class ReleasePolicyTests(unittest.TestCase):
         self.assertFalse(glob_regex("elastos/crates/elastos-protected-content-*/**").match("elastos/crates/x/elastos-protected-content-a/b"))
 
     def test_only_pr_runs_share_a_cancellable_concurrency_group(self):
+        # A burst of pushes to spike/agent-host shares one group and does not
+        # cancel a run that has started, so the header must not say every merge.
+        self.assertNotIn("runs for every merge onto this branch", SOURCE)
+        self.assertIn(
+            "the macOS proof runs for that started merge and for the newest merge still queued on this branch",
+            SOURCE,
+        )
         concurrency = SOURCE.split("\nconcurrency:\n", 1)[1].split("\nenv:\n", 1)[0]
         group = field(concurrency, "group")
         for event, ref, _, _, _ in CASES:
