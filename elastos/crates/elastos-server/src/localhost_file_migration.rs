@@ -18,16 +18,7 @@
 //! calls it before `ensure_file_backed_roots`. When any of the five is already
 //! present, that call does not walk. An empty root that
 //! is still present is not moved aside. A matching marker still walks, so an
-//! older build's later device-key file is rewritten. A file is an envelope only when
-//! `is_encrypted_envelope` accepts it, in any field order. The walk reads a short
-//! header first. If that header cannot start an envelope, the file is left alone
-//! and its body is not read. A device-key envelope is rewritten onto the file key,
-//! one file at a time, through the same temporary file, check, and rename, up to
-//! `SEALED_READ_HARD_LIMIT`. That is the most `read_sealed_localhost_file` will
-//! load: one `Vec` from `read_to_end`, then a second `Vec` from hex-decoding the
-//! ciphertext. The rewrite holds about two copies of the file and drops the first
-//! before it builds the new envelope. A longer file whose header can start an
-//! envelope is left untouched and named; every other file still migrates. A later
+//! older build's later device-key file is rewritten. A new-format header is settled unread. A later
 //! start uses the size and time stored beside the marker and does not open a file
 //! that still matches. The walk logs a count every few seconds. A waiter on
 //! `identity/localhost-file-key.lock` logs that. The walk runs from
@@ -325,8 +316,8 @@ fn localhost_refused(path: &Path, why: &str) -> anyhow::Error {
         )
     } else if why.contains("changed") {
         ("changed while read", "Leave it unchanged, then restart.")
-    } else if why.contains("cut off") {
-        ("cut off", "Remove it, then restart.")
+    } else if why.contains("marker link") {
+        ("linked", "Remove the link, then restart.")
     } else if why.contains("decrypt") {
         ("not decryptable", "Remove it, then restart.")
     } else if why.contains("not a directory") {
@@ -459,39 +450,31 @@ fn opened_identity(meta: &std::fs::Metadata) -> OpenedIdentity {
     }
 }
 
-/// Temps live in the walk's own directory, named by the relative path, so a
-/// person's file is never removed because its name looks like a temp.
 #[cfg(unix)]
-fn migration_root() -> std::path::PathBuf {
-    MIGRATION_ROOT.with(|slot| slot.borrow().clone())
+fn is_owned_rewrite_temp(name: &std::ffi::OsStr) -> bool {
+    let Some(hex_name) = name
+        .to_str()
+        .and_then(|name| name.strip_prefix('.'))
+        .and_then(|rest| rest.strip_suffix(LOCALHOST_REWRITE_SUFFIX))
+    else {
+        return false;
+    };
+    hex_name.len() == 64 && hex_name.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
-#[cfg(unix)]
 fn rewrite_temp_path(path: &Path) -> std::io::Result<std::path::PathBuf> {
     use sha2::Digest;
-    use std::os::unix::fs::DirBuilderExt;
 
-    let dir = migration_root().join("identity").join(LOCALHOST_TEMP_DIR);
-    match std::fs::symlink_metadata(&dir) {
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-            std::fs::DirBuilder::new().mode(0o700).create(&dir)?;
-        }
-        Err(err) => return Err(err),
-        Ok(meta) if meta.file_type().is_symlink() || !meta.is_dir() => {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "localhost temp directory is not a directory",
-            ));
-        }
-        Ok(_) => {}
-    }
+    let parent = path
+        .parent()
+        .ok_or_else(|| std::io::Error::other("localhost file has no directory"))?;
     let mut hasher = sha2::Sha256::new();
     hasher.update(relative_path(path).as_bytes());
     let digest: [u8; 32] = hasher.finalize().into();
     let mut name = std::ffi::OsString::from(".");
     name.push(hex::encode(digest));
     name.push(LOCALHOST_REWRITE_SUFFIX);
-    Ok(dir.join(name))
+    Ok(parent.join(name))
 }
 
 #[cfg(unix)]
@@ -628,25 +611,31 @@ fn seen_file(meta: &std::fs::Metadata, hard: bool) -> SeenFile {
 fn parse_seen(bytes: &[u8]) -> std::collections::HashMap<String, SeenFile> {
     let mut seen = std::collections::HashMap::new();
     let mut lines = std::str::from_utf8(bytes).unwrap_or("").lines();
-    if lines.next() != Some("1") {
+    if lines.next() != Some("2") {
         return seen;
     }
     for line in lines {
         let mut parts = line.splitn(5, ' ');
-        let (Some(len), Some(mtime), Some(mtime_nsec), Some(flag), Some(rel)) = (
+        let (Some(len), Some(mtime), Some(mtime_nsec), Some(flag), Some(hex_rel)) = (
             parts.next().and_then(|text| text.parse().ok()),
             parts.next().and_then(|text| text.parse().ok()),
             parts.next().and_then(|text| text.parse().ok()),
             parts.next(),
             parts.next(),
         ) else {
-            continue;
+            return std::collections::HashMap::new();
+        };
+        let Some(rel) = hex::decode(hex_rel)
+            .ok()
+            .and_then(|raw| String::from_utf8(raw).ok())
+        else {
+            return std::collections::HashMap::new();
         };
         if rel.is_empty() || (flag != "s" && flag != "h") {
-            continue;
+            return std::collections::HashMap::new();
         }
         seen.insert(
-            rel.to_string(),
+            rel,
             SeenFile {
                 len,
                 mtime,
@@ -699,13 +688,14 @@ fn write_seen(
 ) -> anyhow::Result<()> {
     let mut keys: Vec<&String> = seen.keys().collect();
     keys.sort();
-    let mut text = String::from("1\n");
+    let mut text = String::from("2\n");
     for key in keys {
         let item = &seen[key];
         let flag = if item.hard { "h" } else { "s" };
+        let coded = hex::encode(key.as_bytes());
         text.push_str(&format!(
             "{} {} {} {} {}\n",
-            item.len, item.mtime, item.mtime_nsec, flag, key
+            item.len, item.mtime, item.mtime_nsec, flag, coded
         ));
     }
     let parent = path
@@ -790,17 +780,15 @@ fn migrate_localhost_envelope(
         .read(&mut header)
         .with_context(|| localhost_refused(path, "cannot be read"))?;
     note_bytes_read(read);
-    // A `{"version":2` header is not proof. The GCM tag is the last 16 bytes,
-    // so this file is settled only inside the hard limit and only when this
-    // Home's file key opens the whole body. A foreign key fails that check.
-    // A cut-off body is not an envelope. A longer file is not read past here.
+    if localhost_provider::header_is_file_key_envelope(&header[..read]) {
+        return Ok(MigratedFile::Settled);
+    }
     if localhost_provider::header_rules_out_envelope(&header[..read]) {
         return Ok(MigratedFile::Settled);
     }
     if opened.len > localhost_provider::SEALED_READ_HARD_LIMIT {
         return Ok(MigratedFile::OverHard);
     }
-    let claims_file_key = localhost_provider::header_is_file_key_envelope(&header[..read]);
     let mut bytes = Vec::new();
     if bytes.try_reserve(opened.len as usize).is_err() {
         return Ok(MigratedFile::OverHard);
@@ -819,9 +807,6 @@ fn migrate_localhost_envelope(
     run_before_replace(path);
     opened_file_still_matches(path, &opened)?;
     match localhost_provider::rekey_device_envelope(device_key, file_key, bytes) {
-        Ok(localhost_provider::RekeyOutcome::NotEnvelope) if claims_file_key => {
-            Err(localhost_refused(path, "is cut off"))
-        }
         Ok(localhost_provider::RekeyOutcome::NotEnvelope)
         | Ok(localhost_provider::RekeyOutcome::AlreadyFileKey) => Ok(MigratedFile::Settled),
         Ok(localhost_provider::RekeyOutcome::Rewritten(sealed)) => {
@@ -849,6 +834,18 @@ fn directory_names(dir: &Path) -> anyhow::Result<Vec<std::ffi::OsString>> {
 }
 
 #[cfg(unix)]
+fn sweep_rewrite_temps(dir: &Path) -> anyhow::Result<()> {
+    for name in directory_names(dir)? {
+        if !is_owned_rewrite_temp(&name) {
+            continue;
+        }
+        let path = dir.join(name);
+        std::fs::remove_file(&path)
+            .map_err(|err| localhost_write_refused(&path, &err.to_string()))?;
+    }
+    Ok(())
+}
+
 fn migrate_localhost_tree(
     dir: &Path,
     device_key: &[u8; 32],
@@ -859,6 +856,7 @@ fn migrate_localhost_tree(
 ) -> anyhow::Result<()> {
     use std::os::unix::fs::MetadataExt;
 
+    sweep_rewrite_temps(dir)?;
     let names = directory_names(dir)?;
     for name in &names {
         let path = dir.join(name);
@@ -866,7 +864,12 @@ fn migrate_localhost_tree(
             .with_context(|| localhost_refused(&path, "cannot be read"))?;
         let file_type = meta.file_type();
         if file_type.is_symlink() {
-            return Err(localhost_refused(&path, "is a link"));
+            let why = if std::fs::metadata(&path).is_ok_and(|meta| meta.is_dir()) {
+                "is a directory link"
+            } else {
+                "is a link"
+            };
+            return Err(localhost_refused(&path, why));
         }
         if file_type.is_dir() {
             migrate_localhost_tree(&path, device_key, file_key, seen, next, over_hard)?;
@@ -932,7 +935,7 @@ fn read_marker_plan(marker: &Path, file_key: &[u8; 32]) -> anyhow::Result<Marker
         Err(_) => return Err(localhost_refused(marker, "cannot be read")),
     };
     if meta.file_type().is_symlink() {
-        return Err(localhost_refused(marker, "is a link"));
+        return Err(localhost_refused(marker, "is a marker link"));
     }
     if !meta.is_file() {
         return Err(localhost_refused(marker, "is not a file"));

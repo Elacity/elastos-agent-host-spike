@@ -7,10 +7,8 @@ use elastos_common::CapsuleManifest;
 use elastos_runtime::provider::ProviderRegistry;
 
 fn localhost_provider_status(data_dir: &std::path::Path, scheme: &str, fallback: &str) -> String {
-    if scheme == "localhost" {
-        if let Some(sentence) = crate::local_apps::local_apps_refusal(data_dir) {
-            return sentence;
-        }
+    if scheme == "localhost" && crate::local_apps::local_apps_refusal(data_dir).is_some() {
+        return crate::local_apps::LOCAL_APPS_OFF_TO_OTHERS.to_string();
     }
     fallback.to_string()
 }
@@ -274,7 +272,8 @@ mod tests {
             .inspect_get("provider:localhost")
             .await
             .unwrap();
-        assert_eq!(entry.status, sentence);
+        assert_eq!(entry.status, crate::local_apps::LOCAL_APPS_OFF_TO_OTHERS);
+        assert!(!entry.status.contains("note.bin"));
         let capsules = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../capsules");
         let catalog =
             CatalogInspectSource::new(capsules, Arc::downgrade(&registry), PathBuf::new());
@@ -282,6 +281,8 @@ mod tests {
             .inspect_get("capsule:localhost-provider")
             .await
             .unwrap();
-        assert_eq!(entry.status, sentence);
+        assert_eq!(entry.status, crate::local_apps::LOCAL_APPS_OFF_TO_OTHERS);
+        assert!(!entry.status.contains("note.bin"), "{}", entry.status);
+        assert!(sentence.contains("note.bin"));
     }
 }

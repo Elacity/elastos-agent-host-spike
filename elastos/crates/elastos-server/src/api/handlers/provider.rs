@@ -157,7 +157,14 @@ pub async fn provider_proxy(
     let response = state.registry.send_raw(&scheme, &request).await;
 
     let response = match response {
-        Ok(value) => value,
+        Ok(mut value) => {
+            if scheme == "inspect" && owner_shell {
+                if let Some(sentence) = crate::local_apps::local_apps_refusal(&state.data_dir) {
+                    crate::inspect_provider::reveal_localhost_file_name(&mut value, &sentence);
+                }
+            }
+            value
+        }
         Err(e) => {
             if scheme.eq_ignore_ascii_case("localhost") {
                 if let ProviderError::Provider(ref message) = e {
@@ -1953,6 +1960,98 @@ mod tests {
         .unwrap_err();
         assert_eq!(err.0, StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(err.1, "Local apps are off.");
+
+        let registry = Arc::new(ProviderRegistry::new());
+        registry
+            .register(Arc::new(crate::local_apps::RefusingLocalhostProvider::new(
+                sentence.to_string(),
+            )))
+            .await;
+        let source: Arc<dyn crate::inspect_provider::InspectSource> =
+            Arc::new(crate::inspect_provider::RegistryInspectSource::new(
+                Arc::downgrade(&registry),
+                home.path().to_path_buf(),
+            ));
+        let inspect: Arc<dyn Provider> =
+            Arc::new(crate::inspect_provider::InspectProvider::with_registry(
+                source,
+                Arc::downgrade(&registry),
+            ));
+        registry.register(inspect.clone()).await;
+        registry
+            .register_sub_provider("inspect", inspect)
+            .await
+            .unwrap();
+        let inspect_state = ProviderProxyState {
+            data_dir: home.path().to_path_buf(),
+            registry,
+            capability_manager: Some(capability_manager.clone()),
+        };
+        let owner = provider_proxy(
+            State(inspect_state.clone()),
+            Extension(Session::new(SessionType::Shell, None)),
+            Path(("inspect".to_string(), "capsules".to_string())),
+            HeaderMap::new(),
+            "{}".to_string(),
+        )
+        .await
+        .expect("the owner shell reads inspect");
+        let owner_text = owner.0.to_string();
+        assert!(owner_text.contains("secret.bin"), "{owner_text}");
+        let capsule = Session::new(SessionType::Capsule, None);
+        let token = capability_manager.grant(
+            capsule.id.as_str(),
+            ResourceId::new("elastos://inspect/capsules"),
+            Action::Read,
+            TokenConstraints::default(),
+            None,
+        );
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "X-Capability-Token",
+            HeaderValue::from_str(&token.to_base64().unwrap()).unwrap(),
+        );
+        let capsule_body = provider_proxy(
+            State(inspect_state.clone()),
+            Extension(capsule),
+            Path(("inspect".to_string(), "capsules".to_string())),
+            headers,
+            "{}".to_string(),
+        )
+        .await
+        .expect("a capsule reads inspect");
+        let capsule_text = capsule_body.0.to_string();
+        assert!(
+            capsule_text.contains("Local apps are off."),
+            "{capsule_text}"
+        );
+        assert!(!capsule_text.contains("secret.bin"), "{capsule_text}");
+        let guest_session = Session::new(SessionType::Shell, None);
+        let guest_token = capability_manager.grant(
+            guest_session.id.as_str(),
+            ResourceId::new("elastos://inspect/capsules"),
+            Action::Read,
+            TokenConstraints::default(),
+            None,
+        );
+        let mut headers = HeaderMap::new();
+        headers.insert("X-Elastos-Capsule-Id", "guest-app".parse().unwrap());
+        headers.insert(
+            "X-Capability-Token",
+            HeaderValue::from_str(&guest_token.to_base64().unwrap()).unwrap(),
+        );
+        let guest_body = provider_proxy(
+            State(inspect_state),
+            Extension(guest_session),
+            Path(("inspect".to_string(), "capsules".to_string())),
+            headers,
+            "{}".to_string(),
+        )
+        .await
+        .expect("a guest shell reads inspect");
+        let guest_text = guest_body.0.to_string();
+        assert!(guest_text.contains("Local apps are off."), "{guest_text}");
+        assert!(!guest_text.contains("secret.bin"), "{guest_text}");
 
         let registry = Arc::new(ProviderRegistry::new());
         registry

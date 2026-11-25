@@ -84,6 +84,44 @@ impl InspectProvider {
     }
 }
 
+fn localhost_named(object: &serde_json::Map<String, Value>) -> bool {
+    let id = object.get("id").and_then(Value::as_str).unwrap_or("");
+    let name = object.get("name").and_then(Value::as_str).unwrap_or("");
+    id == "provider:localhost"
+        || id == "capsule:localhost-provider"
+        || name == "localhost"
+        || name == "localhost-provider"
+}
+
+pub(crate) fn reveal_localhost_file_name(value: &mut Value, sentence: &str) {
+    fn walk(value: &mut Value, sentence: &str, inside: bool) {
+        match value {
+            Value::Array(items) => {
+                for item in items {
+                    walk(item, sentence, inside);
+                }
+            }
+            Value::Object(object) => {
+                let here = inside || localhost_named(object);
+                if here {
+                    for key in ["state", "status"] {
+                        if object.get(key).and_then(Value::as_str)
+                            == Some(crate::local_apps::LOCAL_APPS_OFF_TO_OTHERS)
+                        {
+                            object.insert(key.to_string(), sentence.to_string().into());
+                        }
+                    }
+                }
+                for child in object.values_mut() {
+                    walk(child, sentence, here);
+                }
+            }
+            _ => {}
+        }
+    }
+    walk(value, sentence, false);
+}
+
 fn ok(data: Value) -> Value {
     json!({ "status": "ok", "data": data })
 }

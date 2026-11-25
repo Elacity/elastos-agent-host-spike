@@ -88,7 +88,10 @@ impl From<ProviderError> for StorageApiError {
             }
             ProviderError::Provider(m) => {
                 match crate::local_apps::sentence_from_local_apps_provider_error(&m) {
-                    Some(sentence) => StorageApiError::LocalApps(sentence.to_string()),
+                    // No caller is known here, so the file name stays in the map.
+                    Some(_) => StorageApiError::LocalApps(
+                        crate::local_apps::LOCAL_APPS_OFF_TO_OTHERS.to_string(),
+                    ),
                     None => StorageApiError::Internal(m),
                 }
             }
@@ -1193,7 +1196,10 @@ mod tests {
             crate::local_apps::marked_local_apps_refusal(sentence),
         );
         match StorageApiError::from(marked) {
-            StorageApiError::LocalApps(got) => assert_eq!(got, sentence),
+            StorageApiError::LocalApps(got) => {
+                assert_eq!(got, crate::local_apps::LOCAL_APPS_OFF_TO_OTHERS);
+                assert!(!got.contains("note.bin"), "{got}");
+            }
             other => panic!("{other:?}"),
         }
         let foreign = elastos_runtime::provider::ProviderError::Provider(

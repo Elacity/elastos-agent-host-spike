@@ -2059,6 +2059,11 @@ pub(super) async fn gateway_provider_proxy(
             }),
         }
     };
+    if scheme == "inspect" && launch_principal_is_admin(&state.data_dir, &context) {
+        if let Some(sentence) = crate::local_apps::local_apps_refusal(&state.data_dir) {
+            crate::inspect_provider::reveal_localhost_file_name(&mut response, &sentence);
+        }
+    }
     let mut response_status = StatusCode::OK;
     if scheme == "model" {
         if let Some(refusal) = local_model_request_expiry_refusal(&request, &response) {
@@ -3999,6 +4004,17 @@ pub(super) fn provider_proxy_runtime_metadata_field(request: &serde_json::Value)
 const HOSTED_RUN_ADMIN_ONLY: &str =
     "Hosted AI on this Home is for admins. Local models are still available.";
 
+fn launch_principal_is_admin(data_dir: &std::path::Path, context: &HomeLaunchTokenContext) -> bool {
+    context
+        .proof_binding_id()
+        .and_then(|proof| crate::auth::load_principal_for_proof_binding(data_dir, proof).ok())
+        .is_some_and(|principal| {
+            crate::auth::ensure_proof_binding_not_revoked(&principal).is_ok()
+                && principal.principal_id == context.principal_id()
+                && crate::auth::is_admin(&principal)
+        })
+}
+
 /// Hosted AI spends this Home's paid connection, so in 0.8.0 only an admin's
 /// run may use a hosted offer. Other offers are not affected.
 fn hosted_run_allowed(
@@ -4010,14 +4026,7 @@ fn hosted_run_allowed(
     if !crate::api::model_provider_config::is_hosted_offer_id(offer_id) {
         return true;
     }
-    context
-        .proof_binding_id()
-        .and_then(|proof| crate::auth::load_principal_for_proof_binding(data_dir, proof).ok())
-        .is_some_and(|principal| {
-            crate::auth::ensure_proof_binding_not_revoked(&principal).is_ok()
-                && principal.principal_id == context.principal_id()
-                && crate::auth::is_admin(&principal)
-        })
+    launch_principal_is_admin(data_dir, context)
 }
 
 pub(super) fn normalize_model_provider_request(

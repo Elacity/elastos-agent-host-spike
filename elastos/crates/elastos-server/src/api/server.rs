@@ -627,6 +627,29 @@ pub(crate) mod tests {
         pending_store: Arc<PendingRequestStore>,
         data_dir: Option<PathBuf>,
     ) -> Router {
+        build_test_router(
+            runtime,
+            session_registry,
+            capability_manager,
+            capability_store,
+            pending_store,
+            data_dir.clone(),
+            data_dir,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn build_test_router(
+        runtime: Arc<Runtime>,
+        session_registry: Arc<SessionRegistry>,
+        capability_manager: Arc<CapabilityManager>,
+        capability_store: Arc<elastos_runtime::capability::CapabilityStore>,
+        pending_store: Arc<PendingRequestStore>,
+        local_apps_dir: Option<PathBuf>,
+        data_dir: Option<PathBuf>,
+        provider_registry: Option<Arc<ProviderRegistry>>,
+    ) -> Router {
         build_router(ServerConfig {
             runtime,
             session_registry,
@@ -634,13 +657,13 @@ pub(crate) mod tests {
             capability_store,
             pending_store,
             namespace_store: None,
-            provider_registry: None,
+            provider_registry,
             audit_log: None,
             identity_state: None,
             docs_dir: None,
             addr: "127.0.0.1:0".to_string(),
             capsule_dir: None,
-            local_apps_dir: data_dir.clone(),
+            local_apps_dir,
             data_dir,
             tls_config: None,
             supervisor: None,
@@ -692,17 +715,72 @@ pub(crate) mod tests {
         assert!(wrong.is_empty(), "{wrong:#?}");
     }
 
-    #[test]
-    fn the_local_apps_refusal_uses_the_home_before_the_public_tree() {
-        let source = include_str!("server.rs");
-        let start = source
-            .find("let refusal_dir = ")
-            .expect("build_router names the home for the refusal");
-        let line = source[start..].lines().next().unwrap();
-        assert_eq!(
-            line.trim(),
-            "let refusal_dir = local_apps_dir.or(data_dir.clone()).unwrap_or_default();"
+    #[tokio::test]
+    async fn the_local_apps_refusal_uses_the_home_before_the_public_tree() {
+        use axum::body::Body;
+        use axum::http::header::AUTHORIZATION;
+        use elastos_runtime::session::SessionType;
+        use elastos_storage::providers::LocalFSProvider;
+        use tower::ServiceExt;
+
+        let _guard = crate::local_apps::lock_local_apps_for_test();
+        let home = tempfile::tempdir().unwrap();
+        let public = tempfile::tempdir().unwrap();
+        let home_sentence =
+            "Users/home-secret.bin is not readable. Make it readable, then restart.";
+        let public_sentence =
+            "Users/public-secret.bin is not readable. Make it readable, then restart.";
+        crate::local_apps::set_local_apps_refusal(home.path(), Some(home_sentence.to_string()));
+        crate::local_apps::set_local_apps_refusal(public.path(), Some(public_sentence.to_string()));
+        let storage = Arc::new(
+            LocalFSProvider::new(home.path().join("storage"))
+                .await
+                .unwrap(),
         );
+        let runtime = Runtime::with_providers_and_component(storage, Vec::new(), None);
+        let audit = Arc::new(AuditLog::new());
+        let sessions = Arc::new(SessionRegistry::new(audit.clone()));
+        let shell = sessions.create_session(SessionType::Shell, None).await;
+        let (store, metrics) = (
+            Arc::new(elastos_runtime::capability::CapabilityStore::new()),
+            Arc::new(elastos_runtime::primitives::metrics::MetricsManager::new()),
+        );
+        let manager = Arc::new(CapabilityManager::new(
+            store.clone(),
+            audit.clone(),
+            metrics,
+        ));
+        let pending = Arc::new(PendingRequestStore::new(audit));
+        let app = build_test_router(
+            Arc::new(runtime),
+            sessions,
+            manager,
+            store,
+            pending,
+            Some(home.path().to_path_buf()),
+            Some(public.path().to_path_buf()),
+            Some(Arc::new(ProviderRegistry::new())),
+        );
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/localhost")
+                    .header(AUTHORIZATION, format!("Bearer {}", shell.token))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            axum::http::StatusCode::SERVICE_UNAVAILABLE
+        );
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let text = String::from_utf8(body.to_vec()).unwrap();
+        assert_eq!(text, home_sentence);
+        assert!(!text.contains("public-secret.bin"), "{text}");
     }
 
     #[tokio::test]

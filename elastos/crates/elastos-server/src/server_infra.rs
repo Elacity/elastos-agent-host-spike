@@ -5479,85 +5479,352 @@ mod tests {
     }
 
     #[test]
-    fn a_version_2_file_is_settled_only_when_our_key_opens_it() {
+    fn a_new_format_file_is_settled_from_its_header() {
+        let _guard = LocalAppsGuard::lock();
+        let device_key = [0x93; 32];
+        let file_key = expected_localhost_file_key(&device_key);
+        let root = TempDir::new().unwrap();
+        let users = root.path().join("Users");
+        fs::create_dir_all(&users).unwrap();
+        let prefix = localhost_provider::FILE_KEY_ENVELOPE_PREFIX;
+        assert!(
+            localhost_provider::encrypt_file_key_bytes(&file_key, b"ours")
+                .unwrap()
+                .starts_with(prefix)
+        );
+        assert!(!localhost_provider::header_is_file_key_envelope(
+            br#"{"version":20"#
+        ));
+        assert!(!localhost_provider::header_is_file_key_envelope(
+            br#"{"version":2"#
+        ));
+        assert!(!localhost_provider::header_is_file_key_envelope(
+            br#"{"version":2,"a":1}"#
+        ));
+
+        let ours = users.join("ours.bin");
+        let ours_bytes = localhost_provider::encrypt_file_key_bytes(&file_key, b"ours").unwrap();
+        fs::write(&ours, &ours_bytes).unwrap();
+        let foreign = users.join("foreign.bin");
+        let foreign_bytes =
+            localhost_provider::encrypt_file_key_bytes(&[0x94; 32], b"not-ours").unwrap();
+        fs::write(&foreign, &foreign_bytes).unwrap();
+        let cut = users.join("cut.bin");
+        fs::write(&cut, prefix).unwrap();
+        let huge = users.join("huge-v2.bin");
+        fs::write(&huge, prefix).unwrap();
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&huge)
+            .unwrap()
+            .set_len(localhost_provider::SEALED_READ_HARD_LIMIT + 1)
+            .unwrap();
+        let plain = users.join("plain.json");
+        let plain_bytes = br#"{"version":2,"a":1}"#;
+        fs::write(&plain, plain_bytes).unwrap();
+        let twenty = users.join("twenty.json");
+        let twenty_bytes = br#"{"version":20,"nonce":"abcd"}"#;
+        fs::write(&twenty, twenty_bytes).unwrap();
+        let short = users.join("short.json");
+        let short_bytes = br#"{"version":2}"#;
+        fs::write(&short, short_bytes).unwrap();
+        let real = users.join("real.bin");
+        plant_device_envelope(&real, &device_key, b"real");
+
+        let _ = take_localhost_migration_bytes_read();
+        migrate_again(root.path(), &device_key);
+        let read = take_localhost_migration_bytes_read();
+        assert!(
+            read < 1024 * 1024,
+            "a new-format body was read on start: {read}"
+        );
+        home_is_up(root.path());
+        assert_eq!(fs::read(&ours).unwrap(), ours_bytes);
+        assert_eq!(fs::read(&foreign).unwrap(), foreign_bytes);
+        assert_eq!(fs::read(&cut).unwrap(), prefix);
+        assert_eq!(
+            fs::metadata(&huge).unwrap().len(),
+            localhost_provider::SEALED_READ_HARD_LIMIT + 1
+        );
+        assert_eq!(fs::read(&plain).unwrap(), plain_bytes);
+        assert_eq!(fs::read(&twenty).unwrap(), twenty_bytes);
+        assert_eq!(fs::read(&short).unwrap(), short_bytes);
+        assert_eq!(
+            localhost_provider::read_sealed_localhost_file(&file_key, &ours, "Users/ours.bin")
+                .unwrap(),
+            b"ours"
+        );
+        let foreign_open = localhost_provider::read_sealed_localhost_file(
+            &file_key,
+            &foreign,
+            "Users/foreign.bin",
+        )
+        .unwrap_err()
+        .to_string();
+        assert_eq!(
+            foreign_open,
+            "Users/foreign.bin is not decryptable. Remove it, then restart."
+        );
+        let cut_open =
+            localhost_provider::read_sealed_localhost_file(&file_key, &cut, "Users/cut.bin")
+                .unwrap_err()
+                .to_string();
+        assert_eq!(
+            cut_open,
+            "Users/cut.bin is cut off. Remove it, then restart."
+        );
+        let huge_open =
+            localhost_provider::read_sealed_localhost_file(&file_key, &huge, "Users/huge-v2.bin")
+                .unwrap_err()
+                .to_string();
+        assert_eq!(
+            huge_open,
+            "Users/huge-v2.bin is larger than this process can read. Move it out of the folder, then restart."
+        );
+        for (path, name, bytes) in [
+            (&plain, "Users/plain.json", plain_bytes.as_slice()),
+            (&twenty, "Users/twenty.json", twenty_bytes.as_slice()),
+            (&short, "Users/short.json", short_bytes.as_slice()),
+        ] {
+            let err = localhost_provider::read_sealed_localhost_file(&file_key, path, name)
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains("not an encrypted envelope"), "{name} {err}");
+            assert!(!err.contains("cut off"), "{name} {err}");
+            assert_eq!(fs::read(path).unwrap(), bytes);
+        }
+        assert_envelope_opens_with_exactly_one_key(&real, b"real", &device_key, &file_key);
+        home_is_up(root.path());
+        let _ = take_localhost_migration_opens();
+        let _ = take_localhost_migration_bytes_read();
+        migrate_again(root.path(), &device_key);
+        assert_eq!(take_localhost_migration_opens(), 0);
+        assert_eq!(take_localhost_migration_bytes_read(), 0);
+    }
+
+    #[test]
+    fn two_thousand_new_format_files_are_read_as_headers() {
+        let _guard = LocalAppsGuard::lock();
+        let device_key = [0x93; 32];
+        let root = TempDir::new().unwrap();
+        let users = root.path().join("Users");
+        fs::create_dir_all(&users).unwrap();
+        let prefix = localhost_provider::FILE_KEY_ENVELOPE_PREFIX;
+        for n in 0..2000 {
+            let mut file = fs::File::create(users.join(format!("{n:04}.bin"))).unwrap();
+            std::io::Write::write_all(&mut file, prefix).unwrap();
+            file.set_len(1024 * 1024).unwrap();
+        }
+        let _ = take_localhost_migration_bytes_read();
+        let _ = take_localhost_migration_opens();
+        migrate_again(root.path(), &device_key);
+        assert_eq!(take_localhost_migration_opens(), 2000);
+        assert_eq!(take_localhost_migration_bytes_read(), 2000 * 64);
+        home_is_up(root.path());
+        let _ = take_localhost_migration_bytes_read();
+        let _ = take_localhost_migration_opens();
+        migrate_again(root.path(), &device_key);
+        assert_eq!(take_localhost_migration_opens(), 0);
+        assert_eq!(take_localhost_migration_bytes_read(), 0);
+    }
+
+    #[test]
+    fn a_seen_record_keeps_a_newline_in_a_name() {
+        let _guard = LocalAppsGuard::lock();
+        let device_key = [0x93; 32];
+        let file_key = expected_localhost_file_key(&device_key);
+        let root = TempDir::new().unwrap();
+        let name = "a\nb.bin";
+        let path = root.path().join("Users").join(name);
+        plant_device_envelope(&path, &device_key, b"line");
+        migrate_again(root.path(), &device_key);
+        let seen = fs::read(root.path().join("identity/localhost-file-key-v1.seen")).unwrap();
+        let text = String::from_utf8(seen).unwrap();
+        assert!(
+            text.contains(&hex::encode(format!("Users/{name}").as_bytes())),
+            "the seen file dropped the newline: {text}"
+        );
+        assert_envelope_opens_with_exactly_one_key(&path, b"line", &device_key, &file_key);
+        let _ = take_localhost_migration_opens();
+        let _ = take_localhost_migration_bytes_read();
+        migrate_again(root.path(), &device_key);
+        assert_eq!(take_localhost_migration_opens(), 0);
+        assert_eq!(take_localhost_migration_bytes_read(), 0);
+    }
+
+    #[test]
+    fn each_remedy_sentence_works_when_it_is_followed() {
+        use std::os::unix::fs::symlink;
+
         let _guard = LocalAppsGuard::lock();
         let device_key = [0x93; 32];
         let file_key = expected_localhost_file_key(&device_key);
 
-        let ours = TempDir::new().unwrap();
-        let ours_path = ours.path().join("Users/ours.bin");
-        let ours_bytes = localhost_provider::encrypt_file_key_bytes(&file_key, b"ours").unwrap();
-        fs::create_dir_all(ours_path.parent().unwrap()).unwrap();
-        fs::write(&ours_path, &ours_bytes).unwrap();
-        migrate_again(ours.path(), &device_key);
-        assert_eq!(fs::read(&ours_path).unwrap(), ours_bytes);
-
-        let foreign = TempDir::new().unwrap();
-        let foreign_path = foreign.path().join("Users/foreign.bin");
-        let foreign_bytes =
-            localhost_provider::encrypt_file_key_bytes(&[0x94; 32], b"not-ours").unwrap();
-        fs::create_dir_all(foreign_path.parent().unwrap()).unwrap();
-        fs::write(&foreign_path, &foreign_bytes).unwrap();
-        expect_refusal(
-            foreign.path(),
-            &device_key,
-            "Users/foreign.bin is not decryptable. Remove it, then restart.",
-            true,
-        );
-        assert_eq!(fs::read(&foreign_path).unwrap(), foreign_bytes);
-        fs::remove_file(&foreign_path).unwrap();
-        migrate_again(foreign.path(), &device_key);
-        home_is_up(foreign.path());
-
-        let cut = TempDir::new().unwrap();
-        let cut_path = cut.path().join("Users/cut.bin");
-        fs::create_dir_all(cut_path.parent().unwrap()).unwrap();
-        fs::write(&cut_path, br#"{"version":2"#).unwrap();
-        expect_refusal(
-            cut.path(),
-            &device_key,
-            "Users/cut.bin is cut off. Remove it, then restart.",
-            true,
-        );
-        assert_eq!(fs::read(&cut_path).unwrap(), br#"{"version":2"#);
-        fs::remove_file(&cut_path).unwrap();
-        migrate_again(cut.path(), &device_key);
-        home_is_up(cut.path());
-
-        let huge = TempDir::new().unwrap();
-        let huge_path = huge.path().join("Users/huge-v2.bin");
-        fs::create_dir_all(huge_path.parent().unwrap()).unwrap();
-        fs::write(&huge_path, br#"{"version":2"#).unwrap();
+        let over = TempDir::new().unwrap();
+        let brace = over.path().join("Users/brace.bin");
+        fs::create_dir_all(brace.parent().unwrap()).unwrap();
+        fs::write(&brace, b"{not-an-envelope").unwrap();
         std::fs::OpenOptions::new()
             .write(true)
-            .open(&huge_path)
+            .open(&brace)
             .unwrap()
-            .set_len(localhost_provider::SEALED_READ_HARD_LIMIT + 1)
+            .set_len(32 * 1024 * 1024 + 1)
             .unwrap();
-        let _ = take_localhost_migration_bytes_read();
-        expect_refusal(
-            huge.path(),
+        let other = over.path().join("Users/other.bin");
+        plant_device_envelope(&other, &device_key, b"other");
+        migrate_again(over.path(), &device_key);
+        let opened =
+            localhost_provider::read_sealed_localhost_file(&file_key, &brace, "Users/brace.bin")
+                .unwrap_err()
+                .to_string();
+        assert_eq!(
+            opened,
+            "Users/brace.bin is larger than 32 MiB. Move it out of the folder, then restart."
+        );
+        let parked = over.path().join("brace-parked.bin");
+        fs::rename(&brace, &parked).unwrap();
+        migrate_again(over.path(), &device_key);
+        home_is_up(over.path());
+        assert_envelope_opens_with_exactly_one_key(&other, b"other", &device_key, &file_key);
+        assert_eq!(fs::metadata(&parked).unwrap().len(), 32 * 1024 * 1024 + 1);
+        let mut head = [0u8; 16];
+        std::io::Read::read_exact(&mut fs::File::open(&parked).unwrap(), &mut head).unwrap();
+        assert_eq!(&head, b"{not-an-envelope");
+
+        let linked = TempDir::new().unwrap();
+        let outside = TempDir::new().unwrap();
+        let outside_file = outside.path().join("kept.bin");
+        fs::write(&outside_file, b"outside-bytes").unwrap();
+        fs::create_dir(linked.path().join("Users")).unwrap();
+        symlink(outside.path(), linked.path().join("Users/linked")).unwrap();
+        let err = localhost_provider_bridge_config(linked.path(), &device_key).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "Users/linked is a directory link. Replace the link with a directory, then restart."
+        );
+        assert_eq!(fs::read(&outside_file).unwrap(), b"outside-bytes");
+        fs::remove_file(linked.path().join("Users/linked")).unwrap();
+        fs::create_dir(linked.path().join("Users/linked")).unwrap();
+        let note = linked.path().join("Users/note.bin");
+        plant_device_envelope(&note, &device_key, b"after-link");
+        migrate_again(linked.path(), &device_key);
+        assert_envelope_opens_with_exactly_one_key(&note, b"after-link", &device_key, &file_key);
+        assert_eq!(fs::read(&outside_file).unwrap(), b"outside-bytes");
+
+        let marker = TempDir::new().unwrap();
+        let marker_note = marker.path().join("Users/note.bin");
+        plant_device_envelope(&marker_note, &device_key, b"after-marker");
+        fs::create_dir(marker.path().join("identity")).unwrap();
+        let marker_target = outside.path().join("marker-target");
+        fs::write(&marker_target, b"not-the-record").unwrap();
+        symlink(
+            &marker_target,
+            marker.path().join("identity/localhost-file-key-v1"),
+        )
+        .unwrap();
+        let err = localhost_provider_bridge_config(marker.path(), &device_key).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "identity/localhost-file-key-v1 is linked. Remove the link, then restart."
+        );
+        assert_eq!(fs::read(&marker_target).unwrap(), b"not-the-record");
+        fs::remove_file(marker.path().join("identity/localhost-file-key-v1")).unwrap();
+        migrate_again(marker.path(), &device_key);
+        assert_envelope_opens_with_exactly_one_key(
+            &marker_note,
+            b"after-marker",
             &device_key,
-            "Users/huge-v2.bin is larger than this process can read. Move it out of the folder, then restart.",
-            false,
+            &file_key,
         );
+        assert_eq!(fs::read(&marker_target).unwrap(), b"not-the-record");
+        assert!(marker
+            .path()
+            .join("identity/localhost-file-key-v1")
+            .is_file());
+    }
+
+    #[test]
+    fn a_rewrite_temp_stays_on_the_file_system_of_its_target() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let _clear = ClearLocalhostMigrationFaults;
+        let _guard = LocalAppsGuard::lock();
+        let device_key = [0x93; 32];
+        let file_key = expected_localhost_file_key(&device_key);
+        let root = TempDir::new().unwrap();
+        let image = root.path().join("vol.dmg");
+        let users = root.path().join("Users");
+        fs::create_dir(&users).unwrap();
+        let created = std::process::Command::new("hdiutil")
+            .args([
+                "create", "-size", "16m", "-fs", "APFS", "-volname", "p24sL", "-ov",
+            ])
+            .arg(&image)
+            .output()
+            .unwrap();
         assert!(
-            take_localhost_migration_bytes_read() <= 64,
-            "a version 2 header past the hard limit was read past the first block"
+            created.status.success(),
+            "{}",
+            String::from_utf8_lossy(&created.stderr)
         );
-        assert_eq!(
-            fs::metadata(&huge_path).unwrap().len(),
-            localhost_provider::SEALED_READ_HARD_LIMIT + 1
+        let attached = std::process::Command::new("hdiutil")
+            .args(["attach", "-nobrowse", "-mountpoint"])
+            .arg(&users)
+            .arg(&image)
+            .output()
+            .unwrap();
+        assert!(
+            attached.status.success(),
+            "{}",
+            String::from_utf8_lossy(&attached.stderr)
         );
-        let parked = huge.path().join("parked-v2.bin");
-        fs::rename(&huge_path, &parked).unwrap();
-        migrate_again(huge.path(), &device_key);
-        home_is_up(huge.path());
-        assert_eq!(
-            fs::metadata(&parked).unwrap().len(),
-            localhost_provider::SEALED_READ_HARD_LIMIT + 1
-        );
-        assert!(fs::read(&parked).unwrap().starts_with(br#"{"version":2"#));
+        struct Detach(std::path::PathBuf);
+        impl Drop for Detach {
+            fn drop(&mut self) {
+                let _ = std::process::Command::new("hdiutil")
+                    .args(["detach", "-force"])
+                    .arg(&self.0)
+                    .status();
+            }
+        }
+        let _detach = Detach(users.clone());
+        let cross = users.join("cross.bin");
+        plant_device_envelope(&cross, &device_key, b"cross");
+        fs::set_permissions(&cross, fs::Permissions::from_mode(0o400)).unwrap();
+        let local = root.path().join("Local/local.bin");
+        plant_device_envelope(&local, &device_key, b"local");
+        let identity_dev = fs::metadata(root.path()).unwrap().dev();
+        let hits = std::sync::Arc::new(AtomicUsize::new(0));
+        let seen = hits.clone();
+        set_localhost_migration_before_rename(Some(Box::new(move |path: &std::path::Path| {
+            if path.file_name().and_then(|name| name.to_str()) != Some("cross.bin") {
+                return;
+            }
+            seen.fetch_add(1, Ordering::Relaxed);
+            let parent = path.parent().unwrap();
+            let mut temps = Vec::new();
+            for entry in fs::read_dir(parent).unwrap() {
+                let entry = entry.unwrap();
+                if entry
+                    .file_name()
+                    .to_string_lossy()
+                    .contains("elastos-localhost-file-key-v1.tmp")
+                {
+                    temps.push(entry.path());
+                }
+            }
+            assert_eq!(temps.len(), 1, "the temp is in the target directory");
+            let temp = fs::symlink_metadata(&temps[0]).unwrap();
+            let file = fs::symlink_metadata(path).unwrap();
+            assert_eq!(temp.dev(), file.dev());
+            assert_ne!(file.dev(), identity_dev);
+            assert_eq!(temp.mode() & 0o777, 0o400);
+        })));
+        migrate_again(root.path(), &device_key);
+        assert_eq!(hits.load(Ordering::Relaxed), 1);
+        assert_envelope_opens_with_exactly_one_key(&cross, b"cross", &device_key, &file_key);
+        assert_envelope_opens_with_exactly_one_key(&local, b"local", &device_key, &file_key);
     }
 
     #[test]
@@ -7170,6 +7437,12 @@ mod tests {
                 delta < 64 * 1024 * 1024,
                 "the restart read an over-cap envelope: {delta}"
             );
+            let header_bytes = take_localhost_migration_bytes_read();
+            eprintln!("SL_R10_HEADER_BYTES={header_bytes}");
+            assert!(
+                header_bytes <= 256,
+                "a new-format body was read: {header_bytes}"
+            );
             let file_key = expected_localhost_file_key(&device_key);
             for (name, byte, len) in [
                 ("seventeen.bin", 0x5au8, 17 * 1024 * 1024),
@@ -7281,6 +7554,13 @@ mod tests {
             assert!(sealed.len() as u64 > 32 * 1024 * 1024, "{name}");
             fs::write(kept.path().join("Users").join(name), &sealed).unwrap();
         }
+        let mut two_hundred = fs::File::create(kept.path().join("Users/two-hundred.bin")).unwrap();
+        std::io::Write::write_all(
+            &mut two_hundred,
+            localhost_provider::FILE_KEY_ENVELOPE_PREFIX,
+        )
+        .unwrap();
+        two_hundred.set_len(200 * 1024 * 1024).unwrap();
         let test = format!(
             "{}::a_file_the_new_key_wrote_over_the_cap_stays_readable",
             module_path!().split_once("::").unwrap().1
@@ -7332,7 +7612,11 @@ mod tests {
             .inspect_get("provider:localhost")
             .await
             .expect("localhost is listed");
-        assert_eq!(entry.status, sentence);
+        assert_eq!(
+            entry.status,
+            elastos_server::local_apps::LOCAL_APPS_OFF_TO_OTHERS
+        );
+        assert!(!entry.status.contains("secret.bin"), "{}", entry.status);
         fs::set_permissions(&secret, fs::Permissions::from_mode(0o600)).unwrap();
     }
 
@@ -7482,13 +7766,26 @@ mod tests {
         child.child().kill().unwrap();
         let status = child.child().wait().unwrap();
         assert_eq!(status.signal(), Some(libc::SIGKILL));
-        let temp_dir = root.join("identity/localhost-file-key-v1.tmpd");
+        let users = root.join("Users");
+        let temps = |dir: &std::path::Path| {
+            fs::read_dir(dir)
+                .unwrap()
+                .filter(|entry| {
+                    entry
+                        .as_ref()
+                        .unwrap()
+                        .file_name()
+                        .to_string_lossy()
+                        .contains("elastos-localhost-file-key-v1.tmp")
+                })
+                .count()
+        };
         if point == "temp-created" {
             assert_eq!(fs::read(&note).unwrap(), original);
-            assert_eq!(fs::read_dir(&temp_dir).unwrap().count(), 1);
+            assert_eq!(temps(&users), 1, "the temp is beside the file");
             assert!(!root.join("identity/localhost-file-key-v1").exists());
             localhost_provider_bridge_config(root, &device_key).unwrap();
-            assert_eq!(fs::read_dir(&temp_dir).unwrap().count(), 0);
+            assert_eq!(temps(&users), 0);
             assert_envelope_opens_with_exactly_one_key(
                 &note,
                 b"kill-secret",
@@ -7497,10 +7794,7 @@ mod tests {
             );
             assert_current_marker(root, &device_key);
         } else {
-            assert_eq!(
-                fs::read_dir(&temp_dir).map(|dir| dir.count()).unwrap_or(0),
-                0
-            );
+            assert_eq!(temps(&users), 0);
             assert!(!root.join("identity/localhost-file-key-v1").exists());
             let rewritten = fs::read(&note).unwrap();
             assert_eq!(

@@ -48,9 +48,7 @@ pub fn header_rules_out_envelope(header: &[u8]) -> bool {
 fn over_cap_refusal(name: &str) -> io::Error {
     io::Error::new(
         io::ErrorKind::InvalidData,
-        format!(
-            "{name} is larger than 32 MiB. Make it readable or move it out of the folder, then restart."
-        ),
+        format!("{name} is larger than 32 MiB. Move it out of the folder, then restart."),
     )
 }
 
@@ -63,15 +61,24 @@ fn hard_limit_refusal(name: &str) -> io::Error {
     )
 }
 
-/// A file-key envelope starts with this header. A device-key envelope is version 1.
+pub const FILE_KEY_ENVELOPE_PREFIX: &[u8] = br#"{"version":2,"nonce":""#;
+
 pub fn header_is_file_key_envelope(header: &[u8]) -> bool {
-    let start = header
-        .iter()
-        .position(|byte| !byte.is_ascii_whitespace())
-        .unwrap_or(header.len());
-    header
-        .get(start..)
-        .is_some_and(|rest| rest.starts_with(br#"{"version":2"#))
+    header.starts_with(FILE_KEY_ENVELOPE_PREFIX)
+}
+
+fn open_new_format(key: &[u8; 32], bytes: &[u8], name: &str) -> io::Result<Vec<u8>> {
+    let cause = if !is_encrypted_envelope(bytes) {
+        "cut off"
+    } else if let Ok(plain) = decrypt_bytes(key, bytes) {
+        return Ok(plain);
+    } else {
+        "not decryptable"
+    };
+    Err(io::Error::new(
+        io::ErrorKind::InvalidData,
+        format!("{name} is {cause}. Remove it, then restart."),
+    ))
 }
 
 #[cfg(test)]
@@ -92,13 +99,26 @@ pub fn take_sealed_read_bytes() -> u64 {
     SEALED_BYTES_READ.with(|slot| slot.replace(0))
 }
 
-/// Read one sealed localhost file.
-///
-/// A file at or under [`ENVELOPE_BYTE_LIMIT`] is decrypted as stored. A larger
-/// file whose header cannot start an envelope is refused by `name` after that
-/// header, and the body is not read. A larger file whose header can start an
-/// envelope is opened with `key` when that key matches, and refused by `name`
-/// when it does not.
+fn read_body_within_hard_limit(
+    file: &mut std::fs::File,
+    header: &[u8],
+    len: u64,
+    name: &str,
+) -> io::Result<Vec<u8>> {
+    if len > SEALED_READ_HARD_LIMIT {
+        return Err(hard_limit_refusal(name));
+    }
+    let mut bytes = header.to_vec();
+    let had = bytes.len() as u64;
+    let room = SEALED_READ_HARD_LIMIT.saturating_sub(had).saturating_add(1);
+    file.by_ref().take(room).read_to_end(&mut bytes)?;
+    note_sealed_bytes(bytes.len() as u64 - had);
+    if bytes.len() as u64 > SEALED_READ_HARD_LIMIT {
+        return Err(hard_limit_refusal(name));
+    }
+    Ok(bytes)
+}
+
 pub fn read_sealed_localhost_file(key: &[u8; 32], path: &Path, name: &str) -> io::Result<Vec<u8>> {
     // Open first, then fstat that descriptor, so a later growth cannot make
     // the read use a size observed on a different inode.
@@ -113,25 +133,29 @@ pub fn read_sealed_localhost_file(key: &[u8; 32], path: &Path, name: &str) -> io
         if raw.len() as u64 > ENVELOPE_BYTE_LIMIT {
             return Err(over_cap_refusal(name));
         }
+        if header_is_file_key_envelope(&raw) {
+            return open_new_format(key, &raw, name);
+        }
         return decrypt_bytes(key, &raw);
     }
     let mut header = [0u8; ENVELOPE_HEADER];
     let read = file.read(&mut header)?;
     note_sealed_bytes(read as u64);
-    if header_rules_out_envelope(&header[..read]) {
+    let header = &header[..read];
+    if header_is_file_key_envelope(header) {
+        if len > SEALED_READ_HARD_LIMIT {
+            return Err(hard_limit_refusal(name));
+        }
+        return open_new_format(
+            key,
+            &read_body_within_hard_limit(&mut file, header, len, name)?,
+            name,
+        );
+    }
+    if header_rules_out_envelope(header) {
         return Err(over_cap_refusal(name));
     }
-    if len > SEALED_READ_HARD_LIMIT {
-        return Err(hard_limit_refusal(name));
-    }
-    let mut bytes = header[..read].to_vec();
-    let had = bytes.len() as u64;
-    let room = SEALED_READ_HARD_LIMIT.saturating_sub(had).saturating_add(1);
-    file.by_ref().take(room).read_to_end(&mut bytes)?;
-    note_sealed_bytes(bytes.len() as u64 - had);
-    if bytes.len() as u64 > SEALED_READ_HARD_LIMIT {
-        return Err(hard_limit_refusal(name));
-    }
+    let bytes = read_body_within_hard_limit(&mut file, header, len, name)?;
     match decrypt_bytes(key, &bytes) {
         Ok(plain) => Ok(plain),
         Err(_) => Err(over_cap_refusal(name)),
@@ -418,6 +442,11 @@ mod tests {
         let text = err.to_string();
         assert!(text.contains("Users/video.bin"), "{text}");
         assert!(text.contains("larger than 32 MiB"), "{text}");
+        assert!(
+            text.contains("Move it out of the folder, then restart."),
+            "{text}"
+        );
+        assert!(!text.contains("Make it readable or"), "{text}");
         let read = take_sealed_read_bytes();
         assert!(
             read <= ENVELOPE_HEADER as u64,
