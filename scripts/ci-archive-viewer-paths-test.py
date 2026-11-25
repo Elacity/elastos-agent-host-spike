@@ -48,7 +48,9 @@ class RuleTest(unittest.TestCase):
         self.assertFalse(paths.must_run(["examples/capsule-kit/guest-extra/src/lib.rs"]))
         self.assertFalse(paths.must_run(["examples/docs-viewer/model-extra/src/lib.rs"]))
         self.assertFalse(paths.must_run(["examples/capsule-kit/v1-host-test-extra/src/lib.rs"]))
-        self.assertFalse(paths.must_run(["elastos/wit/other.wit"]))
+        self.assertFalse(paths.must_run(["elastos/wit-extra/other.wit"]))
+        self.assertFalse(paths.must_run(["elastos/tools/componentize-extra/src/main.rs"]))
+        self.assertFalse(paths.must_run(["examples/capsule-kit/surface/docs-render.js.bak"]))
         self.assertFalse(paths.must_run(["scripts/build-component-capsule.sh.bak"]))
 
     def test_each_direct_input_runs(self):
@@ -58,6 +60,10 @@ class RuleTest(unittest.TestCase):
             "examples/capsule-kit/v1-host-test/src/lib.rs",
             "scripts/build-component-capsule.sh",
             "elastos/wit/elastos-bus-v1.wit",
+            "elastos/wit/other.wit",
+            "elastos/tools/componentize/src/main.rs",
+            "examples/capsule-kit/surface/docs-render.js",
+            "examples/capsule-kit/surface/page-client.js",
         ]
         for name in direct:
             with self.subTest(name=name):

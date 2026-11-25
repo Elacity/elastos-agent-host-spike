@@ -610,7 +610,7 @@ What each A14 row means:
 | Row | PASS means |
 | --- | --- |
 | `versions_receipt` | the receipt names the commit, the Runtime and provider hashes and every launched probe the rows needed |
-| `review_binding` | every passing review names the commit checked out, on a clean tree, the file is outside the repository, and those reviews name two different reviewer families |
+| `review_binding` | every review in the file passed and names the commit checked out, on a clean tree, the file is outside the repository, and the reviews name two different reviewer families |
 | `staged_bundle` | the receipt names the lab CID of each bundle the suite staged and launched |
 | `installed_runtime` | the installed binary and `components.json` have the hashes its `release.json` names, `release-head.json` names that `release.json`, and the release names this repository commit; its records are read, its data folder did not run |
 | `installed_runtime_ran` | the suite was told a named binary whose canonical path is the installed binary, and the Runtime identity it recorded names that path with the installed binary's SHA-256; `run.sh` hashed the report it built before the suite, hashed it again after the suite and its liveness check, refused a change, and ran a copy of the verified bytes; it made the record after that, hashed the installed binary, launched it once and saw it answer, and hashed it again; both hashes match the installed record, and exactly one record names the installed path; nothing shows the bytes the operating system then executed |

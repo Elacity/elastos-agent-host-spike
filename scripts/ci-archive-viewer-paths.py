@@ -27,19 +27,25 @@ CHECK_FILES = frozenset({
 })
 # Direct inputs of the parser, outside examples/archive-viewer. The guest
 # crate, the documents model, and the fuel harness are path dependencies.
-# The component build reads the builder and the Bus v1 WIT file. A neighbour
-# whose name only starts the same way is not an input.
+# The component build reads the builder, its componentize tool, the page files
+# it copies, and the WIT folder. A neighbour whose name only starts the same
+# way is not an input.
 DIRECT_PREFIXES = (
     "examples/capsule-kit/guest/",
     "examples/docs-viewer/model/",
     "examples/capsule-kit/v1-host-test/",
+    "elastos/tools/componentize/",
+    "elastos/wit/",
 )
 DIRECT_FILES = frozenset({
     "examples/capsule-kit/guest",
     "examples/docs-viewer/model",
     "examples/capsule-kit/v1-host-test",
     "scripts/build-component-capsule.sh",
-    "elastos/wit/elastos-bus-v1.wit",
+    "elastos/tools/componentize",
+    "elastos/wit",
+    "examples/capsule-kit/surface/docs-render.js",
+    "examples/capsule-kit/surface/page-client.js",
 })
 
 

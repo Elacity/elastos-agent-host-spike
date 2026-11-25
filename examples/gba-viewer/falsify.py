@@ -172,7 +172,13 @@ def rows_fail(name):
     output = result.stderr + result.stdout
     if "Ran 1 test" not in output:
         raise SystemExit(f"{name} did not run:\n{output[-2000:]}")
-    return result.returncode != 0 and "FAILED" in output
+    if "ERROR:" in output:
+        raise SystemExit(f"{name} did not run cleanly:\n{output[-2000:]}")
+    return result.returncode != 0 and "FAILED (failures=1)" in output
+
+
+def prepare_derive():
+    compile(DERIVE.read_text(), str(DERIVE), "exec")
 
 
 def prepare_core():
@@ -184,7 +190,7 @@ if __name__ == "__main__":
     kit.main(
         [
             (CORE_CASES, prepare_core, core_fails, None, False),
-            (DERIVE_CASES, None, rows_fail, None, False),
+            (DERIVE_CASES, prepare_derive, rows_fail, None, False),
         ],
         done=f"all {count} gba rule falsifiers caught",
     )
