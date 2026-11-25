@@ -4698,6 +4698,26 @@ mod tests {
     }
 
     #[test]
+    fn an_all_zero_device_key_is_refused_by_name() {
+        let err = localhost_file_key(&[0u8; 32]).unwrap_err();
+        let text = err.to_string();
+        assert!(text.contains("identity/device.key"), "{text}");
+        assert!(text.contains("all zero"), "{text}");
+        assert!(localhost_file_key(&[1u8; 32]).is_ok());
+
+        let planted_key = [0x91u8; 32];
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("Users/zero.bin");
+        let planted = plant_device_envelope(&path, &planted_key, b"kept");
+        let err = localhost_provider_bridge_config(temp.path(), &[0u8; 32]).unwrap_err();
+        let text = err.to_string();
+        assert!(text.contains("identity/device.key"), "{text}");
+        assert!(text.contains("all zero"), "{text}");
+        assert_eq!(fs::read(&path).unwrap(), planted);
+        assert!(!temp.path().join("identity/localhost-file-key-v1").exists());
+    }
+
+    #[test]
     fn localhost_provider_config_omits_device_key() {
         let device_key = [0x5a; 32];
         let other_key = [0x5b; 32];

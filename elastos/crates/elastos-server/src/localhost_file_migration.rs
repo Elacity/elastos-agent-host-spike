@@ -263,6 +263,11 @@ fn kept_mode(mode: u32) -> u32 {
 
 #[cfg(unix)]
 pub(crate) fn localhost_file_key(device_key: &[u8; 32]) -> anyhow::Result<[u8; 32]> {
+    if *device_key == [0u8; 32] {
+        anyhow::bail!(
+            "identity/device.key is all zero. Restore a device key that is not all zero, then restart."
+        );
+    }
     let hk = hkdf::Hkdf::<sha2::Sha256>::new(None, device_key);
     let mut okm = [0u8; 32];
     hk.expand(LOCALHOST_FILE_KEY_INFO, &mut okm)
