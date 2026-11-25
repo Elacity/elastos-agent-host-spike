@@ -679,6 +679,19 @@ pub(crate) fn take_parked_plan_guard(request_id: &str) -> Option<crate::runtime:
         .remove(request_id)
 }
 
+#[cfg(all(test, unix))]
+pub(crate) fn park_plan_guard_for_test(request_id: &str, guard: crate::runtime::PlanEffectGuard) {
+    park_plan_guard(request_id, guard);
+}
+
+#[cfg(all(test, unix))]
+pub(crate) fn parked_plan_guard_is_held(request_id: &str) -> bool {
+    parked_plan_guards()
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+        .contains_key(request_id)
+}
+
 fn instance_ended_response() -> serde_json::Value {
     resource_error_response(PLAN_INSTANCE_ENDED, PLAN_INSTANCE_ENDED)
 }
@@ -10166,11 +10179,19 @@ pub async fn production_after() {
             !checks.contains(".validate("),
             "validate consumes a one-use grant and stays after admit"
         );
+        assert_eq!(authorize.matches("spend_invoked_capability(").count(), 1);
         let admit_at = authorize.find("admit_plan_effect(").expect("admit");
-        let validate_at = authorize.find(".validate(").expect("validate");
+        let spend_at = authorize.find("spend_invoked_capability(").expect("spend");
         assert!(
-            admit_at < validate_at,
+            admit_at < spend_at,
             "admit runs before the one-use grant is counted"
+        );
+        let spend = function_body(&source, "spend_invoked_capability");
+        let refusal_at = spend.find("plan_grant_spend_is_refused(").expect("refusal");
+        let validate_at = spend.find(".validate(").expect("validate");
+        assert!(
+            refusal_at < validate_at,
+            "the refusal check runs before validate counts a use"
         );
         assert!(!checks.contains("admit_plan_effect("));
         assert!(!checks.contains("dispatch_admitted_effect("));

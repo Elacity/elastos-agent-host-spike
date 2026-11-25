@@ -729,7 +729,7 @@ async fn stop_collected_agent_rows(runtime: &Runtime, agent_id: &str) -> axum::r
         }
         let info = match runtime.stop_capsule_with_reason(&id, "owner").await {
             Ok(Some(info)) => {
-                runtime.note_agent_stop_requested(agent_id).await;
+                runtime.note_agent_stop_requested(agent_id);
                 info
             }
             Ok(None) => continue,
@@ -4190,7 +4190,7 @@ pub(crate) mod tests {
         .unwrap();
         assert_stopping(launch_grant(&home, &home.capsule_dir, &agent, &grant).await);
         assert!(
-            home.runtime.stop_requested_for_test(&agent).await,
+            home.runtime.stop_requested_for_test(&agent),
             "Start cleared the stop mark while an effect was in flight"
         );
 

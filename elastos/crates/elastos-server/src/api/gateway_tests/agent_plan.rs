@@ -4043,7 +4043,7 @@ async fn a_failed_stop_lets_start_say_already_running() {
     runtime.arm_failing_capsule_stop(session);
     let (status, body) = stop_plan_agent(runtime.clone(), agent).await;
     assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{body}");
-    assert!(!runtime.stop_requested_for_test(agent).await);
+    assert!(!runtime.stop_requested_for_test(agent));
     assert!(!runtime.activation_stop_requested_for_test(session));
     let expires = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -4275,6 +4275,35 @@ fn a_drop_on_a_current_thread_runtime_returns_while_the_write_lock_is_held() {
         Ok(Err(message)) => panic!("{message}"),
         Err(_) => panic!("the drop did not return while the write lock was held"),
     }
+}
+
+/// Dropping the dispatch takes the guard that was parked for the flight.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_dropped_dispatch_takes_the_parked_guard() {
+    let plant = plant_approved(88, false, |_, target| {
+        json!({"steps": [{"scheme": "localhost", "operation": "write", "request": {
+            "path": target, "content": [112, 108, 97, 110]
+        }}]})
+    })
+    .await;
+    let guard = crate::runtime::Runtime::try_enter_plan_effect(
+        &plant.runtime.plan_book(),
+        &plant.session,
+        &plant.agent,
+        &plant.id,
+    )
+    .expect("the flight enters");
+    crate::resource_bridge::park_plan_guard_for_test(&plant.id, guard);
+    assert!(
+        crate::resource_bridge::parked_plan_guard_is_held(&plant.id),
+        "the guard was not parked"
+    );
+    super::gateway_inspect_actions::drop_unsettled_dispatch_for_test(plant.dir.path(), &plant.id);
+    assert!(
+        !crate::resource_bridge::parked_plan_guard_is_held(&plant.id),
+        "the drop left the parked guard"
+    );
 }
 
 fn panic_text(payload: Box<dyn std::any::Any + Send>) -> String {
@@ -4583,7 +4612,7 @@ async fn a_stop_dropped_while_waiting_leaves_start_stopping() {
         tokio::spawn(async move { stopping.stop_capsule_with_reason(session, "owner").await });
     tokio::time::timeout(std::time::Duration::from_secs(1), async {
         loop {
-            if runtime.stop_requested_for_test(agent).await {
+            if runtime.stop_requested_for_test(agent) {
                 return;
             }
             tokio::task::yield_now().await;
@@ -4599,7 +4628,7 @@ async fn a_stop_dropped_while_waiting_leaves_start_stopping() {
         .is_none());
     task.abort();
     let _ = task.await;
-    assert!(runtime.stop_requested_for_test(agent).await);
+    assert!(runtime.stop_requested_for_test(agent));
     let expires = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()

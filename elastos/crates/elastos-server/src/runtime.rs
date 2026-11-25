@@ -264,9 +264,11 @@ pub struct Runtime {
     /// end holds the same mutex: it puts the start tuple on the one stop
     /// audit, then drops the record.
     agent_launches: Arc<tokio::sync::Mutex<AgentLaunchState>>,
-    /// Live Stop tokens. A non-empty set is that agent's stopping mark.
-    /// Lock order: `agent_launches`, then this mutex. It is held for a few
-    /// instructions and never across an await. Drop takes only this mutex.
+    /// Live Stop tokens and the committed stop mark. A non-empty token set
+    /// is that agent's stopping mark. Lock order: `agent_launches`, then this
+    /// mutex. It is held for a few instructions and never across an await.
+    /// Drop of a token takes only this mutex. The committed mark is written
+    /// here, in the same hold as the cause, so that write does not await.
     stop_marks: Arc<StdMutex<AgentStopMarks>>,
     /// This Runtime's plan instances and the effects that have reached their
     /// work. Another Runtime has another book, so one end cannot see the
@@ -321,25 +323,28 @@ struct AgentLaunchState {
     /// session's one end removes it, whether the owner stopped the guest or
     /// the guest ended on its own.
     sessions: HashMap<String, AgentSessionRecord>,
-    /// Set once Stop has asked a live row to end. Dropping Stop does not
-    /// clear it. Start stays refused while a live row remains, and clears
-    /// it once no live row remains.
-    stop_requested: HashSet<String>,
 }
 
-/// One Stop's tokens. The mark is a non-empty set for that agent.
+/// One Stop's tokens, and the agents whose stop has committed.
+/// The token mark is a non-empty set for that agent. `requested` stays
+/// after the token is cleared, until Start sees no live row.
 #[derive(Default)]
 struct AgentStopMarks {
     tokens: HashMap<String, HashSet<u64>>,
     next: u64,
+    /// Set once a stop has committed for this agent. Dropping the Stop
+    /// token does not clear it. Start stays refused while a live row
+    /// remains, and clears it once no live row remains.
+    requested: HashSet<String>,
 }
 
 /// One Runtime's plan instances, and each effect that has reached its work.
 ///
 /// Lock order: this mutex is never taken while `agent_launches` or
-/// `stop_marks` is held, and it is never held across an await. Start and
-/// Stop take `agent_launches`, then `stop_marks`. The end and `try_enter`
-/// take only this mutex: the check and the mark are one hold of it.
+/// `stop_marks` is held, and it is never held across an await. Start takes
+/// `agent_launches`, then `stop_marks`. A committed stop writes its mark on
+/// `stop_marks` and does not take `agent_launches` again. The end and
+/// `try_enter` take only this mutex: the check and the mark are one hold of it.
 pub(crate) struct PlanBook {
     instances: HashMap<String, PlanInstance>,
     /// Effect id to the session it is working for. Two effects of one session
@@ -993,6 +998,43 @@ struct ProviderStopHold {
 #[cfg(all(test, unix))]
 static PROVIDER_STOP_HOLDS: StdMutex<Vec<(usize, String, Arc<ProviderStopHold>)>> =
     StdMutex::new(Vec::new());
+
+/// The await that used to sit between the provider's `Ok` and the commit.
+#[cfg(all(test, unix))]
+struct CommittedStopGate {
+    key: usize,
+    session: String,
+    entered: Arc<tokio::sync::Notify>,
+    release: Arc<tokio::sync::Notify>,
+}
+
+#[cfg(all(test, unix))]
+static COMMITTED_STOP_GATES: StdMutex<Vec<CommittedStopGate>> = StdMutex::new(Vec::new());
+
+/// One armed pause after a stop has committed. Drop lets the stop continue.
+#[cfg(all(test, unix))]
+pub(crate) struct CommittedStopPause {
+    entered: Arc<tokio::sync::Notify>,
+    release: Arc<tokio::sync::Notify>,
+}
+
+#[cfg(all(test, unix))]
+impl CommittedStopPause {
+    pub(crate) async fn entered(&self) {
+        self.entered.notified().await;
+    }
+
+    pub(crate) fn release(&self) {
+        self.release.notify_one();
+    }
+}
+
+#[cfg(all(test, unix))]
+impl Drop for CommittedStopPause {
+    fn drop(&mut self) {
+        self.release.notify_one();
+    }
+}
 
 /// One armed hold. Drop releases any stop still waiting on it.
 #[cfg(all(test, unix))]
@@ -2286,7 +2328,6 @@ impl Runtime {
             if Self::refuse_start_for_stop(
                 &self.stop_marks,
                 capsules,
-                &mut state,
                 facts.agent_id,
                 effect_landing,
             ) {
@@ -2686,12 +2727,13 @@ impl Runtime {
     }
 
     /// Records that Stop has asked this agent's live rows to end. The drop
-    /// guard does not clear this.
-    pub(crate) async fn note_agent_stop_requested(&self, agent_id: &str) {
-        self.agent_launches
+    /// guard does not clear this. The mark is the synchronous one, so this
+    /// does not take the launch gate.
+    pub(crate) fn note_agent_stop_requested(&self, agent_id: &str) {
+        self.stop_marks
             .lock()
-            .await
-            .stop_requested
+            .unwrap_or_else(|err| err.into_inner())
+            .requested
             .insert(agent_id.to_string());
     }
 
@@ -2709,6 +2751,7 @@ impl Runtime {
         )
     }
 
+    #[cfg(test)]
     fn stop_mark_held(marks: &StdMutex<AgentStopMarks>, agent_id: &str) -> bool {
         marks
             .lock()
@@ -2717,32 +2760,29 @@ impl Runtime {
     }
 
     /// While any Stop token is set, or an effect of this agent is still
-    /// landing, Start is refused and `stop_requested` is left set. The row
-    /// test applies only to `stop_requested` once nothing is in flight. No
-    /// signal does not read the registry. No live row, and no landing
-    /// effect, clears `stop_requested`. Each Stop clears only its own token,
-    /// in [`AgentStopGuard`].
+    /// landing, Start is refused and the committed mark is left set. The row
+    /// test applies only to that mark once nothing is in flight. No signal
+    /// does not read the registry. No live row, and no landing effect,
+    /// clears the mark. Each Stop clears only its own token, in
+    /// [`AgentStopGuard`]. The caller holds `agent_launches`.
     fn refuse_start_for_stop(
         marks: &StdMutex<AgentStopMarks>,
         capsules: &RwLock<HashMap<String, RunningCapsuleInfo>>,
-        state: &mut AgentLaunchState,
         agent_id: &str,
         effect_landing: bool,
     ) -> bool {
-        if Self::stop_mark_held(marks, agent_id) {
+        let mut marks = marks.lock().unwrap_or_else(|err| err.into_inner());
+        if marks.holds(agent_id) || effect_landing {
             return true;
         }
         // Settled or unknown: `effect_landing` is false, and a later Start
         // is allowed once no live row remains.
-        if effect_landing {
-            return true;
-        }
-        if !state.stop_requested.contains(agent_id) {
+        if !marks.requested.contains(agent_id) {
             return false;
         }
         match Self::live_row_in(capsules, agent_id) {
             Some(false) => {
-                state.stop_requested.remove(agent_id);
+                marks.requested.remove(agent_id);
                 false
             }
             Some(true) | None => true,
@@ -2752,14 +2792,9 @@ impl Runtime {
     pub(crate) async fn agent_is_stopping(&self, agent_id: &str) -> bool {
         let effect_landing = !self.inflight_plan_sessions(agent_id).is_empty();
         let capsules = &self.running_capsules;
-        let mut state = self.agent_launches.lock().await;
-        Self::refuse_start_for_stop(
-            &self.stop_marks,
-            capsules,
-            &mut state,
-            agent_id,
-            effect_landing,
-        )
+        // The launch gate first, then `stop_marks`, the same order as Start.
+        let _gate = self.agent_launches.lock().await;
+        Self::refuse_start_for_stop(&self.stop_marks, capsules, agent_id, effect_landing)
     }
 
     /// The start record for this session, if Start stored one and the
@@ -2984,6 +3019,41 @@ impl Runtime {
             .fetch_add(1, std::sync::atomic::Ordering::Release);
         hold.entered.notify_one();
         release.notified().await;
+    }
+
+    /// Pauses after the stop is committed, where the launch lock used to await.
+    #[cfg(all(test, unix))]
+    pub(crate) fn arm_committed_stop_gate(&self, session_id: &str) -> CommittedStopPause {
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        COMMITTED_STOP_GATES
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .push(CommittedStopGate {
+                key: self.stop_rows_key(),
+                session: session_id.to_string(),
+                entered: Arc::clone(&entered),
+                release: Arc::clone(&release),
+            });
+        CommittedStopPause { entered, release }
+    }
+
+    #[cfg(all(test, unix))]
+    async fn pause_after_committed_stop(&self, id: &str) {
+        let Some(gate) = ({
+            let mut gates = COMMITTED_STOP_GATES
+                .lock()
+                .unwrap_or_else(|err| err.into_inner());
+            let key = self.stop_rows_key();
+            gates
+                .iter()
+                .rposition(|gate| gate.key == key && gate.session == id)
+                .map(|pos| gates.swap_remove(pos))
+        }) else {
+            return;
+        };
+        gate.entered.notify_one();
+        gate.release.notified().await;
     }
 
     /// Await points on an admitted Start, after the live run is set and before
@@ -4387,11 +4457,11 @@ impl Runtime {
     }
 
     #[cfg(all(test, unix))]
-    pub(crate) async fn stop_requested_for_test(&self, agent_id: &str) -> bool {
-        self.agent_launches
+    pub(crate) fn stop_requested_for_test(&self, agent_id: &str) -> bool {
+        self.stop_marks
             .lock()
-            .await
-            .stop_requested
+            .unwrap_or_else(|err| err.into_inner())
+            .requested
             .contains(agent_id)
     }
 
@@ -4697,6 +4767,20 @@ impl Runtime {
         }
     }
 
+    /// The mark, then the cause. Both land before this returns, and nothing
+    /// here awaits. The provider has already answered `Ok`, or there was no
+    /// provider call.
+    fn commit_staged_stop(&self, ticket: OpenStop, agent_id: Option<String>) {
+        let mut marks = self
+            .stop_marks
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        if let Some(agent_id) = agent_id {
+            marks.requested.insert(agent_id);
+        }
+        ticket.commit();
+    }
+
     /// Update a capsule's status
     pub async fn update_capsule_status(&self, id: &str, status: &str) {
         let mut capsules = self.running_capsules.write().await;
@@ -4789,6 +4873,15 @@ impl Runtime {
         // ticket. The agent's stop mark is stored in that same commit, before
         // the cause is published and before the wait for the end.
         let ticket = OpenStop::stage(&stop, reason);
+        // The session is read before the provider answers. The mark itself is
+        // written after `Ok`, under `stop_marks`, with no await between them.
+        let marked_agent = self
+            .agent_launches
+            .lock()
+            .await
+            .sessions
+            .get(id)
+            .map(|record| record.agent_id.clone());
         if let Some((handle, provider)) = provider {
             tracing::info!("Stopping capsule '{}' ({})", info.name, id);
             #[cfg(test)]
@@ -4804,21 +4897,15 @@ impl Runtime {
             };
             stopped?;
         }
-        // The launch gate is held across the mark and the commit, and the
-        // mark is written first. A Start that observes the cause already
-        // observes the mark: the cause is not published until the mark is in
-        // the set, and Start takes this same gate to read the set.
-        {
-            let mut launches = self.agent_launches.lock().await;
-            if let Some(agent_id) = launches
-                .sessions
-                .get(id)
-                .map(|record| record.agent_id.clone())
-            {
-                launches.stop_requested.insert(agent_id);
-            }
-            ticket.commit();
-        }
+        // The stop mark became synchronous: it lives on `stop_marks`, and
+        // this writes it before the cause. Nothing awaits between the
+        // provider's `Ok` and that commit. Start still takes the launch
+        // gate first, then this mutex.
+        self.commit_staged_stop(ticket, marked_agent);
+        // The old await was the launch lock on this line. The pause is that
+        // await, and the commit above has already run.
+        #[cfg(all(test, unix))]
+        self.pause_after_committed_stop(id).await;
         self.wait_ended(id).await;
         // The end happened, whatever its recorded status and cause: the
         // entry the list serves says which, and a stop whose guest ran to its
@@ -8591,5 +8678,284 @@ pub(crate) mod tests {
         );
         let info = runtime.get_capsule(&id).await.expect("the ended row");
         assert_eq!(info.cause.as_deref(), Some(CAUSE_COMPLETED));
+    }
+
+    /// A component whose `run` loops until a stop interrupts it.
+    #[cfg(unix)]
+    fn spin_component() -> Vec<u8> {
+        wat::parse_str(
+            r#"(component
+              (import "elastos:bus/types@1.0.0" (instance $types
+                (type $error (variant
+                  (case "denied" string) (case "not-found" string) (case "invalid" string)
+                  (case "unavailable" string) (case "timeout" string) (case "internal" string)))
+                (export "bus-error" (type (eq $error)))))
+              (alias export $types "bus-error" (type $bus-error))
+              (core module $m
+                (memory (export "memory") 1)
+                (func $spin (loop $again (br $again)))
+                (func (export "run") (result i32) (call $spin) (i32.const 0)))
+              (core instance $i (instantiate $m))
+              (func $run (result (result (error $bus-error)))
+                (canon lift (core func $i "run") (memory $i "memory")))
+              (instance $lifecycle (export "run" (func $run)))
+              (export "elastos:bus/lifecycle@1.0.0" (instance $lifecycle)))"#,
+        )
+        .expect("component text")
+    }
+
+    #[cfg(unix)]
+    async fn start_guest(
+        runtime: &Runtime,
+        dir: &std::path::Path,
+        name: &str,
+        bytes: &[u8],
+    ) -> String {
+        runtime
+            .configure_capsule_admission(dir, &[], true)
+            .await
+            .unwrap();
+        let folder = dir.join(name);
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(folder.join("capsule.json"), component_manifest_json(name)).unwrap();
+        std::fs::write(folder.join("app.component.wasm"), bytes).unwrap();
+        let (handle, _) = runtime
+            .start_local_with_signer(&folder, Vec::new(), None, None)
+            .await
+            .expect("the guest starts");
+        handle.id.0
+    }
+
+    #[cfg(unix)]
+    async fn component_entry_is_loaded(runtime: &Runtime, id: &str) -> bool {
+        let provider = runtime
+            .component_provider
+            .as_ref()
+            .expect("component provider");
+        let manifest = serde_json::from_str(&component_manifest_json("guest")).unwrap();
+        provider
+            .status(&CapsuleHandle {
+                id: CapsuleId(id.to_string()),
+                manifest,
+                args: Vec::new(),
+            })
+            .await
+            .is_ok()
+    }
+
+    #[cfg(unix)]
+    enum StopGuest {
+        Loading,
+        V1,
+        V2,
+    }
+
+    /// Starts the guest, stops it as the owner, and parks the stop at the
+    /// await that used to sit between the provider's `Ok` and the commit.
+    /// The returned watch hold is the one the caller releases so the watcher
+    /// can record the end: `sees-stop` for a loading guest, `outcome` for a
+    /// running one.
+    #[cfg(unix)]
+    async fn owner_stop_at_the_old_await(
+        kind: StopGuest,
+    ) -> (
+        Arc<Runtime>,
+        tempfile::TempDir,
+        String,
+        &'static str,
+        CommittedStopPause,
+        tokio::task::JoinHandle<Result<Option<RunningCapsuleInfo>>>,
+        WatchHold,
+    ) {
+        let (runtime, dir) = component_runtime().await;
+        let runtime = Arc::new(runtime);
+        let (agent, bytes, name) = match kind {
+            StopGuest::Loading => ("agent:r8-loading", quiet_component(), "quiet"),
+            StopGuest::V1 => ("agent:r8-v1", spin_component(), "spin"),
+            StopGuest::V2 => ("agent:r8-v2", spin_component(), "spin"),
+        };
+        let early = runtime.arm_watch_pause_for_test("sees-stop");
+        let outcome = if matches!(kind, StopGuest::Loading) {
+            None
+        } else {
+            Some(runtime.arm_watch_pause_for_test("outcome"))
+        };
+        let id = start_guest(&runtime, dir.path(), name, &bytes).await;
+        tokio::time::timeout(std::time::Duration::from_secs(60), early.entered.notified())
+            .await
+            .expect("the watcher did not reach the start");
+        if let Some(outcome) = outcome {
+            assert!(
+                runtime
+                    .component_provider
+                    .as_ref()
+                    .expect("component provider")
+                    .prepare_stop_target_for_test(&CapsuleId(id.clone()), false)
+                    .await,
+                "the loading entry was already gone"
+            );
+            drop(early);
+            tokio::time::timeout(
+                std::time::Duration::from_secs(60),
+                outcome.entered.notified(),
+            )
+            .await
+            .expect("the watcher did not reach the outcome");
+            if matches!(kind, StopGuest::V2) {
+                assert!(
+                    runtime
+                        .component_provider
+                        .as_ref()
+                        .expect("component provider")
+                        .prepare_stop_target_for_test(&CapsuleId(id.clone()), true)
+                        .await,
+                    "the running entry was already gone"
+                );
+            }
+            stop_parked(runtime, dir, id, agent, outcome).await
+        } else {
+            stop_parked(runtime, dir, id, agent, early).await
+        }
+    }
+
+    #[cfg(unix)]
+    async fn stop_parked(
+        runtime: Arc<Runtime>,
+        dir: tempfile::TempDir,
+        id: String,
+        agent: &'static str,
+        watch: WatchHold,
+    ) -> (
+        Arc<Runtime>,
+        tempfile::TempDir,
+        String,
+        &'static str,
+        CommittedStopPause,
+        tokio::task::JoinHandle<Result<Option<RunningCapsuleInfo>>>,
+        WatchHold,
+    ) {
+        runtime
+            .insert_agent_session_for_test(AgentSessionRecord {
+                agent_id: agent.to_string(),
+                owner: "person:owner".to_string(),
+                host_cid: "cid".to_string(),
+                launch_id: format!("launch:{id}"),
+                session_id: id.clone(),
+            })
+            .await;
+        let gate = runtime.arm_committed_stop_gate(&id);
+        let stopping = Arc::clone(&runtime);
+        let stop_id = id.clone();
+        let task =
+            tokio::spawn(async move { stopping.stop_capsule_with_reason(&stop_id, "owner").await });
+        tokio::time::timeout(std::time::Duration::from_secs(30), gate.entered())
+            .await
+            .expect("the stop did not reach the old await");
+        assert_eq!(
+            runtime.requested_stop_for_test(&id).as_deref(),
+            Some("stopped: owner"),
+            "the cause was not committed before the old await"
+        );
+        assert!(
+            runtime.stop_requested_for_test(agent),
+            "the mark was not set before the old await"
+        );
+        (runtime, dir, id, agent, gate, task, watch)
+    }
+
+    #[cfg(unix)]
+    async fn release_and_read_owner_stop(
+        runtime: &Runtime,
+        id: &str,
+        watch: WatchHold,
+        gate: CommittedStopPause,
+    ) -> RunningCapsuleInfo {
+        watch.release.notify_one();
+        gate.release();
+        let info = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+            loop {
+                if let Some(info) = runtime.get_capsule(id).await {
+                    if info.ended_at.is_some() {
+                        return info;
+                    }
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the guest did not record an end");
+        assert_eq!(info.status, CAPSULE_STOPPED, "{info:?}");
+        assert_eq!(info.cause.as_deref(), Some("stopped: owner"), "{info:?}");
+        info
+    }
+
+    /// A loading guest the owner stops is recorded `stopped: owner`, even
+    /// while the stop is parked at the old await.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_loading_guest_the_owner_stops_is_recorded_stopped_owner() {
+        let (runtime, _dir, id, _agent, gate, task, watch) =
+            owner_stop_at_the_old_await(StopGuest::Loading).await;
+        assert!(
+            !component_entry_is_loaded(&runtime, &id).await,
+            "stop left the loading entry"
+        );
+        release_and_read_owner_stop(&runtime, &id, watch, gate).await;
+        task.await.expect("the stop task").expect("the stop");
+    }
+
+    /// A running v1 guest the owner stops is recorded `stopped: owner`.
+    /// The provider leaves the entry for the worker.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_running_v1_guest_the_owner_stops_is_recorded_stopped_owner() {
+        let (runtime, _dir, id, _agent, gate, task, watch) =
+            owner_stop_at_the_old_await(StopGuest::V1).await;
+        assert!(
+            component_entry_is_loaded(&runtime, &id).await,
+            "the v1 stop removed the running entry"
+        );
+        release_and_read_owner_stop(&runtime, &id, watch, gate).await;
+        task.await.expect("the stop task").expect("the stop");
+    }
+
+    /// A running v2 guest the owner stops is recorded `stopped: owner`.
+    /// The provider removes that entry before the old await.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_running_v2_guest_the_owner_stops_is_recorded_stopped_owner() {
+        let (runtime, _dir, id, _agent, gate, task, watch) =
+            owner_stop_at_the_old_await(StopGuest::V2).await;
+        assert!(
+            !component_entry_is_loaded(&runtime, &id).await,
+            "the v2 stop left the running entry"
+        );
+        release_and_read_owner_stop(&runtime, &id, watch, gate).await;
+        task.await.expect("the stop task").expect("the stop");
+    }
+
+    /// A caller dropped at the old await has already committed. The guest
+    /// ends and the mark stays set.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_stop_dropped_at_the_old_await_ends_the_guest_and_keeps_the_mark() {
+        let (runtime, _dir, id, agent, gate, task, watch) =
+            owner_stop_at_the_old_await(StopGuest::Loading).await;
+        task.abort();
+        let _ = task.await;
+        assert!(
+            runtime.stop_requested_for_test(agent),
+            "the dropped caller cleared the mark"
+        );
+        assert_eq!(
+            runtime.requested_stop_for_test(&id).as_deref(),
+            Some("stopped: owner"),
+            "the dropped caller withdrew the cause"
+        );
+        release_and_read_owner_stop(&runtime, &id, watch, gate).await;
+        assert!(
+            runtime.stop_requested_for_test(agent),
+            "the ended guest cleared the mark"
+        );
     }
 }

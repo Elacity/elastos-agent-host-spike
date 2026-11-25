@@ -460,6 +460,11 @@ impl Drop for UnsettledDispatch {
             return;
         }
         self.finished = true;
+        // A parked flight is not part of this value. Take it here so a
+        // cancelled task does not leave the guard in the map.
+        drop(crate::resource_bridge::take_parked_plan_guard(
+            &self.request_id,
+        ));
         let code = if std::thread::panicking() {
             "dispatch_panic"
         } else {

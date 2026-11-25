@@ -290,6 +290,23 @@ impl ComponentProvider {
         self.clear_bridge_principal(capsule_id).await;
     }
 
+    /// A long fuel budget, and when `v2` the stop path that removes a running
+    /// v2 entry. Server tests reach this through the `test-hooks` feature.
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub async fn prepare_stop_target_for_test(&self, id: &CapsuleId, v2: bool) -> bool {
+        let mut instances = self.instances.write().await;
+        let Some(entry) = instances.get_mut(id) else {
+            return false;
+        };
+        entry.fuel = u64::MAX;
+        entry.run_deadline = Duration::from_secs(30);
+        if v2 {
+            entry.status = CapsuleStatus::Running;
+            entry.manifest.bus_contract = Some(ELASTOS_BUS_V2_CONTRACT.into());
+        }
+        true
+    }
+
     /// The one engine every v1 component in this process compiles and runs on.
     /// The v1 ABI uses none of these proposals, so they are off here as well as
     /// compiled out of the build (`threads`, `gc`, `stack-switching` in Cargo.toml).
