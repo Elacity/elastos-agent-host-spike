@@ -35,6 +35,7 @@
     "elastos/crates/elastos-server/src/auth.rs",
     "elastos/crates/elastos-server/src/auth_state_files.rs",
     "elastos/crates/elastos-server/src/crypto.rs",
+    "elastos/crates/elastos-server/src/auth/envelope_bound.rs",
     "elastos/crates/elastos-server/src/auth/verified_launch_token_signer.rs",
     "elastos/crates/elastos-server/src/collaboration_profile_authority.rs",
     "elastos/crates/elastos-server/src/collaboration_network.rs",
