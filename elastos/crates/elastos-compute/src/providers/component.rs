@@ -118,6 +118,11 @@ struct ComponentActivation {
     join: Option<Arc<V2Join>>,
     /// How long a stop waits for that join before it answers "still running".
     join_bound: Duration,
+    /// Wakes one clock sleep. Stop and cancel store the flag, then notify.
+    wake: Arc<tokio::sync::Notify>,
+    /// Set for the wait inside `sleep-until`. A test reads it.
+    #[cfg(test)]
+    in_clock_sleep: Arc<AtomicBool>,
     /// The test asks the next join to skip spawning its owner thread.
     #[cfg(test)]
     refuse_join_owner: bool,
@@ -231,6 +236,11 @@ struct ComponentState {
     ended_by_stop: bool,
     /// The v2 activation's cancel flag. v1 leaves this unset.
     cancel_requested: Arc<AtomicBool>,
+    /// Wakes a v2 clock sleep. v1 does not wait on it.
+    wake: Arc<tokio::sync::Notify>,
+    /// Set while a v2 clock sleep is waiting.
+    #[cfg(test)]
+    in_clock_sleep: Arc<AtomicBool>,
     /// The v2 token bucket. v1 has none.
     fuel_bucket: Option<Arc<Mutex<crate::providers::fuel_bucket::FuelBucket>>>,
     /// v2's own limiter. v1 keeps [`ComponentState::limits`].
@@ -407,7 +417,7 @@ impl ComponentProvider {
                 return;
             };
             instance.grants.lock().expect("grant book").clear();
-            instance.stop_requested.store(true, Ordering::Release);
+            raise_flag(&instance.stop_requested, &instance.wake);
             drop(instance.events.take());
             let join = begin_v2_join(instance);
             if join.is_none() {
@@ -650,6 +660,9 @@ impl ComponentProvider {
                 worker: None,
                 join: None,
                 join_bound: V2_HOST_DEADLINE,
+                wake: Arc::new(tokio::sync::Notify::new()),
+                #[cfg(test)]
+                in_clock_sleep: Arc::new(AtomicBool::new(false)),
                 #[cfg(test)]
                 refuse_join_owner: false,
                 #[cfg(test)]
@@ -710,6 +723,9 @@ impl ComponentProvider {
             reads,
             stop_requested: instance.stop_requested.clone(),
             cancel_requested: instance.cancel_requested.clone(),
+            wake: instance.wake.clone(),
+            #[cfg(test)]
+            in_clock_sleep: instance.in_clock_sleep.clone(),
             run_deadline: instance.run_deadline,
             ..ComponentState::new(hostcall, handle.id.0.clone(), principal_id)
         };
@@ -1319,6 +1335,8 @@ struct V2Join {
     owning: AtomicBool,
     /// The owner thread was not spawned. `wait` joins on its caller.
     inline: AtomicBool,
+    /// The guest's clock-sleep wake. Cancel notifies it.
+    wake: Arc<tokio::sync::Notify>,
     #[cfg(test)]
     refuse_spawn: bool,
 }
@@ -1328,6 +1346,7 @@ impl V2Join {
         task: Option<tokio::task::AbortHandle>,
         worker: Option<std::thread::JoinHandle<()>>,
         cancel: Arc<AtomicBool>,
+        wake: Arc<tokio::sync::Notify>,
         #[cfg(test)] refuse_spawn: bool,
     ) -> Arc<Self> {
         Arc::new(Self {
@@ -1339,6 +1358,7 @@ impl V2Join {
             started: AtomicBool::new(false),
             owning: AtomicBool::new(false),
             inline: AtomicBool::new(false),
+            wake,
             #[cfg(test)]
             refuse_spawn,
         })
@@ -1379,6 +1399,7 @@ impl V2Join {
         if let Some(task) = self.task.lock().expect("join").take() {
             if !task.is_finished() {
                 self.cancel.store(true, Ordering::Release);
+                self.wake.notify_one();
                 task.abort();
             }
         }
@@ -1412,6 +1433,12 @@ impl V2Join {
     }
 }
 
+/// Stores a stop or cancel flag and wakes one clock sleep.
+fn raise_flag(flag: &AtomicBool, wake: &tokio::sync::Notify) {
+    flag.store(true, Ordering::Release);
+    wake.notify_one();
+}
+
 /// Moves this guest's worker into the one join, or returns the join a stop
 /// already owns. `None` means there is no worker to join.
 fn begin_v2_join(instance: &mut ComponentActivation) -> Option<Arc<V2Join>> {
@@ -1425,10 +1452,12 @@ fn begin_v2_join(instance: &mut ComponentActivation) -> Option<Arc<V2Join>> {
     }
     #[cfg(test)]
     let refuse_spawn = instance.refuse_join_owner;
+    let wake = instance.wake.clone();
     let join = V2Join::prepare(
         task,
         worker,
         instance.cancel_requested.clone(),
+        wake,
         #[cfg(test)]
         refuse_spawn,
     );
@@ -1577,8 +1606,8 @@ impl Drop for ComponentProvider {
         };
         let mut joins = Vec::new();
         for (id, instance) in instances.iter_mut() {
-            instance.cancel_requested.store(true, Ordering::Release);
-            instance.stop_requested.store(true, Ordering::Release);
+            raise_flag(&instance.cancel_requested, &instance.wake);
+            raise_flag(&instance.stop_requested, &instance.wake);
             let Some(join) = begin_v2_join(instance) else {
                 continue;
             };
@@ -1654,7 +1683,7 @@ impl ComputeProvider for ComponentProvider {
         if !v2 && instance.status == CapsuleStatus::Running {
             // A resident v1 activation is ended by its own epoch callback; the
             // worker removes the entry when the run ends.
-            instance.stop_requested.store(true, Ordering::Release);
+            raise_flag(&instance.stop_requested, &instance.wake);
             return Ok(());
         }
         if !v2 {
@@ -1663,7 +1692,7 @@ impl ComputeProvider for ComponentProvider {
             self.frames.lock().expect("frames").remove(&id.0);
             return Ok(());
         }
-        instance.stop_requested.store(true, Ordering::Release);
+        raise_flag(&instance.stop_requested, &instance.wake);
         instance.grants.lock().expect("grant book").clear();
         drop(instance.events.take());
         let bound = instance.join_bound;
@@ -1814,6 +1843,9 @@ impl ComponentState {
             in_bus: Duration::ZERO,
             stop_requested: Arc::new(AtomicBool::new(false)),
             cancel_requested: Arc::new(AtomicBool::new(false)),
+            wake: Arc::new(tokio::sync::Notify::new()),
+            #[cfg(test)]
+            in_clock_sleep: Arc::new(AtomicBool::new(false)),
             ended_by_stop: false,
             fuel_bucket: None,
             guest_memory: super::fuel_bucket::GuestMemory::default(),
@@ -2152,7 +2184,7 @@ impl v2::elastos::bus::clock::HostWithStore<ComponentState> for HasSelf<Componen
         accessor: &wasmtime::component::Accessor<ComponentState, Self>,
         deadline_ms: u64,
     ) {
-        let (wait, cancel, stop, bucket) = accessor.with(|mut access| {
+        let (wait, cancel, stop, bucket, wake, sleeping) = accessor.with(|mut access| {
             let _opened = charge_access(&mut access);
             let bucket = access.get().fuel_bucket.clone();
             if let Some(bucket) = &bucket {
@@ -2163,22 +2195,34 @@ impl v2::elastos::bus::clock::HostWithStore<ComponentState> for HasSelf<Componen
                 .map(|bucket| bucket.lock().expect("fuel").sleep_for(deadline_ms))
                 .unwrap_or(Duration::ZERO);
             let state = access.get();
+            #[cfg(test)]
+            let sleeping = Some(state.in_clock_sleep.clone());
+            #[cfg(not(test))]
+            let sleeping: Option<Arc<AtomicBool>> = None;
             (
                 wait,
                 state.cancel_requested.clone(),
                 state.stop_requested.clone(),
                 bucket,
+                state.wake.clone(),
+                sleeping,
             )
         });
         let _guard = resume_guard(&bucket);
-        let mut left = wait;
-        while !left.is_zero() {
-            if cancel.load(Ordering::Acquire) || stop.load(Ordering::Acquire) {
-                break;
+        // One wait. Cancel or stop notifies; the sleep is not sliced.
+        let notified = wake.notified();
+        tokio::pin!(notified);
+        if let Some(flag) = &sleeping {
+            flag.store(true, Ordering::Release);
+        }
+        if !cancel.load(Ordering::Acquire) && !stop.load(Ordering::Acquire) && !wait.is_zero() {
+            tokio::select! {
+                _ = &mut notified => {}
+                _ = tokio::time::sleep(wait) => {}
             }
-            let slice = DEADLINE_TICK.min(left);
-            tokio::time::sleep(slice).await;
-            left = left.saturating_sub(slice);
+        }
+        if let Some(flag) = &sleeping {
+            flag.store(false, Ordering::Release);
         }
         accessor.with(|mut access| release_access(&mut access));
     }
@@ -3405,6 +3449,59 @@ mod tests {
             elapsed.as_millis()
         );
         assert_eq!(ending, "returned", "{ending}");
+    }
+
+    /// Cancel wakes one long sleep. The wait is not a 10 ms poll.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn v2_cancel_ends_a_very_long_sleep_within_100ms() {
+        let provider = ComponentProvider::new();
+        let source = include_str!("../../../../tests/fixtures/components/v2-sleep.wat")
+            .replace("i64.const 400", "i64.const -1");
+        let bytes = wat::parse_str(&source).expect("u64::MAX sleep");
+        let handle = load_v2_fixture(&provider, bytes).await;
+        provider.start(&handle).await.expect("the sleeper starts");
+        let (sleeping, wake, cancel) = {
+            let instances = provider.instances.read().await;
+            let instance = instances.get(&handle.id).expect("the guest is loaded");
+            (
+                instance.in_clock_sleep.clone(),
+                instance.wake.clone(),
+                instance.cancel_requested.clone(),
+            )
+        };
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !sleeping.load(Ordering::Acquire) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the guest enters the clock sleep");
+        assert!(
+            provider.endings.read().await.get(&handle.id).is_none(),
+            "the long sleep is still in progress"
+        );
+        let started = Instant::now();
+        cancel.store(true, Ordering::Release);
+        wake.notify_one();
+        let ending = tokio::time::timeout(Duration::from_millis(100), async {
+            loop {
+                if let Some(ending) = provider.endings.read().await.get(&handle.id).cloned() {
+                    return ending;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("cancel ends a very long sleep within 100 ms");
+        assert!(
+            started.elapsed() < Duration::from_millis(100),
+            "elapsed {} ms",
+            started.elapsed().as_millis()
+        );
+        assert!(
+            ending == "returned" || ending.contains("stopped") || ending.contains(ENDING_EPOCH_DEADLINE),
+            "{ending}"
+        );
     }
 
     #[test]
