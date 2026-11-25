@@ -30,6 +30,12 @@ pub const STAGED_BUNDLE_SCOPE: &str =
 pub const INSTALLED_RUNTIME_SCOPE: &str =
     "release head, release and components hash-check each other and name this repository commit; records only, the installed data folder did not run";
 
+/// What `review_binding` asks for. A reviewer family is the leading letters of
+/// the reviewer name, in lower case. A reviewer name uses the existing
+/// test-name alphabet, so `claude` and `claude_opus` are one family and
+/// `codex` and `claude` are two.
+pub const REVIEW_BINDING_SCOPE: &str = "review_binding asks for two different reviewer families.";
+
 /// What the runtime-ran row covers: the suite was told a named binary whose
 /// canonical path is the installed binary, and the one Runtime identity it
 /// recorded names that path with the installed binary's SHA-256; after the
@@ -519,16 +525,33 @@ impl GitIdentity {
     }
 }
 
-/// One review of the tested candidate. It binds only when it passed and names
-/// the exact commit checked out, on a clean tree, when the report is written;
-/// any other review leaves A14 unbound. It does not show that the suite's
-/// results came from that tree.
+/// One review of the tested candidate. The reviews bind only when two different
+/// reviewer families passed and each names the exact commit checked out, on a
+/// clean tree, when the report is written. A reviewer family is the leading
+/// letters of the reviewer name, in lower case. Any other review leaves A14
+/// unbound. It does not show that the suite's results came from that tree.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct Review {
     pub reviewer: String,
     pub verdict: String,
     pub commit: String,
+}
+
+/// The leading letters of a reviewer name, in lower case. `claude` and
+/// `claude_opus` are one family. A name with no leading letter is its own
+/// family, the whole name in lower case.
+fn reviewer_family(reviewer: &str) -> String {
+    let letters: String = reviewer
+        .chars()
+        .take_while(|character| character.is_ascii_alphabetic())
+        .map(|character| character.to_ascii_lowercase())
+        .collect();
+    if letters.is_empty() {
+        reviewer.to_ascii_lowercase()
+    } else {
+        letters
+    }
 }
 
 /// Every reason the reviews do not bind to `git`; empty means bound.
@@ -543,18 +566,33 @@ pub fn review_failures(reviews: Option<&[Review]>, git: Option<&GitIdentity>) ->
         Some(git) if git.dirty => failures.push("reviews cannot bind: dirty tree".into()),
         Some(_) => {}
     }
+    let mut families = BTreeSet::new();
     for review in reviews {
         let reviewer = &review.reviewer;
         if !test_name(reviewer) {
             failures.push("malformed review: reviewer".into());
             continue;
         }
-        if review.verdict != "pass" {
+        let passed = review.verdict == "pass";
+        if !passed {
             failures.push(format!("review did not pass: {reviewer}"));
         }
-        if git.is_some_and(|git| git.commit != review.commit) {
+        let same_commit = git.is_none_or(|git| git.commit == review.commit);
+        if !same_commit {
             failures.push(format!("review names another commit: {reviewer}"));
         }
+        if passed && same_commit {
+            families.insert(reviewer_family(reviewer));
+        }
+    }
+    match families.len() {
+        0 => failures.push("reviews need two reviewer families".into()),
+        1 => {
+            for family in &families {
+                failures.push(format!("reviews name one reviewer family: {family}"));
+            }
+        }
+        _ => {}
     }
     failures.sort();
     failures.dedup();
@@ -1276,6 +1314,7 @@ pub fn render_bound_run(
         "reviews": reviews,
         "review_status": if unbound.is_empty() { "bound" } else { "unbound" },
         "review_failures": unbound,
+        "review_binding_scope": REVIEW_BINDING_SCOPE,
         "staged_bundles": staged,
         "staged_bundle_status": if unstaged.is_empty() { "recorded" } else { "missing" },
         "staged_bundle_failures": unstaged,

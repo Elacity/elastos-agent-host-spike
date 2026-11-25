@@ -1220,10 +1220,19 @@ fn review_failures_name_each_unbound_review() {
     ];
     assert_eq!(
         fails(Some(&wrong), &git),
-        ["review names another commit: claude"]
+        [
+            "review names another commit: claude",
+            "reviews name one reviewer family: codex"
+        ]
     );
     let rejected = [review("codex", "reject", &git.commit)];
-    assert_eq!(fails(Some(&rejected), &git), ["review did not pass: codex"]);
+    assert_eq!(
+        fails(Some(&rejected), &git),
+        [
+            "review did not pass: codex",
+            "reviews need two reviewer families"
+        ]
+    );
     // Exact match only: a prefix, another case, or a verdict that merely
     // contains "pass" does not bind.
     let lettered = GitIdentity {
@@ -1238,7 +1247,8 @@ fn review_failures_name_each_unbound_review() {
         fails(Some(&near), &lettered),
         [
             "review names another commit: prefix",
-            "review names another commit: upper"
+            "review names another commit: upper",
+            "reviews need two reviewer families"
         ]
     );
     let worded = [
@@ -1247,7 +1257,11 @@ fn review_failures_name_each_unbound_review() {
     ];
     assert_eq!(
         fails(Some(&worded), &git),
-        ["review did not pass: claude", "review did not pass: codex"]
+        [
+            "review did not pass: claude",
+            "review did not pass: codex",
+            "reviews need two reviewer families"
+        ]
     );
     let passed = [review("codex", "pass", &git.commit)];
     let dirty = GitIdentity {
@@ -1256,16 +1270,34 @@ fn review_failures_name_each_unbound_review() {
     };
     assert_eq!(
         fails(Some(&passed), &dirty),
-        ["reviews cannot bind: dirty tree"]
+        [
+            "reviews cannot bind: dirty tree",
+            "reviews name one reviewer family: codex"
+        ]
     );
     assert_eq!(
         review_failures(Some(&passed), None),
-        ["reviews cannot bind: no Git identity"]
+        [
+            "reviews cannot bind: no Git identity",
+            "reviews name one reviewer family: codex"
+        ]
     );
     let unnamed = [review("", "pass", &git.commit)];
-    assert_eq!(fails(Some(&unnamed), &git), ["malformed review: reviewer"]);
+    assert_eq!(
+        fails(Some(&unnamed), &git),
+        [
+            "malformed review: reviewer",
+            "reviews need two reviewer families"
+        ]
+    );
     let spaced = [review("co dex", "pass", &git.commit)];
-    assert_eq!(fails(Some(&spaced), &git), ["malformed review: reviewer"]);
+    assert_eq!(
+        fails(Some(&spaced), &git),
+        [
+            "malformed review: reviewer",
+            "reviews need two reviewer families"
+        ]
+    );
     let both = [
         review("codex", "pass", &git.commit),
         review("claude", "pass", &git.commit),
@@ -1317,13 +1349,47 @@ fn receipt_records_review_binding_beside_command_success() {
     assert_eq!(document["review_failures"], serde_json::json!([]));
     assert_eq!(document["reviews"], serde_json::to_value(&reviews).unwrap());
     assert_eq!(document["report"]["table"], report.table);
+    assert_eq!(
+        document["review_binding_scope"],
+        agent_conformance::report::REVIEW_BINDING_SCOPE
+    );
+}
+
+#[test]
+fn one_reviewer_family_is_refused() {
+    use agent_conformance::report::review_failures;
+    let (_, git) = synthetic(1, false);
+    let one = [review("codex", "pass", &git.commit)];
+    assert_eq!(
+        review_failures(Some(&one), Some(&git)),
+        ["reviews name one reviewer family: codex"]
+    );
+    let same = [
+        review("claude", "pass", &git.commit),
+        review("claude_opus", "pass", &git.commit),
+    ];
+    assert_eq!(
+        review_failures(Some(&same), Some(&git)),
+        ["reviews name one reviewer family: claude"]
+    );
+    let (report, document) = reviewed(git, Some(&one));
+    assert!(report.table.contains("review_binding (A14) | FAIL\n"));
+    assert_eq!(document["review_status"], "unbound");
+    assert_eq!(
+        document["review_failures"],
+        serde_json::json!(["reviews name one reviewer family: codex"])
+    );
+    assert!(report.passed, "{:?}", report.failures);
 }
 
 #[test]
 fn a_tree_dirty_around_the_run_fails_review_binding() {
     use agent_conformance::report::render_bound_run;
     let (observations, git) = synthetic(1, false);
-    let reviews = [review("codex", "pass", &git.commit)];
+    let reviews = [
+        review("codex", "pass", &git.commit),
+        review("claude", "pass", &git.commit),
+    ];
     let render = |tree_check_failure: Option<String>| {
         let report = render_bound_run(
             &format!("{LIVE}: test\n"),
@@ -1545,7 +1611,10 @@ fn reviews_file_inside_the_repository_cannot_bind() {
 
     // The row: reviews that would bind do not when their file is refused.
     let (observations, git) = synthetic(1, false);
-    let reviews = [review("first", "pass", &git.commit)];
+    let reviews = [
+        review("first", "pass", &git.commit),
+        review("second", "pass", &git.commit),
+    ];
     let row = |reviews_file_failure: Option<String>| {
         let report = agent_conformance::report::render_bound_run(
             &format!("{LIVE}: test\n"),
@@ -2131,7 +2200,7 @@ fn no_installed_runtime_leaves_the_receipt_unchanged() {
 fn receipt_without_an_installed_runtime_has_exactly_these_fields() {
     use agent_conformance::report::STAGED_BUNDLE_SCOPE;
     // The whole list, so a field added under any name shows up here.
-    const FIELDS: [&str; 23] = [
+    const FIELDS: [&str; 24] = [
         "build_only_probes",
         "cargo_success",
         "command_success",
@@ -2143,6 +2212,7 @@ fn receipt_without_an_installed_runtime_has_exactly_these_fields() {
         "probes",
         "report",
         "repository",
+        "review_binding_scope",
         "review_failures",
         "review_status",
         "reviews",
@@ -2968,7 +3038,10 @@ fn a14_rows_pass_only_when_every_row_is_present_and_passes() {
         sha256: sha256(b"installed runtime"),
         path: Some(fixture.binary.to_string_lossy().into_owned()),
     };
-    let reviews = [review("codex", "pass", &git.commit)];
+    let reviews = [
+        review("codex", "pass", &git.commit),
+        review("claude", "pass", &git.commit),
+    ];
     let directory = tempfile::tempdir().unwrap();
     let record_path = directory.path().join("launches");
     fs::write(
