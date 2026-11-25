@@ -1820,12 +1820,13 @@ impl ProviderBridge {
     /// race, are accepted only through an opened handle: `O_DIRECTORY |
     /// O_NOFOLLOW`, then `fstat` on that handle. The mode check is the full
     /// permission word, `0o7777`, so set-id and sticky bits are refused.
-    #[rustfmt::skip]
     fn ensure_chain_provider_root(data_dir: &Path) -> Result<(), BridgeError> {
         let root = data_dir.join("chain-provider");
         match Self::accept_chain_provider_root(&root) {
             Ok(()) => Ok(()),
-            Err(BridgeError::Io(err)) if err.kind() == std::io::ErrorKind::NotFound => Self::create_chain_provider_root(&root),
+            Err(BridgeError::Io(err)) if err.kind() == std::io::ErrorKind::NotFound => {
+                Self::create_chain_provider_root(&root)
+            }
             Err(err) => Err(err),
         }
     }
@@ -1850,16 +1851,26 @@ impl ProviderBridge {
     /// the full mode `0700`. `NotFound` stays an I/O error so the create path
     /// can run. Every other open failure, and a handle whose mode is not
     /// exactly `0700`, is the same refusal.
-    #[rustfmt::skip]
     fn accept_chain_provider_root(root: &Path) -> Result<(), BridgeError> {
         use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
         let refused = BridgeError::Refused("provider start is refused: chain-provider is not a directory this user owns with mode 0700. Replace it with a directory you own, then start Home again.".into());
-        let dir = match std::fs::OpenOptions::new().read(true).custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW).open(root) {
+        let dir = match std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW)
+            .open(root)
+        {
             Ok(dir) => dir,
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Err(BridgeError::Io(err)),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                return Err(BridgeError::Io(err))
+            }
             Err(_) => return Err(refused),
         };
-        let meta = dir.metadata().map_err(BridgeError::Io)?; if meta.uid() == unsafe { libc::geteuid() } && meta.mode() & 0o7777 == 0o700 { Ok(()) } else { Err(refused) }
+        let meta = dir.metadata().map_err(BridgeError::Io)?;
+        if meta.uid() == unsafe { libc::geteuid() } && meta.mode() & 0o7777 == 0o700 {
+            Ok(())
+        } else {
+            Err(refused)
+        }
     }
 
     /// Start localhost, object, or chain on that provider's path allow-list.

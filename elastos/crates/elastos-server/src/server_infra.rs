@@ -1306,8 +1306,8 @@ async fn setup_server_infrastructure_impl(
             Err(err) => tracing::error!("object helper spawn refused: {err}"),
             Ok(object_config) => {
                 // One line: the loader census names this exact call.
-                #[rustfmt::skip]
-                let object_bridge = spawn_allow_listed_provider("object-provider", &path, &data_dir, object_config);
+                let object_bridge =
+                    spawn_allow_listed_provider("object-provider", &path, &data_dir, object_config);
                 match object_bridge.await {
                     Ok(bridge) => {
                         let object_provider: Arc<dyn provider::Provider> = Arc::new(

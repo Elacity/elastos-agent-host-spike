@@ -105,8 +105,11 @@ pub(super) struct Prepared {
     root_pins: Vec<RootPin>,
 }
 
-#[rustfmt::skip]
-#[cfg(all(target_os = "linux", not(any(target_arch = "x86_64", target_arch = "aarch64"))))] compile_error!("linux confinement refused: this architecture has no seccomp list");
+#[cfg(all(
+    target_os = "linux",
+    not(any(target_arch = "x86_64", target_arch = "aarch64"))
+))]
+compile_error!("linux confinement refused: this architecture has no seccomp list");
 
 fn host_audit_arch() -> AuditArch {
     if cfg!(target_arch = "x86_64") {

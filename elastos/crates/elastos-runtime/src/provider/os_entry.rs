@@ -224,15 +224,14 @@ fn start_path_allow_os(
 /// `plan.root_dev` lines up with the storage roots, which are the first rules.
 /// The executable, loader, and resolver paths are not roots. Metadata literals
 /// and `current_dir` are not roots either; the launch comment says why a swap
-/// of those paths does not widen the profile. The attribute keeps each
-/// refusal on one line, as `require_real_root` does.
+/// of those paths does not widen the profile.
 #[cfg(all(not(elastos_unsupported_os_check), target_os = "macos"))]
-#[rustfmt::skip]
 fn confirm_allow_list_roots(plan: &super::landlock_plan::Plan) -> Result<(), String> {
     use std::ffi::CString;
     use std::os::unix::ffi::OsStrExt;
     for (index, rule) in plan.rules.iter().enumerate().take(plan.root_dev.len()) {
-        let path = CString::new(rule.1.as_os_str().as_bytes()).map_err(|_| format!("provider start is refused: {} contains NUL", rule.0))?;
+        let path = CString::new(rule.1.as_os_str().as_bytes())
+            .map_err(|_| format!("provider start is refused: {} contains NUL", rule.0))?;
         super::root_pin::open_pinned_directory(&path, super::root_pin::DIRECTORY_OPEN_FLAGS, plan.root_dev[index], plan.root_ino[index])
             .map_err(|errno| format!("provider start is refused: {} changed between the allow-list check and sandbox-exec: errno {errno}", rule.0))?;
     }
@@ -243,24 +242,48 @@ fn confirm_allow_list_roots(plan: &super::landlock_plan::Plan) -> Result<(), Str
 /// before `sandbox-exec`. A root swapped before that check starts nothing.
 /// After it, `sandbox-exec` resolves paths by name.
 #[cfg(all(not(elastos_unsupported_os_check), target_os = "macos"))]
-#[rustfmt::skip]
 fn launch_macos_path_allow(
-    confinement: &super::path_allow::HelperConfinement, plan: &super::landlock_plan::Plan,
-    executable: &super::CheckedExecutable, data_dir: &Path, stdio: ChildStdio,
+    confinement: &super::path_allow::HelperConfinement,
+    plan: &super::landlock_plan::Plan,
+    executable: &super::CheckedExecutable,
+    data_dir: &Path,
+    stdio: ChildStdio,
 ) -> Result<Launched, String> {
     let prepared = executable.verify_at_spawn()?;
-    let binary = std::fs::canonicalize(prepared.exec_path()).map_err(|error| format!("provider start is refused: cannot resolve provider executable: {error}"))?;
+    let binary = std::fs::canonicalize(prepared.exec_path()).map_err(|error| {
+        format!("provider start is refused: cannot resolve provider executable: {error}")
+    })?;
     let mut defines: Vec<(String, std::path::PathBuf)> = confinement
         .landlock
         .iter()
-        .filter(|rule| !matches!(rule.0, "PROVIDER_EXECUTABLE" | "LANDLOCK_LOADER_PATHS" | "READ_ONLY_FILE"))
+        .filter(|rule| {
+            !matches!(
+                rule.0,
+                "PROVIDER_EXECUTABLE" | "LANDLOCK_LOADER_PATHS" | "READ_ONLY_FILE"
+            )
+        })
         .map(|rule| (rule.0.to_string(), rule.1.clone()))
         .collect();
-    defines.extend(confinement.metadata.iter().enumerate().map(|(index, path)| (format!("META_{index}"), path.clone())));
+    defines.extend(
+        confinement
+            .metadata
+            .iter()
+            .enumerate()
+            .map(|(index, path)| (format!("META_{index}"), path.clone())),
+    );
     defines.push(("PROVIDER_EXECUTABLE".to_string(), binary.clone()));
-    let bound: Vec<(&str, &Path)> = defines.iter().map(|(name, path)| (name.as_str(), path.as_path())).collect();
+    let bound: Vec<(&str, &Path)> = defines
+        .iter()
+        .map(|(name, path)| (name.as_str(), path.as_path()))
+        .collect();
     confirm_allow_list_roots(plan)?;
-    let mut command = macos_sandbox_command(Path::new("/usr/bin/sandbox-exec"), &confinement.seatbelt, &binary, &bound, Some(data_dir))?;
+    let mut command = macos_sandbox_command(
+        Path::new("/usr/bin/sandbox-exec"),
+        &confinement.seatbelt,
+        &binary,
+        &bound,
+        Some(data_dir),
+    )?;
     // localhost stats the working directory before it reads init. That directory
     // is the data directory. Localhost and object have a `file-read-metadata`
     // literal for it, not a subpath and not a read of `identity/device.key`.

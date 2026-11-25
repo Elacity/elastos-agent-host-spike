@@ -234,7 +234,10 @@ mod tests {
         let mut plan = chain_plan(data);
         let path = CString::new(plan.rules[0].1.as_os_str().as_bytes()).unwrap();
         let real = std::fs::symlink_metadata(&plan.rules[0].1).unwrap();
-        assert_eq!((plan.root_dev[0], plan.root_ino[0]), (real.dev(), real.ino()));
+        assert_eq!(
+            (plan.root_dev[0], plan.root_ino[0]),
+            (real.dev(), real.ino())
+        );
         plan.root_dev[0] = plan.root_dev[0].wrapping_add(1);
         let error = super::open_pinned_directory(
             &path,

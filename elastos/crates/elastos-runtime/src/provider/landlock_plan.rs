@@ -105,15 +105,29 @@ pub(super) fn handled_fs(abi: u32) -> u64 {
 /// ABI this provider needs. Truncate stays in `STORAGE` and `renameat2` stays
 /// on the storage list, so refer is not subtracted. The literal name `ioctl`
 /// is subtracted when the seccomp list does not admit it.
-#[rustfmt::skip]
 pub(super) fn abi_required(names: &[&str]) -> u32 {
-    if names.contains(&"ioctl") { 5 } else if STORAGE & (1 << 14) != 0 { 3 } else { 2 }
+    if names.contains(&"ioctl") {
+        5
+    } else if STORAGE & (1 << 14) != 0 {
+        3
+    } else {
+        2
+    }
 }
 
-#[rustfmt::skip]
-pub(super) fn require_abi(provider: RuntimeProviderId, admitted: &AdmittedRights, reported: io::Result<u32>) -> Result<u32, String> {
-    let arch = if cfg!(target_arch = "x86_64") { super::seccomp_list::AuditArch::X86_64 } else { super::seccomp_list::AuditArch::Aarch64 };
-    let needed = abi_required(&super::seccomp_list::linux_seccomp_list(provider, admitted, arch));
+pub(super) fn require_abi(
+    provider: RuntimeProviderId,
+    admitted: &AdmittedRights,
+    reported: io::Result<u32>,
+) -> Result<u32, String> {
+    let arch = if cfg!(target_arch = "x86_64") {
+        super::seccomp_list::AuditArch::X86_64
+    } else {
+        super::seccomp_list::AuditArch::Aarch64
+    };
+    let needed = abi_required(&super::seccomp_list::linux_seccomp_list(
+        provider, admitted, arch,
+    ));
     match reported { Ok(abi) if abi >= needed => Ok(abi), Ok(abi) => Err(format!("linux confinement refused: this kernel reports Landlock ABI {abi}; {} needs ABI {needed}", if needed >= 5 { "ioctl on devices" } else { "truncate" })), Err(_) => Err(NO_LANDLOCK.to_string()) }
 }
 

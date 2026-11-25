@@ -8,7 +8,8 @@ const HEAD: &[&str] = &["(version 1)", "(deny default)", "(deny network*)"];
 
 /// Runtime-owned model launch inputs. Each numbered socket is a bound literal;
 /// the later caller supplies the canonical paths before starting the child.
-#[rustfmt::skip] #[cfg(not(elastos_unsupported_os_check))] fn model_inputs() -> Vec<String> {
+#[cfg(all(not(elastos_unsupported_os_check), any(target_os = "macos", test)))]
+fn model_inputs() -> Vec<String> {
     // Lab-only X1 layout: 19 ancestors and 64 reserved socket slots. The
     // installer must derive these bounds from its verified launch inputs.
     // X2 is process-fork; proposal rows 2, 4 and 5 cover the fixed inputs.
@@ -45,7 +46,7 @@ const HEAD: &[&str] = &["(version 1)", "(deny default)", "(deny network*)"];
 }
 
 /// Render `rows` and the macOS process-start baseline in profile order.
-#[rustfmt::skip] #[cfg(not(elastos_unsupported_os_check))] #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+#[cfg(all(not(elastos_unsupported_os_check), any(target_os = "macos", test)))]
 pub(super) fn render_macos_profile(
     provider: RuntimeProviderId,
     admitted: &AdmittedRights,
@@ -89,7 +90,17 @@ pub(super) fn render_macos_profile(
 /// `STORAGE_PARENT`: those parents would be the data directory, which contains
 /// `identity/device.key`. Metadata literals are the data directory and its
 /// ancestors only. They are not a read of that directory's children.
-#[rustfmt::skip] #[cfg(all(not(elastos_unsupported_os_check), any(target_os = "macos", all(target_os = "linux", any(target_arch = "x86_64", target_arch = "aarch64")))))] pub(super) fn render_path_allow_profile(
+#[cfg(all(
+    not(elastos_unsupported_os_check),
+    any(
+        target_os = "macos",
+        all(
+            target_os = "linux",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        )
+    )
+))]
+pub(super) fn render_path_allow_profile(
     roots: &[&str],
     metadata_slots: usize,
     chain: bool,

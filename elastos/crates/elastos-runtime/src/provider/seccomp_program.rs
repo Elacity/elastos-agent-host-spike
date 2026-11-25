@@ -121,16 +121,28 @@ fn object_directory_fcntl(arch: AuditArch) -> Vec<Instruction> {
 /// The model's measured argument rules, with syscall numbers filled in.
 /// Chain uses the clone3, clone, fcntl, futex, and prlimit64 blocks. Those
 /// blocks jump only inside themselves, so chain can place them in its order.
-#[rustfmt::skip]
 fn measured_argument_rules(arch: AuditArch) -> Vec<Instruction> {
-    let mut rules: Vec<Instruction> = MODEL_RULES.split_whitespace().map(|packed| {
-        let bits = u64::from_str_radix(packed, 16).expect("model rule encoding");
-        [(bits >> 48) as u32, ((bits >> 40) & 255) as u32,
-         ((bits >> 32) & 255) as u32, bits as u32]
-    }).collect();
-    for (at, name) in [(0, "clone3"), (2, "clone"), (9, "socketpair"),
-                       (14, "fcntl"), (22, "prlimit64"), (33, "futex"),
-                       (42, "socket")] {
+    let mut rules: Vec<Instruction> = MODEL_RULES
+        .split_whitespace()
+        .map(|packed| {
+            let bits = u64::from_str_radix(packed, 16).expect("model rule encoding");
+            [
+                (bits >> 48) as u32,
+                ((bits >> 40) & 255) as u32,
+                ((bits >> 32) & 255) as u32,
+                bits as u32,
+            ]
+        })
+        .collect();
+    for (at, name) in [
+        (0, "clone3"),
+        (2, "clone"),
+        (9, "socketpair"),
+        (14, "fcntl"),
+        (22, "prlimit64"),
+        (33, "futex"),
+        (42, "socket"),
+    ] {
         rules[at][3] = number(name, arch).expect("measured rule needs an architecture number");
     }
     rules

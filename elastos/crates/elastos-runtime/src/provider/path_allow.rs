@@ -96,7 +96,7 @@ fn current_user() -> u32 {
 /// `path` is one allow-list root. It must be a real directory this user owns,
 /// and its resolved path must stay a child of `data_dir` that does not reach
 /// `identity/` or `identity/device.key`.
-#[rustfmt::skip] fn require_real_root(data_dir: &Path, name: &str, path: &Path) -> Result<(u64, u64), String> {
+fn require_real_root(data_dir: &Path, name: &str, path: &Path) -> Result<(u64, u64), String> {
     let metadata = std::fs::symlink_metadata(path)
         .map_err(|_| format!("provider start is refused: {name} is missing. Create a directory named {name} that you own in the data directory, then start Home again."))?;
     if metadata.file_type().is_symlink() {
@@ -563,10 +563,18 @@ mod tests {
             std::fs::write(&path, b"kept-from-the-old-home").unwrap();
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o640)).unwrap();
         }
-        assert!(!data.join("UsersAI").exists(), "an old home has no UsersAI yet");
-        assert!(!data.join("capsules/localhost-provider/capsule.json").exists());
+        assert!(
+            !data.join("UsersAI").exists(),
+            "an old home has no UsersAI yet"
+        );
+        assert!(!data
+            .join("capsules/localhost-provider/capsule.json")
+            .exists());
         elastos_common::localhost::ensure_file_backed_roots(&data).unwrap();
-        assert!(data.join("UsersAI").is_dir(), "Home creates the missing root");
+        assert!(
+            data.join("UsersAI").is_dir(),
+            "Home creates the missing root"
+        );
         data
     }
 
@@ -652,7 +660,8 @@ mod tests {
                 if std::fs::write(&probe, b"mode").is_err() {
                     continue;
                 }
-                if std::fs::set_permissions(&probe, std::fs::Permissions::from_mode(0o640)).is_err() {
+                if std::fs::set_permissions(&probe, std::fs::Permissions::from_mode(0o640)).is_err()
+                {
                     continue;
                 }
                 let Ok(probed) = std::fs::symlink_metadata(&probe) else {
@@ -687,7 +696,10 @@ mod tests {
         let error = render("localhost-provider", held.path(), Path::new(EXE), 5)
             .expect_err("a missing root is refused");
         assert!(error.contains("UsersAI"), "{error}");
-        assert!(error.contains("Create a directory named UsersAI"), "{error}");
+        assert!(
+            error.contains("Create a directory named UsersAI"),
+            "{error}"
+        );
         assert!(error.contains("that you own"), "{error}");
         assert!(error.contains("start Home again"), "{error}");
     }
@@ -713,8 +725,12 @@ mod tests {
         use std::os::unix::fs::MetadataExt;
         let uid = super::current_user();
         let mut found = None;
-        for (parent, name) in [("/usr", "bin"), ("/usr", "lib"), ("/private", "etc"), ("/", "usr")]
-        {
+        for (parent, name) in [
+            ("/usr", "bin"),
+            ("/usr", "lib"),
+            ("/private", "etc"),
+            ("/", "usr"),
+        ] {
             let path = std::path::Path::new(parent).join(name);
             let Ok(meta) = std::fs::symlink_metadata(&path) else {
                 continue;
@@ -731,7 +747,10 @@ mod tests {
             .expect_err("a root owned by someone else is refused");
         assert!(error.contains(name), "{error}");
         assert!(error.contains("not owned by the current user"), "{error}");
-        assert!(error.contains(&format!("Give {name} to this user")), "{error}");
+        assert!(
+            error.contains(&format!("Give {name} to this user")),
+            "{error}"
+        );
         assert!(error.contains("start Home again"), "{error}");
     }
 }
