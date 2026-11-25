@@ -2526,7 +2526,8 @@ mod tests {
         hold_localhost_migration_lock, localhost_bringup, localhost_file_key,
         localhost_provider_bridge_config, set_localhost_migration_before_rename,
         set_localhost_migration_before_replace, set_localhost_migration_write_budget,
-        set_localhost_migration_write_error, LocalhostBringup,
+        set_localhost_migration_write_error, take_localhost_migration_progress_lines,
+        LocalhostBringup,
     };
     #[cfg(unix)]
     use std::ffi::CString;
@@ -4966,6 +4967,7 @@ mod tests {
             set_localhost_migration_write_error(None);
             set_localhost_migration_before_replace(None);
             set_localhost_migration_before_rename(None);
+            let _ = take_localhost_migration_progress_lines();
         }
     }
 
@@ -6262,35 +6264,14 @@ mod tests {
             }
             std::thread::sleep(Duration::from_secs(4));
         })));
-        let log = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
-        let writer = log.clone();
-        let subscriber = tracing_subscriber::fmt()
-            .with_max_level(tracing::Level::INFO)
-            .with_ansi(false)
-            .with_writer(move || LogWriter(writer.clone()))
-            .finish();
-        tracing::subscriber::with_default(subscriber, || {
-            localhost_provider_bridge_config(root, &device_key).unwrap();
-        });
-        let text = String::from_utf8(log.lock().unwrap().clone()).unwrap();
+        localhost_provider_bridge_config(root, &device_key).unwrap();
+        let lines = take_localhost_migration_progress_lines();
         assert!(
-            text.contains("localhost file migration checked 2 files"),
-            "{text}"
+            lines
+                .iter()
+                .any(|line| line == "localhost file migration checked 2 files"),
+            "{lines:?}"
         );
-    }
-
-    #[derive(Clone)]
-    struct LogWriter(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
-
-    impl std::io::Write for LogWriter {
-        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-            self.0.lock().unwrap().extend_from_slice(buf);
-            Ok(buf.len())
-        }
-
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
     }
 
     fn spawn_kill_child(root: &std::path::Path, device_key: &[u8; 32], point: &str) -> Child {

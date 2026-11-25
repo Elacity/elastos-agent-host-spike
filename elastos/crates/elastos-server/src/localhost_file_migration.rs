@@ -76,6 +76,7 @@ thread_local! {
         std::cell::RefCell::new(None);
     static BEFORE_RENAME: std::cell::RefCell<Option<MigrationReplaceHook>> =
         std::cell::RefCell::new(None);
+    static PROGRESS_LINES: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
 /// Stops the walk after this many migration writes. `None` writes normally.
@@ -102,6 +103,11 @@ pub(crate) fn set_localhost_migration_before_replace(hook: Option<MigrationRepla
 #[cfg(all(unix, test))]
 pub(crate) fn set_localhost_migration_before_rename(hook: Option<MigrationReplaceHook>) {
     BEFORE_RENAME.with(|slot| *slot.borrow_mut() = hook);
+}
+
+#[cfg(all(unix, test))]
+pub(crate) fn take_localhost_migration_progress_lines() -> Vec<String> {
+    PROGRESS_LINES.with(|slot| std::mem::take(&mut *slot.borrow_mut()))
 }
 
 #[cfg(all(unix, test))]
@@ -248,7 +254,10 @@ fn note_progress() {
         let count = count + 1;
         let now = unix_secs();
         if now.saturating_sub(last) >= 3 {
-            tracing::info!(target: "elastos", "localhost file migration checked {count} files");
+            let line = format!("localhost file migration checked {count} files");
+            tracing::info!(target: "elastos", "{line}");
+            #[cfg(test)]
+            PROGRESS_LINES.with(|slot| slot.borrow_mut().push(line));
             slot.set((count, now));
         } else {
             slot.set((count, last));
