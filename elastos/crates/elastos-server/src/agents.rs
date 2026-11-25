@@ -1724,8 +1724,8 @@ pub(crate) fn stored_wrap(
     wrap_parts(data_dir, protection)
 }
 
-/// The owner and the raw wrap, with no feature gate. The sentences match
-/// `stored_wrap` so a caller can tell a closed key from a broken file.
+/// The owner and the raw wrap. `stored_wrap` is the only caller, and it
+/// applies the feature gate before this runs.
 fn wrap_parts(
     data_dir: &Path,
     protection: &PrincipalRootProtectionV1,
