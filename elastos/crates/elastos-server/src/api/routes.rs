@@ -692,6 +692,21 @@ async fn stop_collected_agent_rows(runtime: &Runtime, agent_id: &str) -> axum::r
             });
         }
     }
+    // A session whose row already ended is absent from the live list, and its
+    // effect can still be landing. Name that session here. The answer is 202
+    // while any such effect remains.
+    for session_id in runtime.inflight_plan_sessions(agent_id) {
+        if stopping.iter().any(|row| row.session_id == session_id) {
+            continue;
+        }
+        if let Some(pos) = stopped.iter().position(|row| row.session_id == session_id) {
+            stopped.remove(pos);
+        }
+        stopping.push(StoppedAgentBody {
+            session_id,
+            status: "stopping".to_string(),
+        });
+    }
     let unknown = unknown_step_bodies(runtime, agent_id);
     if stopped.is_empty() {
         stopped = stopped_rows_for_unknown(&unknown);

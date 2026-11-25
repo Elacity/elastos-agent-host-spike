@@ -3069,3 +3069,78 @@ async fn a_dropped_stop_leaves_the_run_able_to_dispatch() {
     ));
     assert_the_run_can_still_dispatch(&plant).await;
 }
+
+/// A per-agent Stop names a session whose row has ended while its effect is
+/// still landing, and answers 202. A second live session of the same agent
+/// can stop in the same call.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_stop_names_an_inflight_session_that_already_ended() {
+    let plant = plant_approved(47, false, |_, target| {
+        json!({"steps": [{"scheme": "localhost", "operation": "write", "request": {
+            "path": target, "content": [112, 108, 97, 110]
+        }}]})
+    })
+    .await;
+    let live = format!("session-live-{}", plant.session);
+    plant
+        .runtime
+        .register_capsule(crate::runtime::RunningCapsuleInfo {
+            id: live.clone(),
+            name: "planted-live".to_string(),
+            status: crate::runtime::CAPSULE_RUNNING.to_string(),
+            capsule_type: elastos_common::CapsuleType::Wasm,
+            handle: None,
+            session_id: live.clone(),
+            principal: Some(plant.agent.clone()),
+            cause: None,
+            ended_at: None,
+        })
+        .await;
+    plant
+        .runtime
+        .insert_agent_session_for_test(crate::runtime::AgentSessionRecord {
+            agent_id: plant.agent.clone(),
+            owner: plant.owner.clone(),
+            host_cid: "cid".to_string(),
+            launch_id: format!("launch:{live}"),
+            session_id: live.clone(),
+        })
+        .await;
+    let pause = crate::resource_bridge::arm_plan_dispatch_hold(
+        &plant.id,
+        crate::resource_bridge::PlanDispatchPoint::InEffect,
+    );
+    let state = plant.state.clone();
+    let owner = plant.owner.clone();
+    let id = plant.id.clone();
+    let task = tokio::spawn(async move {
+        super::gateway_inspect_actions::dispatch_approved_agent_plan(
+            &state,
+            &dispatch_context(&owner),
+            &id,
+        )
+        .await
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(15), pause.entered.notified())
+        .await
+        .expect("the effect did not reach its hold");
+    plant
+        .runtime
+        .end_planted_session_for_test(&plant.session)
+        .await;
+    let (status, body) = stop_plan_agent(plant.runtime.clone(), &plant.agent).await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{body}");
+    let stopping = body["stopping"].as_array().expect("stopping is a list");
+    assert!(
+        stopping
+            .iter()
+            .any(|row| row["session_id"] == plant.session && row["status"] == "stopping"),
+        "the landing session is unlisted: {body}"
+    );
+    pause.release.notify_one();
+    let finished = tokio::time::timeout(std::time::Duration::from_secs(15), task)
+        .await
+        .expect("the effect did not settle");
+    finished.expect("dispatch task").expect("dispatch");
+}
