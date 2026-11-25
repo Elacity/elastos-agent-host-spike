@@ -3,7 +3,7 @@ use super::rights::AdmittedRights;
 use super::rights_table::RuntimeProviderId;
 use super::seccomp_program::number;
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[allow(dead_code)] // The installer is a later B3 slice.
 pub(super) enum AuditArch {
     X86_64,
@@ -318,5 +318,99 @@ mod tests {
         assert!(!object_arm.contains(&"rename"));
         assert_ne!(object_x86, local_x86);
         assert_ne!(object_arm, local_arm);
+    }
+
+    /// Every declared name resolves on both architectures, or it is named here
+    /// with the reason the number table leaves that cell blank. `readx` is the
+    /// typo: it is not allowlisted and it has no number, so this row is red.
+    #[test]
+    fn every_declared_seccomp_name_resolves_or_is_allowlisted() {
+        use RuntimeProviderId::*;
+        const ALLOWED: &[(&str, AuditArch, &str)] = &[
+            (
+                "ioctl",
+                AuditArch::X86_64,
+                "Landlock ABI 5 device ioctl; the filter has no ioctl number and abi_required still selects ABI 5",
+            ),
+            (
+                "ioctl",
+                AuditArch::Aarch64,
+                "Landlock ABI 5 device ioctl; the filter has no ioctl number and abi_required still selects ABI 5",
+            ),
+            (
+                "rmdir",
+                AuditArch::Aarch64,
+                "aarch64 has no rmdir syscall; unlinkat is the call",
+            ),
+            (
+                "readlink",
+                AuditArch::Aarch64,
+                "aarch64 glibc uses readlinkat, which the baseline allows; the number table has no readlink there",
+            ),
+            (
+                "arch_prctl",
+                AuditArch::Aarch64,
+                "aarch64 has no arch_prctl",
+            ),
+            (
+                "poll",
+                AuditArch::Aarch64,
+                "aarch64 has no poll; the baseline also allows ppoll",
+            ),
+            (
+                "mkdir",
+                AuditArch::Aarch64,
+                "aarch64 uses mkdirat, which the storage row allows",
+            ),
+            (
+                "unlink",
+                AuditArch::Aarch64,
+                "aarch64 uses unlinkat, which the storage row allows",
+            ),
+            (
+                "rename",
+                AuditArch::Aarch64,
+                "aarch64 uses renameat or renameat2; the number table has no rename there",
+            ),
+            (
+                "renameat",
+                AuditArch::X86_64,
+                "x86_64 uses renameat2; the renameat number is the aarch64 call",
+            ),
+            (
+                "epoll_wait",
+                AuditArch::Aarch64,
+                "aarch64 uses epoll_pwait; the number table has no epoll_wait there",
+            ),
+            (
+                "dup2",
+                AuditArch::Aarch64,
+                "the measured x86-only dup2 has no AArch64 syscall",
+            ),
+            (
+                "getpgrp",
+                AuditArch::Aarch64,
+                "the measured x86-only getpgrp has no AArch64 syscall",
+            ),
+        ];
+        let allowed = |name: &str, arch: AuditArch| {
+            ALLOWED.iter().any(|(allowed_name, allowed_arch, reason)| {
+                *allowed_name == name && *allowed_arch == arch && !reason.is_empty()
+            })
+        };
+        assert!(number("readx", AuditArch::X86_64).is_none());
+        assert!(!allowed("readx", AuditArch::X86_64), "a typo is not allowlisted");
+        for provider in [Did, Wallet, Model, Localhost, Object, Chain] {
+            let admitted = super::super::rights::admit_runtime_grant(provider);
+            let names = declared_linux_names(provider, &admitted);
+            for arch in [AuditArch::X86_64, AuditArch::Aarch64] {
+                for name in &names {
+                    assert!(
+                        number(name, arch).is_some() || allowed(name, arch),
+                        "{provider:?} {arch:?} {name} does not resolve and is not allowlisted"
+                    );
+                }
+            }
+        }
     }
 }
