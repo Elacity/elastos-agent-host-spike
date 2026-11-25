@@ -1602,13 +1602,14 @@ async function main() {
     const submits = entries(summary).filter((entry) => (
       String(entry.action_ref?.action_id || "").startsWith("capability-approve-request:")
       && resourceOf(entry.body).startsWith("elastos://inspect/submit_agent_plan")
+      && String(entry.body || "").includes(state.agentA)
     ));
     if (submits.length === 1) {
       await call("POST", "/api/apps/inbox/actions", state.inboxToken, {
         action_id: submits[0].action_ref.action_id,
       });
     } else if (submits.length > 1) {
-      halt("plan_card_captured", "more than one plan submit request remained");
+      halt("plan_card_captured", "more than one plan submit remained for agent A");
     }
     const cards = planCards(summary).filter((card) => {
       const text = `${card.title || ""} ${card.body || ""}`;
