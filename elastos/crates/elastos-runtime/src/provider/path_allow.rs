@@ -624,7 +624,9 @@ mod tests {
     /// A second writable volume. `cargo test` lists this ignored. Running it
     /// with `--ignored` fences that volume, or fails when the machine has none.
     /// `test-elastos` does not pass `--ignored`, and no CI job has a second
-    /// volume, so the job lists this ignored and does not run it for real.
+    /// volume, so this test stays unproved. The device comparison is
+    /// `a_rendered_plan_with_a_changed_root_dev_is_refused`, which changes
+    /// `root_dev` in a rendered plan and does not mount a volume.
     #[test]
     #[ignore = "needs a second writable volume; test-elastos lists this ignored and does not run it"]
     fn an_updated_home_on_another_volume_is_fenced() {

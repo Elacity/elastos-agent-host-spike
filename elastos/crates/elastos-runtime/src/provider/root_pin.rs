@@ -223,4 +223,26 @@ mod tests {
             "a different directory swapped in at the same name is refused with ESTALE (errno {error})"
         );
     }
+
+    /// The inode above stays the rendered inode. Only `root_dev` changes, so
+    /// this refusal is the device comparison. No second volume is mounted.
+    #[test]
+    fn a_rendered_plan_with_a_changed_root_dev_is_refused() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data = tmp.path();
+        std::fs::create_dir(data.join("chain-provider")).unwrap();
+        let mut plan = chain_plan(data);
+        let path = CString::new(plan.rules[0].1.as_os_str().as_bytes()).unwrap();
+        let real = std::fs::symlink_metadata(&plan.rules[0].1).unwrap();
+        assert_eq!((plan.root_dev[0], plan.root_ino[0]), (real.dev(), real.ino()));
+        plan.root_dev[0] = plan.root_dev[0].wrapping_add(1);
+        let error = super::open_pinned_directory(
+            &path,
+            super::DIRECTORY_OPEN_FLAGS,
+            plan.root_dev[0],
+            plan.root_ino[0],
+        )
+        .expect_err("a changed root_dev is refused");
+        assert_eq!(error, libc::ESTALE, "errno {error}");
+    }
 }
