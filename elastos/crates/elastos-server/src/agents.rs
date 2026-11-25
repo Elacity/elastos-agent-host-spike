@@ -933,6 +933,67 @@ fn list_in_any_build(data_dir: &Path, caller: &Caller<'_>) -> anyhow::Result<Vec
     Ok(theirs.map(view).collect())
 }
 
+pub(crate) fn opening_agent_count(data_dir: &Path, owner_id: &str) -> anyhow::Result<usize> {
+    if !build_allows() {
+        return Ok(0);
+    }
+    let path = agent_file_path(data_dir)?;
+    if std::fs::symlink_metadata(&path)
+        .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+    {
+        return Ok(0);
+    }
+    let opened = open(data_dir, false)?;
+    let Some(owner) = opened
+        .owner_file
+        .iter()
+        .find(|record| record.principal_id == owner_id && is_person(record))
+    else {
+        return Ok(0);
+    };
+    let mut count = 0usize;
+    for agent in &opened.file.agents {
+        if owned_by(agent, owner)
+            && agent.record.retired_at.is_none()
+            && data_key_opens(data_dir, &agent.protection)?
+        {
+            count += 1;
+        }
+    }
+    Ok(count)
+}
+
+fn data_key_opens(data_dir: &Path, protection: &PrincipalRootProtectionV1) -> anyhow::Result<bool> {
+    match crate::auth::open_agent_root_data_key(data_dir, protection) {
+        Ok(_) => Ok(true),
+        Err(err) => {
+            let text = err.to_string();
+            let closed = matches!(
+                text.as_str(),
+                "agent file holds no record for this principal root"
+                    | "principal-root protection is not the agent file's stored one"
+                    | "agent's owner holds no storage protection"
+                    | "agent data key does not match its protection"
+                    | "agent data key has the wrong length"
+            ) || (text.starts_with("principal-root ") && text.ends_with(" failed"));
+            if closed {
+                Ok(false)
+            } else {
+                Err(err)
+            }
+        }
+    }
+}
+
+pub(crate) fn agents_would_stop_opening(count: usize) -> String {
+    let (word, retire) = if count == 1 {
+        ("agent", "Retire that agent first")
+    } else {
+        ("agents", "Retire them first")
+    };
+    format!("{count} {word} on this Home would stop opening. {retire}, or import on another Home.")
+}
+
 const NO_SUCH_AGENT: &str = "the caller owns no agent with that id";
 const ALREADY_RETIRED: &str = "agent is already retired";
 pub(crate) const NOT_ACTIVE: &str = "agent is off until its owner turns it on";
@@ -1210,12 +1271,15 @@ pub(crate) fn stored_wrap(
     data_dir: &Path,
     protection: &PrincipalRootProtectionV1,
 ) -> anyhow::Result<(String, [u8; 12], Vec<u8>)> {
-    let Some(agent) = stored_agent_for_root(
-        data_dir,
-        &protection.principal_id,
-        &protection.localhost_root,
-    )?
-    else {
+    // List and launch stop when agents are off. The wrap itself still opens.
+    if !build_allows_for_home(data_dir) {
+        anyhow::bail!("agent file holds no record for this principal root");
+    }
+    let opened = open(data_dir, false)?;
+    let Some(agent) = opened.file.agents.iter().find(|agent| {
+        agent.record.principal_id == protection.principal_id
+            && agent.record.localhost_root == protection.localhost_root
+    }) else {
         anyhow::bail!("agent file holds no record for this principal root");
     };
     if agent.protection != *protection {

@@ -226,12 +226,12 @@ pub struct RecoveryKitImportResponse {
 }
 
 #[derive(Debug, Clone)]
-struct RecoveryKitMaterialImport {
-    principal_id: String,
-    localhost_root: String,
-    kit: RecoveryKitV1,
-    did_recovery_proof: Option<DidRecoveryProofV1>,
-    reassign_to_current_principal: bool,
+pub(crate) struct RecoveryKitMaterialImport {
+    pub(crate) principal_id: String,
+    pub(crate) localhost_root: String,
+    pub(crate) kit: RecoveryKitV1,
+    pub(crate) did_recovery_proof: Option<DidRecoveryProofV1>,
+    pub(crate) reassign_to_current_principal: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1764,6 +1764,19 @@ fn full_recovery_bundle_establish_kit(
     Ok(kit)
 }
 
+const AGENTS_STAY_ON_THIS_HOME: &str = "Agents and their data stay on the Home where you created them; this bundle does not carry them.";
+
+fn full_recovery_bundle_instructions() -> Vec<&'static str> {
+    let mut instructions = vec![
+        "Keep this Full Recovery Bundle offline. Anyone with it can recover this ElastOS user root, included built-in Wallet accounts, and the signed People identity with its contacts.",
+        "Import it only through ElastOS System recovery on a runtime you control.",
+    ];
+    if crate::agents::build_allows() {
+        instructions.push(AGENTS_STAY_ON_THIS_HOME);
+    }
+    instructions
+}
+
 async fn full_recovery_bundle_export_inner(
     state: &GatewayState,
     headers: &HeaderMap,
@@ -1835,10 +1848,7 @@ async fn full_recovery_bundle_export_inner(
             "people_identity": people_identity_included
         },
         "created_at": now,
-        "instructions": [
-            "Keep this Full Recovery Bundle offline. Anyone with it can recover this ElastOS user root, included built-in Wallet accounts, and the signed People identity with its contacts.",
-            "Import it only through ElastOS System recovery on a runtime you control."
-        ]
+        "instructions": full_recovery_bundle_instructions()
     });
     if let Some(people_identity) = people_identity {
         bundle
@@ -3014,7 +3024,7 @@ fn b64_decode_field(value: &Value, field: &str) -> anyhow::Result<Vec<u8>> {
         .map_err(|_| anyhow::anyhow!("full recovery bundle package invalid {field}"))
 }
 
-async fn recovery_kit_import_inner(
+pub(crate) async fn recovery_kit_import_inner(
     state: &GatewayState,
     headers: &HeaderMap,
     input: RecoveryKitMaterialImport,
@@ -3120,6 +3130,22 @@ async fn recovery_kit_import_inner(
                 &principal,
                 "auth.recovery_kit.import.rejected",
                 format!("recovery root reassignment failed: {err}"),
+            );
+        }
+    }
+    // Before activation or any store.
+    let replaces_root_key = !input.reassign_to_current_principal
+        && crate::auth::load_principal_root_protection(
+            &state.data_dir,
+            &kit.principal_id,
+            &kit.localhost_root,
+        )?
+        .is_some_and(|stored| stored.data_key_id != kit.data_key_id);
+    if input.reassign_to_current_principal || replaces_root_key {
+        let count = crate::agents::opening_agent_count(&state.data_dir, &principal.principal_id)?;
+        if count > 0 {
+            return Err(
+                crate::agents::Refused(crate::agents::agents_would_stop_opening(count)).into(),
             );
         }
     }
@@ -4858,7 +4884,7 @@ pub(in crate::api) fn auth_error_response(err: anyhow::Error) -> Response {
         )
             .into_response();
     }
-    if err.is::<RecoveryKitPreparationRefused>() {
+    if err.is::<RecoveryKitPreparationRefused>() || err.is::<crate::agents::Refused>() {
         return (StatusCode::CONFLICT, err.to_string()).into_response();
     }
     let text = err.to_string();
@@ -11606,6 +11632,33 @@ mod tests {
         assert_eq!(
             crate::auth::active_admin_passkey_principal_count(temp.path()).unwrap(),
             1
+        );
+    }
+
+    #[test]
+    fn recovery_bundle_instructions_name_agents_only_when_this_build_has_them() {
+        let lines = full_recovery_bundle_instructions();
+        let stay = AGENTS_STAY_ON_THIS_HOME;
+        if crate::agents::build_allows() {
+            assert_eq!(lines.last().copied(), Some(stay));
+        } else {
+            assert!(lines.iter().all(|line| *line != stay));
+        }
+        assert!(lines.len() >= 2);
+    }
+
+    #[tokio::test]
+    async fn an_agent_refusal_answers_conflict() {
+        let response = auth_error_response(
+            crate::agents::Refused(crate::agents::agents_would_stop_opening(1)).into(),
+        );
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(
+            String::from_utf8(body.to_vec()).unwrap(),
+            crate::agents::agents_would_stop_opening(1)
         );
     }
 }

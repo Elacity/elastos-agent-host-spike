@@ -1235,6 +1235,105 @@ pub(crate) fn plant_enabled_home_with_one_agent(
 }
 
 #[test]
+fn the_refusal_names_the_count_and_what_to_do() {
+    assert_eq!(
+        agents_would_stop_opening(1),
+        "1 agent on this Home would stop opening. Retire that agent first, or import on another Home."
+    );
+    assert_eq!(
+        agents_would_stop_opening(2),
+        "2 agents on this Home would stop opening. Retire them first, or import on another Home."
+    );
+}
+
+/// One agent whose note opens under the owner's current key. The caller has
+/// already stored that owner's protection. The owner is an admin.
+#[cfg(feature = "prototype-agents")]
+pub(crate) struct PlantedAgent {
+    pub agent_id: String,
+    pub root: String,
+    pub uri: String,
+    pub path: PathBuf,
+    pub note: Vec<u8>,
+}
+
+#[cfg(feature = "prototype-agents")]
+pub(crate) fn plant_opening_agent(
+    data_dir: &Path,
+    owner_id: &str,
+    request_id: &str,
+) -> PlantedAgent {
+    let owner = crate::auth::stored_principal_record(data_dir, owner_id)
+        .unwrap()
+        .unwrap();
+    let caller = Caller {
+        principal_id: owner_id,
+        proof_binding_id: &owner.proof_binding_id,
+        session_id: "session:plant",
+    };
+    set_enabled_in_any_build(data_dir, &caller, true, 9).unwrap();
+    let agent_id = create_in_any_build(data_dir, &caller, &request(request_id), admit, 10)
+        .unwrap()
+        .agent_id;
+    let note = b"note-opens-under-the-key-in-force".to_vec();
+    DISPATCH_FIXTURES
+        .get_or_init(|| Mutex::new(std::collections::HashSet::new()))
+        .lock()
+        .unwrap()
+        .insert(data_dir.to_path_buf());
+    let root = crate::auth::principal_stored_localhost_root(Some(data_dir), &agent_id).unwrap();
+    let uri = format!("{root}/journal/stable-id.txt");
+    let path = elastos_common::localhost::rooted_localhost_fs_path(data_dir, &uri).unwrap();
+    crate::auth::write_principal_root_object(data_dir, &agent_id, &root, &uri, &path, &note)
+        .unwrap();
+    assert_eq!(
+        crate::auth::read_principal_root_object(data_dir, &agent_id, &root, &uri, &path).unwrap(),
+        note,
+        "the planted note opens under the key in force"
+    );
+    PlantedAgent {
+        agent_id,
+        root,
+        uri,
+        path,
+        note,
+    }
+}
+
+/// The same plant, then the agent is retired. The note still opens: retirement
+/// keeps the wrap. The note is data the owner already stopped using.
+#[cfg(feature = "prototype-agents")]
+pub(crate) fn plant_retired_agent(
+    data_dir: &Path,
+    owner_id: &str,
+    request_id: &str,
+) -> PlantedAgent {
+    let planted = plant_opening_agent(data_dir, owner_id, request_id);
+    let owner = crate::auth::stored_principal_record(data_dir, owner_id)
+        .unwrap()
+        .unwrap();
+    let caller = Caller {
+        principal_id: owner_id,
+        proof_binding_id: &owner.proof_binding_id,
+        session_id: "session:plant",
+    };
+    retire_in_any_build(data_dir, &caller, &planted.agent_id, 11).unwrap();
+    assert_eq!(
+        crate::auth::read_principal_root_object(
+            data_dir,
+            &planted.agent_id,
+            &planted.root,
+            &planted.uri,
+            &planted.path
+        )
+        .unwrap(),
+        planted.note,
+        "a retired agent's note still opens under the key that wrapped it"
+    );
+    planted
+}
+
+#[test]
 fn a_create_leaves_one_record_and_one_protection_in_the_agent_file_only() {
     let home = Home::new();
     turn_on(&home);
