@@ -522,7 +522,7 @@ mod off {
 
     /// Create Recovery Kit through the export route. A protection with no
     /// archive, and an unretired record of this owner, is refused by the
-    /// sentence this build can carry out.
+    /// kit sentence. The step-up is still unused.
     #[tokio::test]
     async fn create_recovery_kit_refuses_when_an_unarchived_key_would_seal_an_agent() {
         let dir = tempfile::tempdir().unwrap();
@@ -571,7 +571,11 @@ mod off {
         )
         .await;
         assert_eq!(status, StatusCode::CONFLICT);
-        assert_eq!(body, crate::agents::agents_would_stop_opening(1));
+        assert_eq!(body, crate::agents::agents_use_a_key_not_in_a_kit(1));
+        assert!(
+            !super::step_up_was_spent(dir.path()),
+            "hold_unarchived's refusal leaves the step-up unspent"
+        );
         let after = crate::auth::load_principal_root_protection(
             dir.path(),
             &owner.principal_id,

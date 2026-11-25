@@ -252,14 +252,15 @@ fn read_agent_file_capped(
     path: &Path,
     cap: Option<u64>,
 ) -> Result<Option<Vec<u8>>, &'static str> {
-    #[cfg(windows)]
-    Err::<(), _>("agent file custody is unsupported on Windows")?;
     match std::fs::symlink_metadata(path) {
         Ok(metadata) if metadata.is_file() => {}
         Ok(_) => return Err(NOT_REGULAR),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(_) => return Err(CANNOT_READ),
     }
+    // A missing file is none. Windows refuses custody only once a file is there.
+    #[cfg(windows)]
+    Err::<(), _>("agent file custody is unsupported on Windows")?;
     // The file exists, so each parent exists: this only checks them.
     let parents_regular = path.parent().is_some_and(|parent| {
         crate::auth_state_files::ensure_regular_auth_parent(data_dir, parent).is_ok()
@@ -1248,18 +1249,21 @@ pub(crate) const CANNOT_OPEN_THE_WRAP: &str =
 pub(crate) const PASSKEY_NO_LONGER_NAMES: &str = "This passkey no longer names the account this recovery started with, so the recovery is refused.";
 
 pub(crate) fn agents_would_stop_opening(count: usize) -> String {
-    let (word, whom) = if count == 1 {
-        ("agent", "that agent")
+    let word = if count == 1 { "agent" } else { "agents" };
+    format!(
+        "{count} {word} on this Home would stop opening, so nothing was changed. Use this Recovery Kit on another Home instead."
+    )
+}
+
+/// Create Recovery Kit. The same words in a build with agents and without.
+pub(crate) fn agents_use_a_key_not_in_a_kit(count: usize) -> String {
+    let (word, verb) = if count == 1 {
+        ("agent", "uses")
     } else {
-        ("agents", "them")
-    };
-    let place = if build_allows() {
-        "on this Home"
-    } else {
-        "in a Runtime that includes agents"
+        ("agents", "use")
     };
     format!(
-        "{count} {word} on this Home would stop opening. Retire {whom} {place}, or import on another Home."
+        "{count} {word} on this Home {verb} a key this Home can't put in a Recovery Kit yet, so nothing was changed."
     )
 }
 
@@ -1315,7 +1319,7 @@ pub(crate) fn hold_unarchived(data_dir: &Path, owner_id: &str) -> anyhow::Result
     let guard = hold_agent_writer_for_root_change(data_dir, owner_id, owner_id, || Ok(false))?;
     let named = agents_naming_owner(data_dir, owner_id, true)?;
     if named > 0 {
-        return Err(Refused(agents_would_stop_opening(named)).into());
+        return Err(Refused(agents_use_a_key_not_in_a_kit(named)).into());
     }
     Ok(guard)
 }

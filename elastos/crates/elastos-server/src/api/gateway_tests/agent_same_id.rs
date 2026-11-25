@@ -1270,8 +1270,8 @@ async fn two_reassignments_paused_at_the_seam_refuse_when_the_passkey_moves() {
 }
 
 /// Create Recovery Kit, through the export route. A protection with no archive
-/// and an agent of this owner is refused with the same sentence, and the key
-/// stays.
+/// and an agent of this owner is refused with the kit sentence, and the key
+/// stays. The step-up is still unused.
 #[tokio::test]
 async fn create_recovery_kit_refuses_when_an_unarchived_key_would_seal_an_agent() {
     let dir = tempfile::tempdir().unwrap();
@@ -1331,7 +1331,11 @@ async fn create_recovery_kit_refuses_when_an_unarchived_key_would_seal_an_agent(
         .unwrap();
     assert_eq!(
         String::from_utf8(body.to_vec()).unwrap(),
-        crate::agents::agents_would_stop_opening(1)
+        crate::agents::agents_use_a_key_not_in_a_kit(1)
+    );
+    assert!(
+        !super::step_up_was_spent(dir.path()),
+        "hold_unarchived's refusal leaves the step-up unspent"
     );
     let after = crate::auth::load_principal_root_protection(
         dir.path(),

@@ -1184,6 +1184,17 @@ async fn wallet_chain_test_state_with_shared_wallet_provider(
 include!("support_providers.rs");
 include!("support_runtime.rs");
 
+/// A consumed passkey step-up leaves a file under the auth root. Absent means unspent.
+fn step_up_was_spent(data_dir: &std::path::Path) -> bool {
+    let root = crate::auth::auth_state_path(data_dir)
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join("passkey-step-up")
+        .join("consumed");
+    root.is_dir() && std::fs::read_dir(root).unwrap().any(|entry| entry.is_ok())
+}
+
 #[cfg(feature = "prototype-agents")]
 mod agent_launch;
 mod agent_plan;

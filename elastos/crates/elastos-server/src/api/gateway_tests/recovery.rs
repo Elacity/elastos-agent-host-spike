@@ -2525,31 +2525,40 @@ fn recovery_status_reports_pending_journal_and_damage() {
     .unwrap();
     assert!(status.root_encrypted);
     assert!(status.objects_needing_attention.is_empty());
-    let keys: std::collections::BTreeSet<String> = serde_json::to_value(&status)
-        .unwrap()
-        .as_object()
-        .unwrap()
-        .keys()
-        .cloned()
-        .collect();
+    let value = serde_json::to_value(&status).unwrap();
+    let keys: std::collections::BTreeSet<String> =
+        value.as_object().unwrap().keys().cloned().collect();
+    let mut expected: std::collections::BTreeSet<String> = [
+        "schema",
+        "principal_id",
+        "localhost_root",
+        "root_encrypted",
+        "recovery_configured",
+        "recovery_download_available",
+        "protection_configured",
+        "required_actions",
+        "crypto",
+    ]
+    .into_iter()
+    .map(String::from)
+    .collect();
+    // agents_built is left out when false. A reader still accepts that JSON.
+    if status.agents_built {
+        expected.insert("agents_built".to_string());
+    }
+    assert_eq!(keys, expected);
     assert_eq!(
-        keys,
-        [
-            "schema",
-            "principal_id",
-            "localhost_root",
-            "root_encrypted",
-            "recovery_configured",
-            "recovery_download_available",
-            "protection_configured",
-            "agents_built",
-            "required_actions",
-            "crypto",
-        ]
-        .into_iter()
-        .map(String::from)
-        .collect()
+        value.get("agents_built").is_some(),
+        crate::agents::build_allows()
     );
+    let sent: elastos_runtime::auth::PrincipalRootRecoveryStatusV1 =
+        serde_json::from_value(value.clone()).unwrap();
+    assert_eq!(sent.agents_built, status.agents_built);
+    let mut without = value;
+    without.as_object_mut().unwrap().remove("agents_built");
+    let reread: elastos_runtime::auth::PrincipalRootRecoveryStatusV1 =
+        serde_json::from_value(without).expect("a reader accepts agents_built left out");
+    assert!(!reread.agents_built);
 
     // A damaged label is listed with its problem and action.
     let dir = tempfile::tempdir().unwrap();

@@ -119,10 +119,24 @@ test("recovery text says agents stay on the Home where they were created", async
   assert.equal(off.pendingText(plan).includes(STAY), false);
   assert.equal(on.success({}).endsWith(STAY), true);
   assert.equal(off.success({}), "Recovery Kit imported.");
-  const onHome = "1 agent on this Home would stop opening. Retire that agent on this Home, or import on another Home.";
-  const otherRuntime = "1 agent on this Home would stop opening. Retire that agent in a Runtime that includes agents, or import on another Home.";
-  assert.equal(on.refusal({ message: `request failed: 409 ${onHome}` }), onHome);
-  assert.equal(on.refusal({ message: `request failed: 409 ${otherRuntime}` }), otherRuntime);
+  const stop = "1 agent on this Home would stop opening, so nothing was changed. Use this Recovery Kit on another Home instead.";
+  const stopMany = "2 agents on this Home would stop opening, so nothing was changed. Use this Recovery Kit on another Home instead.";
+  const kit = "1 agent on this Home uses a key this Home can't put in a Recovery Kit yet, so nothing was changed.";
+  const kitMany = "2 agents on this Home use a key this Home can't put in a Recovery Kit yet, so nothing was changed.";
+  assert.equal(on.refusal({ message: `request failed: 409 ${stop}` }), stop);
+  assert.equal(on.refusal({ message: `request failed: 409 ${stopMany}` }), stopMany);
+  assert.equal(on.refusal({ message: `request failed: 409 ${kit}` }), kit);
+  assert.equal(on.refusal({ message: `request failed: 409 ${kitMany}` }), kitMany);
+  const retire = "1 agent on this Home would stop opening. Retire that agent on this Home, or import on another Home.";
+  assert.match(on.refusal({ message: `request failed: 409 ${retire}` }), /request failed/);
+  const wrongVerb = "1 agent on this Home use a key this Home can't put in a Recovery Kit yet, so nothing was changed.";
+  assert.match(on.refusal({ message: `request failed: 409 ${wrongVerb}` }), /request failed/);
+  const extra = "1 agent on this Home would stop opening tomorrow, so nothing was changed. Use this Recovery Kit on another Home instead.";
+  assert.match(on.refusal({ message: `request failed: 409 ${extra}` }), /request failed/);
+  assert.equal(source.includes("would stop opening, so nothing was changed\\. Use this Recovery Kit on another Home instead\\."), true);
+  assert.equal(source.includes("uses a key this Home can't put in a Recovery Kit yet, so nothing was changed\\."), true);
+  assert.equal(source.includes("agents on this Home use a key this Home can't put in a Recovery Kit yet, so nothing was changed\\."), true);
+  assert.equal(source.includes("Retire that agent"), false);
   const orphan = "1 agent on this Home would belong to nobody. This recovery changes the owner id its record names.";
   assert.equal(on.refusal({ message: `request failed: 409 ${orphan}` }), orphan);
   const orphans = "2 agents on this Home would belong to nobody. This recovery changes the owner id their records name.";
@@ -162,6 +176,11 @@ test("the agents sentence is shown only for a confirmed agents answer", async ()
     schema: "elastos.full-recovery-bundle.import.request/v1",
   });
   assert.equal(shown.note.textContent.endsWith(STAY), true);
+  const absent = recoveryFlow({ omitAgentsBuilt: true });
+  await absent.context.submitRecoveryImport({
+    schema: "elastos.full-recovery-bundle.import.request/v1",
+  });
+  assert.equal(absent.note.textContent.includes(STAY), false);
 });
 
 const flowSource = source.slice(
@@ -193,11 +212,14 @@ function recoveryFlow(options = {}) {
         if (options.fetchJson) {
           return options.fetchJson(url);
         }
-        return {
+        const status = {
           principal_id: "person:current",
           localhost_root: "localhost://Users/current",
-          agents_built: options.agentsBuilt === true,
         };
+        if (!options.omitAgentsBuilt) {
+          status.agents_built = options.agentsBuilt === true;
+        }
+        return status;
       }
       if (String(url).includes("/api/auth/recovery/full-import")) {
         return {
@@ -246,6 +268,77 @@ function kitFile(principalId, root) {
     }),
   };
 }
+
+test("import and Create Recovery Kit show the refusal, not a raw request failed", async () => {
+  const stop = "1 agent on this Home would stop opening, so nothing was changed. Use this Recovery Kit on another Home instead.";
+  const kit = "1 agent on this Home uses a key this Home can't put in a Recovery Kit yet, so nothing was changed.";
+  const download = source.slice(
+    source.indexOf("async function onRecoveryDownload("),
+    source.indexOf("async function onRecoveryImport("),
+  );
+  assert.equal(download.includes("recoveryRefusal(error)"), true);
+  assert.equal(download.includes("String(error.message"), false);
+  const note = { hidden: true, textContent: "", dataset: {} };
+  const context = vm.createContext({
+    hasShellAccess: () => true,
+    recoveryProfileStatus: "ready",
+    recoveryProfileRequired: false,
+    recoveryDownloadButton: { textContent: "Create Recovery Kit", disabled: false },
+    recoveryExportBusy: false,
+    recoveryProfileName: null,
+    recoveryPasswordInput: { value: "" },
+    recoveryImportInput: { value: "" },
+    pendingRecoveryImport: null,
+    recoveryNoteNode: note,
+    clearRecoveryPending: () => {},
+    setRecoveryButton: () => {},
+    showRecoveryStatus: () => {},
+    shellHeaders: () => ({}),
+    recoveryDownloadPassword: () => "",
+    requestPasskeyStepUp: async () => "step-up",
+    downloadRecoveryKit: () => "kit.json",
+    notifyHomeSummaryChanged: () => {},
+    refreshSystemSummary: async () => {},
+    fetchJson: async (url) => {
+      const path = String(url);
+      if (path.includes("/api/auth/recovery/full-export")) {
+        throw new Error(`request failed: 409 ${kit}`);
+      }
+      if (path.includes("/api/auth/recovery/full-import")) {
+        throw new Error(`request failed: 409 ${stop}`);
+      }
+      if (path.includes("/api/auth/recovery/status")) {
+        return {
+          principal_id: "person:current",
+          localhost_root: "localhost://Users/current",
+        };
+      }
+      throw new Error(`unexpected ${path}`);
+    },
+  });
+  const readerSource = source.slice(
+    source.indexOf("function readText(value) {"),
+    source.indexOf("const HOSTED_KEY_CHECK_PENDING"),
+  );
+  const noteSource = source.slice(
+    source.indexOf("function showRecoveryNote(message, tone) {"),
+    source.indexOf("async function refreshChainNetworks("),
+  );
+  const flow = source.slice(
+    source.indexOf("async function onRecoveryDownload("),
+    source.indexOf("function recoveryImportIsComplete"),
+  );
+  vm.runInContext(`${readerSource}\n${noteSource}\n${flow}`, context);
+  await context.onRecoveryDownload();
+  assert.equal(note.textContent, kit);
+  assert.equal(note.textContent.includes("request failed"), false);
+  await context.onRecoveryImport({
+    target: { files: [kitFile("person:current", "localhost://Users/current")] },
+  });
+  assert.equal(note.textContent, stop);
+  assert.equal(note.textContent.includes("request failed"), false);
+  assert.equal(note.textContent.includes("Retire"), false);
+});
 
 test("onRecoveryImport reads agents_built and does not decide from a 409", async () => {
   const hidden = recoveryFlow();

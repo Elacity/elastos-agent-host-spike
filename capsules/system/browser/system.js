@@ -2891,7 +2891,7 @@ async function onRecoveryDownload(options = {}) {
     return true;
   } catch (error) {
     showRecoveryStatus("Not set", "error");
-    showRecoveryNote(String(error.message || error), "error");
+    showRecoveryNote(recoveryRefusal(error), "error");
     setRecoveryButton("Download Recovery Kit", false);
     return false;
   } finally {
@@ -3102,7 +3102,8 @@ const AGENTS_STAY_ON_THIS_HOME = "Agents and their data stay on the Home where y
 function recoveryRefusal(error) {
   const message = String((error && error.message) || error || "");
   const patterns = [
-    /(\d+ agents? on this Home would stop opening\. Retire (?:that agent|them) (?:on this Home|in a Runtime that includes agents), or import on another Home\.)/,
+    /(\d+ agent on this Home would stop opening, so nothing was changed\. Use this Recovery Kit on another Home instead\.|\d+ agents on this Home would stop opening, so nothing was changed\. Use this Recovery Kit on another Home instead\.)/,
+    /(\d+ agent on this Home uses a key this Home can't put in a Recovery Kit yet, so nothing was changed\.|\d+ agents on this Home use a key this Home can't put in a Recovery Kit yet, so nothing was changed\.)/,
     /(\d+ agents? on this Home would belong to nobody\. This recovery changes the owner id (?:its record names|their records name)\.)/,
     /(This Home has an agents file this build cannot read, so a root-key change is refused\.)/,
     /(This Home cannot open the key that wraps an agent's data, so a root-key change is refused\.)/,

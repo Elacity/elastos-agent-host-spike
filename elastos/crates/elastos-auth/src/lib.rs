@@ -384,7 +384,7 @@ pub struct PrincipalRootRecoveryStatusV1 {
     pub protection_configured: bool,
     /// Whether this Runtime build carries agents. The Recovery page reads
     /// this field. It is not derived from an agents-list error.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub agents_built: bool,
     pub required_actions: Vec<String>,
     pub crypto: PrincipalRootCryptoProfileV1,

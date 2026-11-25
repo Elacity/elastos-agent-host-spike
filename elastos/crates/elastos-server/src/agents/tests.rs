@@ -1517,20 +1517,41 @@ fn a_plain_file_of_today_still_names_its_owner() {
 }
 
 #[test]
+fn a_missing_agent_file_is_checked_before_windows_refuses_custody() {
+    let source = include_str!("../agents.rs");
+    let missing = source
+        .find("NotFound => return Ok(None)")
+        .expect("the read names a missing file");
+    let windows = source
+        .find("agent file custody is unsupported on Windows")
+        .expect("Windows still refuses a file that is there");
+    assert!(
+        missing < windows,
+        "a missing file returns before Windows refuses custody"
+    );
+}
+
+#[test]
 fn the_refusal_names_the_count_and_what_to_do() {
-    let place = if build_allows() {
-        "on this Home"
-    } else {
-        "in a Runtime that includes agents"
-    };
+    // The same words with the feature on and off: this Home has no Retire control.
     assert_eq!(
         agents_would_stop_opening(1),
-        format!("1 agent on this Home would stop opening. Retire that agent {place}, or import on another Home.")
+        "1 agent on this Home would stop opening, so nothing was changed. Use this Recovery Kit on another Home instead."
     );
     assert_eq!(
         agents_would_stop_opening(2),
-        format!("2 agents on this Home would stop opening. Retire them {place}, or import on another Home.")
+        "2 agents on this Home would stop opening, so nothing was changed. Use this Recovery Kit on another Home instead."
     );
+    assert_eq!(
+        agents_use_a_key_not_in_a_kit(1),
+        "1 agent on this Home uses a key this Home can't put in a Recovery Kit yet, so nothing was changed."
+    );
+    assert_eq!(
+        agents_use_a_key_not_in_a_kit(2),
+        "2 agents on this Home use a key this Home can't put in a Recovery Kit yet, so nothing was changed."
+    );
+    assert!(!agents_would_stop_opening(1).contains("Retire"));
+    assert!(!agents_use_a_key_not_in_a_kit(1).contains("Retire"));
     assert_eq!(
         agents_would_belong_to_nobody(1),
         "1 agent on this Home would belong to nobody. This recovery changes the owner id its record names."
