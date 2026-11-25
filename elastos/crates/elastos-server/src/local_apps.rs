@@ -1,16 +1,14 @@
 //! Local apps stay off with one sentence. This provider has no key and no process.
 //!
 //! The sentence is stored for one data folder. A bad file in one Home does not
-//! turn off another Home in the same process. A route reads the folder bound to
-//! its own provider registry.
+//! turn off another Home in the same process. A route reads the folder on that
+//! Home's own state. The registry's heap address is not a key.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{LazyLock, Mutex};
 
-use elastos_runtime::provider::{
-    Provider, ProviderError, ProviderRegistry, ResourceRequest, ResourceResponse,
-};
+use elastos_runtime::provider::{Provider, ProviderError, ResourceRequest, ResourceResponse};
 
 /// The provider error starts with this mark and a newline, then the sentence.
 pub const LOCAL_APPS_REFUSAL_MARK: &str = "local-apps-off\n";
@@ -25,15 +23,9 @@ pub fn sentence_from_local_apps_provider_error(message: &str) -> Option<&str> {
 
 static LOCAL_APPS_REFUSAL: LazyLock<Mutex<HashMap<PathBuf, String>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
-static LOCAL_APPS_HOMES: LazyLock<Mutex<HashMap<usize, PathBuf>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
 
 fn refusal_key(data_dir: &Path) -> PathBuf {
     std::fs::canonicalize(data_dir).unwrap_or_else(|_| data_dir.to_path_buf())
-}
-
-fn registry_key(registry: &ProviderRegistry) -> usize {
-    std::ptr::from_ref(registry) as usize
 }
 
 fn test_override() -> Option<String> {
@@ -45,14 +37,6 @@ fn test_override() -> Option<String> {
     {
         None
     }
-}
-
-/// Remember which data folder this Home's registry serves.
-pub fn bind_local_apps_home(registry: &ProviderRegistry, data_dir: &Path) {
-    LOCAL_APPS_HOMES
-        .lock()
-        .expect("local apps homes")
-        .insert(registry_key(registry), refusal_key(data_dir));
 }
 
 pub fn set_local_apps_refusal(data_dir: &Path, sentence: Option<String>) {
@@ -73,7 +57,6 @@ pub fn clear_local_apps_refusals() {
         .lock()
         .expect("local apps refusal")
         .clear();
-    LOCAL_APPS_HOMES.lock().expect("local apps homes").clear();
 }
 
 pub fn local_apps_refusal(data_dir: &Path) -> Option<String> {
@@ -84,21 +67,6 @@ pub fn local_apps_refusal(data_dir: &Path) -> Option<String> {
         .lock()
         .expect("local apps refusal")
         .get(&refusal_key(data_dir))
-        .cloned()
-}
-
-pub fn local_apps_refusal_for_registry(registry: &ProviderRegistry) -> Option<String> {
-    if let Some(sentence) = test_override() {
-        return Some(sentence);
-    }
-    let data_dir = {
-        let homes = LOCAL_APPS_HOMES.lock().expect("local apps homes");
-        homes.get(&registry_key(registry))?.clone()
-    };
-    LOCAL_APPS_REFUSAL
-        .lock()
-        .expect("local apps refusal")
-        .get(&data_dir)
         .cloned()
 }
 
@@ -170,16 +138,13 @@ pub(crate) fn lock_local_apps_for_test() -> LocalAppsTestGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use elastos_runtime::provider::ProviderRegistry;
 
     #[test]
     fn refusal_is_keyed_by_the_data_folder() {
         let _guard = lock_local_apps_for_test();
         let first = tempfile::tempdir().unwrap();
         let second = tempfile::tempdir().unwrap();
-        let first_registry = ProviderRegistry::new();
-        let second_registry = ProviderRegistry::new();
-        bind_local_apps_home(&first_registry, first.path());
-        bind_local_apps_home(&second_registry, second.path());
         set_local_apps_refusal(
             first.path(),
             Some("Users/secret.bin is not readable.".into()),
@@ -190,19 +155,38 @@ mod tests {
             Some("Users/secret.bin is not readable.")
         );
         assert_eq!(local_apps_refusal(second.path()), None);
-        assert_eq!(
-            local_apps_refusal_for_registry(&first_registry).as_deref(),
-            Some("Users/secret.bin is not readable.")
-        );
-        assert_eq!(local_apps_refusal_for_registry(&second_registry), None);
         set_local_apps_refusal(second.path(), Some("other".into()));
         assert_eq!(
             local_apps_refusal(first.path()).as_deref(),
             Some("Users/secret.bin is not readable.")
         );
+        assert_eq!(local_apps_refusal(second.path()).as_deref(), Some("other"));
+    }
+
+    #[test]
+    fn a_dropped_registry_does_not_hand_its_refusal_to_the_next() {
+        let _guard = lock_local_apps_for_test();
+        let old_home = tempfile::tempdir().unwrap();
+        let sentence = "Users/secret.bin is not readable.";
+        set_local_apps_refusal(old_home.path(), Some(sentence.into()));
+        let old = Box::new(ProviderRegistry::new());
+        let old_addr = std::ptr::from_ref(old.as_ref()) as usize;
+        drop(old);
+        let new_home = tempfile::tempdir().unwrap();
+        let new = Box::new(ProviderRegistry::new());
+        let new_addr = std::ptr::from_ref(new.as_ref()) as usize;
+        assert!(local_apps_refusal(new_home.path()).is_none());
         assert_eq!(
-            local_apps_refusal_for_registry(&second_registry).as_deref(),
-            Some("other")
+            local_apps_refusal(old_home.path()).as_deref(),
+            Some(sentence)
+        );
+        if old_addr == new_addr {
+            assert!(local_apps_refusal(new_home.path()).is_none());
+        }
+        drop(new);
+        assert_eq!(
+            local_apps_refusal(old_home.path()).as_deref(),
+            Some(sentence)
         );
     }
 }

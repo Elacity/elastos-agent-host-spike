@@ -35,6 +35,8 @@ pub struct ProviderStorageState {
     pub capability_manager: Option<Arc<CapabilityManager>>,
     /// Per-capsule storage quota in MB. 0 means unlimited.
     pub storage_quota_mb: u32,
+    /// This Home's data folder. The local-apps refusal is stored for this path.
+    pub data_dir: std::path::PathBuf,
 }
 
 /// Storage API errors
@@ -105,8 +107,8 @@ impl From<ProviderError> for StorageApiError {
 ///
 /// Read a file from a file-backed localhost root.
 /// Returns the file contents with appropriate content-type.
-fn refuse_local_apps(registry: &ProviderRegistry) -> Result<(), StorageApiError> {
-    match crate::local_apps::local_apps_refusal_for_registry(registry) {
+fn refuse_local_apps(data_dir: &std::path::Path) -> Result<(), StorageApiError> {
+    match crate::local_apps::local_apps_refusal(data_dir) {
         Some(sentence) => Err(StorageApiError::LocalApps(sentence)),
         None => Ok(()),
     }
@@ -118,7 +120,7 @@ pub async fn read_file(
     headers: HeaderMap,
     Path(path): Path<String>,
 ) -> Result<Response, StorageApiError> {
-    refuse_local_apps(&state.registry)?;
+    refuse_local_apps(&state.data_dir)?;
     let user_id = session_user_id(&session);
     let path = normalize_path(&path);
     reject_principal_root_storage_path(&path)?;
@@ -154,7 +156,7 @@ pub async fn write_file(
     Path(path): Path<String>,
     body: Bytes,
 ) -> Result<Json<WriteOutput>, StorageApiError> {
-    refuse_local_apps(&state.registry)?;
+    refuse_local_apps(&state.data_dir)?;
     let user_id = session_user_id(&session);
     let path = normalize_path(&path);
     reject_principal_root_storage_path(&path)?;
@@ -218,7 +220,7 @@ pub async fn delete_path(
     Path(path): Path<String>,
     Query(query): Query<DeleteQuery>,
 ) -> Result<Json<DeleteOutput>, StorageApiError> {
-    refuse_local_apps(&state.registry)?;
+    refuse_local_apps(&state.data_dir)?;
     let user_id = session_user_id(&session);
     let path = normalize_path(&path);
     reject_principal_root_storage_path(&path)?;
@@ -271,7 +273,7 @@ pub async fn list_dir(
     headers: HeaderMap,
     Path(path): Path<String>,
 ) -> Result<Json<ListOutput>, StorageApiError> {
-    refuse_local_apps(&state.registry)?;
+    refuse_local_apps(&state.data_dir)?;
     let user_id = session_user_id(&session);
     let path = normalize_path(&path);
     reject_principal_root_storage_path(&path)?;
@@ -354,7 +356,7 @@ pub async fn stat_path(
     headers: HeaderMap,
     Path(path): Path<String>,
 ) -> Result<Response, StorageApiError> {
-    refuse_local_apps(&state.registry)?;
+    refuse_local_apps(&state.data_dir)?;
     let user_id = session_user_id(&session);
     let path = normalize_path(&path);
     reject_principal_root_storage_path(&path)?;
@@ -404,7 +406,7 @@ pub async fn mkdir(
     headers: HeaderMap,
     Path(path): Path<String>,
 ) -> Result<Json<MkdirOutput>, StorageApiError> {
-    refuse_local_apps(&state.registry)?;
+    refuse_local_apps(&state.data_dir)?;
     let user_id = session_user_id(&session);
     let path = normalize_path(&path);
     reject_principal_root_storage_path(&path)?;
@@ -583,7 +585,7 @@ pub async fn handle_get_root(
     headers: HeaderMap,
     Query(query): Query<StorageQuery>,
 ) -> Result<Response, StorageApiError> {
-    refuse_local_apps(&state.registry)?;
+    refuse_local_apps(&state.data_dir)?;
     let path = Path(String::new());
     if query.list.unwrap_or(false) {
         list_dir(state, session, headers, path)
@@ -750,6 +752,7 @@ mod tests {
         let app = crate::api::server::storage_router()
             .layer(Extension(make_session(SessionType::Shell)))
             .with_state(ProviderStorageState {
+                data_dir: std::path::PathBuf::new(),
                 registry,
                 audit_log: None,
                 capability_manager: None,
@@ -839,6 +842,7 @@ mod tests {
 
     fn make_state(cap_mgr: Option<Arc<CapabilityManager>>) -> ProviderStorageState {
         ProviderStorageState {
+            data_dir: std::path::PathBuf::new(),
             registry: Arc::new(ProviderRegistry::new()),
             audit_log: None,
             capability_manager: cap_mgr,

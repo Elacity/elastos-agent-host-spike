@@ -6,9 +6,9 @@ use async_trait::async_trait;
 use elastos_common::CapsuleManifest;
 use elastos_runtime::provider::ProviderRegistry;
 
-fn localhost_provider_status(registry: &ProviderRegistry, scheme: &str, fallback: &str) -> String {
+fn localhost_provider_status(data_dir: &std::path::Path, scheme: &str, fallback: &str) -> String {
     if scheme == "localhost" {
-        if let Some(sentence) = crate::local_apps::local_apps_refusal_for_registry(registry) {
+        if let Some(sentence) = crate::local_apps::local_apps_refusal(data_dir) {
             return sentence;
         }
     }
@@ -33,16 +33,17 @@ pub trait InspectSource: Send + Sync {
 
 pub struct RegistryInspectSource {
     registry: Weak<ProviderRegistry>,
+    data_dir: PathBuf,
 }
 
 impl RegistryInspectSource {
-    pub fn new(registry: Weak<ProviderRegistry>) -> Self {
-        Self { registry }
+    pub fn new(registry: Weak<ProviderRegistry>, data_dir: PathBuf) -> Self {
+        Self { registry, data_dir }
     }
 
     fn scheme_entry(&self, scheme: String) -> InspectEntry {
         let status = match self.registry.upgrade() {
-            Some(registry) => localhost_provider_status(&registry, &scheme, "running"),
+            Some(_) => localhost_provider_status(&self.data_dir, &scheme, "running"),
             None => "running".to_string(),
         };
         InspectEntry {
@@ -88,13 +89,15 @@ impl InspectSource for RegistryInspectSource {
 pub struct CatalogInspectSource {
     capsules_dir: PathBuf,
     registry: Weak<ProviderRegistry>,
+    data_dir: PathBuf,
 }
 
 impl CatalogInspectSource {
-    pub fn new(capsules_dir: PathBuf, registry: Weak<ProviderRegistry>) -> Self {
+    pub fn new(capsules_dir: PathBuf, registry: Weak<ProviderRegistry>, data_dir: PathBuf) -> Self {
         Self {
             capsules_dir,
             registry,
+            data_dir,
         }
     }
 
@@ -163,7 +166,7 @@ impl CatalogInspectSource {
                 .is_some_and(|provides| provides.starts_with("localhost://"))
         {
             match self.registry.upgrade() {
-                Some(registry) => localhost_provider_status(&registry, "localhost", fallback),
+                Some(_) => localhost_provider_status(&self.data_dir, "localhost", fallback),
                 None => fallback.to_string(),
             }
         } else {
@@ -266,14 +269,15 @@ mod tests {
                 sentence.to_string(),
             )))
             .await;
-        let registry_source = RegistryInspectSource::new(Arc::downgrade(&registry));
+        let registry_source = RegistryInspectSource::new(Arc::downgrade(&registry), PathBuf::new());
         let entry = registry_source
             .inspect_get("provider:localhost")
             .await
             .unwrap();
         assert_eq!(entry.status, sentence);
         let capsules = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../capsules");
-        let catalog = CatalogInspectSource::new(capsules, Arc::downgrade(&registry));
+        let catalog =
+            CatalogInspectSource::new(capsules, Arc::downgrade(&registry), PathBuf::new());
         let entry = catalog
             .inspect_get("capsule:localhost-provider")
             .await

@@ -115,6 +115,8 @@ impl Provider for InspectProvider {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
     use super::*;
 
     async fn provider_for_manifest(manifest: Value) -> (tempfile::TempDir, InspectProvider) {
@@ -148,6 +150,7 @@ mod tests {
         let source: Arc<dyn InspectSource> = Arc::new(CatalogInspectSource::new(
             capsules_dir,
             Arc::downgrade(&registry),
+            PathBuf::new(),
         ));
         (tmp, InspectProvider::new(source))
     }

@@ -681,6 +681,26 @@ async fn register_media_provider(
         .map_err(|err| anyhow::anyhow!("failed to register media provider: {err}"))
 }
 
+/// `elastos gateway` and `elastos home --browser` do not spawn the localhost
+/// helper. They still run the walk. A refusal is registered so System's
+/// inspect state is that sentence.
+async fn register_localhost_without_helper(
+    registry: &provider::ProviderRegistry,
+    data_dir: &Path,
+    device_key: &[u8; 32],
+) {
+    if let crate::localhost_file_migration::LocalhostBringup::Refuse(sentence) =
+        crate::localhost_file_migration::localhost_bringup(data_dir, device_key)
+    {
+        tracing::error!(target: "elastos", "{sentence}");
+        registry
+            .register(Arc::new(
+                elastos_server::local_apps::RefusingLocalhostProvider::new(sentence),
+            ))
+            .await;
+    }
+}
+
 pub(crate) async fn setup_server_infrastructure() -> anyhow::Result<ServerInfrastructure> {
     setup_server_infrastructure_impl(true, elastos_server::ipfs::IpfsHostRole::User).await
 }
@@ -1050,7 +1070,6 @@ async fn setup_server_infrastructure_impl(
     ensure_file_backed_roots(&data_dir).ok();
     elastos_server::protected_content_runtime::log_unresolved_runtime_releases(&data_dir);
     let provider_registry = Arc::new(provider::ProviderRegistry::new());
-    elastos_server::local_apps::bind_local_apps_home(&provider_registry, &data_dir);
     let mut managed_host_processes = Vec::new();
     let mut external_availability_registered = false;
     let mut carrier_service = None;
@@ -1072,11 +1091,13 @@ async fn setup_server_infrastructure_impl(
             Arc::new(elastos_server::inspect_provider::CatalogInspectSource::new(
                 data_dir.join("capsules"),
                 Arc::downgrade(&provider_registry),
+                data_dir.clone(),
             )),
             Arc::new(
-                elastos_server::inspect_provider::RegistryInspectSource::new(Arc::downgrade(
-                    &provider_registry,
-                )),
+                elastos_server::inspect_provider::RegistryInspectSource::new(
+                    Arc::downgrade(&provider_registry),
+                    data_dir.clone(),
+                ),
             ),
         ]),
     );
@@ -1184,6 +1205,8 @@ async fn setup_server_infrastructure_impl(
                 );
             }
         }
+    } else {
+        register_localhost_without_helper(&provider_registry, &data_dir, &device_key).await;
     }
 
     match binaries::resolve_verified_native_provider_binary("content-block-graph-provider") {
@@ -2525,9 +2548,9 @@ mod tests {
     use crate::localhost_file_migration::{
         hold_localhost_migration_lock, localhost_bringup, localhost_file_key,
         localhost_provider_bridge_config, set_localhost_migration_before_rename,
-        set_localhost_migration_before_replace, set_localhost_migration_progress_clock,
-        set_localhost_migration_write_budget, set_localhost_migration_write_error,
-        take_localhost_migration_progress_lines, LocalhostBringup,
+        set_localhost_migration_before_replace, set_localhost_migration_create_error,
+        set_localhost_migration_progress_clock, set_localhost_migration_write_budget,
+        set_localhost_migration_write_error, take_localhost_migration_bytes_read, LocalhostBringup,
     };
     #[cfg(unix)]
     use std::ffi::CString;
@@ -4965,10 +4988,11 @@ mod tests {
         fn drop(&mut self) {
             set_localhost_migration_write_budget(None);
             set_localhost_migration_write_error(None);
+            set_localhost_migration_create_error(None);
             set_localhost_migration_before_replace(None);
             set_localhost_migration_before_rename(None);
             set_localhost_migration_progress_clock(None);
-            let _ = take_localhost_migration_progress_lines();
+            let _ = take_localhost_migration_bytes_read();
         }
     }
 
@@ -5290,7 +5314,7 @@ mod tests {
         let done_a = fs::read(shared_root.join("child-a.done")).unwrap();
         let done_b = fs::read(shared_root.join("child-b.done")).unwrap();
         assert_eq!(done_a, hex::encode(file_key).into_bytes());
-        assert_eq!(done_a, done_b);
+        assert_eq!(done_b, hex::encode(file_key).into_bytes());
         assert!(
             localhost_provider::decrypt_bytes(&device_key, &fs::read(&first).unwrap()).is_err()
         );
@@ -5714,13 +5738,14 @@ mod tests {
 
         let bad_registry = Arc::new(provider::ProviderRegistry::new());
         let good_registry = Arc::new(provider::ProviderRegistry::new());
-        elastos_server::local_apps::bind_local_apps_home(&bad_registry, bad.path());
-        elastos_server::local_apps::bind_local_apps_home(&good_registry, good.path());
-        let storage = |registry| elastos_server::api::handlers::storage::ProviderStorageState {
-            registry,
-            audit_log: None,
-            capability_manager: None,
-            storage_quota_mb: 0,
+        let storage = |registry, data_dir: &std::path::Path| {
+            elastos_server::api::handlers::storage::ProviderStorageState {
+                data_dir: data_dir.to_path_buf(),
+                registry,
+                audit_log: None,
+                capability_manager: None,
+                storage_quota_mb: 0,
+            }
         };
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -5731,7 +5756,7 @@ mod tests {
                 || axum::Extension(session::Session::new(session::SessionType::Shell, None));
             let path = || axum::extract::Path("MyWebSite/index.html".to_string());
             let bad_route = elastos_server::api::handlers::storage::read_file(
-                axum::extract::State(storage(bad_registry)),
+                axum::extract::State(storage(bad_registry, bad.path())),
                 session(),
                 axum::http::HeaderMap::new(),
                 path(),
@@ -5744,7 +5769,7 @@ mod tests {
                 other => panic!("bad Home route: {other:?}"),
             }
             let good_route = elastos_server::api::handlers::storage::read_file(
-                axum::extract::State(storage(good_registry)),
+                axum::extract::State(storage(good_registry, good.path())),
                 session(),
                 axum::http::HeaderMap::new(),
                 path(),
@@ -6065,14 +6090,21 @@ mod tests {
         assert_eq!(fs::read(&marker_path).unwrap(), marker);
         assert!(!lock.exists());
 
-        fs::remove_dir_all(root.path().join("AppCapsules")).unwrap();
+        let aside = root.path().with_file_name(format!(
+            "{}-aside-AppCapsules",
+            root.path().file_name().unwrap().to_string_lossy()
+        ));
+        fs::rename(root.path().join("AppCapsules"), &aside).unwrap();
         match localhost_bringup(root.path(), &other_key) {
             LocalhostBringup::Start(_) => {}
             LocalhostBringup::Refuse(got) => panic!("empty start refused: {got}"),
         }
         assert!(elastos_server::local_apps::local_apps_refusal(root.path()).is_none());
+        assert!(aside.is_dir());
+        assert!(!root.path().join("AppCapsules").exists());
         assert!(!note.exists());
         assert_current_marker(root.path(), &other_key);
+        fs::remove_dir_all(&aside).unwrap();
     }
 
     #[test]
@@ -6349,6 +6381,55 @@ mod tests {
             .path()
             .join("identity/localhost-file-key-v1")
             .exists());
+
+        let _clear = ClearLocalhostMigrationFaults;
+        let full_identity = TempDir::new().unwrap();
+        let full_note = full_identity.path().join("Users/note.bin");
+        let planted = plant_device_envelope(&full_note, &device_key, b"stay");
+        set_localhost_migration_create_error(Some(libc::ENOSPC));
+        let err = localhost_provider_bridge_config(full_identity.path(), &device_key).unwrap_err();
+        let text = err.to_string();
+        assert!(text.contains("identity could not be written"), "{text}");
+        assert!(text.contains("No space left on device"), "{text}");
+        assert!(
+            text.contains("Free space, or the folder's permissions, then restart."),
+            "{text}"
+        );
+        assert!(!text.contains("is not readable"), "{text}");
+        assert_eq!(fs::read(&full_note).unwrap(), planted);
+        assert!(!full_identity.path().join("identity").exists());
+        set_localhost_migration_create_error(None);
+        localhost_provider_bridge_config(full_identity.path(), &device_key).unwrap();
+        assert_envelope_opens_with_exactly_one_key(
+            &full_note,
+            b"stay",
+            &device_key,
+            &expected_localhost_file_key(&device_key),
+        );
+
+        let full_lock = TempDir::new().unwrap();
+        let lock_note = full_lock.path().join("Users/note.bin");
+        let planted = plant_device_envelope(&lock_note, &device_key, b"stay");
+        fs::create_dir(full_lock.path().join("identity")).unwrap();
+        set_localhost_migration_create_error(Some(libc::ENOSPC));
+        let err = localhost_provider_bridge_config(full_lock.path(), &device_key).unwrap_err();
+        let text = err.to_string();
+        assert!(
+            text.contains("identity/localhost-file-key.lock could not be written"),
+            "{text}"
+        );
+        assert!(text.contains("No space left on device"), "{text}");
+        assert!(
+            text.contains("Free space, or the folder's permissions, then restart."),
+            "{text}"
+        );
+        assert!(!text.contains("is not readable"), "{text}");
+        assert_eq!(fs::read(&lock_note).unwrap(), planted);
+        assert!(!full_lock
+            .path()
+            .join("identity/localhost-file-key-v1")
+            .exists());
+        set_localhost_migration_create_error(None);
     }
 
     #[test]
@@ -6387,15 +6468,312 @@ mod tests {
     }
 
     #[test]
+    fn a_plain_file_is_ruled_out_from_its_header() {
+        let _clear = ClearLocalhostMigrationFaults;
+        let _ = take_localhost_migration_bytes_read();
+        let device_key = [0x21; 32];
+        let temp = TempDir::new().unwrap();
+        let plain = temp.path().join("Users/video.bin");
+        fs::create_dir_all(plain.parent().unwrap()).unwrap();
+        fs::write(&plain, b"ftyp").unwrap();
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&plain)
+            .unwrap()
+            .set_len(1024 * 1024)
+            .unwrap();
+        localhost_provider_bridge_config(temp.path(), &device_key).unwrap();
+        let read = take_localhost_migration_bytes_read();
+        assert!(read <= 64, "read the plain body: {read}");
+        let mut head = [0u8; 4];
+        std::io::Read::read_exact(&mut std::fs::File::open(&plain).unwrap(), &mut head).unwrap();
+        assert_eq!(&head, b"ftyp");
+        assert_eq!(fs::metadata(&plain).unwrap().len(), 1024 * 1024);
+    }
+
+    #[test]
+    fn a_same_length_rewrite_in_place_is_kept() {
+        use std::io::Write;
+
+        let _clear = ClearLocalhostMigrationFaults;
+        let device_key = [0x22; 32];
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("Users/note.bin");
+        let original = plant_device_envelope(&path, &device_key, b"same-length");
+        let flipped_len = original.len();
+        set_localhost_migration_before_replace(Some(Box::new(move |path| {
+            let mut file = std::fs::OpenOptions::new().write(true).open(path).unwrap();
+            let mut flipped = fs::read(path).unwrap();
+            assert_eq!(flipped.len(), flipped_len);
+            flipped[10] ^= 0xff;
+            file.write_all(&flipped).unwrap();
+            file.sync_all().unwrap();
+        })));
+        let err = localhost_provider_bridge_config(temp.path(), &device_key).unwrap_err();
+        let text = err.to_string();
+        assert!(text.contains("changed while read"), "{text}");
+        let now = fs::read(&path).unwrap();
+        assert_eq!(now.len(), original.len());
+        assert_ne!(now, original);
+        assert!(!temp.path().join("identity/localhost-file-key-v1").exists());
+    }
+
+    #[test]
+    fn a_marker_temp_from_a_crash_is_removed_on_the_next_walk() {
+        let device_key = [0x23; 32];
+        let temp = TempDir::new().unwrap();
+        let note = temp.path().join("Users/note.bin");
+        plant_device_envelope(&note, &device_key, b"kept");
+        localhost_provider_bridge_config(temp.path(), &device_key).unwrap();
+        let marker = fs::read(temp.path().join("identity/localhost-file-key-v1")).unwrap();
+        let stale = temp
+            .path()
+            .join("identity/.localhost-file-key-v1.elastos-localhost-file-key-v1.tmp");
+        fs::write(&stale, b"stale").unwrap();
+        localhost_provider_bridge_config(temp.path(), &device_key).unwrap();
+        assert!(!stale.exists());
+        assert_eq!(
+            fs::read(temp.path().join("identity/localhost-file-key-v1")).unwrap(),
+            marker
+        );
+    }
+
+    #[test]
+    fn a_long_file_name_still_migrates() {
+        let device_key = [0x24; 32];
+        let file_key = expected_localhost_file_key(&device_key);
+        let temp = TempDir::new().unwrap();
+        let name = "n".repeat(221);
+        let path = temp.path().join("Users").join(&name);
+        plant_device_envelope(&path, &device_key, b"long-name");
+        localhost_provider_bridge_config(temp.path(), &device_key).unwrap();
+        assert_envelope_opens_with_exactly_one_key(&path, b"long-name", &device_key, &file_key);
+        assert_current_marker(temp.path(), &device_key);
+    }
+
+    #[test]
+    fn a_short_marker_fingerprint_is_forged() {
+        let device_key = [0x25; 32];
+        let temp = TempDir::new().unwrap();
+        let note = temp.path().join("Users/note.bin");
+        let planted = plant_device_envelope(&note, &device_key, b"stay");
+        fs::create_dir_all(temp.path().join("identity")).unwrap();
+        fs::write(
+            temp.path().join("identity/localhost-file-key-v1"),
+            b"elastos-localhost-file-v1 1 aa\n",
+        )
+        .unwrap();
+        let err = localhost_provider_bridge_config(temp.path(), &device_key).unwrap_err();
+        let text = err.to_string();
+        assert!(text.contains("is not the migration record"), "{text}");
+        assert!(!text.contains("does not match"), "{text}");
+        assert_eq!(fs::read(&note).unwrap(), planted);
+    }
+
+    #[test]
+    fn a_file_the_new_key_wrote_over_the_cap_stays_readable() {
+        const CHILD: &str = "ELASTOS_LOCALHOST_KEEP_CHILD";
+        if std::env::var(CHILD).as_deref() == Ok("1") {
+            let root =
+                std::path::PathBuf::from(std::env::var("ELASTOS_LOCALHOST_KEEP_ROOT").unwrap());
+            let raw = hex::decode(std::env::var("ELASTOS_LOCALHOST_KEEP_KEY").unwrap()).unwrap();
+            let mut device_key = [0u8; 32];
+            device_key.copy_from_slice(&raw);
+            let before = resident_peak();
+            match localhost_bringup(&root, &device_key) {
+                LocalhostBringup::Start(_) => {}
+                LocalhostBringup::Refuse(got) => {
+                    panic!("restart refused a file this key wrote: {got}")
+                }
+            }
+            let after = resident_peak();
+            let delta = after.saturating_sub(before);
+            eprintln!("SL_R6_KEEP_RSS_BEFORE={before} AFTER={after} DELTA={delta}");
+            assert!(
+                delta < 64 * 1024 * 1024,
+                "the restart read an over-cap envelope: {delta}"
+            );
+            let file_key = expected_localhost_file_key(&device_key);
+            for (name, byte, len) in [
+                ("seventeen.bin", 0x5au8, 17 * 1024 * 1024),
+                ("hundred.bin", 0x11u8, 100 * 1024 * 1024),
+            ] {
+                let plain = localhost_provider::decrypt_bytes(
+                    &file_key,
+                    &fs::read(root.join("Users").join(name)).unwrap(),
+                )
+                .unwrap();
+                assert_eq!(plain.len(), len, "{name}");
+                assert!(plain.iter().all(|item| *item == byte), "{name}");
+            }
+            return;
+        }
+
+        let device_key = [0x26; 32];
+        let migrating = TempDir::new().unwrap();
+        let old = migrating.path().join("Users/old.bin");
+        fs::create_dir_all(old.parent().unwrap()).unwrap();
+        let old_plain = vec![0x22u8; 17 * 1024 * 1024];
+        fs::write(
+            &old,
+            localhost_provider::encrypt_bytes(&device_key, &old_plain).unwrap(),
+        )
+        .unwrap();
+        assert!(fs::metadata(&old).unwrap().len() > 32 * 1024 * 1024);
+        let err = localhost_provider_bridge_config(migrating.path(), &device_key).unwrap_err();
+        assert!(err.to_string().contains("larger than 32 MiB"), "{err}");
+        let aside = migrating.path().with_file_name(format!(
+            "{}-aside-old",
+            migrating.path().file_name().unwrap().to_string_lossy()
+        ));
+        fs::create_dir(&aside).unwrap();
+        fs::rename(&old, aside.join("old.bin")).unwrap();
+        match localhost_bringup(migrating.path(), &device_key) {
+            LocalhostBringup::Start(_) => {}
+            LocalhostBringup::Refuse(got) => panic!("moving the file out did not restart: {got}"),
+        }
+        assert!(elastos_server::local_apps::local_apps_refusal(migrating.path()).is_none());
+        assert_eq!(
+            localhost_provider::decrypt_bytes(
+                &device_key,
+                &fs::read(aside.join("old.bin")).unwrap()
+            )
+            .unwrap(),
+            old_plain
+        );
+        fs::remove_dir_all(&aside).unwrap();
+
+        let kept = TempDir::new().unwrap();
+        plant_device_envelope(&kept.path().join("Users/small.bin"), &device_key, b"small");
+        localhost_provider_bridge_config(kept.path(), &device_key).unwrap();
+        let file_key = expected_localhost_file_key(&device_key);
+        for (name, byte, len) in [
+            ("seventeen.bin", 0x5au8, 17 * 1024 * 1024),
+            ("hundred.bin", 0x11u8, 100 * 1024 * 1024),
+        ] {
+            let plain = vec![byte; len];
+            let sealed = localhost_provider::encrypt_bytes(&file_key, &plain).unwrap();
+            assert!(sealed.len() as u64 > 32 * 1024 * 1024, "{name}");
+            fs::write(kept.path().join("Users").join(name), &sealed).unwrap();
+        }
+        let test = format!(
+            "{}::a_file_the_new_key_wrote_over_the_cap_stays_readable",
+            module_path!().split_once("::").unwrap().1
+        );
+        let output = Command::new(std::env::current_exe().unwrap())
+            .env(CHILD, "1")
+            .env("ELASTOS_LOCALHOST_KEEP_ROOT", kept.path())
+            .env("ELASTOS_LOCALHOST_KEEP_KEY", hex::encode(device_key))
+            .args(["--exact", test.as_str(), "--nocapture", "--test-threads=1"])
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success(),
+            "keep child failed\nstdout {stdout}\nstderr {stderr}"
+        );
+        let rss = stderr
+            .lines()
+            .find(|line| line.contains("SL_R6_KEEP_RSS_"))
+            .expect("child printed its peak");
+        let delta: i64 = rss.split_once("DELTA=").unwrap().1.trim().parse().unwrap();
+        assert!(delta < 64 * 1024 * 1024, "{rss}");
+        eprintln!("{rss}");
+    }
+
+    #[tokio::test]
+    async fn home_browser_refusal_is_the_inspect_state() {
+        use elastos_server::inspect_provider::InspectSource;
+        use std::os::unix::fs::PermissionsExt;
+
+        let _guard = LocalAppsGuard::lock();
+        let device_key = [0x27; 32];
+        let root = TempDir::new().unwrap();
+        let secret = root.path().join("Users/secret.bin");
+        plant_device_envelope(&secret, &device_key, b"hidden");
+        fs::set_permissions(&secret, fs::Permissions::from_mode(0o000)).unwrap();
+        let registry = Arc::new(provider::ProviderRegistry::new());
+        register_localhost_without_helper(&registry, root.path(), &device_key).await;
+        let sentence = elastos_server::local_apps::local_apps_refusal(root.path())
+            .expect("home --browser stored the refusal");
+        assert!(sentence.contains("Users/secret.bin"), "{sentence}");
+        assert!(sentence.contains(". "), "{sentence}");
+        let source = elastos_server::inspect_provider::RegistryInspectSource::new(
+            Arc::downgrade(&registry),
+            root.path().to_path_buf(),
+        );
+        let entry = source
+            .inspect_get("provider:localhost")
+            .await
+            .expect("localhost is listed");
+        assert_eq!(entry.status, sentence);
+        fs::set_permissions(&secret, fs::Permissions::from_mode(0o600)).unwrap();
+    }
+
+    #[derive(Clone)]
+    struct ProgressWriter(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for ProgressWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
     fn migration_logs_progress_every_few_seconds() {
+        const CHILD: &str = "ELASTOS_LOCALHOST_PROGRESS_CHILD";
+        let test = format!(
+            "{}::migration_logs_progress_every_few_seconds",
+            module_path!().split_once("::").unwrap().1
+        );
+        if std::env::var(CHILD).as_deref() != Ok("1") {
+            let output = Command::new(std::env::current_exe().unwrap())
+                .env(CHILD, "1")
+                .args(["--exact", test.as_str(), "--nocapture", "--test-threads=1"])
+                .output()
+                .unwrap();
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            assert!(
+                output.status.success(),
+                "progress child failed\nstdout {stdout}\nstderr {stderr}"
+            );
+            assert!(
+                stderr.contains("localhost file migration checked 2 files"),
+                "{stderr}"
+            );
+            assert!(stderr.contains("PROGRESS_EVENTS=1"), "{stderr}");
+            let walk_ms = stderr
+                .lines()
+                .find_map(|line| line.strip_prefix("PROGRESS_WALK_MS="))
+                .unwrap_or("missing");
+            let walk_ms: u128 = walk_ms.parse().unwrap_or(u128::MAX);
+            assert!(walk_ms < 2_000, "the progress row slept: {walk_ms} ms");
+            return;
+        }
+        let captured = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+        let writer = ProgressWriter(captured.clone());
+        tracing::subscriber::set_global_default(
+            tracing_subscriber::fmt()
+                .with_max_level(tracing::Level::INFO)
+                .with_ansi(false)
+                .with_writer(move || writer.clone())
+                .finish(),
+        )
+        .expect("fresh process has no tracing subscriber");
+        tracing::callsite::rebuild_interest_cache();
         let device_key = [0x96; 32];
         let temp = TempDir::new().unwrap();
         let root = temp.path();
         plant_device_envelope(&root.join("Users/a.bin"), &device_key, b"a");
         plant_device_envelope(&root.join("Users/b.bin"), &device_key, b"b");
         let _clear = ClearLocalhostMigrationFaults;
-        // The product clock starts at 1_000. The first file moves it to 1_003
-        // before the second file is counted. No sleep, and no tracing subscriber.
         set_localhost_migration_progress_clock(Some(1_000));
         let advanced = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let flag = advanced.clone();
@@ -6407,15 +6785,15 @@ mod tests {
         })));
         let started = Instant::now();
         localhost_provider_bridge_config(root, &device_key).unwrap();
-        assert!(
-            started.elapsed() < Duration::from_secs(2),
-            "the progress row slept"
-        );
-        let lines = take_localhost_migration_progress_lines();
-        assert_eq!(
-            lines,
-            vec!["localhost file migration checked 2 files".to_string()]
-        );
+        let walk_ms = started.elapsed().as_millis();
+        let text = String::from_utf8(captured.lock().unwrap().clone()).unwrap();
+        let events = text
+            .matches("localhost file migration checked 2 files")
+            .count();
+        assert_eq!(events, 1, "{text}");
+        eprintln!("{text}");
+        eprintln!("PROGRESS_EVENTS={events}");
+        eprintln!("PROGRESS_WALK_MS={walk_ms}");
     }
 
     fn spawn_kill_child(root: &std::path::Path, device_key: &[u8; 32], point: &str) -> Child {
@@ -6574,12 +6952,31 @@ mod tests {
         format!("{:.2} {:.2} {:.2}", load[0], load[1], load[2])
     }
 
+    fn ru_maxrss_to_bytes(raw: i64, linux_kib: bool) -> i64 {
+        if linux_kib {
+            raw.saturating_mul(1024)
+        } else {
+            raw
+        }
+    }
+
     fn resident_peak() -> i64 {
         let mut usage = unsafe { std::mem::zeroed::<libc::rusage>() };
         if unsafe { libc::getrusage(libc::RUSAGE_SELF, &mut usage) } != 0 {
             return 0;
         }
-        usage.ru_maxrss
+        ru_maxrss_to_bytes(usage.ru_maxrss, cfg!(target_os = "linux"))
+    }
+
+    #[test]
+    fn peak_memory_converts_linux_ru_maxrss_from_kib() {
+        assert_eq!(ru_maxrss_to_bytes(256 * 1024, true), 256 * 1024 * 1024);
+        assert_eq!(ru_maxrss_to_bytes(17_000_000, false), 17_000_000);
+        let held = ru_maxrss_to_bytes((200 * 1024 * 1024) / 1024, true);
+        assert!(
+            held >= 200 * 1024 * 1024,
+            "Linux ru_maxrss is kibibytes: {held}"
+        );
     }
 
     #[cfg(unix)]

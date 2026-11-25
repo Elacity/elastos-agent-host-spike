@@ -395,6 +395,7 @@ pub(crate) fn build_router(config: ServerConfig) -> anyhow::Result<Router> {
     // Public contract: rooted `localhost://...` paths.
     let storage_routes = if let Some(registry) = provider_registry {
         let storage_state = handlers::storage::ProviderStorageState {
+            data_dir: data_dir.clone().unwrap_or_default(),
             registry: registry.clone(),
             audit_log: audit_log.clone(),
             capability_manager: Some(capability_manager.clone()),
@@ -403,6 +404,7 @@ pub(crate) fn build_router(config: ServerConfig) -> anyhow::Result<Router> {
 
         // Generic provider proxy: POST /api/provider/:scheme/:op
         let proxy_state = handlers::provider::ProviderProxyState {
+            data_dir: data_dir.clone().unwrap_or_default(),
             registry,
             capability_manager: Some(capability_manager.clone()),
         };

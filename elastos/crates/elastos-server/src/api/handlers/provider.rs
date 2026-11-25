@@ -26,6 +26,8 @@ use elastos_runtime::session::Session;
 pub struct ProviderProxyState {
     pub registry: Arc<ProviderRegistry>,
     pub capability_manager: Option<Arc<CapabilityManager>>,
+    /// This Home's data folder. The local-apps refusal is stored for this path.
+    pub data_dir: std::path::PathBuf,
 }
 
 /// Error code for a session API call to the Runtime-owned IPFS provider.
@@ -59,8 +61,7 @@ pub async fn provider_proxy(
         ));
     }
     if scheme.eq_ignore_ascii_case("localhost") {
-        if let Some(sentence) = crate::local_apps::local_apps_refusal_for_registry(&state.registry)
-        {
+        if let Some(sentence) = crate::local_apps::local_apps_refusal(&state.data_dir) {
             return Err((StatusCode::SERVICE_UNAVAILABLE, sentence));
         }
     }
@@ -385,6 +386,7 @@ mod tests {
                 .route("/api/provider/:scheme/:op", post(provider_proxy))
                 .layer(Extension(Session::new(kind, None)))
                 .with_state(ProviderProxyState {
+                    data_dir: std::path::PathBuf::new(),
                     registry: registry.clone(),
                     capability_manager: None,
                 });
@@ -419,6 +421,7 @@ mod tests {
             .route("/api/provider/:scheme/:op", post(provider_proxy))
             .layer(Extension(Session::new(SessionType::Shell, None)))
             .with_state(ProviderProxyState {
+                data_dir: std::path::PathBuf::new(),
                 registry: Arc::new(ProviderRegistry::new()),
                 capability_manager: None,
             });
@@ -458,6 +461,7 @@ mod tests {
             .route("/api/provider/:scheme/:op", post(provider_proxy))
             .layer(Extension(Session::new(SessionType::Shell, None)))
             .with_state(ProviderProxyState {
+                data_dir: std::path::PathBuf::new(),
                 registry: shell_registry,
                 capability_manager: None,
             });
@@ -488,6 +492,7 @@ mod tests {
             .route("/api/provider/:scheme/:op", post(provider_proxy))
             .layer(Extension(Session::new(SessionType::Capsule, None)))
             .with_state(ProviderProxyState {
+                data_dir: std::path::PathBuf::new(),
                 registry,
                 capability_manager: None,
             });
@@ -595,6 +600,7 @@ mod tests {
         );
         let result = provider_proxy(
             State(ProviderProxyState {
+                data_dir: std::path::PathBuf::new(),
                 registry,
                 capability_manager: Some(manager),
             }),
@@ -825,6 +831,7 @@ mod tests {
                 .unwrap();
         }
         let state = ProviderProxyState {
+            data_dir: std::path::PathBuf::new(),
             registry,
             capability_manager: None,
         };
@@ -876,6 +883,7 @@ mod tests {
             .unwrap();
         let refused = provider_proxy(
             State(ProviderProxyState {
+                data_dir: std::path::PathBuf::new(),
                 registry,
                 capability_manager: None,
             }),
@@ -1027,6 +1035,7 @@ mod tests {
                     .await
                     .unwrap();
                 let state = ProviderProxyState {
+                    data_dir: std::path::PathBuf::new(),
                     registry,
                     capability_manager: Some(manager.clone()),
                 };
@@ -1127,6 +1136,7 @@ mod tests {
             HeaderValue::from_str(&token.to_base64().unwrap()).unwrap(),
         );
         let state = ProviderProxyState {
+            data_dir: std::path::PathBuf::new(),
             registry,
             capability_manager: Some(capability_manager),
         };
@@ -1214,6 +1224,7 @@ mod tests {
             ),
         ] {
             let state = ProviderProxyState {
+                data_dir: std::path::PathBuf::new(),
                 registry: Arc::new(ProviderRegistry::new()),
                 capability_manager: None,
             };
@@ -1235,6 +1246,7 @@ mod tests {
     #[tokio::test]
     async fn test_provider_proxy_returns_structured_provider_error() {
         let state = ProviderProxyState {
+            data_dir: std::path::PathBuf::new(),
             registry: Arc::new(ProviderRegistry::new()),
             capability_manager: None,
         };
@@ -1272,6 +1284,7 @@ mod tests {
             .await
             .unwrap();
         let state = ProviderProxyState {
+            data_dir: std::path::PathBuf::new(),
             registry,
             capability_manager: None,
         };
@@ -1309,6 +1322,7 @@ mod tests {
             .await
             .unwrap();
         let state = ProviderProxyState {
+            data_dir: std::path::PathBuf::new(),
             registry,
             capability_manager: None,
         };
@@ -1354,6 +1368,7 @@ mod tests {
             Arc::new(MetricsManager::new()),
         ));
         let state = ProviderProxyState {
+            data_dir: std::path::PathBuf::new(),
             registry: Arc::new(ProviderRegistry::new()),
             capability_manager: Some(capability_manager.clone()),
         };
@@ -1398,6 +1413,7 @@ mod tests {
             Arc::new(MetricsManager::new()),
         ));
         let state = ProviderProxyState {
+            data_dir: std::path::PathBuf::new(),
             registry: Arc::new(ProviderRegistry::new()),
             capability_manager: Some(capability_manager.clone()),
         };
@@ -1435,6 +1451,7 @@ mod tests {
             Arc::new(MetricsManager::new()),
         ));
         let state = ProviderProxyState {
+            data_dir: std::path::PathBuf::new(),
             registry: Arc::new(ProviderRegistry::new()),
             capability_manager: Some(capability_manager.clone()),
         };
@@ -1521,6 +1538,7 @@ mod tests {
             HeaderValue::from_str(&token.to_base64().unwrap()).unwrap(),
         );
         let state = ProviderProxyState {
+            data_dir: std::path::PathBuf::new(),
             registry,
             capability_manager: Some(capability_manager),
         };
@@ -1569,6 +1587,7 @@ mod tests {
             HeaderValue::from_str(&token.to_base64().unwrap()).unwrap(),
         );
         let state = ProviderProxyState {
+            data_dir: std::path::PathBuf::new(),
             registry,
             capability_manager: Some(capability_manager),
         };
@@ -1651,6 +1670,7 @@ mod tests {
             HeaderValue::from_str(&token.to_base64().unwrap()).unwrap(),
         );
         let state = ProviderProxyState {
+            data_dir: std::path::PathBuf::new(),
             registry,
             capability_manager: Some(capability_manager),
         };
@@ -1678,6 +1698,7 @@ mod tests {
         let sentence = "Users/note.bin is not readable. Make it readable or move it out of the folder, then restart.";
         crate::local_apps::set_local_apps_refusal_for_test(Some(sentence.to_string()));
         let state = ProviderProxyState {
+            data_dir: std::path::PathBuf::new(),
             registry: Arc::new(ProviderRegistry::new()),
             capability_manager: None,
         };

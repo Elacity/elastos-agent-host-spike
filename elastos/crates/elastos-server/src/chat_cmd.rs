@@ -2657,6 +2657,7 @@ mod tests {
                 },
             ))
             .with_state(ProviderProxyState {
+                data_dir: std::path::PathBuf::new(),
                 registry,
                 capability_manager: None,
             });

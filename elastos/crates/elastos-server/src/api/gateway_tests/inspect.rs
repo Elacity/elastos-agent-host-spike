@@ -129,9 +129,11 @@ async fn inspect_test_state(dir: &std::path::Path) -> GatewayState {
             Arc::new(crate::inspect_provider::CatalogInspectSource::new(
                 dir.join("capsules"),
                 Arc::downgrade(&registry),
+                std::path::PathBuf::new(),
             )),
             Arc::new(crate::inspect_provider::RegistryInspectSource::new(
                 Arc::downgrade(&registry),
+                std::path::PathBuf::new(),
             )),
         ]));
     let provider: Arc<dyn Provider> = Arc::new(
