@@ -2,9 +2,9 @@
 """The re-review date check names an advisory whose date has passed.
 
 Today in these tests is the fixed day below. It is not the clock, and it is
-not the re-review date written in elastos/.cargo/audit.toml. Each ignored id
-has to carry its own date: the comment block directly above it, or a date on
-its own line. A date is not kept for the next id.
+not the re-review date written in elastos/.cargo/audit.toml. The ignore list
+has one shape. A date on an entry's own line is that wrong shape. Each
+accepted id takes the date from the unbroken comment lines above it only.
 """
 
 import datetime
@@ -23,6 +23,7 @@ SCRIPT = Path(__file__).with_name("audit-re-review.py")
 REAL = SCRIPT.resolve().parents[1] / "elastos/.cargo/audit.toml"
 # A fixed day. The committed audit file's own deadline is later than this.
 FIXED_TODAY = "2026-11-25"
+SHAPE = "not a blank line, a comment, or an ignore entry"
 
 FRESH = """\
 [advisories]
@@ -58,8 +59,7 @@ ignore = [
 ]
 """
 
-# The review's demonstrated line: the date sits in a trailing comment, so a
-# scan that keeps the date and skips the id accepts an overdue advisory.
+# The review's demonstrated line: the date sits in a trailing comment.
 DEMONSTRATED = """\
 [advisories]
 ignore = [
@@ -90,7 +90,8 @@ TWO_DATES = """\
 [advisories]
 ignore = [
   # re-review by 2026-12-09 at the latest.
-  "RUSTSEC-2026-0001", # re-review by 2026-12-31 at the latest.
+  # re-review by 2026-12-31 at the latest.
+  "RUSTSEC-2026-0001",
 ]
 """
 
@@ -159,15 +160,80 @@ ignore = [
 ]
 """
 
+# A future date. Accepting this dotted key would let the file pass.
 DOTTED = """\
 advisories.ignore = [
-  # re-review by 2026-01-01 at the latest.
+  # re-review by 2026-12-09 at the latest.
   "RUSTSEC-2026-0001",
 ]
 """
 
 INLINE = """\
 advisories = { note = "no", ignore = ["RUSTSEC-2026-0001"] }
+"""
+
+ABOVE = """\
+# see RUSTSEC-2026-0009
+[advisories]
+ignore = [
+  # re-review by 2026-12-09 at the latest.
+  "RUSTSEC-2026-0381",
+]
+"""
+
+REPEAT = """\
+[advisories]
+ignore = [
+  # RUSTSEC-2026-0381 stays
+  # re-review by 2026-12-09 at the latest.
+  "RUSTSEC-2026-0381",
+]
+"""
+
+ONE_SPACE = """\
+[advisories]
+ignore = [
+  # re-review by 2026-12-09 at the latest.
+ "RUSTSEC-2026-0001",
+]
+"""
+
+SPACES = "[advisories]\nignore = [\n  \n  # re-review by 2026-12-09 at the latest.\n  \"RUSTSEC-2026-0001\",\n]\n"
+
+SECOND = """\
+[advisories]
+ignore = [
+  # re-review by 2026-12-09 at the latest.
+  "RUSTSEC-2026-0381",
+]
+ignore = [
+]
+"""
+
+EXTRA_KEY = """\
+[advisories]
+ignore = [
+  # re-review by 2026-12-09 at the latest.
+  "RUSTSEC-2026-0381",
+]
+note = "kept"
+"""
+
+EXTRA_SECTION = """\
+[advisories]
+ignore = [
+  # re-review by 2026-12-09 at the latest.
+  "RUSTSEC-2026-0381",
+]
+[notes]
+"""
+
+BELOW = """\
+[advisories]
+ignore = [
+  "RUSTSEC-2026-0001",
+  # re-review by 2026-12-09 at the latest.
+]
 """
 
 
@@ -185,6 +251,9 @@ class AuditReReviewTest(unittest.TestCase):
                 check=False,
             )
         return result.returncode, result.stderr
+
+    def test_the_checker_is_at_most_ninety_lines(self):
+        self.assertLessEqual(len(SCRIPT.read_text(encoding="utf-8").splitlines()), 90)
 
     def test_a_future_date_passes(self):
         status, errors = self.run_check(FRESH, FIXED_TODAY)
@@ -208,13 +277,14 @@ class AuditReReviewTest(unittest.TestCase):
         self.assertEqual(errors, "")
 
     def test_todays_ids_keep_their_own_dates(self):
-        found, items = load_checker().parse_document(REAL.read_text(encoding="utf-8"))
-        self.assertTrue(found)
+        module = load_checker()
+        text = REAL.read_text(encoding="utf-8")
+        self.assertEqual(module.failures(text, datetime.date(2026, 12, 9)), [])
         self.assertEqual(
-            [(advisory, dates) for advisory, dates, _own in items],
+            module.failures(text, datetime.date(2026, 12, 10)),
             [
-                ("RUSTSEC-2026-0381", ["2026-12-09"]),
-                ("RUSTSEC-2026-0387", ["2026-12-09"]),
+                "RUSTSEC-2026-0381: re-review date 2026-12-09 has passed",
+                "RUSTSEC-2026-0387: re-review date 2026-12-09 has passed",
             ],
         )
 
@@ -227,33 +297,45 @@ class AuditReReviewTest(unittest.TestCase):
         self.assertEqual(status, 1)
         self.assertIn("RUSTSEC-2026-0001: re-review date is missing", errors)
 
-    def test_a_date_on_the_same_line_is_that_ids_date(self):
+    def test_a_date_on_the_same_line_is_the_wrong_shape(self):
         status, errors = self.run_check(SAME_LINE, FIXED_TODAY)
-        self.assertEqual(status, 0, errors)
-        self.assertEqual(errors, "")
+        self.assertEqual(status, 1)
+        self.assertIn(f"audit.toml:3: {SHAPE}", errors)
+        self.assertIn("id RUSTSEC-2026-0001 is outside the ignore list", errors)
+        self.assertNotIn("has passed", errors)
 
-    def test_the_demonstrated_same_line_date_names_the_advisory(self):
+    def test_the_demonstrated_same_line_date_is_the_wrong_shape(self):
         status, errors = self.run_check(DEMONSTRATED, FIXED_TODAY)
         self.assertEqual(status, 1)
-        self.assertIn("RUSTSEC-2026-0001: re-review date 2026-01-01 has passed", errors)
+        self.assertIn(f"audit.toml:3: {SHAPE}", errors)
+        self.assertIn("id RUSTSEC-2026-0001 is outside the ignore list", errors)
+        self.assertNotIn("has passed", errors)
 
     def test_the_demonstrated_fragment_does_not_pass(self):
         # The review's temp file was this line alone. It is not an ignore list.
         status, errors = self.run_check(DEMONSTRATED_FRAGMENT, FIXED_TODAY)
         self.assertEqual(status, 1)
-        self.assertIn("RUSTSEC-2026-0001", errors)
+        self.assertIn("id RUSTSEC-2026-0001 is outside the ignore list", errors)
+        self.assertIn("[advisories] is missing", errors)
 
     def test_a_same_line_date_is_not_kept_for_the_next_id(self):
         status, errors = self.run_check(NOT_KEPT, FIXED_TODAY)
         self.assertEqual(status, 1)
         self.assertIn("RUSTSEC-2026-0002: re-review date is missing", errors)
-        self.assertNotIn("RUSTSEC-2026-0001", errors)
+        self.assertNotIn("RUSTSEC-2026-0002: re-review date 2026-12-09", errors)
+        self.assertIn("id RUSTSEC-2026-0001 is outside the ignore list", errors)
 
     def test_a_date_above_is_not_kept_for_the_next_id(self):
         status, errors = self.run_check(NOT_KEPT_ABOVE, FIXED_TODAY)
         self.assertEqual(status, 1)
         self.assertIn("RUSTSEC-2026-0002: re-review date is missing", errors)
         self.assertNotIn("RUSTSEC-2026-0001", errors)
+
+    def test_a_date_below_the_entry_is_not_its_date(self):
+        status, errors = self.run_check(BELOW, FIXED_TODAY)
+        self.assertEqual(status, 1)
+        self.assertIn("RUSTSEC-2026-0001: re-review date is missing", errors)
+        self.assertNotIn("has passed", errors)
 
     def test_two_dates_name_the_advisory(self):
         status, errors = self.run_check(TWO_DATES, FIXED_TODAY)
@@ -271,47 +353,101 @@ class AuditReReviewTest(unittest.TestCase):
     def test_two_ids_on_one_line_are_both_named(self):
         status, errors = self.run_check(ONE_LINE, FIXED_TODAY)
         self.assertEqual(status, 1)
-        self.assertIn("RUSTSEC-2026-0001: re-review date is not its own", errors)
-        self.assertIn("RUSTSEC-2026-0002: re-review date is not its own", errors)
+        self.assertIn(f"audit.toml:3: {SHAPE}", errors)
+        self.assertIn("id RUSTSEC-2026-0001 is outside the ignore list", errors)
+        self.assertIn("id RUSTSEC-2026-0002 is outside the ignore list", errors)
 
-    def test_a_single_quoted_id_is_checked(self):
+    def test_a_single_quoted_id_is_the_wrong_shape(self):
         status, errors = self.run_check(SINGLE_QUOTED, FIXED_TODAY)
         self.assertEqual(status, 1)
-        self.assertIn("RUSTSEC-2026-0001: re-review date 2026-11-20 has passed", errors)
+        self.assertIn(f"audit.toml:4: {SHAPE}", errors)
+        self.assertIn("id RUSTSEC-2026-0001 is outside the ignore list", errors)
+        self.assertNotIn("has passed", errors)
 
     def test_a_trailing_comment_does_not_hide_the_id(self):
         status, errors = self.run_check(TRAILING, FIXED_TODAY)
         self.assertEqual(status, 1)
-        self.assertIn("RUSTSEC-2026-0001: re-review date 2026-11-20 has passed", errors)
+        self.assertIn(f"audit.toml:4: {SHAPE}", errors)
+        self.assertIn("id RUSTSEC-2026-0001 is outside the ignore list", errors)
+        self.assertNotIn("has passed", errors)
 
-    def test_a_commented_out_id_is_not_checked(self):
+    def test_a_commented_out_id_is_outside_the_list(self):
         status, errors = self.run_check(COMMENTED_OUT, FIXED_TODAY)
-        self.assertEqual(status, 0, errors)
-        self.assertNotIn("RUSTSEC-2026-0001", errors)
+        self.assertEqual(status, 1)
+        self.assertIn("audit.toml:3: id RUSTSEC-2026-0001 is outside the ignore list", errors)
+        self.assertNotIn("RUSTSEC-2026-0381", errors)
 
-    def test_an_id_in_another_section_is_not_checked(self):
+    def test_an_id_above_the_list_fails(self):
+        status, errors = self.run_check(ABOVE, FIXED_TODAY)
+        self.assertEqual(status, 1)
+        self.assertIn("audit.toml:1: id RUSTSEC-2026-0009 is outside the ignore list", errors)
+        self.assertNotIn("RUSTSEC-2026-0381", errors)
+
+    def test_an_id_repeated_in_a_comment_fails(self):
+        status, errors = self.run_check(REPEAT, FIXED_TODAY)
+        self.assertEqual(status, 1)
+        self.assertIn("audit.toml:3: id RUSTSEC-2026-0381 is outside the ignore list", errors)
+
+    def test_an_id_in_another_section_fails(self):
         status, errors = self.run_check(OTHER_SECTION, FIXED_TODAY)
-        self.assertEqual(status, 0, errors)
-        self.assertNotIn("RUSTSEC-2026-0001", errors)
-        self.assertNotIn("RUSTSEC-2026-0002", errors)
-        self.assertNotIn("RUSTSEC-2026-0009", errors)
+        self.assertEqual(status, 1)
+        self.assertIn("another section", errors)
+        self.assertIn("another key", errors)
+        self.assertIn("another ignore", errors)
+        self.assertIn("id RUSTSEC-2026-0001 is outside the ignore list", errors)
+        self.assertIn("id RUSTSEC-2026-0002 is outside the ignore list", errors)
+        self.assertIn("id RUSTSEC-2026-0009 is outside the ignore list", errors)
+        self.assertNotIn("RUSTSEC-2026-0381:", errors)
+
+    def test_another_ignore_fails(self):
+        status, errors = self.run_check(SECOND, FIXED_TODAY)
+        self.assertEqual(status, 1)
+        self.assertIn("audit.toml:6: another ignore", errors)
+
+    def test_another_key_fails(self):
+        status, errors = self.run_check(EXTRA_KEY, FIXED_TODAY)
+        self.assertEqual(status, 1)
+        self.assertIn("audit.toml:6: another key", errors)
+
+    def test_another_section_fails(self):
+        status, errors = self.run_check(EXTRA_SECTION, FIXED_TODAY)
+        self.assertEqual(status, 1)
+        self.assertIn("audit.toml:6: another section", errors)
+
+    def test_an_entry_needs_two_spaces(self):
+        status, errors = self.run_check(ONE_SPACE, FIXED_TODAY)
+        self.assertEqual(status, 1)
+        self.assertIn(f"audit.toml:4: {SHAPE}", errors)
+        self.assertIn("id RUSTSEC-2026-0001 is outside the ignore list", errors)
+
+    def test_a_line_of_spaces_is_not_blank(self):
+        status, errors = self.run_check(SPACES, FIXED_TODAY)
+        self.assertEqual(status, 1)
+        self.assertIn(f"audit.toml:3: {SHAPE}", errors)
 
     def test_a_blank_line_ends_the_comment_block(self):
         status, errors = self.run_check(BLANK, FIXED_TODAY)
         self.assertEqual(status, 1)
         self.assertIn("RUSTSEC-2026-0001: re-review date is missing", errors)
 
-    def test_a_dotted_ignore_key_is_checked(self):
+    def test_a_dotted_ignore_key_is_not_the_list(self):
         status, errors = self.run_check(DOTTED, FIXED_TODAY)
         self.assertEqual(status, 1)
-        self.assertIn("RUSTSEC-2026-0001: re-review date 2026-01-01 has passed", errors)
-        self.assertNotIn("ignore list is missing", errors)
+        self.assertIn("audit.toml:1: another ignore", errors)
+        self.assertIn("id RUSTSEC-2026-0001 is outside the ignore list", errors)
+        self.assertNotIn("has passed", errors)
 
-    def test_an_inline_ignore_table_is_checked(self):
+    def test_an_inline_ignore_table_is_not_the_list(self):
         status, errors = self.run_check(INLINE, FIXED_TODAY)
         self.assertEqual(status, 1)
-        self.assertIn("RUSTSEC-2026-0001: re-review date is missing", errors)
-        self.assertNotIn("ignore list is missing", errors)
+        self.assertIn("audit.toml:1: another ignore", errors)
+        self.assertIn("id RUSTSEC-2026-0001 is outside the ignore list", errors)
+        self.assertIn("[advisories] is missing", errors)
+
+    def test_a_today_override_must_be_a_real_day(self):
+        status, errors = self.run_check(FRESH, "2026-02-29")
+        self.assertEqual(status, 1)
+        self.assertIn("AUDIT_RE_REVIEW_TODAY 2026-02-29 is not a date", errors)
 
     def test_the_clock_is_utc(self):
         # 2026-11-25 01:00 UTC is still 2026-11-24 in Los Angeles. The deadline
@@ -351,20 +487,6 @@ ignore = [
                 os.environ["TZ"] = previous
             time.tzset()
         self.assertEqual(seen, [datetime.timezone.utc, datetime.timezone.utc])
-
-    def test_tomllib_disagreement_names_the_id(self):
-        module = load_checker()
-
-        class FakeToml:
-            @staticmethod
-            def loads(_text):
-                return {"advisories": {"ignore": ["RUSTSEC-2026-9999"]}}
-
-        module.tomllib = FakeToml()
-        found = module.failures(FRESH, datetime.date(2026, 11, 25))
-        self.assertEqual(len(found), 1)
-        self.assertIn("RUSTSEC-2026-9999", found[0])
-        self.assertIn("RUSTSEC-2026-0381", found[0])
 
 
 def load_checker():
