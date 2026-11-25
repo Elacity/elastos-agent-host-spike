@@ -1363,3 +1363,29 @@ async fn stop_that_does_not_end_says_stopping_and_start_is_refused() {
         "today Stop says stopped and Start adds a session: runtime {runtime_status} {runtime_body}; gateway {gateway_status} {gateway_body}; after stop {after_stop}; start {start_status} {start_body}; after start {after_start}"
     );
 }
+
+/// A second Start while this agent has a live row is the running refusal.
+/// The planted row stays the one live row.
+#[tokio::test]
+async fn a_second_start_is_agent_already_running() {
+    let world = world().await;
+    let agent = world.agent_a.clone();
+    world
+        .runtime
+        .runtime
+        .plant_open_agent_stop_for_test(&agent, "session-held")
+        .await;
+    let before = live_principal(&live(&world).await, &agent);
+    let token = step_up(&world.app, &world.admin, &agent).await;
+    let (status, body) = start(&world, &world.admin, &agent, &token).await;
+    let after = live_principal(&live(&world).await, &agent);
+    let json: Value = serde_json::from_str(&body).unwrap_or(Value::Null);
+    assert!(
+        status == StatusCode::CONFLICT
+            && json["code"] == "agent_already_running"
+            && json["reason"] == "this agent is already running"
+            && before == 1
+            && after == 1,
+        "a second start was not the running refusal: {status} {body} before={before} after={after}"
+    );
+}
