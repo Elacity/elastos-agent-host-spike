@@ -77,7 +77,7 @@ CORE_CASES = [
         LIB,
         [(
             "        count => Err(CoreError::RomAmbiguous(count)),\n",
-            "        count => Ok(roms.remove(0)),\n",
+            "        _ => Ok(roms.remove(0)),\n",
         )],
         ["tests::c6_two_roms_are_refused_by_name"],
     ),
