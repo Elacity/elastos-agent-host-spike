@@ -5266,6 +5266,10 @@ mod tests {
         }
         assert_envelope_opens_with_exactly_one_key(&first, b"one", &device_key, &file_key);
         assert_envelope_opens_with_exactly_one_key(&second, b"two", &device_key, &file_key);
+        let done_a = fs::read(shared_root.join("child-a.done")).unwrap();
+        let done_b = fs::read(shared_root.join("child-b.done")).unwrap();
+        assert_eq!(done_a, hex::encode(file_key).into_bytes());
+        assert_eq!(done_a, done_b);
         assert!(
             localhost_provider::decrypt_bytes(&device_key, &fs::read(&first).unwrap()).is_err()
         );

@@ -22,9 +22,15 @@
 //! owns" and does not walk. `elastos serve` skips that lock when
 //! `ELASTOS_ALLOW_SUBORDINATE_RUNTIME_HOST=1`. `elastos run` of a data capsule
 //! starts these providers without that lock (`main.rs` `serve_web_capsule`).
-//! Those walks share the migration lock. A helper already running in the other
-//! process is not stopped. A new inode keeps a mode that is a subset of `0600`, else
-//! `0600`, and drops ACLs and extended attributes. Plaintext is zeroized.
+//! `elastos capsule` attaches to a running runtime and does not walk. `elastos run`
+//! and a host can therefore overlap. They cannot mix keys: the file key is
+//! HKDF-SHA256 of the device key (info `elastos-localhost-file-v1`), and the
+//! migration lock lets one walk write at a time.
+//! `two_homes_on_one_data_folder_finish_on_one_key` runs two processes on one
+//! folder and both finish on that same file key. A helper already running in
+//! the other process is not stopped. A new inode keeps a mode that is a subset
+//! of `0600`, else `0600`, and drops ACLs and extended attributes. Plaintext is
+//! zeroized.
 
 use std::path::Path;
 
