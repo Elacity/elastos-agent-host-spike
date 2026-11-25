@@ -1,4 +1,6 @@
-//! This test code stands in for the Runtime's launch by CID, which does not exist yet.
+//! This stand-in is not the Runtime start by CID (Runtime::start_by_bundle in
+//! elastos/crates/elastos-server/src/runtime.rs; POST /api/launch/open in
+//! elastos/crates/elastos-server/src/api/routes.rs).
 
 use std::collections::BTreeSet;
 

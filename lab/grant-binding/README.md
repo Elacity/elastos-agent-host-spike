@@ -66,7 +66,7 @@ verifier, no second name parser and no second plant runner.
 - `src/lib.rs`: the verifier, the registry, the grant store and the decisions.
 - `src/ledger.rs`: the ledger (`Ledger::new()`), one store for holds, ceilings
   and ended bindings.
-- `src/ops.rs`: operation checks; this stub holds none yet.
+- `src/ops.rs`: operation checks. Append, overwrite and child-journal are distinct rights; each permits only its own operation.
 - `src/link.rs`: the one detector for a path dependency on this crate.
 - `src/plant.rs`: the plant grammar and the one falsifier runner.
 - `plants/`: one planted bug per file; `model_planted_bugs_are_caught` proves

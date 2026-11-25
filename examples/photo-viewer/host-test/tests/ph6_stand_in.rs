@@ -1,4 +1,4 @@
-//! This test code stands in for the Runtime's launch by CID, which does not exist yet.
+//! This stand-in is not the Runtime start by CID (Runtime::start_by_bundle in elastos/crates/elastos-server/src/runtime.rs; POST /api/launch/open in elastos/crates/elastos-server/src/api/routes.rs).
 
 use std::collections::BTreeMap;
 use std::os::unix::fs::PermissionsExt;
@@ -220,7 +220,7 @@ fn checked_playlist(fixture: &Fixture, evidence: &StandInEvidence) {
     assert_eq!(evidence.playlist["items"], json!(items));
 }
 
-/// This test code stands in for the Runtime's launch by CID, which does not exist yet.
+/// This stand-in is not the Runtime start by CID (Runtime::start_by_bundle in elastos/crates/elastos-server/src/runtime.rs; POST /api/launch/open in elastos/crates/elastos-server/src/api/routes.rs).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn stand_in_opens_content_cid_and_writes_checked_playlist() {
     let images = fixture_images();
@@ -262,7 +262,7 @@ async fn stand_in_opens_content_cid_and_writes_checked_playlist() {
     assert!(!fixture.source_core.exists());
 }
 
-/// This test code stands in for the Runtime's launch by CID, which does not exist yet.
+/// This stand-in is not the Runtime start by CID (Runtime::start_by_bundle in elastos/crates/elastos-server/src/runtime.rs; POST /api/launch/open in elastos/crates/elastos-server/src/api/routes.rs).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn stand_in_runs_the_staged_core() {
     let fixture = Fixture::new(&fixture_images());
@@ -292,7 +292,7 @@ async fn stand_in_runs_the_staged_core() {
         .is_file());
 }
 
-/// This test code stands in for the Runtime's launch by CID, which does not exist yet.
+/// This stand-in is not the Runtime start by CID (Runtime::start_by_bundle in elastos/crates/elastos-server/src/runtime.rs; POST /api/launch/open in elastos/crates/elastos-server/src/api/routes.rs).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn stand_in_preserves_content_skip_and_authority_stop() {
     let mut images = fixture_images();
@@ -432,7 +432,7 @@ fn assert_refused(response: Value, code: &str, message: &str) {
     );
 }
 
-/// This test code stands in for the Runtime's launch by CID, which does not exist yet.
+/// This stand-in is not the Runtime start by CID (Runtime::start_by_bundle in elastos/crates/elastos-server/src/runtime.rs; POST /api/launch/open in elastos/crates/elastos-server/src/api/routes.rs).
 #[test]
 fn stand_in_denies_a_read_outside_bound_content() {
     let (mut bridge, images) = photo_bridge();
@@ -470,7 +470,7 @@ fn stand_in_denies_a_read_outside_bound_content() {
     }
 }
 
-/// This test code stands in for the Runtime's launch by CID, which does not exist yet.
+/// This stand-in is not the Runtime start by CID (Runtime::start_by_bundle in elastos/crates/elastos-server/src/runtime.rs; POST /api/launch/open in elastos/crates/elastos-server/src/api/routes.rs).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn stand_in_refuses_revoked_content_at_open() {
     let fixture = Fixture::new(&fixture_images());
@@ -498,7 +498,7 @@ async fn stand_in_refuses_revoked_content_at_open() {
     assert!(fixture.source_core.exists());
 }
 
-/// This test code stands in for the Runtime's launch by CID, which does not exist yet.
+/// This stand-in is not the Runtime start by CID (Runtime::start_by_bundle in elastos/crates/elastos-server/src/runtime.rs; POST /api/launch/open in elastos/crates/elastos-server/src/api/routes.rs).
 #[test]
 fn stand_in_stops_when_content_is_revoked_after_grant() {
     let fixture = Fixture::new(&fixture_images());
@@ -549,7 +549,7 @@ fn stand_in_stops_when_content_is_revoked_after_grant() {
     }
 }
 
-/// This test code stands in for the Runtime's launch by CID, which does not exist yet.
+/// This stand-in is not the Runtime start by CID (Runtime::start_by_bundle in elastos/crates/elastos-server/src/runtime.rs; POST /api/launch/open in elastos/crates/elastos-server/src/api/routes.rs).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn stand_in_stops_when_policy_changes_mid_run() {
     let fixture = Fixture::new(&fixture_images());
@@ -603,7 +603,7 @@ async fn stand_in_stops_when_policy_changes_mid_run() {
     assert!(!fixture.source_core.exists());
 }
 
-/// This test code stands in for the Runtime's launch by CID, which does not exist yet.
+/// This stand-in is not the Runtime start by CID (Runtime::start_by_bundle in elastos/crates/elastos-server/src/runtime.rs; POST /api/launch/open in elastos/crates/elastos-server/src/api/routes.rs).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn stand_in_refuses_a_policy_held_before_revocation() {
     let fixture = Fixture::new(&fixture_images());
@@ -645,7 +645,7 @@ async fn stand_in_refuses_a_policy_held_before_revocation() {
     assert!(fixture.source_core.exists());
 }
 
-/// This test code stands in for the Runtime's launch by CID, which does not exist yet.
+/// This stand-in is not the Runtime start by CID (Runtime::start_by_bundle in elastos/crates/elastos-server/src/runtime.rs; POST /api/launch/open in elastos/crates/elastos-server/src/api/routes.rs).
 #[test]
 fn stand_in_denies_closed_or_foreign_launches() {
     for (close, principal, instance) in [
@@ -669,7 +669,7 @@ fn stand_in_denies_closed_or_foreign_launches() {
     }
 }
 
-/// This test code stands in for the Runtime's launch by CID, which does not exist yet.
+/// This stand-in is not the Runtime start by CID (Runtime::start_by_bundle in elastos/crates/elastos-server/src/runtime.rs; POST /api/launch/open in elastos/crates/elastos-server/src/api/routes.rs).
 #[test]
 fn stand_in_grants_are_specific_to_one_run() {
     let (mut first, images) = photo_bridge();
@@ -701,7 +701,7 @@ fn stand_in_grants_are_specific_to_one_run() {
     );
 }
 
-/// This test code stands in for the Runtime's launch by CID, which does not exist yet.
+/// This stand-in is not the Runtime start by CID (Runtime::start_by_bundle in elastos/crates/elastos-server/src/runtime.rs; POST /api/launch/open in elastos/crates/elastos-server/src/api/routes.rs).
 #[test]
 fn stand_in_rechecks_authority_on_each_invoke() {
     let (mut bridge, images) = photo_bridge();

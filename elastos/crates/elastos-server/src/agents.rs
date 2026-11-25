@@ -20,7 +20,16 @@
 //! The rules this module keeps:
 //!
 //! - `build_allows` is the only place the cargo feature is read. With the
-//!   feature off every operation refuses by name, whatever is on disk.
+//!   feature off, create, list, rename, retire, launch and stop refuse by
+//!   name. A root-key change reads the agent file as plain JSON, with the
+//!   same mode checks and a bounded read, and refuses when any unretired
+//!   record names this owner. That decision opens no key. An unreadable
+//!   file refuses with its own reason. That includes a schema other than
+//!   this one, an entry without a record or an owner string, and a
+//!   `retired_at` that is not absent, null, or an unsigned integer. A file
+//!   that names only other owners,
+//!   or only retired records of this owner, leaves this owner free to
+//!   change the root key.
 //! - A load takes no lock and writes nothing. A missing file means no agents.
 //!   A file that fails any rule makes agents unavailable, with a named
 //!   reason; it is never rewritten or deleted, and the owner's own sign-in
@@ -29,6 +38,16 @@
 //!   replaces the file in one step at mode 0600. It then appends one audit
 //!   event. A heal of the signed spend floor does not: that total is already
 //!   a signed spend event.
+//! - A root-key change takes the writer before it loads the stored
+//!   protection, decides under that writer, and holds it until the key is
+//!   stored. An agent created in between waits, and then wraps under the
+//!   key the store left. When the agents file is absent, the in-process
+//!   mutex does not stop another process from creating the first agent, so
+//!   the change also holds the file lock a create takes and removes that
+//!   lock file afterwards while the agents file is still absent. After the
+//!   lock is taken, the open file is still the one at that path. A missing
+//!   or different file is opened and locked again, and a write that cannot
+//!   settle on that file is refused by name.
 //! - Every write is one of a closed list of operations, and each operation
 //!   may change only what `permits` lists for it.
 //! - This module never holds the owner's data key. It asks `auth` for a key
@@ -37,6 +56,8 @@
 use std::cell::Cell;
 use std::io::Read;
 use std::path::{Path, PathBuf};
+#[cfg(all(test, unix))]
+use std::sync::Condvar;
 use std::sync::{Mutex, MutexGuard};
 use std::time::Duration;
 
@@ -66,6 +87,15 @@ const AGENT_RECORDS_FILE: &str = "agent-records.json";
 
 /// The refusal every operation gives in a build without the feature.
 pub(crate) const FEATURE_OFF: &str = "agents are not built into this Runtime";
+/// A root-key change in a build that cannot read the agent file it found.
+pub(crate) const AGENTS_FILE_UNREADABLE: &str =
+    "This Home has an agents file this build cannot read, so a root-key change is refused.";
+/// The open lock file was not the file at the path when the lock was taken.
+#[cfg(unix)]
+pub(crate) const AGENTS_LOCK_CHANGED: &str =
+    "The agents lock changed while this Home was taking it, so the write is refused.";
+/// The most bytes a root-key change reads from the agent file.
+pub(crate) const MAX_AGENT_FILE_BYTES: u64 = 256 * 1024;
 
 /// How the agent's data key is wrapped: under a key derived with HKDF-SHA256.
 const OWNER_ROOT_KDF: &str = "hkdf-sha256";
@@ -78,7 +108,6 @@ const NOT_REGULAR: &str = "agent file path is not a regular file";
 #[cfg(unix)]
 const MODE_TOO_WIDE: &str = "agent file mode is wider than 0600";
 pub(crate) const CANNOT_READ: &str = "agent file cannot be read";
-const WINDOWS_AGENT_FILE: &str = "agent file custody is unsupported on Windows";
 pub(crate) const DOES_NOT_PARSE: &str = "agent file does not parse";
 pub(crate) const CANNOT_WRITE: &str = "agent file cannot be written";
 pub(crate) const SIGN_IN_CANNOT_READ: &str = "sign-in file cannot be read";
@@ -274,14 +303,23 @@ fn windows_agent_file_refused() -> bool {
 /// file. Refuses a path that is not a regular file under regular
 /// directories, and a file anyone but its owner can read or write.
 fn read_agent_file(data_dir: &Path, path: &Path) -> Result<Option<Vec<u8>>, &'static str> {
-    if windows_agent_file_refused() {
-        return Err(WINDOWS_AGENT_FILE);
-    }
+    read_agent_file_capped(data_dir, path, None)
+}
+
+fn read_agent_file_capped(
+    data_dir: &Path,
+    path: &Path,
+    cap: Option<u64>,
+) -> Result<Option<Vec<u8>>, &'static str> {
     match std::fs::symlink_metadata(path) {
         Ok(metadata) if metadata.is_file() => {}
         Ok(_) => return Err(NOT_REGULAR),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(_) => return Err(CANNOT_READ),
+    }
+    // A missing file is none. Windows refuses custody only once a file is there.
+    if windows_agent_file_refused() {
+        return Err(WINDOWS_AGENT_FILE);
     }
     // The file exists, so each parent exists: this only checks them.
     let parents_regular = path.parent().is_some_and(|parent| {
@@ -310,9 +348,21 @@ fn read_agent_file(data_dir: &Path, path: &Path) -> Result<Option<Vec<u8>>, &'st
         }
     }
     let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes).map_err(|_| CANNOT_READ)?;
+    if let Some(limit) = cap {
+        (&mut file)
+            .take(limit.saturating_add(1))
+            .read_to_end(&mut bytes)
+            .map_err(|_| CANNOT_READ)?;
+        if bytes.len() as u64 > limit {
+            return Err(CANNOT_READ);
+        }
+    } else {
+        file.read_to_end(&mut bytes).map_err(|_| CANNOT_READ)?;
+    }
     Ok(Some(bytes))
 }
+
+const WINDOWS_AGENT_FILE: &str = "agent file custody is unsupported on Windows";
 
 /// Parses the file and refuses anything this Runtime would not have written:
 /// the parsed file, written back, must hold the same fields and values as
@@ -442,29 +492,74 @@ pub(crate) fn agent_file_lock_held() -> bool {
     AGENT_FILE_LOCK_HELD.with(Cell::get)
 }
 
-struct AgentFileLockFlag;
+struct AgentFileLockFlag {
+    armed: bool,
+}
 
 impl AgentFileLockFlag {
     fn take() -> Self {
         AGENT_FILE_LOCK_HELD.with(|held| held.set(true));
-        Self
+        Self { armed: true }
+    }
+
+    fn idle() -> Self {
+        Self { armed: false }
     }
 }
 
 impl Drop for AgentFileLockFlag {
     fn drop(&mut self) {
-        AGENT_FILE_LOCK_HELD.with(|held| held.set(false));
+        if self.armed {
+            AGENT_FILE_LOCK_HELD.with(|held| held.set(false));
+        }
     }
 }
 
 /// The agent file lock is already held on this thread.
 pub(crate) const LOCK_ORDER: &str = "agent file lock before the budget mutex";
 
-/// The agent lock: one writer in this process, and one across processes.
+/// The agent lock: one writer in this process, and on Unix one across
+/// processes.
+///
+/// The in-process mutex is not enough when `agent-records.json` is absent.
+/// Another process can create that file and the first agent while this
+/// process holds only its own mutex, and a root-key change would then store
+/// a different key over the new agent. A root-key change therefore takes the
+/// same file lock a create takes. It removes that lock file on the way out
+/// when the agents file is still absent, so a finished change leaves no new
+/// file. After the lock is taken, the open file must still be the one at
+/// that path: the same device and inode. A missing or different file is
+/// opened and locked again. A bounded run of those tries ends in a named
+/// refusal, so a waiter does not keep a file the other process removed.
+/// When the wait itself is bounded, a removed file is opened again inside
+/// that same bound. A crash while the lock is held can leave the lock file;
+/// the next writer reuses it. A build without agents cannot create an agent
+/// itself, and it takes this same file lock because another process built
+/// with agents can create the first one. A platform without that file lock
+/// holds only the in-process mutex, and a second process is not excluded
+/// there. The flock wait finishes before this process's agent mutex. The
+/// owner's sign-in lock is only taken inside this lock, and the budget mutex
+/// is taken before this lock. The reverse is [`LOCK_ORDER`].
 struct WriteLock {
-    _file: FileLock,
+    _file: Option<FileLock>,
     _process: MutexGuard<'static, ()>,
     _order: AgentFileLockFlag,
+    /// Removed on drop when the agents file is still absent.
+    temporary_lock: Option<PathBuf>,
+}
+
+impl Drop for WriteLock {
+    fn drop(&mut self) {
+        let Some(path) = self.temporary_lock.take() else {
+            return;
+        };
+        let agents = path.with_file_name(AGENT_RECORDS_FILE);
+        let absent = std::fs::symlink_metadata(&agents)
+            .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound);
+        if absent {
+            let _ = std::fs::remove_file(path);
+        }
+    }
 }
 
 fn charge_lock_already_waited() -> bool {
@@ -492,48 +587,189 @@ impl Drop for ChargeLockWaited {
     }
 }
 
-/// Takes the agent lock. The flock wait finishes before this process's agent
-/// mutex. The owner's sign-in lock is only taken inside this lock, and the
-/// budget mutex is taken before this lock. The reverse is `LOCK_ORDER`.
+/// Takes the agent lock for a writer of the agents file. The flock wait
+/// finishes before this process's agent mutex.
 fn lock_for_write(data_dir: &Path, wait: Option<Duration>) -> anyhow::Result<WriteLock> {
+    acquire_agent_lock_for(data_dir, true, wait)
+}
+
+/// `create_when_absent` keeps the lock file when the agents file is missing,
+/// which is what a writer of that file does. A root-key change passes false:
+/// on Unix it still takes the file lock, then `WriteLock` removes that file
+/// if the agents file is still absent. Create and import both check that the
+/// locked file is still the one at the path.
+fn acquire_agent_lock(data_dir: &Path, create_when_absent: bool) -> anyhow::Result<WriteLock> {
+    acquire_agent_lock_for(data_dir, create_when_absent, None)
+}
+
+/// Opens the lock file. A path that cannot be opened is [`LOCK_NOT_FREE`],
+/// before any wait.
+fn open_agent_lock_file(path: &Path) -> anyhow::Result<std::fs::File> {
+    match crate::auth_state_files::open_regular_lock_file(path, "agent records") {
+        Ok(file) => Ok(file),
+        Err(_) => return Err(Named(LOCK_NOT_FREE).into()),
+    }
+}
+
+/// How many times a writer opens and locks the agents file before refusing.
+#[cfg(unix)]
+const AGENT_LOCK_IDENTITY_TRIES: u32 = 8;
+
+/// Locks `path` and keeps the lock only when that open file is still the
+/// file at the path. A removed or replaced file is opened and locked again.
+/// A bounded `wait` covers every try; a later try uses the time still left.
+#[cfg(unix)]
+fn lock_the_agents_file(path: &Path, wait: Option<Duration>) -> anyhow::Result<FileLock> {
+    use std::os::unix::fs::MetadataExt;
+    use std::time::Instant;
+    let deadline = wait.map(|wait| Instant::now() + wait);
+    for _ in 0..AGENT_LOCK_IDENTITY_TRIES {
+        if deadline.is_some_and(|end| Instant::now() >= end) {
+            return Err(Named(LOCK_NOT_FREE).into());
+        }
+        let file = open_agent_lock_file(path)?;
+        #[cfg(test)]
+        note_agent_lock_opened(&file);
+        let held = file
+            .metadata()
+            .context("failed to inspect the agents lock")?;
+        let lock = match deadline {
+            Some(end) => {
+                let remaining = end.saturating_duration_since(Instant::now());
+                #[cfg(all(test, unix))]
+                let started = Instant::now();
+                let waited = FileLock::exclusive_within(file, remaining);
+                #[cfg(all(test, unix))]
+                tests::note_agent_lock_wait(started.elapsed());
+                waited.map_err(|_| Named(LOCK_NOT_FREE))?
+            }
+            None => FileLock::exclusive(file).context("failed to lock agent records")?,
+        };
+        #[cfg(test)]
+        displace_agent_lock_for_test(path);
+        let same = std::fs::symlink_metadata(path).is_ok_and(|current| {
+            current.is_file() && current.dev() == held.dev() && current.ino() == held.ino()
+        });
+        if same {
+            return Ok(lock);
+        }
+        drop(lock);
+    }
+    refused(AGENTS_LOCK_CHANGED)
+}
+
+#[cfg(not(unix))]
+fn lock_the_agents_file(path: &Path, wait: Option<Duration>) -> anyhow::Result<FileLock> {
+    let file = open_agent_lock_file(path)?;
+    match wait {
+        Some(wait) => {
+            FileLock::exclusive_within(file, wait).map_err(|_| Named(LOCK_NOT_FREE).into())
+        }
+        None => Ok(FileLock::exclusive(file).context("failed to lock agent records")?),
+    }
+}
+
+fn agent_process_mutex() -> MutexGuard<'static, ()> {
+    AGENT_WRITE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+fn acquire_agent_lock_for(
+    data_dir: &Path,
+    create_when_absent: bool,
+    wait: Option<Duration>,
+) -> anyhow::Result<WriteLock> {
     if agent_file_lock_held() {
         return Err(Named(LOCK_ORDER).into());
     }
-    let path = agent_file_path(data_dir)?.with_file_name(format!("{AGENT_RECORDS_FILE}.lock"));
+    let records = agent_file_path(data_dir)?;
+    let absent = std::fs::symlink_metadata(&records)
+        .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound);
+    #[cfg(not(unix))]
+    if absent && !create_when_absent {
+        return Ok(WriteLock {
+            _file: None,
+            _process: agent_process_mutex(),
+            _order: AgentFileLockFlag::idle(),
+            temporary_lock: None,
+        });
+    }
+    let path = records.with_file_name(format!("{AGENT_RECORDS_FILE}.lock"));
     if let Some(parent) = path.parent() {
         crate::auth_state_files::ensure_regular_auth_parent(data_dir, parent)?;
     }
-    let opened = crate::auth_state_files::open_regular_lock_file(&path, "agent records");
-    let file = match opened {
-        Ok(file) => file,
-        Err(_) => return Err(Named(LOCK_NOT_FREE).into()),
-    };
     // The 2s wait ran outside the mutex. Retry briefly so another caller can leave the lock.
     let wait = match (charge_lock_already_waited(), wait) {
         (true, Some(_)) => Some(Duration::from_millis(500)),
         (_, kept) => kept,
     };
-    let held = match wait {
-        Some(wait) => {
-            #[cfg(all(test, unix))]
-            let started = std::time::Instant::now();
-            let waited = FileLock::exclusive_within(file, wait);
-            #[cfg(all(test, unix))]
-            tests::note_agent_lock_wait(started.elapsed());
-            waited.map_err(|_| Named(LOCK_NOT_FREE))?
-        }
-        None => FileLock::exclusive(file).context("failed to lock agent records")?,
+    let file = lock_the_agents_file(&path, wait)?;
+    let temporary_lock = if absent && !create_when_absent {
+        Some(path)
+    } else {
+        None
     };
-    let process = AGENT_WRITE
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
     Ok(WriteLock {
-        _file: held,
-        _process: process,
+        _file: Some(file),
+        _process: agent_process_mutex(),
         _order: AgentFileLockFlag::take(),
+        temporary_lock,
     })
 }
 
+#[cfg(all(test, unix))]
+thread_local! {
+    static AGENT_LOCK_OPENED_TRACE: std::cell::Cell<Option<fn(&std::fs::File)>> =
+        const { std::cell::Cell::new(None) };
+    static DISPLACE_AGENT_LOCK: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(all(test, unix))]
+fn note_agent_lock_opened(file: &std::fs::File) {
+    AGENT_LOCK_OPENED_TRACE.with(|hook| {
+        if let Some(hook) = hook.get() {
+            hook(file);
+        }
+    });
+}
+
+/// The next opens of the agents lock call `hook` before they wait.
+#[cfg(all(test, unix))]
+pub(crate) fn set_agent_lock_opened_trace(hook: Option<fn(&std::fs::File)>) {
+    AGENT_LOCK_OPENED_TRACE.with(|slot| slot.set(hook));
+}
+
+/// The next `count` locks remove the path after the lock is taken, so the
+/// identity check has to open it again.
+#[cfg(all(test, unix))]
+pub(crate) fn displace_agent_lock_on_the_next_tries(count: u32) {
+    DISPLACE_AGENT_LOCK.with(|left| left.set(count));
+}
+
+#[cfg(all(test, unix))]
+fn displace_agent_lock_for_test(path: &Path) {
+    DISPLACE_AGENT_LOCK.with(|left| {
+        let count = left.get();
+        if count == 0 {
+            return;
+        }
+        left.set(count - 1);
+        let _ = std::fs::remove_file(path);
+    });
+}
+
+#[cfg(all(test, unix))]
+fn agent_lock_identity(lock: &WriteLock) -> (u64, u64) {
+    use std::os::unix::fs::MetadataExt;
+    let metadata = lock
+        ._file
+        .as_ref()
+        .expect("the agents lock holds a file")
+        .metadata()
+        .expect("the agents lock can be inspected");
+    (metadata.dev(), metadata.ino())
+}
 /// Every change to the agent file is one of these.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Operation {
@@ -734,9 +970,17 @@ pub(crate) enum SpendRefusal {
 }
 
 fn reason_of(err: &anyhow::Error) -> &'static str {
-    err.downcast_ref::<Named>()
-        .map(|named| named.0)
-        .unwrap_or(CANNOT_READ)
+    if let Some(named) = err.downcast_ref::<Named>() {
+        return named.0;
+    }
+    #[cfg(unix)]
+    if err
+        .downcast_ref::<Refused>()
+        .is_some_and(|refused| refused.0 == AGENTS_LOCK_CHANGED)
+    {
+        return AGENTS_LOCK_CHANGED;
+    }
+    CANNOT_READ
 }
 
 fn agent_of<'a>(
@@ -765,17 +1009,27 @@ pub(crate) fn wait_agent_file_lock(data_dir: &Path) -> Result<ChargeLockWaited, 
     if !build_allows_for_home(data_dir) {
         return Ok(ChargeLockWaited::idle());
     }
-    let path = agent_file_path(data_dir)
-        .map_err(|err| reason_of(&err))?
-        .with_file_name(format!("{AGENT_RECORDS_FILE}.lock"));
+    let records = agent_file_path(data_dir).map_err(|err| reason_of(&err))?;
+    let path = records.with_file_name(format!("{AGENT_RECORDS_FILE}.lock"));
     if let Some(parent) = path.parent() {
         crate::auth_state_files::ensure_regular_auth_parent(data_dir, parent)
             .map_err(|err| reason_of(&err))?;
     }
-    let file = crate::auth_state_files::open_regular_lock_file(&path, "agent records")
-        .map_err(|_| LOCK_NOT_FREE)?;
-    FileLock::exclusive_within(file, CHARGE_LOCK_WAIT).map_err(|_| LOCK_NOT_FREE)?;
+    let lock =
+        lock_the_agents_file(&path, Some(CHARGE_LOCK_WAIT)).map_err(|err| reason_of(&err))?;
+    release_probe_lock(&records, &path, lock);
     Ok(ChargeLockWaited::arm())
+}
+
+/// A probe that settles on a Home with no agents file removes that lock file
+/// before it releases the lock.
+fn release_probe_lock(records: &Path, lock_path: &Path, lock: FileLock) {
+    let absent = std::fs::symlink_metadata(records)
+        .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound);
+    if absent {
+        let _ = std::fs::remove_file(lock_path);
+    }
+    drop(lock);
 }
 
 pub(crate) fn model_spend(data_dir: &Path, agent_id: &str) -> Result<(String, u64), &'static str> {
@@ -1305,6 +1559,10 @@ fn create_in_any_build(
     if live >= MAX_LIVE_AGENTS_PER_OWNER {
         return refused(AT_THE_LIMIT);
     }
+    // The wrap reads the owner's key. A root-key change holds this same lock
+    // until its store returns, so the key read here is the key that store left.
+    #[cfg(all(test, unix))]
+    pause_agent_writer(data_dir, PAUSE_BEFORE_WRAP);
     let id = crate::auth::fresh_agent_id();
     let root = crate::auth::principal_kind_localhost_root(&id, PrincipalKind::Agent);
     let Some(protection) = protect_agent_root(data_dir, owner, &id, &root, now)? else {
@@ -1371,6 +1629,310 @@ fn list_in_any_build(data_dir: &Path, caller: &Caller<'_>) -> anyhow::Result<Vec
         .iter()
         .filter(|agent| owned_by(agent, owner));
     Ok(theirs.map(view).collect())
+}
+
+pub(crate) fn opening_agent_count(data_dir: &Path, owner_id: &str) -> anyhow::Result<usize> {
+    if !build_allows() {
+        return named_in_plain_file(data_dir, owner_id, true);
+    }
+    let Some(opened) = open_for_root_change(data_dir)? else {
+        return Ok(0);
+    };
+    let Some(owner) = opened
+        .owner_file
+        .iter()
+        .find(|record| record.principal_id == owner_id && is_person(record))
+    else {
+        return Ok(0);
+    };
+    let mut count = 0usize;
+    for agent in &opened.file.agents {
+        if owned_by(agent, owner)
+            && agent.record.retired_at.is_none()
+            && data_key_opens(data_dir, &owner.principal_id, &agent.protection)?
+        {
+            count += 1;
+        }
+    }
+    Ok(count)
+}
+
+/// The agent file for a root-key decision in a build that has agents.
+/// `None` is a Home with no file.
+fn open_for_root_change(data_dir: &Path) -> anyhow::Result<Option<Opened>> {
+    let path = agent_file_path(data_dir)?;
+    if std::fs::symlink_metadata(&path)
+        .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+    {
+        return Ok(None);
+    }
+    Ok(Some(open(data_dir, false)?))
+}
+
+/// Owner ids in the agent file, read as plain JSON. `None` is no file.
+/// The read uses the same mode checks as a load, and stops at
+/// `MAX_AGENT_FILE_BYTES`. An unreadable file refuses with its own reason.
+/// This path opens no key, so a build without agents can decide.
+fn plain_owner_names(data_dir: &Path) -> anyhow::Result<Option<Vec<(String, bool)>>> {
+    let path = agent_file_path(data_dir)?;
+    let bytes = match read_agent_file_capped(data_dir, &path, Some(MAX_AGENT_FILE_BYTES)) {
+        Ok(Some(bytes)) => bytes,
+        Ok(None) => return Ok(None),
+        Err(_) => return Err(Refused(AGENTS_FILE_UNREADABLE.to_string()).into()),
+    };
+    match owners_in_plain_json(&bytes) {
+        Ok(owners) => Ok(Some(owners)),
+        Err(_) => Err(Refused(AGENTS_FILE_UNREADABLE.to_string()).into()),
+    }
+}
+
+/// One record's owner id, and whether that record is retired.
+fn owners_in_plain_json(bytes: &[u8]) -> Result<Vec<(String, bool)>, &'static str> {
+    let value: serde_json::Value = serde_json::from_slice(bytes).map_err(|_| DOES_NOT_PARSE)?;
+    if value.get("schema").and_then(|item| item.as_str()) != Some(AGENT_RECORDS_SCHEMA) {
+        return Err(DOES_NOT_PARSE);
+    }
+    let Some(agents) = value.get("agents").and_then(|item| item.as_array()) else {
+        return Err(DOES_NOT_PARSE);
+    };
+    let mut owners = Vec::new();
+    for agent in agents {
+        let Some(record) = agent.get("record") else {
+            return Err(DOES_NOT_PARSE);
+        };
+        let Some(owner) = record.get("owner").and_then(|owner| owner.as_str()) else {
+            return Err(DOES_NOT_PARSE);
+        };
+        let retired = match record.get("retired_at") {
+            None => false,
+            Some(retired_at) if retired_at.is_null() => false,
+            Some(retired_at) if retired_at.as_u64().is_some() => true,
+            Some(_) => return Err(DOES_NOT_PARSE),
+        };
+        owners.push((owner.to_string(), retired));
+    }
+    Ok(owners)
+}
+
+/// `unretired_only` is the root-key decision: a retired record does not stop
+/// opening. A reassignment passes false, because a retired record still
+/// names its owner.
+fn named_in_plain_file(
+    data_dir: &Path,
+    owner_id: &str,
+    unretired_only: bool,
+) -> anyhow::Result<usize> {
+    let Some(owners) = plain_owner_names(data_dir)? else {
+        return Ok(0);
+    };
+    Ok(owners
+        .iter()
+        .filter(|(owner, retired)| owner == owner_id && (!unretired_only || !retired))
+        .count())
+}
+
+fn data_key_opens(
+    data_dir: &Path,
+    owner_id: &str,
+    protection: &PrincipalRootProtectionV1,
+) -> anyhow::Result<bool> {
+    crate::api::auth_gateway::agent_key_open(data_dir, owner_id, protection)
+        .ok_or_else(|| Refused(CANNOT_OPEN_THE_WRAP.to_string()).into())
+}
+
+pub(crate) const CANNOT_OPEN_THE_WRAP: &str =
+    "This Home cannot open the key that wraps an agent's data, so a root-key change is refused.";
+
+pub(crate) const PASSKEY_NO_LONGER_NAMES: &str = "This passkey no longer names the account this recovery started with, so the recovery is refused.";
+
+pub(crate) fn agents_would_stop_opening(count: usize) -> String {
+    let word = if count == 1 { "agent" } else { "agents" };
+    format!(
+        "{count} {word} on this Home would stop opening, so nothing was changed. Use this Recovery Kit on another Home instead."
+    )
+}
+
+/// Create Recovery Kit. The same words in a build with agents and without.
+pub(crate) fn agents_use_a_key_not_in_a_kit(count: usize) -> String {
+    let (word, verb) = if count == 1 {
+        ("agent", "uses")
+    } else {
+        ("agents", "use")
+    };
+    format!(
+        "{count} {word} on this Home {verb} a key this Home can't put in a Recovery Kit yet, so nothing was changed."
+    )
+}
+
+pub(crate) fn agents_would_belong_to_nobody(count: usize) -> String {
+    let (word, names) = if count == 1 {
+        ("agent", "its record names")
+    } else {
+        ("agents", "their records name")
+    };
+    format!(
+        "{count} {word} on this Home would belong to nobody. This recovery changes the owner id {names}."
+    )
+}
+
+/// Held from the opening count until the caller finishes storing the key.
+pub(crate) struct AgentWriterGuard {
+    _lock: WriteLock,
+}
+
+/// The count and the key store are one decision. The caller stores the key
+/// before dropping the guard. The guard is taken after any provider wait,
+/// and before `key_changes` loads the stored protection.
+///
+/// A reassignment that changes the owner id a record names refuses: that
+/// agent would belong to nobody. A retired record still names its owner, so
+/// it counts. The same owner id is refused only when the key changes and an
+/// agent's data would stop opening. A build without agents counts unretired
+/// records that name the owner and opens no key.
+pub(crate) fn hold_agent_writer_for_root_change(
+    data_dir: &Path,
+    current_owner_id: &str,
+    next_owner_id: &str,
+    key_changes: impl FnOnce() -> anyhow::Result<bool>,
+) -> anyhow::Result<AgentWriterGuard> {
+    let lock = acquire_agent_lock(data_dir, false)?;
+    #[cfg(all(test, unix))]
+    pause_agent_writer(data_dir, PAUSE_BEFORE_STORE);
+    if current_owner_id != next_owner_id {
+        let named = agents_naming_owner(data_dir, current_owner_id, false)?;
+        if named > 0 {
+            return Err(Refused(agents_would_belong_to_nobody(named)).into());
+        }
+    } else if key_changes()? {
+        let count = opening_agent_count(data_dir, current_owner_id)?;
+        if count > 0 {
+            return Err(Refused(agents_would_stop_opening(count)).into());
+        }
+    }
+    Ok(AgentWriterGuard { _lock: lock })
+}
+
+pub(crate) fn hold_unarchived(data_dir: &Path, owner_id: &str) -> anyhow::Result<AgentWriterGuard> {
+    let guard = hold_agent_writer_for_root_change(data_dir, owner_id, owner_id, || Ok(false))?;
+    let named = agents_naming_owner(data_dir, owner_id, true)?;
+    if named > 0 {
+        return Err(Refused(agents_use_a_key_not_in_a_kit(named)).into());
+    }
+    Ok(guard)
+}
+
+fn agents_naming_owner(
+    data_dir: &Path,
+    owner_id: &str,
+    unretired_only: bool,
+) -> anyhow::Result<usize> {
+    if !build_allows() {
+        return named_in_plain_file(data_dir, owner_id, unretired_only);
+    }
+    let Some(opened) = open_for_root_change(data_dir)? else {
+        return Ok(0);
+    };
+    Ok(opened
+        .file
+        .agents
+        .iter()
+        .filter(|agent| {
+            agent.record.owner.as_deref() == Some(owner_id)
+                && (!unretired_only || agent.record.retired_at.is_none())
+        })
+        .count())
+}
+
+#[cfg(all(test, unix))]
+pub(crate) const PAUSE_BEFORE_STORE: &str = "before-store";
+#[cfg(all(test, unix))]
+pub(crate) const PAUSE_BEFORE_WRAP: &str = "before-wrap";
+
+#[cfg(all(test, unix))]
+struct WriterPause {
+    data_dir: PathBuf,
+    point: &'static str,
+    arrived: bool,
+    release: bool,
+}
+
+/// One pause per Home. Two tests can arm two Homes at once; a single slot
+/// would let one Home release the other.
+#[cfg(all(test, unix))]
+static WRITER_PAUSES: Mutex<Vec<WriterPause>> = Mutex::new(Vec::new());
+#[cfg(all(test, unix))]
+static WRITER_PAUSE_CV: Condvar = Condvar::new();
+
+#[cfg(all(test, unix))]
+pub(crate) struct AgentWriterPauseGuard {
+    data_dir: PathBuf,
+}
+
+#[cfg(all(test, unix))]
+impl Drop for AgentWriterPauseGuard {
+    fn drop(&mut self) {
+        release_agent_writer_pause(&self.data_dir);
+    }
+}
+
+#[cfg(all(test, unix))]
+fn writer_pause_lock() -> MutexGuard<'static, Vec<WriterPause>> {
+    WRITER_PAUSES
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// Arms the pause for this Home. Dropping the guard lets that Home's waiter
+/// continue. Another Home keeps its own pause.
+#[cfg(all(test, unix))]
+pub(crate) fn arm_agent_writer_pause(
+    data_dir: &Path,
+    point: &'static str,
+) -> AgentWriterPauseGuard {
+    let mut pauses = writer_pause_lock();
+    pauses.retain(|pause| pause.data_dir != data_dir);
+    pauses.push(WriterPause {
+        data_dir: data_dir.to_path_buf(),
+        point,
+        arrived: false,
+        release: false,
+    });
+    AgentWriterPauseGuard {
+        data_dir: data_dir.to_path_buf(),
+    }
+}
+
+#[cfg(all(test, unix))]
+pub(crate) fn agent_writer_pause_arrived(data_dir: &Path) -> bool {
+    writer_pause_lock()
+        .iter()
+        .any(|pause| pause.data_dir == data_dir && pause.arrived)
+}
+
+#[cfg(all(test, unix))]
+fn release_agent_writer_pause(data_dir: &Path) {
+    if let Some(pause) = writer_pause_lock()
+        .iter_mut()
+        .find(|pause| pause.data_dir == data_dir)
+    {
+        pause.release = true;
+    }
+    WRITER_PAUSE_CV.notify_all();
+}
+
+#[cfg(all(test, unix))]
+fn pause_agent_writer(data_dir: &Path, point: &str) {
+    let mut guard = writer_pause_lock();
+    while let Some(index) = guard
+        .iter()
+        .position(|pause| pause.data_dir == data_dir && pause.point == point && !pause.release)
+    {
+        guard[index].arrived = true;
+        WRITER_PAUSE_CV.notify_all();
+        guard = WRITER_PAUSE_CV
+            .wait(guard)
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+    }
 }
 
 const NO_SUCH_AGENT: &str = "the caller owns no agent with that id";
@@ -1649,16 +2211,30 @@ pub(crate) fn stored_protection(
 /// The stored protection must equal the one passed in, byte for byte, so a
 /// protection that merely looks like an agent's yields nothing. This module
 /// never holds a key: `auth` derives the wrap key and opens the wrap.
+///
+/// A build that does not serve agents does not open a wrap. Its root-key
+/// decision reads the agent file and does not call this.
 pub(crate) fn stored_wrap(
     data_dir: &Path,
     protection: &PrincipalRootProtectionV1,
 ) -> anyhow::Result<(String, [u8; 12], Vec<u8>)> {
-    let Some(agent) = stored_agent_for_root(
-        data_dir,
-        &protection.principal_id,
-        &protection.localhost_root,
-    )?
-    else {
+    if !build_allows_for_home(data_dir) {
+        return refused(FEATURE_OFF);
+    }
+    wrap_parts(data_dir, protection)
+}
+
+/// The owner and the raw wrap. `stored_wrap` is the only caller, and it
+/// applies the feature gate before this runs.
+fn wrap_parts(
+    data_dir: &Path,
+    protection: &PrincipalRootProtectionV1,
+) -> anyhow::Result<(String, [u8; 12], Vec<u8>)> {
+    let opened = open(data_dir, false)?;
+    let Some(agent) = opened.file.agents.iter().find(|agent| {
+        agent.record.principal_id == protection.principal_id
+            && agent.record.localhost_root == protection.localhost_root
+    }) else {
         anyhow::bail!("agent file holds no record for this principal root");
     };
     if agent.protection != *protection {

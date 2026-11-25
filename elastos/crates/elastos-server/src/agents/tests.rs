@@ -1443,6 +1443,421 @@ pub(crate) fn plant_enabled_home_with_one_agent(
         .agent_id
 }
 
+#[cfg(not(feature = "prototype-agents"))]
+#[test]
+fn a_writer_pause_is_armed_until_its_guard_drops() {
+    let dir = tempfile::tempdir().unwrap();
+    let guard = arm_agent_writer_pause(dir.path(), PAUSE_BEFORE_STORE);
+    assert!(!agent_writer_pause_arrived(dir.path()));
+    drop(guard);
+    assert!(!agent_writer_pause_arrived(dir.path()));
+}
+
+const REMOVED_LOCK_TEST: &str = "agents::tests::a_waiter_does_not_hold_a_removed_agents_lock";
+
+fn trace_opened_agents_lock(file: &std::fs::File) {
+    let Ok(path) = std::env::var("U5_AGENT_LOCK_OPENED") else {
+        return;
+    };
+    if std::fs::symlink_metadata(&path).is_ok() {
+        return;
+    }
+    use std::os::unix::fs::MetadataExt;
+    let meta = file.metadata().expect("opened agents lock");
+    std::fs::write(path, format!("{} {}", meta.dev(), meta.ino())).expect("record opened lock");
+}
+
+fn parse_lock_identity(text: &str) -> (u64, u64) {
+    let mut parts = text.split_whitespace();
+    (
+        parts.next().expect("device").parse().expect("device"),
+        parts.next().expect("inode").parse().expect("inode"),
+    )
+}
+
+/// The re-exec'd half of the removed-lock row. It is a create: it takes the
+/// same lock an import holds, and it keeps that lock until the parent says
+/// to drop it.
+fn removed_lock_waiter() {
+    set_agent_lock_opened_trace(Some(trace_opened_agents_lock));
+    let home = PathBuf::from(std::env::var("U5_LOCK_HOME").expect("home"));
+    let held_path = std::env::var("U5_LOCK_HELD").expect("held");
+    let release = PathBuf::from(std::env::var("U5_LOCK_RELEASE").expect("release"));
+    let lock = acquire_agent_lock(&home, true).expect("the waiter takes the agents lock");
+    let (dev, ino) = agent_lock_identity(&lock);
+    std::fs::write(&held_path, format!("{dev} {ino}")).expect("record the held lock");
+    let started = std::time::Instant::now();
+    while started.elapsed() < std::time::Duration::from_secs(30) {
+        if release.is_file() {
+            drop(lock);
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    panic!("the remover did not release the waiter");
+}
+
+struct StopChild(std::process::Child);
+
+impl Drop for StopChild {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+fn wait_for_lock_note(path: &Path, child: &mut std::process::Child) -> String {
+    let started = std::time::Instant::now();
+    while started.elapsed() < std::time::Duration::from_secs(15) {
+        if let Ok(text) = std::fs::read_to_string(path) {
+            if !text.is_empty() {
+                return text;
+            }
+        }
+        match child.try_wait() {
+            Ok(Some(status)) => panic!("waiter exited early: {status}"),
+            Ok(None) => std::thread::sleep(std::time::Duration::from_millis(20)),
+            Err(error) => panic!("waiter status: {error}"),
+        }
+    }
+    panic!("timed out waiting for {}", path.display());
+}
+
+/// One process holds the import lock and removes it while another process is
+/// waiting on that file. The waiter is a create. The two do not hold the
+/// lock together afterwards: the waiter's file is the one at the path, and
+/// a second open cannot lock it.
+#[test]
+fn a_waiter_does_not_hold_a_removed_agents_lock() {
+    if std::env::var("U5_LOCK_ROLE").ok().as_deref() == Some("waiter") {
+        removed_lock_waiter();
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path().join("home");
+    std::fs::create_dir(&home).unwrap();
+    let opened = root.path().join("opened");
+    let held = root.path().join("held");
+    let release = root.path().join("release");
+    let remover = acquire_agent_lock(&home, false).expect("the import takes the agents lock");
+    let remover_id = agent_lock_identity(&remover);
+    let mut child = StopChild(
+        std::process::Command::new(std::env::current_exe().expect("test binary"))
+            .args(["--exact", REMOVED_LOCK_TEST])
+            .env("U5_LOCK_ROLE", "waiter")
+            .env("U5_LOCK_HOME", &home)
+            .env("U5_AGENT_LOCK_OPENED", &opened)
+            .env("U5_LOCK_HELD", &held)
+            .env("U5_LOCK_RELEASE", &release)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("re-exec the waiter"),
+    );
+    let opened_text = wait_for_lock_note(&opened, &mut child.0);
+    assert_eq!(
+        parse_lock_identity(&opened_text),
+        remover_id,
+        "the waiter opened the lock the import holds"
+    );
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    assert!(
+        !held.is_file(),
+        "the waiter took the lock while the import still held it"
+    );
+    assert!(
+        child.0.try_wait().expect("waiter status").is_none(),
+        "the waiter exited before the import removed the lock"
+    );
+    drop(remover);
+    let held_text = wait_for_lock_note(&held, &mut child.0);
+    let (dev, ino) = parse_lock_identity(&held_text);
+    let path = agent_file_path(&home)
+        .unwrap()
+        .with_file_name(format!("{AGENT_RECORDS_FILE}.lock"));
+    use std::os::unix::fs::MetadataExt;
+    let current = std::fs::symlink_metadata(&path)
+        .ok()
+        .filter(|meta| meta.is_file());
+    let same = current
+        .as_ref()
+        .is_some_and(|meta| meta.dev() == dev && meta.ino() == ino);
+    let second_took_it = if same {
+        crate::host_lock::FileLock::try_exclusive(std::fs::File::open(&path).unwrap()).is_ok()
+    } else {
+        crate::auth_state_files::open_regular_lock_file(&path, "agent records")
+            .ok()
+            .and_then(|file| crate::host_lock::FileLock::try_exclusive(file).ok())
+            .is_some()
+    };
+    assert!(
+        same && !second_took_it,
+        "the waiter and a second process hold the agents lock together (same={same}, second={second_took_it}, waiter={dev}:{ino})"
+    );
+    std::fs::write(&release, b"go").unwrap();
+    let status = child.0.wait().expect("waiter");
+    assert!(status.success(), "waiter failed: {status}");
+}
+
+struct ClearDisplace;
+
+impl Drop for ClearDisplace {
+    fn drop(&mut self) {
+        displace_agent_lock_on_the_next_tries(0);
+    }
+}
+
+#[test]
+fn a_lock_that_keeps_changing_is_refused_by_name() {
+    let _clear = ClearDisplace;
+    let dir = tempfile::tempdir().unwrap();
+    displace_agent_lock_on_the_next_tries(AGENT_LOCK_IDENTITY_TRIES);
+    let error = match acquire_agent_lock(dir.path(), true) {
+        Ok(_lock) => panic!("the lock settled"),
+        Err(error) => error,
+    };
+    assert_eq!(error.to_string(), AGENTS_LOCK_CHANGED);
+    let settled = acquire_agent_lock(dir.path(), false).expect("a settled lock is taken");
+    drop(settled);
+    assert!(
+        agent_file_path(dir.path())
+            .unwrap()
+            .symlink_metadata()
+            .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound),
+        "the agents file stays absent"
+    );
+}
+
+fn plain_bytes(value: &Value) -> Vec<u8> {
+    serde_json::to_vec(value).unwrap()
+}
+
+fn assert_plain_unreadable(bytes: &[u8]) {
+    assert_eq!(owners_in_plain_json(bytes), Err(DOES_NOT_PARSE));
+    let home = Home::new();
+    let path = home.agent_file();
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, bytes).unwrap();
+    set_mode(&path, 0o600);
+    let error = plain_owner_names(home.path()).expect_err("an unreadable agents file");
+    assert_eq!(error.to_string(), AGENTS_FILE_UNREADABLE);
+}
+
+fn plain_record(owner: &str, retired_at: Option<Value>) -> Value {
+    let mut record = json!({ "owner": owner });
+    if let Some(retired_at) = retired_at {
+        record["retired_at"] = retired_at;
+    }
+    json!({
+        "schema": AGENT_RECORDS_SCHEMA,
+        "agents": [{ "record": record }]
+    })
+}
+
+#[test]
+fn a_plain_file_from_a_newer_home_is_unreadable() {
+    let newer = plain_bytes(&json!({
+        "schema": "elastos.agent.records/v2",
+        "agents": [{ "record": { "owner": OWNER_ID } }]
+    }));
+    assert_plain_unreadable(&newer);
+    let missing = plain_bytes(&json!({
+        "agents": [{ "record": { "owner": OWNER_ID } }]
+    }));
+    assert_plain_unreadable(&missing);
+}
+
+#[test]
+fn a_plain_entry_without_a_record_is_unreadable() {
+    assert_plain_unreadable(&plain_bytes(&json!({
+        "schema": AGENT_RECORDS_SCHEMA,
+        "agents": [{ "owner": OWNER_ID }]
+    })));
+}
+
+#[test]
+fn a_plain_entry_without_an_owner_string_is_unreadable() {
+    assert_plain_unreadable(&plain_bytes(&json!({
+        "schema": AGENT_RECORDS_SCHEMA,
+        "agents": [{ "record": {} }]
+    })));
+    assert_plain_unreadable(&plain_bytes(&json!({
+        "schema": AGENT_RECORDS_SCHEMA,
+        "agents": [{ "record": { "owner": 4 } }]
+    })));
+    assert_plain_unreadable(&plain_bytes(&json!({
+        "schema": AGENT_RECORDS_SCHEMA,
+        "agents": [{ "record": { "owner": null } }]
+    })));
+}
+
+#[test]
+fn a_plain_retired_at_that_is_not_absent_null_or_unsigned_is_unreadable() {
+    for retired_at in [json!(false), json!("4"), json!(-1), json!(1.5), json!([])] {
+        assert_plain_unreadable(&plain_bytes(&plain_record(OWNER_ID, Some(retired_at))));
+    }
+}
+
+#[test]
+fn a_plain_file_of_today_still_names_its_owner() {
+    let absent = owners_in_plain_json(&plain_bytes(&plain_record(OWNER_ID, None))).unwrap();
+    assert_eq!(absent, vec![(OWNER_ID.to_string(), false)]);
+    let null_retired =
+        owners_in_plain_json(&plain_bytes(&plain_record(OWNER_ID, Some(json!(null))))).unwrap();
+    assert_eq!(null_retired, vec![(OWNER_ID.to_string(), false)]);
+    let retired =
+        owners_in_plain_json(&plain_bytes(&plain_record(OWNER_ID, Some(json!(4))))).unwrap();
+    assert_eq!(retired, vec![(OWNER_ID.to_string(), true)]);
+
+    let home = Home::new();
+    let caller = home.caller();
+    set_enabled_in_any_build(home.path(), &caller, true, 9).unwrap();
+    create_in_any_build(
+        home.path(),
+        &caller,
+        &request("request-plain-today"),
+        admit,
+        9,
+    )
+    .unwrap();
+    let owners = owners_in_plain_json(&home.agent_bytes()).expect("a file this Runtime writes");
+    assert_eq!(owners, vec![(OWNER_ID.to_string(), false)]);
+}
+
+#[test]
+fn a_missing_agent_file_is_checked_before_windows_refuses_custody() {
+    let source = include_str!("../agents.rs");
+    let missing = source
+        .find("NotFound => return Ok(None)")
+        .expect("the read names a missing file");
+    let windows = source
+        .find("agent file custody is unsupported on Windows")
+        .expect("Windows still refuses a file that is there");
+    assert!(
+        missing < windows,
+        "a missing file returns before Windows refuses custody"
+    );
+}
+
+#[test]
+fn the_refusal_names_the_count_and_what_to_do() {
+    // The same words with the feature on and off: this Home has no Retire control.
+    assert_eq!(
+        agents_would_stop_opening(1),
+        "1 agent on this Home would stop opening, so nothing was changed. Use this Recovery Kit on another Home instead."
+    );
+    assert_eq!(
+        agents_would_stop_opening(2),
+        "2 agents on this Home would stop opening, so nothing was changed. Use this Recovery Kit on another Home instead."
+    );
+    assert_eq!(
+        agents_use_a_key_not_in_a_kit(1),
+        "1 agent on this Home uses a key this Home can't put in a Recovery Kit yet, so nothing was changed."
+    );
+    assert_eq!(
+        agents_use_a_key_not_in_a_kit(2),
+        "2 agents on this Home use a key this Home can't put in a Recovery Kit yet, so nothing was changed."
+    );
+    assert!(!agents_would_stop_opening(1).contains("Retire"));
+    assert!(!agents_use_a_key_not_in_a_kit(1).contains("Retire"));
+    assert_eq!(
+        agents_would_belong_to_nobody(1),
+        "1 agent on this Home would belong to nobody. This recovery changes the owner id its record names."
+    );
+    assert_eq!(
+        agents_would_belong_to_nobody(2),
+        "2 agents on this Home would belong to nobody. This recovery changes the owner id their records name."
+    );
+}
+
+/// One agent whose note opens under the owner's current key. The caller has
+/// already stored that owner's protection. The owner is an admin.
+#[cfg(feature = "prototype-agents")]
+pub(crate) struct PlantedAgent {
+    pub agent_id: String,
+    pub root: String,
+    pub uri: String,
+    pub path: PathBuf,
+    pub note: Vec<u8>,
+}
+
+#[cfg(feature = "prototype-agents")]
+pub(crate) fn plant_opening_agent(
+    data_dir: &Path,
+    owner_id: &str,
+    request_id: &str,
+) -> PlantedAgent {
+    let owner = crate::auth::stored_principal_record(data_dir, owner_id)
+        .unwrap()
+        .unwrap();
+    let caller = Caller {
+        principal_id: owner_id,
+        proof_binding_id: &owner.proof_binding_id,
+        session_id: "session:plant",
+    };
+    set_enabled_in_any_build(data_dir, &caller, true, 9).unwrap();
+    let agent_id = create_in_any_build(data_dir, &caller, &request(request_id), admit, 10)
+        .unwrap()
+        .agent_id;
+    let note = b"note-opens-under-the-key-in-force".to_vec();
+    DISPATCH_FIXTURES
+        .get_or_init(|| Mutex::new(std::collections::HashSet::new()))
+        .lock()
+        .unwrap()
+        .insert(data_dir.to_path_buf());
+    let root = crate::auth::principal_stored_localhost_root(Some(data_dir), &agent_id).unwrap();
+    let uri = format!("{root}/journal/stable-id.txt");
+    let path = elastos_common::localhost::rooted_localhost_fs_path(data_dir, &uri).unwrap();
+    crate::auth::write_principal_root_object(data_dir, &agent_id, &root, &uri, &path, &note)
+        .unwrap();
+    assert_eq!(
+        crate::auth::read_principal_root_object(data_dir, &agent_id, &root, &uri, &path).unwrap(),
+        note,
+        "the planted note opens under the key in force"
+    );
+    PlantedAgent {
+        agent_id,
+        root,
+        uri,
+        path,
+        note,
+    }
+}
+
+/// The same plant, then the agent is retired. The note still opens: retirement
+/// keeps the wrap. The note is data the owner already stopped using.
+#[cfg(feature = "prototype-agents")]
+pub(crate) fn plant_retired_agent(
+    data_dir: &Path,
+    owner_id: &str,
+    request_id: &str,
+) -> PlantedAgent {
+    let planted = plant_opening_agent(data_dir, owner_id, request_id);
+    let owner = crate::auth::stored_principal_record(data_dir, owner_id)
+        .unwrap()
+        .unwrap();
+    let caller = Caller {
+        principal_id: owner_id,
+        proof_binding_id: &owner.proof_binding_id,
+        session_id: "session:plant",
+    };
+    retire_in_any_build(data_dir, &caller, &planted.agent_id, 11).unwrap();
+    assert_eq!(
+        crate::auth::read_principal_root_object(
+            data_dir,
+            &planted.agent_id,
+            &planted.root,
+            &planted.uri,
+            &planted.path
+        )
+        .unwrap(),
+        planted.note,
+        "a retired agent's note still opens under the key that wrapped it"
+    );
+    planted
+}
+
 #[test]
 fn a_create_leaves_one_record_and_one_protection_in_the_agent_file_only() {
     let home = Home::new();
@@ -4061,6 +4476,118 @@ fn a_lock_directory_on_a_current_file_is_named_lock_not_free() {
         hosted_charge_still_standing(dir.path(), &owner, &agent, "offer-dir").unwrap_err();
     assert_named(standing, LOCK_NOT_FREE);
     assert!(take_agent_lock_wait().is_none(), "standing waited");
+}
+
+static BOUNDED_LOCK_NOTE: std::sync::Mutex<Option<std::path::PathBuf>> = std::sync::Mutex::new(None);
+static BOUNDED_LOCK_OPENS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+fn note_bounded_lock_open(file: &std::fs::File) {
+    use std::sync::atomic::Ordering;
+    let seen = BOUNDED_LOCK_OPENS.fetch_add(1, Ordering::SeqCst);
+    if seen != 0 {
+        return;
+    }
+    let Some(path) = BOUNDED_LOCK_NOTE.lock().unwrap().clone() else {
+        return;
+    };
+    use std::os::unix::fs::MetadataExt;
+    let meta = file.metadata().expect("opened agents lock");
+    std::fs::write(path, format!("{} {}", meta.dev(), meta.ino())).expect("note the opened lock");
+}
+
+struct ClearBoundedNote;
+
+impl Drop for ClearBoundedNote {
+    fn drop(&mut self) {
+        *BOUNDED_LOCK_NOTE.lock().unwrap() = None;
+        BOUNDED_LOCK_OPENS.store(0, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// The outside wait settles on the file that is at the path. A lock removed
+/// during that wait is opened again, and the second wait stays inside the
+/// original bound.
+#[test]
+fn a_bounded_wait_opens_a_removed_lock_again_inside_its_bound() {
+    use std::sync::atomic::Ordering;
+    let _clear = ClearBoundedNote;
+    BOUNDED_LOCK_OPENS.store(0, Ordering::SeqCst);
+    let (dir, _owner, _agent) = home_at_its_floor();
+    let path = agent_file_path(dir.path())
+        .unwrap()
+        .with_file_name("agent-records.json.lock");
+    let old = hold_external_agent_lock(dir.path());
+    let note = dir.path().join("bounded-open");
+    *BOUNDED_LOCK_NOTE.lock().unwrap() = Some(note.clone());
+    let home = dir.path().to_path_buf();
+    let (tx, rx) = std::sync::mpsc::channel();
+    let waiter = std::thread::spawn(move || {
+        set_agent_lock_opened_trace(Some(note_bounded_lock_open));
+        let started = std::time::Instant::now();
+        let result = wait_agent_file_lock(&home);
+        let _ = tx.send((result, started.elapsed()));
+    });
+    let opened_at = std::time::Instant::now();
+    while !note.is_file() {
+        assert!(
+            waiter.is_finished() || opened_at.elapsed() < std::time::Duration::from_secs(5),
+            "the bounded wait did not open the lock"
+        );
+        assert!(!waiter.is_finished(), "the waiter exited before opening the lock");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    std::thread::sleep(std::time::Duration::from_millis(1200));
+    std::fs::remove_file(&path).unwrap();
+    let replacement = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .open(&path)
+        .unwrap();
+    let new_lock = crate::host_lock::FileLock::exclusive(replacement).unwrap();
+    drop(old);
+    let outcome = rx.recv_timeout(CHARGE_LOCK_WAIT + std::time::Duration::from_millis(400));
+    drop(new_lock);
+    let _ = waiter.join();
+    let (result, elapsed) = outcome.expect("the bounded wait ran past its bound");
+    match result {
+        Err(name) => assert_eq!(name, LOCK_NOT_FREE, "{elapsed:?}"),
+        Ok(_) => panic!("the bounded wait took a removed lock: {elapsed:?}"),
+    }
+    assert!(
+        BOUNDED_LOCK_OPENS.load(Ordering::SeqCst) >= 2,
+        "the removed lock was not opened again"
+    );
+    assert!(
+        elapsed + std::time::Duration::from_millis(50) >= std::time::Duration::from_millis(1200),
+        "the wait returned before the lock was removed: {elapsed:?}"
+    );
+    assert!(
+        elapsed <= CHARGE_LOCK_WAIT + std::time::Duration::from_millis(500),
+        "the reopen used a new bound: {elapsed:?}"
+    );
+}
+
+/// A wait on a Home with no agents file does not leave the lock file behind.
+#[test]
+fn a_lock_wait_on_a_home_without_agents_leaves_no_lock_file() {
+    let dir = tempfile::tempdir().unwrap();
+    crate::auth::store_test_human_principal(dir.path(), "person:local:no-agents");
+    allow_dispatch_spend(dir.path());
+    let records = agent_file_path(dir.path()).unwrap();
+    assert!(
+        records
+            .symlink_metadata()
+            .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound),
+        "the home has an agents file"
+    );
+    wait_agent_file_lock(dir.path()).expect("the wait takes the lock");
+    let path = records.with_file_name("agent-records.json.lock");
+    assert!(
+        path.symlink_metadata()
+            .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound),
+        "the wait left a lock file on a home without agents"
+    );
 }
 
 /// An unreadable sign-in file is named at the open, with no message-text test.

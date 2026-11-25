@@ -112,6 +112,570 @@ mod off {
         assert_eq!(std::fs::read(agent_file(dir.path())).unwrap(), written);
         assert_eq!(audit_len(dir.path()), events);
     }
+
+    struct OwnerHome {
+        dir: tempfile::TempDir,
+        state: crate::api::gateway::GatewayState,
+        home_token: String,
+        proof_binding_id: String,
+        principal_id: String,
+        localhost_root: String,
+    }
+
+    fn owner_home() -> OwnerHome {
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_state(dir.path());
+        let owner = protected_owner(dir.path());
+        let principal =
+            crate::auth::load_principal_for_proof_binding(dir.path(), &owner.proof_binding_id)
+                .unwrap();
+        OwnerHome {
+            dir,
+            state,
+            home_token: owner.home_token,
+            proof_binding_id: owner.proof_binding_id,
+            principal_id: principal.principal_id,
+            localhost_root: principal.localhost_root,
+        }
+    }
+
+    fn different_key(home: &OwnerHome) -> elastos_runtime::auth::RecoveryKitV1 {
+        let current = crate::auth::load_principal_root_protection(
+            home.dir.path(),
+            &home.principal_id,
+            &home.localhost_root,
+        )
+        .unwrap()
+        .unwrap();
+        let replacement =
+            crate::auth::store_test_principal_root_protection(home.dir.path(), &home.principal_id);
+        let kit = crate::auth::recovery_kit_from_archive(
+            home.dir.path(),
+            replacement.protectors[0].archive.as_ref().unwrap(),
+        )
+        .unwrap();
+        assert_ne!(kit.data_key_id, current.data_key_id);
+        crate::auth::store_principal_root_protection(home.dir.path(), current).unwrap();
+        kit
+    }
+
+    async fn import_kit(
+        home: &OwnerHome,
+        kit: elastos_runtime::auth::RecoveryKitV1,
+        reassign: bool,
+    ) -> anyhow::Result<crate::api::auth_gateway::RecoveryKitImportResponse> {
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert("x-elastos-home-token", home.home_token.parse().unwrap());
+        headers.insert("host", "localhost:61180".parse().unwrap());
+        headers.insert("origin", "http://localhost:61180".parse().unwrap());
+        crate::api::auth_gateway::recovery_kit_import_inner(
+            &home.state,
+            &headers,
+            crate::api::auth_gateway::RecoveryKitMaterialImport {
+                principal_id: home.principal_id.clone(),
+                localhost_root: home.localhost_root.clone(),
+                reassign_to_current_principal: reassign,
+                kit,
+                did_recovery_proof: None,
+            },
+        )
+        .await
+    }
+
+    fn auth_bytes(dir: &std::path::Path) -> Vec<u8> {
+        std::fs::read(crate::auth::auth_state_path(dir).unwrap()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn root_key_change_refuses_when_the_file_holds_an_opening_agent() {
+        let home = owner_home();
+        crate::agents::tests::plant_enabled_home_with_one_agent(
+            home.dir.path(),
+            &home.principal_id,
+            &home.proof_binding_id,
+        );
+        let kit = different_key(&home);
+        let auth = auth_bytes(home.dir.path());
+        let agents = std::fs::read(agent_file(home.dir.path())).unwrap();
+        let err = import_kit(&home, kit, false)
+            .await
+            .expect_err("a root-key change must be refused while an agent's data opens")
+            .to_string();
+        assert_eq!(err, crate::agents::agents_would_stop_opening(1));
+        assert_eq!(auth_bytes(home.dir.path()), auth);
+        assert_eq!(std::fs::read(agent_file(home.dir.path())).unwrap(), agents);
+    }
+
+    #[tokio::test]
+    async fn root_key_change_with_no_agents_file_stores_the_kit() {
+        let home = owner_home();
+        let kit = different_key(&home);
+        let new_key = kit.data_key_id.clone();
+        assert!(
+            std::fs::symlink_metadata(agent_file(home.dir.path()))
+                .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound),
+            "this owner has no agents file"
+        );
+        let before = data_root_entries(home.dir.path());
+        let response = import_kit(&home, kit, false)
+            .await
+            .expect("an owner with no agents file imports as before");
+        assert_eq!(response.status, "imported");
+        assert_person_without_agents_leaves_no_agent_file(
+            &before,
+            &data_root_entries(home.dir.path()),
+        );
+        let stored = crate::auth::load_principal_root_protection(
+            home.dir.path(),
+            &home.principal_id,
+            &home.localhost_root,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(stored.data_key_id, new_key);
+        assert!(
+            std::fs::symlink_metadata(agent_file(home.dir.path()))
+                .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound),
+            "the import does not create an agents file"
+        );
+    }
+
+    #[tokio::test]
+    async fn root_key_change_names_an_agents_file_this_build_cannot_read() {
+        let home = owner_home();
+        std::fs::write(agent_file(home.dir.path()), b"not an agent file").unwrap();
+        let kit = different_key(&home);
+        let auth = auth_bytes(home.dir.path());
+        let err = import_kit(&home, kit, false)
+            .await
+            .expect_err("an unreadable agents file refuses the root-key change")
+            .to_string();
+        assert_eq!(err, crate::agents::AGENTS_FILE_UNREADABLE);
+        assert_eq!(auth_bytes(home.dir.path()), auth);
+        assert_eq!(
+            std::fs::read(agent_file(home.dir.path())).unwrap(),
+            b"not an agent file"
+        );
+    }
+
+    /// The whole data root, before and after. The key store leaves its own
+    /// lifecycle lock. The agents file and its lock stay absent.
+    fn assert_person_without_agents_leaves_no_agent_file(before: &[String], after: &[String]) {
+        let added: Vec<_> = after
+            .iter()
+            .filter(|entry| !before.contains(entry))
+            .cloned()
+            .collect();
+        let removed: Vec<_> = before
+            .iter()
+            .filter(|entry| !after.contains(entry))
+            .cloned()
+            .collect();
+        assert!(removed.is_empty(), "the import removed {removed:?}");
+        assert!(
+            added
+                .iter()
+                .all(|entry| { entry == "ElastOS/System/Auth/principal-root-lifecycle.lock" }),
+            "the whole data root gained {added:?}"
+        );
+        assert!(
+            after.iter().all(|entry| {
+                !entry.ends_with("agent-records.json")
+                    && !entry.ends_with("agent-records.json.lock")
+            }),
+            "a person without agents leaves no agents file"
+        );
+    }
+
+    fn data_root_entries(root: &std::path::Path) -> Vec<String> {
+        let mut entries = Vec::new();
+        let mut stack = vec![root.to_path_buf()];
+        while let Some(dir) = stack.pop() {
+            for entry in std::fs::read_dir(&dir).unwrap() {
+                let entry = entry.unwrap();
+                let path = entry.path();
+                entries.push(
+                    path.strip_prefix(root)
+                        .unwrap()
+                        .to_string_lossy()
+                        .replace('\\', "/"),
+                );
+                if entry.file_type().unwrap().is_dir() {
+                    stack.push(path);
+                }
+            }
+        }
+        entries.sort();
+        entries
+    }
+
+    fn write_0600(path: &std::path::Path, bytes: &[u8]) {
+        std::fs::write(path, bytes).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(
+            std::fs::metadata(path).unwrap().permissions().mode() & 0o777,
+            0o600,
+            "the fixture is mode 0600"
+        );
+    }
+
+    /// A fixed agent file at mode 0600. The default build reads it as plain
+    /// JSON and does not open a key.
+    #[tokio::test]
+    async fn root_key_change_reads_a_0600_fixture_without_a_key() {
+        let home = owner_home();
+        let naming_owner = serde_json::to_vec(&json!({
+            "schema": crate::agents::AGENT_RECORDS_SCHEMA,
+            "agents": [{ "record": { "owner": home.principal_id } }]
+        }))
+        .unwrap();
+        write_0600(&agent_file(home.dir.path()), &naming_owner);
+        let kit = different_key(&home);
+        let auth = auth_bytes(home.dir.path());
+        let err = import_kit(&home, kit, false)
+            .await
+            .expect_err("a record that names this owner refuses the root-key change")
+            .to_string();
+        assert_eq!(err, crate::agents::agents_would_stop_opening(1));
+        assert_eq!(auth_bytes(home.dir.path()), auth);
+        assert_eq!(
+            std::fs::read(agent_file(home.dir.path())).unwrap(),
+            naming_owner
+        );
+
+        let home = owner_home();
+        let other_owners = serde_json::to_vec(&json!({
+            "schema": crate::agents::AGENT_RECORDS_SCHEMA,
+            "agents": [{ "record": { "owner": "person:local:someone-else" } }]
+        }))
+        .unwrap();
+        write_0600(&agent_file(home.dir.path()), &other_owners);
+        let kit = different_key(&home);
+        let new_key = kit.data_key_id.clone();
+        let response = import_kit(&home, kit, false)
+            .await
+            .expect("a file that names only other owners leaves this owner free");
+        assert_eq!(response.status, "imported");
+        let stored = crate::auth::load_principal_root_protection(
+            home.dir.path(),
+            &home.principal_id,
+            &home.localhost_root,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(stored.data_key_id, new_key);
+        assert_eq!(
+            std::fs::read(agent_file(home.dir.path())).unwrap(),
+            other_owners
+        );
+
+        let home = owner_home();
+        write_0600(&agent_file(home.dir.path()), b"not json");
+        let kit = different_key(&home);
+        let auth = auth_bytes(home.dir.path());
+        let err = import_kit(&home, kit, false)
+            .await
+            .expect_err("an unreadable file refuses with its own reason")
+            .to_string();
+        assert_eq!(err, crate::agents::AGENTS_FILE_UNREADABLE);
+        assert_eq!(auth_bytes(home.dir.path()), auth);
+
+        let home = owner_home();
+        let oversized = serde_json::to_vec(&json!({
+            "schema": crate::agents::AGENT_RECORDS_SCHEMA,
+            "agents": [{ "record": { "owner": home.principal_id } }],
+            "pad": " ".repeat(crate::agents::MAX_AGENT_FILE_BYTES as usize)
+        }))
+        .unwrap();
+        assert!(oversized.len() as u64 > crate::agents::MAX_AGENT_FILE_BYTES);
+        write_0600(&agent_file(home.dir.path()), &oversized);
+        let kit = different_key(&home);
+        let err = import_kit(&home, kit, false)
+            .await
+            .expect_err("a file past the read bound refuses as unreadable")
+            .to_string();
+        assert_eq!(err, crate::agents::AGENTS_FILE_UNREADABLE);
+    }
+
+    /// A retired record does not stop a root-key change. An unretired one
+    /// does, and that refusal opens no key and creates no key file.
+    #[tokio::test]
+    async fn root_key_change_counts_unretired_records_and_creates_no_key_file() {
+        let home = owner_home();
+        let retired = serde_json::to_vec(&json!({
+            "schema": crate::agents::AGENT_RECORDS_SCHEMA,
+            "agents": [{ "record": { "owner": home.principal_id, "retired_at": 4 } }]
+        }))
+        .unwrap();
+        write_0600(&agent_file(home.dir.path()), &retired);
+        let kit = different_key(&home);
+        let response = import_kit(&home, kit, false)
+            .await
+            .expect("a retired record does not stop a root-key change");
+        assert_eq!(response.status, "imported");
+        assert_eq!(std::fs::read(agent_file(home.dir.path())).unwrap(), retired);
+
+        let home = owner_home();
+        let mixed = serde_json::to_vec(&json!({
+            "schema": crate::agents::AGENT_RECORDS_SCHEMA,
+            "agents": [
+                { "record": { "owner": home.principal_id, "retired_at": 4 } },
+                { "record": { "owner": home.principal_id, "retired_at": null } }
+            ]
+        }))
+        .unwrap();
+        write_0600(&agent_file(home.dir.path()), &mixed);
+        let kit = different_key(&home);
+        let key_file = home
+            .dir
+            .path()
+            .join("ElastOS/System/Auth/recovery-archive.key");
+        assert!(
+            key_file.is_file(),
+            "building the kit writes the archive key, so the import can be checked for creating one"
+        );
+        std::fs::remove_file(&key_file).unwrap();
+        let err = import_kit(&home, kit, false)
+            .await
+            .expect_err(
+                "one unretired record refuses, and the retired one does not add to the count",
+            )
+            .to_string();
+        assert_eq!(err, crate::agents::agents_would_stop_opening(1));
+        assert!(
+            !key_file.exists(),
+            "the decision opens no key and creates no key file"
+        );
+        assert_eq!(std::fs::read(agent_file(home.dir.path())).unwrap(), mixed);
+    }
+
+    /// The kit import route, with reassignment asked for. A record that names
+    /// this owner, retired or not, refuses: the recovery would leave that
+    /// agent belonging to nobody.
+    #[tokio::test]
+    async fn reassignment_refuses_when_a_record_names_this_owner() {
+        let home = owner_home();
+        crate::agents::tests::plant_enabled_home_with_one_agent(
+            home.dir.path(),
+            &home.principal_id,
+            &home.proof_binding_id,
+        );
+        let other = passkey_authority_with_name_role_credential(
+            home.dir.path(),
+            None,
+            crate::auth::RuntimePrincipalRole::Guest,
+            "feature-off-reassign",
+        );
+        let other_protection =
+            crate::auth::store_test_principal_root_protection(home.dir.path(), &other.principal_id);
+        let kit = crate::auth::recovery_kit_from_archive(
+            home.dir.path(),
+            other_protection.protectors[0].archive.as_ref().unwrap(),
+        )
+        .unwrap();
+        assert_ne!(kit.principal_id, home.principal_id);
+        let auth = auth_bytes(home.dir.path());
+        let agents = std::fs::read(agent_file(home.dir.path())).unwrap();
+        let err = import_kit(&home, kit, true)
+            .await
+            .expect_err("a reassignment that changes the owner id a record names")
+            .to_string();
+        assert_eq!(err, crate::agents::agents_would_belong_to_nobody(1));
+        assert_eq!(auth_bytes(home.dir.path()), auth);
+        assert_eq!(std::fs::read(agent_file(home.dir.path())).unwrap(), agents);
+    }
+
+    /// A retired record alone still names this owner. Changing `false` to
+    /// `true` in the plain count would let this reassignment through.
+    #[tokio::test]
+    async fn reassignment_refuses_when_only_a_retired_record_names_this_owner() {
+        let home = owner_home();
+        let retired = serde_json::to_vec(&json!({
+            "schema": crate::agents::AGENT_RECORDS_SCHEMA,
+            "agents": [{ "record": { "owner": home.principal_id, "retired_at": 4 } }]
+        }))
+        .unwrap();
+        write_0600(&agent_file(home.dir.path()), &retired);
+        let other = passkey_authority_with_name_role_credential(
+            home.dir.path(),
+            None,
+            crate::auth::RuntimePrincipalRole::Guest,
+            "feature-off-retired-reassign",
+        );
+        let other_protection =
+            crate::auth::store_test_principal_root_protection(home.dir.path(), &other.principal_id);
+        let kit = crate::auth::recovery_kit_from_archive(
+            home.dir.path(),
+            other_protection.protectors[0].archive.as_ref().unwrap(),
+        )
+        .unwrap();
+        let auth = auth_bytes(home.dir.path());
+        let err = import_kit(&home, kit, true)
+            .await
+            .expect_err("a retired record still names the owner this recovery changes")
+            .to_string();
+        assert_eq!(err, crate::agents::agents_would_belong_to_nobody(1));
+        assert_eq!(auth_bytes(home.dir.path()), auth);
+        assert_eq!(std::fs::read(agent_file(home.dir.path())).unwrap(), retired);
+    }
+
+    /// Create Recovery Kit through the export route. A protection with no
+    /// archive, and an unretired record of this owner, is refused by the
+    /// kit sentence. The step-up is still unused.
+    #[tokio::test]
+    async fn create_recovery_kit_refuses_when_an_unarchived_key_would_seal_an_agent() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = gateway_router(wallet_test_state(dir.path()).await);
+        let owner = protected_owner(dir.path());
+        let principal =
+            crate::auth::load_principal_for_proof_binding(dir.path(), &owner.proof_binding_id)
+                .unwrap();
+        crate::agents::tests::plant_enabled_home_with_one_agent(
+            dir.path(),
+            &owner.principal_id,
+            &owner.proof_binding_id,
+        );
+        let mut stored = crate::auth::load_principal_root_protection(
+            dir.path(),
+            &owner.principal_id,
+            &principal.localhost_root,
+        )
+        .unwrap()
+        .unwrap();
+        let key_before = stored.data_key_id.clone();
+        stored.protectors[0].archive = None;
+        crate::auth::store_principal_root_protection(dir.path(), stored).unwrap();
+        let agents = std::fs::read(agent_file(dir.path())).unwrap();
+        let intent = json!({
+            "principal_id": owner.principal_id,
+            "localhost_root": principal.localhost_root,
+            "label": "Kit",
+            "download_password": null,
+        });
+        let token = step_up_token_for_app_context(
+            dir.path(),
+            SYSTEM_CAPSULE_ID,
+            &owner.system_token,
+            "auth.full-recovery-bundle.export",
+            &intent,
+        );
+        let mut request = intent.clone();
+        request["schema"] = json!("elastos.full-recovery-bundle.export.request/v1");
+        request["step_up_token"] = json!(token);
+        let (status, body) = call(
+            &app,
+            "/api/auth/recovery/full-export",
+            &owner.system_token,
+            Some(request),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(body, crate::agents::agents_use_a_key_not_in_a_kit(1));
+        assert!(
+            !super::step_up_was_spent(dir.path()),
+            "hold_unarchived's refusal leaves the step-up unspent"
+        );
+        let after = crate::auth::load_principal_root_protection(
+            dir.path(),
+            &owner.principal_id,
+            &principal.localhost_root,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(after.data_key_id, key_before);
+        assert!(after.protectors[0].archive.is_none());
+        assert_eq!(std::fs::read(agent_file(dir.path())).unwrap(), agents);
+    }
+
+    /// Create Recovery Kit through full-export, with the archive removed so
+    /// `hold_unarchived` runs. `prepare` may write the agents file first.
+    async fn export_unarchived(
+        prepare: impl FnOnce(&std::path::Path, &str),
+    ) -> (StatusCode, String, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let app = gateway_router(wallet_test_state(dir.path()).await);
+        let owner = protected_owner(dir.path());
+        let principal =
+            crate::auth::load_principal_for_proof_binding(dir.path(), &owner.proof_binding_id)
+                .unwrap();
+        prepare(dir.path(), &owner.principal_id);
+        let mut stored = crate::auth::load_principal_root_protection(
+            dir.path(),
+            &owner.principal_id,
+            &principal.localhost_root,
+        )
+        .unwrap()
+        .unwrap();
+        stored.protectors[0].archive = None;
+        crate::auth::store_principal_root_protection(dir.path(), stored).unwrap();
+        let intent = json!({
+            "principal_id": owner.principal_id,
+            "localhost_root": principal.localhost_root,
+            "label": "Kit",
+            "download_password": null,
+        });
+        let token = step_up_token_for_app_context(
+            dir.path(),
+            SYSTEM_CAPSULE_ID,
+            &owner.system_token,
+            "auth.full-recovery-bundle.export",
+            &intent,
+        );
+        let mut request = intent;
+        request["schema"] = json!("elastos.full-recovery-bundle.export.request/v1");
+        request["step_up_token"] = json!(token);
+        let (status, body) = call(
+            &app,
+            "/api/auth/recovery/full-export",
+            &owner.system_token,
+            Some(request),
+        )
+        .await;
+        (status, body, dir)
+    }
+
+    #[tokio::test]
+    async fn full_export_with_no_agents_file_still_saves_the_kit() {
+        let (status, body, dir) = export_unarchived(|_, _| {}).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert!(body.contains("elastos.full-recovery-bundle/v1"), "{body}");
+        assert!(!agent_file(dir.path()).exists());
+        assert!(super::step_up_was_spent(dir.path()));
+    }
+
+    #[tokio::test]
+    async fn full_export_with_only_a_retired_record_still_saves_the_kit() {
+        let (status, body, dir) = export_unarchived(|path, owner| {
+            let retired = serde_json::to_vec(&json!({
+                "schema": crate::agents::AGENT_RECORDS_SCHEMA,
+                "agents": [{ "record": { "owner": owner, "retired_at": 4 } }]
+            }))
+            .unwrap();
+            write_0600(&agent_file(path), &retired);
+        })
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert!(body.contains("elastos.full-recovery-bundle/v1"), "{body}");
+        let saved = std::fs::read(agent_file(dir.path())).unwrap();
+        assert!(String::from_utf8_lossy(&saved).contains("retired_at"));
+        assert!(super::step_up_was_spent(dir.path()));
+    }
+
+    #[tokio::test]
+    async fn full_export_of_a_damaged_agents_file_names_the_refusal_and_leaves_the_step_up() {
+        let (status, body, dir) = export_unarchived(|path, _| {
+            write_0600(&agent_file(path), b"{");
+        })
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(body, crate::agents::AGENTS_FILE_UNREADABLE);
+        assert!(
+            !super::step_up_was_spent(dir.path()),
+            "hold_unarchived's refusal leaves the step-up unspent"
+        );
+        assert_eq!(std::fs::read(agent_file(dir.path())).unwrap(), b"{");
+    }
 }
 
 #[cfg(feature = "prototype-agents")]
