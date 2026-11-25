@@ -622,6 +622,34 @@ test("Stopping stays when Stop's sentence has no refusal code", async () => {
   assert.equal(ui.button("Start").disabled, true);
 });
 
+test("a refused Start with the already-running code stays Running and does not offer Retry", async () => {
+  let launches = 0;
+  const ui = mount((path, init = {}) => {
+    if ((init.method || "GET") === "GET") {
+      return Promise.resolve({
+        agents: [{ agent_id: AGENT_ID, display_name: "Helper", active: true }],
+      });
+    }
+    launches += 1;
+    return refusal("agent_already_running", "this agent is already running");
+  }, () => Promise.resolve("step-token"));
+  await ui.load();
+  ui.button("Start").click();
+  await flush();
+  await flush();
+  await flush();
+  assert.equal(ui.state(AGENT_ID), "Running");
+  assert.equal(ui.button("Start").disabled, true);
+  assert.equal(ui.status.textContent, "this agent is already running");
+  assert.equal(ui.retry.hidden, true);
+  ui.button("Start").click();
+  await flush();
+  assert.equal(launches, 1);
+  await ui.load();
+  assert.equal(ui.state(AGENT_ID), "On");
+  assert.equal(ui.button("Start").disabled, false);
+});
+
 test("a refused Start with the stopping code stays Stopping", async () => {
   const ui = mount((path, init = {}) => {
     if ((init.method || "GET") === "GET") {
