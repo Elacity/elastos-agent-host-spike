@@ -415,7 +415,7 @@ impl ComponentProvider {
             compile_slot: Arc::new(Semaphore::new(1)),
             #[cfg(test)]
             worker_gate: std::sync::Mutex::new(None),
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-fixtures"))]
             panic_next_v2: AtomicBool::new(false),
             #[cfg(test)]
             threads_live: Arc::new(AtomicUsize::new(0)),
@@ -1003,9 +1003,9 @@ impl ComponentProvider {
             wall_clock: instance.test_wall_clock,
         };
         let ending_cancel = control.cancel_requested.clone();
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-fixtures"))]
         let panic_now = self.panic_next_v2.swap(false, Ordering::AcqRel);
-        #[cfg(not(test))]
+        #[cfg(not(any(test, feature = "test-fixtures")))]
         let panic_now = false;
         let (abort_tx, abort_rx) = tokio::sync::oneshot::channel();
         #[cfg(test)]
@@ -1038,11 +1038,11 @@ impl ComponentProvider {
                 #[cfg(test)]
                 let _live = LiveGuard(threads_live);
                 let task = rt.spawn(async move {
-                    #[cfg(test)]
+                    #[cfg(any(test, feature = "test-fixtures"))]
                     if panic_now {
                         panic!("injected v2 task panic");
                     }
-                    #[cfg(not(test))]
+                    #[cfg(not(any(test, feature = "test-fixtures")))]
                     let _ = panic_now;
                     Self::run_v2(engine, component, state, receiver, control, ready_tx).await
                 });
@@ -1188,7 +1188,18 @@ impl ComponentProvider {
         match ready_rx.await {
             Ok(result) => result?,
             Err(_) => {
-                return Err(ElastosError::Compute(STOPPED_DURING_START.into()));
+                let stopped = self
+                    .instances
+                    .read()
+                    .await
+                    .get(&handle.id)
+                    .is_some_and(|instance| instance.stop_requested.load(Ordering::Acquire));
+                let message = if stopped {
+                    STOPPED_DURING_START
+                } else {
+                    START_TASK_ENDED
+                };
+                return Err(ElastosError::Compute(message.into()));
             }
         }
         Ok(ResidentActivation {

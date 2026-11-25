@@ -7133,6 +7133,7 @@ pub(crate) mod tests {
     async fn start_v2_home(
         bytes: Vec<u8>,
         name: &str,
+        panic_start: bool,
     ) -> (
         Runtime,
         Arc<ComponentProvider>,
@@ -7171,6 +7172,9 @@ pub(crate) mod tests {
             })
             .await;
         let held = ActivationContextHeld::new(&runtime, &handle, component.clone(), None);
+        if panic_start {
+            component.panic_next_v2.store(true, Ordering::Release);
+        }
         runtime.watch_activation(handle.id.clone(), handle.clone(), component.clone(), held);
         (runtime, component, handle, temp)
     }
@@ -7218,7 +7222,7 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn a_v2_home_resident_stays_up_and_stops() {
         let (runtime, component, handle, _temp) =
-            start_v2_home(v2_home_bytes("stay"), "stays").await;
+            start_v2_home(v2_home_bytes("stay"), "stays", false).await;
         let running = wait_v2_status(&runtime, handle.id.as_str(), true).await;
         assert_eq!(running.status, CAPSULE_RUNNING);
         assert_eq!(running.session_id, handle.id.0);
@@ -7244,6 +7248,18 @@ pub(crate) mod tests {
         assert!(ended.ended_at.is_some());
         assert_eq!(ended.session_id, handle.id.0);
         assert_v2_home_cleared(&runtime, &component, &handle).await;
+    }
+
+    /// A start task that panics, with no stop requested, is the guest's failure.
+    #[tokio::test]
+    async fn a_panic_in_the_v2_start_task_is_recorded_failed() {
+        let (runtime, _component, handle, _temp) =
+            start_v2_home(v2_home_bytes("stay"), "panics", true).await;
+        let ended = wait_v2_status(&runtime, handle.id.as_str(), false).await;
+        assert_eq!(ended.status, CAPSULE_FAILED, "{ended:?}");
+        let cause = ended.cause.unwrap_or_default();
+        assert!(cause.contains("ended without answering"), "{cause}");
+        assert!(!cause.contains(STOPPED_DURING_START), "{cause}");
     }
 
     /// A stop while start is still in the publish gap is recorded stopped.
@@ -7314,7 +7330,7 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn a_v2_home_resident_trap_end_clears_it() {
         let (runtime, component, handle, _temp) =
-            start_v2_home(v2_home_bytes("trap"), "traps").await;
+            start_v2_home(v2_home_bytes("trap"), "traps", false).await;
         let ended = wait_v2_status(&runtime, handle.id.as_str(), false).await;
         assert_eq!(ended.status, CAPSULE_FAILED);
         let cause = ended.cause.unwrap();
@@ -7332,7 +7348,7 @@ pub(crate) mod tests {
             .build()
             .unwrap();
         let (runtime, component, handle, _temp) = local.block_on(async {
-            let started = start_v2_home(v2_home_bytes("stay"), "shutdown").await;
+            let started = start_v2_home(v2_home_bytes("stay"), "shutdown", false).await;
             let running = wait_v2_status(&started.0, started.2.id.as_str(), true).await;
             assert_eq!(running.status, CAPSULE_RUNNING);
             started
