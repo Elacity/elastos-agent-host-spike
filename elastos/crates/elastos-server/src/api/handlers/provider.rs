@@ -59,7 +59,8 @@ pub async fn provider_proxy(
         ));
     }
     if scheme.eq_ignore_ascii_case("localhost") {
-        if let Some(sentence) = crate::local_apps::local_apps_refusal() {
+        if let Some(sentence) = crate::local_apps::local_apps_refusal_for_registry(&state.registry)
+        {
             return Err((StatusCode::SERVICE_UNAVAILABLE, sentence));
         }
     }

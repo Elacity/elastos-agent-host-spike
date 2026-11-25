@@ -105,8 +105,8 @@ impl From<ProviderError> for StorageApiError {
 ///
 /// Read a file from a file-backed localhost root.
 /// Returns the file contents with appropriate content-type.
-fn refuse_local_apps() -> Result<(), StorageApiError> {
-    match crate::local_apps::local_apps_refusal() {
+fn refuse_local_apps(registry: &ProviderRegistry) -> Result<(), StorageApiError> {
+    match crate::local_apps::local_apps_refusal_for_registry(registry) {
         Some(sentence) => Err(StorageApiError::LocalApps(sentence)),
         None => Ok(()),
     }
@@ -118,7 +118,7 @@ pub async fn read_file(
     headers: HeaderMap,
     Path(path): Path<String>,
 ) -> Result<Response, StorageApiError> {
-    refuse_local_apps()?;
+    refuse_local_apps(&state.registry)?;
     let user_id = session_user_id(&session);
     let path = normalize_path(&path);
     reject_principal_root_storage_path(&path)?;
@@ -154,7 +154,7 @@ pub async fn write_file(
     Path(path): Path<String>,
     body: Bytes,
 ) -> Result<Json<WriteOutput>, StorageApiError> {
-    refuse_local_apps()?;
+    refuse_local_apps(&state.registry)?;
     let user_id = session_user_id(&session);
     let path = normalize_path(&path);
     reject_principal_root_storage_path(&path)?;
@@ -218,7 +218,7 @@ pub async fn delete_path(
     Path(path): Path<String>,
     Query(query): Query<DeleteQuery>,
 ) -> Result<Json<DeleteOutput>, StorageApiError> {
-    refuse_local_apps()?;
+    refuse_local_apps(&state.registry)?;
     let user_id = session_user_id(&session);
     let path = normalize_path(&path);
     reject_principal_root_storage_path(&path)?;
@@ -271,7 +271,7 @@ pub async fn list_dir(
     headers: HeaderMap,
     Path(path): Path<String>,
 ) -> Result<Json<ListOutput>, StorageApiError> {
-    refuse_local_apps()?;
+    refuse_local_apps(&state.registry)?;
     let user_id = session_user_id(&session);
     let path = normalize_path(&path);
     reject_principal_root_storage_path(&path)?;
@@ -354,7 +354,7 @@ pub async fn stat_path(
     headers: HeaderMap,
     Path(path): Path<String>,
 ) -> Result<Response, StorageApiError> {
-    refuse_local_apps()?;
+    refuse_local_apps(&state.registry)?;
     let user_id = session_user_id(&session);
     let path = normalize_path(&path);
     reject_principal_root_storage_path(&path)?;
@@ -404,7 +404,7 @@ pub async fn mkdir(
     headers: HeaderMap,
     Path(path): Path<String>,
 ) -> Result<Json<MkdirOutput>, StorageApiError> {
-    refuse_local_apps()?;
+    refuse_local_apps(&state.registry)?;
     let user_id = session_user_id(&session);
     let path = normalize_path(&path);
     reject_principal_root_storage_path(&path)?;
@@ -583,7 +583,7 @@ pub async fn handle_get_root(
     headers: HeaderMap,
     Query(query): Query<StorageQuery>,
 ) -> Result<Response, StorageApiError> {
-    refuse_local_apps()?;
+    refuse_local_apps(&state.registry)?;
     let path = Path(String::new());
     if query.list.unwrap_or(false) {
         list_dir(state, session, headers, path)

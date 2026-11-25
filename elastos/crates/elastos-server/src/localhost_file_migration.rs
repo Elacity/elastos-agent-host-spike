@@ -732,12 +732,12 @@ pub(crate) enum LocalhostBringup {
 pub(crate) fn localhost_bringup(data_dir: &Path, device_key: &[u8; 32]) -> LocalhostBringup {
     match localhost_provider_bridge_config(data_dir, device_key) {
         Ok(config) => {
-            elastos_server::local_apps::set_local_apps_refusal(None);
+            elastos_server::local_apps::set_local_apps_refusal(data_dir, None);
             LocalhostBringup::Start(config)
         }
         Err(err) => {
             let sentence = err.to_string();
-            elastos_server::local_apps::set_local_apps_refusal(Some(sentence.clone()));
+            elastos_server::local_apps::set_local_apps_refusal(data_dir, Some(sentence.clone()));
             LocalhostBringup::Refuse(sentence)
         }
     }

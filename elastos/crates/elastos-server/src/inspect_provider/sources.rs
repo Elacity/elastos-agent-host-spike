@@ -6,9 +6,9 @@ use async_trait::async_trait;
 use elastos_common::CapsuleManifest;
 use elastos_runtime::provider::ProviderRegistry;
 
-fn localhost_provider_status(scheme: &str, fallback: &str) -> String {
+fn localhost_provider_status(registry: &ProviderRegistry, scheme: &str, fallback: &str) -> String {
     if scheme == "localhost" {
-        if let Some(sentence) = crate::local_apps::local_apps_refusal() {
+        if let Some(sentence) = crate::local_apps::local_apps_refusal_for_registry(registry) {
             return sentence;
         }
     }
@@ -40,8 +40,11 @@ impl RegistryInspectSource {
         Self { registry }
     }
 
-    fn scheme_entry(scheme: String) -> InspectEntry {
-        let status = localhost_provider_status(&scheme, "running");
+    fn scheme_entry(&self, scheme: String) -> InspectEntry {
+        let status = match self.registry.upgrade() {
+            Some(registry) => localhost_provider_status(&registry, &scheme, "running"),
+            None => "running".to_string(),
+        };
         InspectEntry {
             id: format!("provider:{scheme}"),
             name: scheme,
@@ -63,7 +66,10 @@ impl InspectSource for RegistryInspectSource {
         schemes.extend(registry.sub_provider_schemes().await);
         schemes.sort();
         schemes.dedup();
-        schemes.into_iter().map(Self::scheme_entry).collect()
+        schemes
+            .into_iter()
+            .map(|scheme| self.scheme_entry(scheme))
+            .collect()
     }
 
     async fn inspect_get(&self, id: &str) -> Option<InspectEntry> {
@@ -75,7 +81,7 @@ impl InspectSource for RegistryInspectSource {
                 .await
                 .iter()
                 .any(|known| known == scheme);
-        is_known.then(|| Self::scheme_entry(scheme.to_string()))
+        is_known.then(|| self.scheme_entry(scheme.to_string()))
     }
 }
 
@@ -156,7 +162,10 @@ impl CatalogInspectSource {
                 .as_deref()
                 .is_some_and(|provides| provides.starts_with("localhost://"))
         {
-            localhost_provider_status("localhost", fallback)
+            match self.registry.upgrade() {
+                Some(registry) => localhost_provider_status(&registry, "localhost", fallback),
+                None => fallback.to_string(),
+            }
         } else {
             fallback.to_string()
         };

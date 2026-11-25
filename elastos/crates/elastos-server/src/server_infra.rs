@@ -1050,6 +1050,7 @@ async fn setup_server_infrastructure_impl(
     ensure_file_backed_roots(&data_dir).ok();
     elastos_server::protected_content_runtime::log_unresolved_runtime_releases(&data_dir);
     let provider_registry = Arc::new(provider::ProviderRegistry::new());
+    elastos_server::local_apps::bind_local_apps_home(&provider_registry, &data_dir);
     let mut managed_host_processes = Vec::new();
     let mut external_availability_registered = false;
     let mut carrier_service = None;
@@ -5567,13 +5568,13 @@ mod tests {
     impl Drop for LocalAppsGuard {
         fn drop(&mut self) {
             let _kept = &self.0;
-            elastos_server::local_apps::set_local_apps_refusal(None);
+            elastos_server::local_apps::clear_local_apps_refusals();
         }
     }
 
-    fn home_stays_up(sentence: &str) {
+    fn home_stays_up(root: &std::path::Path, sentence: &str) {
         assert_eq!(
-            elastos_server::local_apps::local_apps_refusal().as_deref(),
+            elastos_server::local_apps::local_apps_refusal(root).as_deref(),
             Some(sentence)
         );
         let runtime = tokio::runtime::Builder::new_current_thread()
@@ -5605,10 +5606,99 @@ mod tests {
             LocalhostBringup::Refuse(got) => assert_eq!(got, sentence),
             LocalhostBringup::Start(_) => panic!("local apps started for {sentence}"),
         }
-        home_stays_up(sentence);
+        home_stays_up(root, sentence);
         if marker_absent {
             assert!(!root.join("identity/localhost-file-key-v1").exists());
         }
+    }
+
+    #[test]
+    fn a_bad_file_in_one_home_does_not_turn_off_another() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _guard = LocalAppsGuard::lock();
+        elastos_server::local_apps::set_local_apps_refusal_for_test(None);
+        let bad_key = [0x31; 32];
+        let good_key = [0x32; 32];
+        let bad = TempDir::new().unwrap();
+        let good = TempDir::new().unwrap();
+        let secret = bad.path().join("Users/secret.bin");
+        let original = plant_device_envelope(&secret, &bad_key, b"hidden");
+        fs::set_permissions(&secret, fs::Permissions::from_mode(0o000)).unwrap();
+        let note = good.path().join("Users/note.bin");
+        plant_device_envelope(&note, &good_key, b"visible");
+
+        let bad_sentence = match localhost_bringup(bad.path(), &bad_key) {
+            LocalhostBringup::Refuse(sentence) => sentence,
+            LocalhostBringup::Start(_) => panic!("the bad Home started local apps"),
+        };
+        assert!(bad_sentence.contains("Users/secret.bin"), "{bad_sentence}");
+        assert!(bad_sentence.contains("not readable"), "{bad_sentence}");
+        match localhost_bringup(good.path(), &good_key) {
+            LocalhostBringup::Start(_) => {}
+            LocalhostBringup::Refuse(got) => panic!("the good Home was turned off: {got}"),
+        }
+        assert_eq!(
+            elastos_server::local_apps::local_apps_refusal(bad.path()).as_deref(),
+            Some(bad_sentence.as_str())
+        );
+        assert!(elastos_server::local_apps::local_apps_refusal(good.path()).is_none());
+
+        let bad_registry = Arc::new(provider::ProviderRegistry::new());
+        let good_registry = Arc::new(provider::ProviderRegistry::new());
+        elastos_server::local_apps::bind_local_apps_home(&bad_registry, bad.path());
+        elastos_server::local_apps::bind_local_apps_home(&good_registry, good.path());
+        let storage = |registry| elastos_server::api::handlers::storage::ProviderStorageState {
+            registry,
+            audit_log: None,
+            capability_manager: None,
+            storage_quota_mb: 0,
+        };
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let session =
+                || axum::Extension(session::Session::new(session::SessionType::Shell, None));
+            let path = || axum::extract::Path("MyWebSite/index.html".to_string());
+            let bad_route = elastos_server::api::handlers::storage::read_file(
+                axum::extract::State(storage(bad_registry)),
+                session(),
+                axum::http::HeaderMap::new(),
+                path(),
+            )
+            .await;
+            match bad_route {
+                Err(elastos_server::api::handlers::storage::StorageApiError::LocalApps(got)) => {
+                    assert_eq!(got, bad_sentence);
+                }
+                other => panic!("bad Home route: {other:?}"),
+            }
+            let good_route = elastos_server::api::handlers::storage::read_file(
+                axum::extract::State(storage(good_registry)),
+                session(),
+                axum::http::HeaderMap::new(),
+                path(),
+            )
+            .await;
+            match good_route {
+                Err(elastos_server::api::handlers::storage::StorageApiError::LocalApps(got)) => {
+                    panic!("good Home route was turned off: {got}");
+                }
+                Err(_) | Ok(_) => {}
+            }
+        });
+
+        fs::set_permissions(&secret, fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(fs::read(&secret).unwrap(), original);
+        assert!(!bad.path().join("identity/localhost-file-key-v1").exists());
+        assert_envelope_opens_with_exactly_one_key(
+            &note,
+            b"visible",
+            &good_key,
+            &expected_localhost_file_key(&good_key),
+        );
     }
 
     fn migrate_again(root: &std::path::Path, device_key: &[u8; 32]) {
@@ -5650,7 +5740,7 @@ mod tests {
             }
             LocalhostBringup::Refuse(got) => panic!("{got}"),
         }
-        assert!(elastos_server::local_apps::local_apps_refusal().is_none());
+        assert!(elastos_server::local_apps::local_apps_refusal(unread.path()).is_none());
         assert_envelope_opens_with_exactly_one_key(&secret, b"hidden", &device_key, &file_key);
         assert_current_marker(unread.path(), &device_key);
 
