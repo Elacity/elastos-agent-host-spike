@@ -1678,7 +1678,8 @@ impl ModelBudgetRefusal {
 const AGENT_ACCOUNT_UNAVAILABLE: &str = "model_budget_exceeded: agent account unavailable";
 
 /// An admitted agent whose launch holds neither a ceiling nor an account.
-/// A person, or an id that is not a stored agent, is not this refusal.
+/// A stored person is not this refusal. A principal this Home cannot show,
+/// including one the owner file no longer carries, is refused.
 fn agent_run_without_account(ctx: &BridgeContext, operation: &str) -> Option<serde_json::Value> {
     if operation != "runs_create" {
         return None;
@@ -1691,8 +1692,11 @@ fn agent_run_without_account(ctx: &BridgeContext, operation: &str) -> Option<ser
     else {
         return None;
     };
-    let Ok(Some(stored)) = crate::auth::stored_principal_record(data_dir, principal_id) else {
-        return None;
+    let stored = match crate::auth::stored_principal_record(data_dir, principal_id) {
+        Ok(Some(stored)) => stored,
+        Ok(None) | Err(_) => {
+            return Some(resource_error_response("denied", AGENT_ACCOUNT_UNAVAILABLE));
+        }
     };
     if stored.kind != crate::auth::PrincipalKind::Agent {
         return None;
@@ -9220,6 +9224,30 @@ pub(crate) mod tests {
         );
     }
 
+    /// Agents are off, so the owner file no longer shows the agent. The run is
+    /// refused and the provider is not asked.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_agent_absent_from_the_owner_file_is_refused_before_dispatch() {
+        let (mut ctx, provider, temp) = model_bus(Some(ALICE), "capsule-absent").await;
+        let agent = crate::agents::tests::plant_for_dispatch(temp.path(), ALICE, ALICE);
+        crate::agents::tests::stop_dispatch_agent(temp.path(), ALICE, &agent, true);
+        ctx.principal_id = Some(agent);
+        let response = model_invoke(
+            &ctx,
+            "runs_create",
+            Action::Execute,
+            model_create("model:local"),
+        )
+        .await;
+        let message = response["response"]["message"].as_str().unwrap_or("");
+        assert!(message.contains(AGENT_ACCOUNT_UNAVAILABLE), "{response}");
+        assert!(
+            provider.requests.lock().await.is_empty(),
+            "the provider was asked"
+        );
+    }
+
     /// Hosted agent rows. The body is a test file the feature reader skips.
     /// The next module is the row a build without agents lists, with the reason.
     mod hosted_agent_rows;
@@ -9229,8 +9257,8 @@ pub(crate) mod tests {
     /// count in job `test-elastos`, in the step that tests the agents build.
     /// A Studio receipt of that library test on a Mac runs the seven rows.
     /// The default Studio receipt is featureless, so it lists the ignored row
-    /// and does not run the seven. Job `source-home-macos`, step "B4-R named
-    /// localhost decision tests", does not select these rows. The rows file
+    /// and does not run the seven. Job `source-home-macos`, step "hosted agent
+    /// rows", runs the seven after merge and requires 7 passed. The rows file
     /// names the cargo line.
     #[test]
     fn hosted_agent_rows_stay_in_the_agents_build() {
