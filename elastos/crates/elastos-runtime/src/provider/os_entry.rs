@@ -1341,13 +1341,21 @@ mod tests {
         assert!(!narrow_names.contains(&"pwrite64"));
         assert!(full_names.contains(&"write") && full_names.contains(&"pwrite64"));
         assert!(narrow_names.len() < full_names.len());
-        let narrow_profile =
-            super::super::macos_profile::render_macos_profile(RuntimeProviderId::Did, &admitted);
-        let full_profile =
-            super::super::macos_profile::render_macos_profile(RuntimeProviderId::Did, &full_rights);
-        assert!(!narrow_profile.contains("STORAGE_ROOT"));
-        assert!(full_profile.contains("STORAGE_ROOT"));
-        assert!(narrow_profile.len() < full_profile.len());
+        // The renderer is absent when the unsupported-OS check is on.
+        #[cfg(not(elastos_unsupported_os_check))]
+        {
+            let narrow_profile = super::super::macos_profile::render_macos_profile(
+                RuntimeProviderId::Did,
+                &admitted,
+            );
+            let full_profile = super::super::macos_profile::render_macos_profile(
+                RuntimeProviderId::Did,
+                &full_rights,
+            );
+            assert!(!narrow_profile.contains("STORAGE_ROOT"));
+            assert!(full_profile.contains("STORAGE_ROOT"));
+            assert!(narrow_profile.len() < full_profile.len());
+        }
     }
 
     #[test]

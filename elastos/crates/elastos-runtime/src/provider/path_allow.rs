@@ -222,7 +222,16 @@ pub(super) fn render_with_plan(
     ))
 }
 
-#[cfg(unix)]
+#[cfg(all(
+    not(elastos_unsupported_os_check),
+    any(
+        target_os = "macos",
+        all(
+            target_os = "linux",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        )
+    )
+))]
 #[cfg(test)]
 mod tests {
     use std::path::Path;
