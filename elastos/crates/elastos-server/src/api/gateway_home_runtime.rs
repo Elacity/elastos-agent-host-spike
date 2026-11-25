@@ -694,6 +694,13 @@ pub(super) async fn launch_runtime_agent(
             }
             .into());
         }
+        if trimmed == crate::runtime::Runtime::AGENT_ALREADY_RUNNING {
+            return Err(crate::agents::CodedRefusal {
+                code: "agent_already_running",
+                reason: "this agent is already running",
+            }
+            .into());
+        }
         return Err(crate::agents::Refused(trimmed.to_string()).into());
     }
     if !status.is_success() {
