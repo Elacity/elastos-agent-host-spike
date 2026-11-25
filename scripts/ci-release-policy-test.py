@@ -2379,19 +2379,32 @@ class ReleasePolicyTests(unittest.TestCase):
         for name, context, results, answer, expected in cases:
             self.assertEqual(self.run_required(context, results, installed=answer), expected, name)
 
-    def test_archive_parser_skips_only_when_its_paths_job_did_not_say_run(self):
+    def test_archive_parser_skips_only_on_exact_run_false_for_a_pull_request_or_after_merge(self):
         pr = event_context("pull_request", "refs/pull/9/merge")
         push = event_context("push", "refs/heads/spike/agent-host")
         merge = event_context("merge_group", "refs/heads/gh-readonly-queue/develop/pr-1")
+        manual = event_context("workflow_dispatch", "refs/heads/main")
         mac, assets = {"source-home-macos": "skipped"}, {"release-upstream-assets": "skipped"}
         skipped = {"archive-viewer-parser": "skipped"}
+        after = {**assets, "pr-substance": "skipped"}
+        # The exact answer run=false may skip on a pull request and after the merge.
         self.assertEqual(self.run_required(pr, {**mac, **assets, **skipped}, archive="false"), 0)
+        self.assertEqual(self.run_required(push, {**after, **skipped}, archive="false"), 0)
+        # An empty answer and a missing answer do not allow the skip.
+        self.assertEqual(self.run_required(pr, {**mac, **assets, **skipped}, archive=""), 1)
+        self.assertEqual(self.run_required(pr, {**mac, **assets, **skipped}, archive=None), 1)
+        self.assertEqual(self.run_required(push, {**after, **skipped}, archive=""), 1)
+        self.assertEqual(self.run_required(push, {**after, **skipped}, archive=None), 1)
+        # A merge queue does not skip, including when the answer is run=false.
+        self.assertEqual(self.run_required(merge, {**after, **skipped}, archive="false"), 1)
+        self.assertEqual(self.run_required(merge, {**after, **skipped}, archive=""), 1)
+        self.assertEqual(self.run_required(merge, {**after, **skipped}, archive=None), 1)
+        # A manual run does not skip either. The word true still means the parser ran.
+        self.assertEqual(self.run_required(manual, {**after, **skipped}, archive="false"), 1)
         self.assertEqual(self.run_required(pr, {**mac, **assets, **skipped}, archive="true"), 1)
+        self.assertEqual(self.run_required(pr, {**mac, **assets, **skipped}, archive="False"), 1)
         self.assertEqual(self.run_required(pr, {**mac, **assets}, archive="true"), 0)
-        self.assertEqual(
-            self.run_required(push, {**assets, "pr-substance": "skipped", **skipped}, archive="false"), 0)
-        self.assertEqual(
-            self.run_required(merge, {**assets, "pr-substance": "skipped", **skipped}, archive="true"), 1)
+        self.assertEqual(self.run_required(merge, {**after, **skipped}, archive="true"), 1)
 
     def test_installed_app_jobs_skip_only_on_a_notes_only_pull_request(self):
         paths_job = JOBS["installed-app-paths"]

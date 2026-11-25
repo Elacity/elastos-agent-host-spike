@@ -2261,9 +2261,11 @@ jobs:
           # A pull request that changes only notes and lab files skips the installed-app jobs.
           if os.environ["PULL_REQUEST"] == "true" and needs.get("installed-app-paths", {}).get("outputs", {}).get("run") == "false":
               may_skip.update(("source-home-linux", "source-home-linux-arm64", "update-hop-linux", "musl-check-linux", "musl-check-linux-arm64"))
-          # The archive parser runs on a pull request only when its paths job said so,
-          # and on a merge queue or a manual run. Any other answer skips it.
-          if needs.get("archive-viewer-paths", {}).get("outputs", {}).get("run") != "true":
+          # The archive parser may be skipped only when its paths job wrote the
+          # exact answer run=false, and only on a pull request or after the merge
+          # (a push or the schedule). A merge queue and a manual run do not skip
+          # it. An empty answer, a missing answer, or any other word does not skip it.
+          if (os.environ["PULL_REQUEST"] == "true" or os.environ["POST_MERGE"] == "true") and needs.get("archive-viewer-paths", {}).get("outputs", {}).get("run") == "false":
               may_skip.add("archive-viewer-parser")
           failed = [f"{job}: {need['result']}" for job, need in sorted(needs.items())
                     if need["result"] != "success" and not (need["result"] == "skipped" and job in may_skip)]
