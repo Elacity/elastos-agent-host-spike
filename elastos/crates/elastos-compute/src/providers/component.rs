@@ -5,9 +5,9 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::pin::Pin;
 #[cfg(test)]
-use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::{AtomicU64, AtomicUsize};
 use std::sync::{
-    atomic::{AtomicBool, AtomicU64, Ordering},
+    atomic::{AtomicBool, Ordering},
     Arc, Condvar, Mutex, OnceLock,
 };
 use std::task::{Context, Poll};
@@ -32,7 +32,7 @@ use elastos_guest::{
 
 use crate::{CapsuleHandle, CapsuleInfo, ComputeProvider};
 
-use super::{BridgeHostcall, BridgeLegGuard, ComponentBridgeLeg};
+use super::{BridgeHostcall, BridgeHostcallAsync, BridgeLegGuard, ComponentBridgeLeg};
 
 bindgen!({
     path: "../../wit",
@@ -72,9 +72,13 @@ const COMPONENT_RUN_DEADLINE: Duration = Duration::from_secs(10);
 const V2_STOP_GRACE: Duration = Duration::from_millis(200);
 #[cfg(test)]
 const V2_STOP_GRACE: Duration = Duration::from_millis(20);
-/// Every blocking bridge call and the invoke trailer. The guest thread waits
-/// this long, then the call is named a timeout. A stop joins within this too.
+/// Every v2 read and every v2 bridge call that is not a person's approval.
+/// The guest waits this long, then the call is a timeout. A stop joins within
+/// this too.
 const V2_HOST_DEADLINE: Duration = Duration::from_secs(2);
+/// A person's approval. The bridge polls the shell for 30 s; this is that
+/// same limit, so an answer inside it still reaches the guest.
+const V2_APPROVAL_DEADLINE: Duration = Duration::from_secs(30);
 #[cfg(not(test))]
 const V2_EPOCH_TICKS: u64 = 1_000;
 #[cfg(test)]
@@ -92,6 +96,49 @@ const V2_RESIDENT_CAP: usize = 8;
 const ENDING_FUEL_EXHAUSTED: &str = "fuel-exhausted";
 /// The named ending of a run that a stop request ended.
 const ENDING_STOPPED: &str = "stopped";
+
+/// A test blocks one thread here and releases it from another.
+#[cfg(test)]
+struct TestGate {
+    entered: Mutex<bool>,
+    enter: Condvar,
+    release: Mutex<bool>,
+    go: Condvar,
+}
+
+#[cfg(test)]
+impl TestGate {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            entered: Mutex::new(false),
+            enter: Condvar::new(),
+            release: Mutex::new(false),
+            go: Condvar::new(),
+        })
+    }
+
+    fn wait(&self) {
+        let mut entered = self.entered.lock().expect("gate");
+        *entered = true;
+        self.enter.notify_all();
+        drop(entered);
+        let guard = self.release.lock().expect("gate");
+        let _guard = self.go.wait_while(guard, |open| !*open).expect("gate");
+    }
+
+    fn entered(&self) {
+        let guard = self.entered.lock().expect("gate");
+        let _guard = self
+            .enter
+            .wait_while(guard, |entered| !*entered)
+            .expect("gate");
+    }
+
+    fn open(&self) {
+        *self.release.lock().expect("gate") = true;
+        self.go.notify_all();
+    }
+}
 
 struct ComponentActivation {
     engine: Engine,
@@ -126,6 +173,15 @@ struct ComponentActivation {
     /// The test asks the next join to skip spawning its owner thread.
     #[cfg(test)]
     refuse_join_owner: bool,
+    /// The test holds start here until it has the task, before the worker is published.
+    #[cfg(test)]
+    publish_gate: Option<Arc<TestGate>>,
+    /// The test holds a natural exit here after the worker has signalled done.
+    #[cfg(test)]
+    exit_gate: Option<Arc<TestGate>>,
+    /// Present waits here while it still holds the book lock.
+    #[cfg(test)]
+    present_gate: Option<Arc<TestGate>>,
     #[cfg(test)]
     test_max_ticks: u64,
     #[cfg(test)]
@@ -251,6 +307,11 @@ struct ComponentState {
     frames: Arc<Mutex<HashMap<String, StoredFrame>>>,
     /// This guest's provider budget. Guests of one provider share it.
     reads: Arc<super::bus2_stream::ReadBudget>,
+    /// v2 bridge. Awaited on the guest runtime. v1 leaves this empty.
+    async_hostcall: Option<BridgeHostcallAsync>,
+    /// Present pauses here while it still holds the book lock.
+    #[cfg(test)]
+    present_gate: Option<Arc<TestGate>>,
 }
 
 /// The host's copy of one presented frame. The principal is the caller the
@@ -271,6 +332,10 @@ pub struct ComponentProvider {
     #[cfg(test)]
     endings: Arc<RwLock<HashMap<CapsuleId, String>>>,
     bus_hostcall: std::sync::RwLock<Option<BridgeHostcall>>,
+    bus_hostcall_async: std::sync::RwLock<Option<BridgeHostcallAsync>>,
+    /// Revoke-all pauses here before it sweeps live guests.
+    #[cfg(test)]
+    revoke_gate: Mutex<Option<Arc<TestGate>>>,
     bridge_principals: Arc<RwLock<HashMap<CapsuleId, Option<String>>>>,
     frames: Arc<Mutex<HashMap<String, StoredFrame>>>,
     read_budget: Arc<super::bus2_stream::ReadBudget>,
@@ -293,6 +358,9 @@ impl ComponentProvider {
             #[cfg(test)]
             endings: Arc::new(RwLock::new(HashMap::new())),
             bus_hostcall: std::sync::RwLock::new(None),
+            bus_hostcall_async: std::sync::RwLock::new(None),
+            #[cfg(test)]
+            revoke_gate: Mutex::new(None),
             bridge_principals: Arc::new(RwLock::new(HashMap::new())),
             frames: Arc::new(Mutex::new(HashMap::new())),
             read_budget: super::bus2_stream::ReadBudget::new(),
@@ -310,6 +378,53 @@ impl ComponentProvider {
 
     pub fn set_bus_hostcall(&self, hostcall: BridgeHostcall) {
         *self.bus_hostcall.write().unwrap() = Some(hostcall);
+    }
+
+    /// v2 awaits this future on the guest runtime. No thread is started for the call.
+    pub fn set_bus_hostcall_async(&self, hostcall: BridgeHostcallAsync) {
+        *self.bus_hostcall_async.write().unwrap() = Some(hostcall);
+    }
+
+    /// Records `grant` on a loaded guest. A test uses this before the guest runs.
+    pub async fn testing_hold_grant(
+        &self,
+        id: &CapsuleId,
+        grant: &str,
+        resource: &str,
+        action: &str,
+    ) {
+        if let Some(instance) = self.instances.read().await.get(id) {
+            instance
+                .grants
+                .lock()
+                .expect("grant book")
+                .hold(grant, resource, action);
+        }
+    }
+
+    /// Revokes every grant on every live v2 guest and drops that guest's frame.
+    /// Lock order is the book, then the frames. A grant recorded before this
+    /// sweep, including one recorded while the sweep waited, is included.
+    pub async fn deliver_revoke_all(&self) {
+        #[cfg(test)]
+        if let Some(gate) = self.revoke_gate.lock().expect("revoke gate").clone() {
+            gate.wait();
+        }
+        let guests: Vec<(String, Arc<Mutex<crate::providers::bus2_ui::GrantBook>>)> = {
+            let instances = self.instances.read().await;
+            instances
+                .iter()
+                .filter(|(_, instance)| {
+                    instance.manifest.bus_contract.as_deref() == Some(ELASTOS_BUS_V2_CONTRACT)
+                })
+                .map(|(id, instance)| (id.0.clone(), instance.grants.clone()))
+                .collect()
+        };
+        for (id, book) in guests {
+            let mut book = book.lock().expect("grant book");
+            book.revoke_all_held();
+            self.frames.lock().expect("frames").remove(&id);
+        }
     }
 
     /// The frame stored for `id` when `caller` is the principal who presented
@@ -666,6 +781,12 @@ impl ComponentProvider {
                 #[cfg(test)]
                 refuse_join_owner: false,
                 #[cfg(test)]
+                publish_gate: None,
+                #[cfg(test)]
+                exit_gate: None,
+                #[cfg(test)]
+                present_gate: None,
+                #[cfg(test)]
                 test_max_ticks: V2_TEST_EPOCH_TICKS,
                 #[cfg(test)]
                 pending_read: Arc::new(AtomicBool::new(false)),
@@ -716,6 +837,11 @@ impl ComponentProvider {
             ));
         }
         let reads = self.read_budget.clone();
+        let async_hostcall = self.bus_hostcall_async.read().unwrap().clone();
+        #[cfg(test)]
+        let publish_gate = instance.publish_gate.clone();
+        #[cfg(test)]
+        let exit_gate = instance.exit_gate.clone();
         let state = ComponentState {
             sealed: instance.sealed,
             grants: instance.grants.clone(),
@@ -724,8 +850,11 @@ impl ComponentProvider {
             stop_requested: instance.stop_requested.clone(),
             cancel_requested: instance.cancel_requested.clone(),
             wake: instance.wake.clone(),
+            async_hostcall,
             #[cfg(test)]
             in_clock_sleep: instance.in_clock_sleep.clone(),
+            #[cfg(test)]
+            present_gate: instance.present_gate.clone(),
             ..ComponentState::new(hostcall, handle.id.0.clone(), principal_id)
         };
         let (engine, component) = (instance.engine.clone(), instance.component.clone());
@@ -794,6 +923,11 @@ impl ComponentProvider {
                     Err(error) => format!("panicked: {error}"),
                 };
                 let _ = done_tx.send(ending);
+                // The natural-exit task joins this thread before it frees the slot.
+                #[cfg(test)]
+                if let Some(gate) = exit_gate {
+                    gate.wait();
+                }
             });
         let worker = match spawned_worker {
             Ok(worker) => worker,
@@ -806,20 +940,39 @@ impl ComponentProvider {
                 return Err(ElastosError::Compute(format!("v2 guest thread: {err}")));
             }
         };
+        // The task is in hand before the worker is published. A stop in the
+        // gap finds neither, so it cannot join a thread whose task is missing.
+        drop(entries);
+        let abort = match abort_rx.await {
+            Ok(abort) => abort,
+            Err(_) => {
+                let _ = worker.join();
+                self.instances.write().await.remove(&handle.id);
+                return Err(ElastosError::Compute(
+                    "v2 guest thread ended before it started".into(),
+                ));
+            }
+        };
+        #[cfg(test)]
+        if let Some(gate) = publish_gate {
+            gate.wait();
+        }
         {
+            let mut entries = self.instances.write().await;
             let Some(instance) = entries.get_mut(&handle.id) else {
                 drop(entries);
+                abort.abort();
                 drop(sender);
                 let _ = worker.join();
                 return Err(ElastosError::Compute(
                     "v2 guest was removed before its thread was stored".into(),
                 ));
             };
+            instance.task = Some(abort);
             instance.status = CapsuleStatus::Running;
             instance.events = Some(sender);
             instance.worker = Some(worker);
         }
-        drop(entries);
 
         let id_for_end = handle.id.clone();
         let frames_for_end = self.frames.clone();
@@ -834,9 +987,18 @@ impl ComponentProvider {
                 _ => ActivationOutcome::Trapped(ending.clone()),
             };
             let _ = outcome_tx.send(Some(outcome));
-            // A stop owns the join. The entry and its frame stay until that
-            // wait succeeds, or until the next status, stop, list, or launch
-            // sees the join is done.
+            // A stop owns the join. Otherwise join the worker first: the slot
+            // stays while status is still running, then the entry and frame go.
+            let worker = {
+                let mut held = instances.write().await;
+                match held.get_mut(&id_for_end) {
+                    Some(instance) if instance.join.is_none() => instance.worker.take(),
+                    _ => None,
+                }
+            };
+            if let Some(worker) = worker {
+                let _ = tokio::task::spawn_blocking(move || worker.join()).await;
+            }
             {
                 let mut held = instances.write().await;
                 let owned = held
@@ -853,24 +1015,6 @@ impl ComponentProvider {
             #[cfg(test)]
             endings.write().await.insert(id_for_end, ending);
         });
-
-        let abort = match abort_rx.await {
-            Ok(abort) => abort,
-            Err(_) => {
-                self.instances.write().await.remove(&handle.id);
-                return Err(ElastosError::Compute(
-                    "v2 guest thread ended before it started".into(),
-                ));
-            }
-        };
-        {
-            let mut entries = self.instances.write().await;
-            if let Some(instance) = entries.get_mut(&handle.id) {
-                instance.task = Some(abort);
-            } else {
-                abort.abort();
-            }
-        }
         match ready_rx.await {
             Ok(result) => result?,
             Err(_) => {
@@ -1141,37 +1285,34 @@ impl ComponentProvider {
         // Epochs are only the wall-clock backstop. A guest parked in a host
         // wait does not spend a tick. Fuel is the bucket, settled at waits.
         store.set_epoch_deadline(1);
-        let deadline_ticks = Arc::new(AtomicU64::new(0));
         let cancel_requested = control.cancel_requested.clone();
         let max_ticks = control.max_ticks;
         store.epoch_deadline_callback(move |context| {
             if cancel_requested.load(Ordering::Acquire) {
                 return Ok(UpdateDeadline::Interrupt);
             }
-            let (parked, fault) = context
-                .data()
-                .fuel_bucket
-                .as_ref()
-                .map(|bucket| {
-                    let bucket = bucket.lock().expect("fuel");
-                    (bucket.parked, bucket.fault.is_some())
-                })
-                .unwrap_or((false, false));
-            if fault {
+            let Some(bucket) = context.data().fuel_bucket.clone() else {
+                return Ok(UpdateDeadline::Continue(1));
+            };
+            let mut bucket = bucket.lock().expect("fuel");
+            if bucket.fault.is_some() {
                 return Ok(UpdateDeadline::Interrupt);
             }
-            // Ticks count whenever the guest can run or a host call is working.
-            // A sleep or a stream wait sets `parked` and does not count.
-            if parked {
+            // Parked means this guest cannot run. A sleep sets that. An events
+            // read that is only pending does not, so a burn beside it still counts.
+            // The count is this window. An idle wait refills it when the guest
+            // resumes, before these ticks, so a long fill is not itself a refill.
+            if bucket.parked {
+                bucket.window_ticks = 0;
                 return Ok(UpdateDeadline::Continue(1));
             }
-            Ok(
-                if deadline_ticks.fetch_add(1, Ordering::AcqRel) + 1 >= max_ticks {
-                    UpdateDeadline::Interrupt
-                } else {
-                    UpdateDeadline::Continue(1)
-                },
-            )
+            let used = bucket.window_ticks.saturating_add(1);
+            bucket.window_ticks = used;
+            if used >= max_ticks {
+                Ok(UpdateDeadline::Interrupt)
+            } else {
+                Ok(UpdateDeadline::Continue(1))
+            }
         });
         let mut linker = Linker::new(&engine);
         v2::ProductCapsuleV2::add_to_linker::<_, HasSelf<_>>(&mut linker, |state| state)
@@ -1262,6 +1403,7 @@ impl<D> StreamProducer<D> for V2EventFeed {
         }
         match self.0.poll_recv(cx) {
             Poll::Ready(Some(event)) => {
+                note_wait_ended(&self.4);
                 release_bucket(&self.4);
                 // Epochs that passed while the guest was parked are not ticks.
                 store.set_epoch_deadline(1);
@@ -1270,17 +1412,23 @@ impl<D> StreamProducer<D> for V2EventFeed {
                 Poll::Ready(Ok(StreamResult::Completed))
             }
             Poll::Ready(None) => {
+                note_wait_ended(&self.4);
                 release_bucket(&self.4);
                 store.set_epoch_deadline(1);
                 Poll::Ready(Ok(StreamResult::Dropped))
             }
             Poll::Pending if finish => {
+                note_wait_ended(&self.4);
                 release_bucket(&self.4);
                 store.set_epoch_deadline(1);
                 Poll::Ready(Ok(StreamResult::Cancelled))
             }
             Poll::Pending => {
-                self.4.lock().expect("fuel").park();
+                // The read is pending. The guest can still run, so this does not park.
+                let mut bucket = self.4.lock().expect("fuel");
+                if bucket.wait_since.is_none() {
+                    bucket.wait_since = Some(Instant::now());
+                }
                 #[cfg(test)]
                 self.5.store(true, Ordering::Release);
                 Poll::Pending
@@ -1330,6 +1478,8 @@ struct V2Join {
     done: Mutex<bool>,
     cv: Condvar,
     started: AtomicBool,
+    /// The owner thread was spawned. False when the caller joins inline.
+    spawned: AtomicBool,
     /// One caller runs `own`. A second caller waits until that one sets `done`.
     owning: AtomicBool,
     /// The owner thread was not spawned. `wait` joins on its caller.
@@ -1355,6 +1505,7 @@ impl V2Join {
             done: Mutex::new(false),
             cv: Condvar::new(),
             started: AtomicBool::new(false),
+            spawned: AtomicBool::new(false),
             owning: AtomicBool::new(false),
             inline: AtomicBool::new(false),
             wake,
@@ -1382,7 +1533,9 @@ impl V2Join {
         let spawned = std::thread::Builder::new()
             .name("component-v2-join".into())
             .spawn(move || join.own());
-        if spawned.is_err() {
+        if spawned.is_ok() {
+            self.spawned.store(true, Ordering::Release);
+        } else {
             tracing::error!("join-owner");
             self.inline.store(true, Ordering::Release);
         }
@@ -1423,7 +1576,7 @@ impl V2Join {
     }
 
     fn owns_thread(&self) -> bool {
-        self.started.load(Ordering::Acquire)
+        self.spawned.load(Ordering::Acquire)
     }
 
     /// The worker has been joined. A later stop does not need to wait again.
@@ -1536,6 +1689,18 @@ fn release_bucket(bucket: &Mutex<crate::providers::fuel_bucket::FuelBucket>) {
     bucket.lock().expect("fuel").resume();
 }
 
+/// An idle wait longer than one tick starts a new tick window. The gap is the
+/// time the guest was not running. A fill after it resumes is not part of the gap.
+fn note_wait_ended(bucket: &Mutex<crate::providers::fuel_bucket::FuelBucket>) {
+    let mut bucket = bucket.lock().expect("fuel");
+    let Some(since) = bucket.wait_since.take() else {
+        return;
+    };
+    if Instant::now().saturating_duration_since(since) > DEADLINE_TICK {
+        bucket.window_ticks = 0;
+    }
+}
+
 fn charge_access(access: &mut impl wasmtime::AsContextMut<Data = ComponentState>) -> bool {
     let Some(bucket) = access.as_context().data().fuel_bucket.clone() else {
         return false;
@@ -1551,38 +1716,39 @@ fn release_access(access: &mut impl wasmtime::AsContextMut<Data = ComponentState
     access.as_context_mut().set_epoch_deadline(1);
 }
 
-/// Runs a v2 bridge on another thread. The guest waits at most `deadline`.
-/// A panic is named `panicked`. Only a timeout is named `deadline`.
-fn bounded_hostcall(
-    hostcall: &BridgeHostcall,
+/// A v2 bridge on the guest runtime. An async host call is awaited and dropped
+/// when `deadline` passes, so a timeout keeps no thread. A sync host call, used
+/// by tests, runs on this thread and adds none.
+async fn await_v2_bridge(
+    async_host: &Option<BridgeHostcallAsync>,
+    sync_host: &Option<BridgeHostcall>,
     line: &str,
     capsule_id: &str,
     principal: Option<&str>,
     deadline: Duration,
 ) -> std::result::Result<String, String> {
-    let (done_tx, done_rx) = std::sync::mpsc::channel();
-    let hostcall = hostcall.clone();
-    let line = line.to_string();
-    let capsule_id = capsule_id.to_string();
-    let principal = principal.map(str::to_string);
-    std::thread::Builder::new()
-        .name("component-bridge".into())
-        .spawn(move || {
-            let _leg = BridgeLegGuard::enter(ComponentBridgeLeg::Side);
-            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                hostcall(&line, &capsule_id, principal.as_deref())
-            }));
-            let result = match result {
-                Ok(value) => value,
-                Err(_) => Err("panicked".into()),
-            };
-            let _ = done_tx.send(result);
-        })
-        .map_err(|err| err.to_string())?;
-    match done_rx.recv_timeout(deadline) {
+    if let Some(call) = async_host {
+        return match tokio::time::timeout(deadline, call(line, capsule_id, principal)).await {
+            Ok(result) => result,
+            Err(_) => Err("timeout".into()),
+        };
+    }
+    let Some(call) = sync_host else {
+        return Err("component bridge is not configured".into());
+    };
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        call(line, capsule_id, principal)
+    })) {
         Ok(result) => result,
-        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => Err("panicked".into()),
-        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Err("deadline".into()),
+        Err(_) => Err("panicked".into()),
+    }
+}
+
+fn bridge_failure(err: String) -> elastos::bus::types::BusError {
+    if err == "timeout" {
+        elastos::bus::types::BusError::Timeout(err)
+    } else {
+        bus_error("internal", err)
     }
 }
 
@@ -1605,6 +1771,7 @@ impl Drop for ComponentProvider {
         };
         let mut joins = Vec::new();
         for (id, instance) in instances.iter_mut() {
+            drop(instance.events.take());
             raise_flag(&instance.cancel_requested, &instance.wake);
             raise_flag(&instance.stop_requested, &instance.wake);
             let Some(join) = begin_v2_join(instance) else {
@@ -1765,17 +1932,85 @@ fn window_bytes(data: &serde_json::Value) -> V2Result<Vec<u8>> {
     if let Some(text) = content.as_str() {
         return Ok(text.as_bytes().to_vec());
     }
-    let Some(items) = content.as_array() else {
-        return Err(V2BusError::Invalid("read content is not bytes".into()));
-    };
-    items
-        .iter()
-        .map(|item| {
-            item.as_u64()
-                .and_then(|byte| u8::try_from(byte).ok())
-                .ok_or_else(|| V2BusError::Invalid("read content is not bytes".into()))
-        })
-        .collect()
+    if let Some(encoded) = content.get("b64").and_then(|value| value.as_str()) {
+        return decode_b64(encoded)
+            .ok_or_else(|| V2BusError::Invalid("read content is not bytes".into()));
+    }
+    Err(V2BusError::Invalid("read content is not bytes".into()))
+}
+
+/// Standard base64, with padding. A JSON array of one number per byte is refused.
+fn decode_b64(text: &str) -> Option<Vec<u8>> {
+    fn value(byte: u8) -> Option<u8> {
+        match byte {
+            b'A'..=b'Z' => Some(byte - b'A'),
+            b'a'..=b'z' => Some(byte - b'a' + 26),
+            b'0'..=b'9' => Some(byte - b'0' + 52),
+            b'+' => Some(62),
+            b'/' => Some(63),
+            _ => None,
+        }
+    }
+    if text.len() % 4 != 0 {
+        return None;
+    }
+    let mut out = Vec::with_capacity(text.len() / 4 * 3);
+    let bytes = text.as_bytes();
+    for chunk in bytes.chunks(4) {
+        let pad = chunk.iter().rev().take_while(|byte| **byte == b'=').count();
+        if pad > 2 {
+            return None;
+        }
+        let mut bits = 0u32;
+        for (index, byte) in chunk.iter().enumerate() {
+            if *byte == b'=' {
+                if index < 4 - pad {
+                    return None;
+                }
+                continue;
+            }
+            bits = (bits << 6) | u32::from(value(*byte)?);
+        }
+        bits <<= 6 * pad as u32;
+        let produced = 3 - pad;
+        for shift in (3 - produced..3).rev() {
+            out.push((bits >> (8 * shift)) as u8);
+        }
+    }
+    Some(out)
+}
+
+#[cfg(test)]
+fn encode_b64(bytes: &[u8]) -> String {
+    const ALPHA: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::new();
+    let mut index = 0;
+    while index + 3 <= bytes.len() {
+        let packed = (u32::from(bytes[index]) << 16)
+            | (u32::from(bytes[index + 1]) << 8)
+            | u32::from(bytes[index + 2]);
+        for shift in [18u32, 12, 6, 0] {
+            out.push(ALPHA[((packed >> shift) & 63) as usize] as char);
+        }
+        index += 3;
+    }
+    let rest = bytes.len() - index;
+    if rest > 0 {
+        let mut packed = u32::from(bytes[index]) << 16;
+        if rest == 2 {
+            packed |= u32::from(bytes[index + 1]) << 8;
+        }
+        out.push(ALPHA[((packed >> 18) & 63) as usize] as char);
+        out.push(ALPHA[((packed >> 12) & 63) as usize] as char);
+        if rest == 2 {
+            out.push(ALPHA[((packed >> 6) & 63) as usize] as char);
+            out.push('=');
+        } else {
+            out.push('=');
+            out.push('=');
+        }
+    }
+    out
 }
 
 fn bus_error(code: &str, message: impl Into<String>) -> elastos::bus::types::BusError {
@@ -1824,6 +2059,30 @@ fn json_body(
     })
 }
 
+/// One v2 host call that has not run yet. The guest awaits it, then checks
+/// the grant again. Dropping it drops the call.
+struct OpenBridge {
+    line: String,
+    async_host: Option<BridgeHostcallAsync>,
+    sync_host: Option<BridgeHostcall>,
+    capsule_id: String,
+    principal: Option<String>,
+}
+
+struct PendingRead {
+    bridge: OpenBridge,
+    cap: usize,
+    grant: String,
+    hold: super::bus2_stream::ReadHold,
+}
+
+struct PendingGrant {
+    bridge: OpenBridge,
+    resource: String,
+    action: String,
+    epoch: u64,
+}
+
 impl ComponentState {
     fn new(
         hostcall: Option<BridgeHostcall>,
@@ -1851,6 +2110,9 @@ impl ComponentState {
             grants: Arc::new(Mutex::new(crate::providers::bus2_ui::GrantBook::default())),
             frames: Arc::new(Mutex::new(HashMap::new())),
             reads: super::bus2_stream::ReadBudget::new(),
+            async_hostcall: None,
+            #[cfg(test)]
+            present_gate: None,
         }
     }
 
@@ -1869,12 +2131,11 @@ impl ComponentState {
         }
     }
 
-    /// `bounded` is the v2 path: one bridge thread and the host deadline.
-    /// v1 passes false and stays on this thread with no cap.
+    /// v1 only. The call stays on this thread and has no cap. v2 uses
+    /// [`Self::await_v2_bridge`] so a call adds no thread.
     fn call_bridge(
         &mut self,
         request: RuntimeRequest,
-        bounded: bool,
     ) -> std::result::Result<RuntimeResponse, elastos::bus::types::BusError> {
         if self.sealed {
             return Err(bus_error("denied", SEALED_BRIDGE));
@@ -1886,18 +2147,8 @@ impl ComponentState {
         let line = guest_bus::bridge_envelope_json(1, request)
             .map_err(|err| bus_error("internal", err.to_string()))?;
         let asked = Instant::now();
-        let raw = if bounded {
-            bounded_hostcall(
-                &hostcall,
-                &line,
-                &self.capsule_id,
-                self.principal_id.as_deref(),
-                V2_HOST_DEADLINE,
-            )
-        } else {
-            let _leg = BridgeLegGuard::enter(ComponentBridgeLeg::Caller);
-            hostcall(&line, &self.capsule_id, self.principal_id.as_deref())
-        };
+        let _leg = BridgeLegGuard::enter(ComponentBridgeLeg::Caller);
+        let raw = hostcall(&line, &self.capsule_id, self.principal_id.as_deref());
         self.in_bus += asked.elapsed();
         let raw = raw.map_err(|err| bus_error("internal", err))?;
         let envelope: ResponseEnvelope =
@@ -1908,14 +2159,13 @@ impl ComponentState {
         Ok(envelope.response)
     }
 
-    /// A v2 read through the sync bridge. The seal is the first decision.
-    /// One call asks for `cap + 1` bytes on the bridge the v1 invoke already
-    /// uses. Over the cap, this returns before any guest chunk exists.
-    fn windowed_read(
-        &mut self,
+    /// Checks, then one line that asks for `cap + 1` bytes. The call itself
+    /// happens after this returns, and the grant is checked again after it.
+    fn begin_read(
+        &self,
         request: &v2::elastos::bus::types::InvokeRequest,
         had_body: bool,
-    ) -> V2Result<super::bus2_stream::PreparedRead> {
+    ) -> V2Result<PendingRead> {
         if self.sealed {
             return Err(V2BusError::Denied(SEALED_BRIDGE.into()));
         }
@@ -1938,77 +2188,43 @@ impl ComponentState {
         if self.grants.lock().expect("grant book").blocks_read(&grant) {
             return Err(V2BusError::Denied("the grant is closed".into()));
         }
-        let mut hold = super::bus2_stream::ReadHold::try_reserve(&self.reads, cap)
+        let hold = super::bus2_stream::ReadHold::try_reserve(&self.reads, cap)
             .ok_or_else(|| V2BusError::Unavailable("the host read cap is already in use".into()))?;
-        let resource = request.resource.clone();
-        let (bytes, audit) = self.bridge_window(&resource, &grant, 0, cap as u64 + 1)?;
-        if bytes.len() > cap {
-            return Err(V2BusError::Invalid(format!(
-                "object is {} bytes, over the cap of {cap}",
-                bytes.len()
-            )));
-        }
-        hold.shrink(bytes.len());
-        self.grants
-            .lock()
-            .expect("grant book")
-            .hold(&grant, &resource, "read");
-        Ok(super::bus2_stream::PreparedRead { bytes, audit, hold })
-    }
-
-    /// Checker first, then a grant this guest already holds. One frame, replaced.
-    fn present_document(&mut self, media: &str, document: &[u8]) -> V2Result<()> {
-        if self.sealed {
-            return Err(V2BusError::Denied(SEALED_BRIDGE.into()));
-        }
-        if self.stop_requested.load(Ordering::Acquire)
-            || self.cancel_requested.load(Ordering::Acquire)
-        {
-            return Err(V2BusError::Denied("the grant book is closed".into()));
-        }
-        let frame = {
-            let book = self.grants.lock().expect("grant book");
-            crate::providers::bus2_ui::present_frame(media, document, &book)
-                .map_err(present_error)?
-        };
-        if self.stop_requested.load(Ordering::Acquire)
-            || self.cancel_requested.load(Ordering::Acquire)
-        {
-            return Err(V2BusError::Denied("the grant book is closed".into()));
-        }
-        self.frames.lock().expect("frames").insert(
-            self.capsule_id.clone(),
-            StoredFrame {
-                principal: self.principal_id.clone(),
-                frame,
-            },
-        );
-        Ok(())
-    }
-
-    fn bridge_window(
-        &mut self,
-        resource: &str,
-        grant: &str,
-        offset: u64,
-        length: u64,
-    ) -> V2Result<(Vec<u8>, Option<String>)> {
-        let response = self
-            .call_bridge(
-                guest_bus::invoke_request(guest_bus::InvokeRequest {
-                    resource: resource.to_string(),
-                    operation: "read".into(),
-                    body: serde_json::json!({
-                        "path": resource,
-                        "offset": offset,
-                        "length": length,
-                        "check_revision": true,
-                    }),
-                    grant: Some(grant.to_string()),
+        let line = guest_bus::bridge_envelope_json(
+            1,
+            guest_bus::invoke_request(guest_bus::InvokeRequest {
+                resource: request.resource.clone(),
+                operation: "read".into(),
+                body: serde_json::json!({
+                    "path": request.resource,
+                    "offset": 0,
+                    "length": cap as u64 + 1,
+                    "check_revision": true,
                 }),
-                true,
-            )
-            .map_err(v2_error)?;
+                grant: Some(grant.clone()),
+            }),
+        )
+        .map_err(|err| V2BusError::Internal(err.to_string()))?;
+        Ok(PendingRead {
+            bridge: self.open_bridge(line),
+            cap,
+            grant,
+            hold,
+        })
+    }
+
+    /// The host answer is refused when the grant or the stop arrived during the call.
+    fn finish_read(
+        &mut self,
+        mut pending: PendingRead,
+        raw: std::result::Result<String, String>,
+    ) -> V2Result<super::bus2_stream::PreparedRead> {
+        if self.stop_requested.load(Ordering::Acquire)
+            || self.cancel_requested.load(Ordering::Acquire)
+        {
+            return Err(V2BusError::Denied("the grant book is closed".into()));
+        }
+        let response = decode_bridge(raw).map_err(v2_error)?;
         let (result, audit) = match response {
             RuntimeResponse::ResourceResult { result, audit } => (result, audit),
             other => return Err(v2_error(response_error(&other))),
@@ -2025,8 +2241,113 @@ impl ComponentState {
             return Err(v2_error(bus_error(code, message)));
         }
         let data = result.get("data").unwrap_or(&result);
-        Ok((window_bytes(data)?, audit))
+        if self
+            .grants
+            .lock()
+            .expect("grant book")
+            .blocks_read(&pending.grant)
+        {
+            return Err(V2BusError::Denied("the grant is closed".into()));
+        }
+        let bytes = window_bytes(data)?;
+        if bytes.len() > pending.cap {
+            return Err(V2BusError::Invalid(format!(
+                "object is {} bytes, over the cap of {}",
+                bytes.len(),
+                pending.cap
+            )));
+        }
+        pending.hold.shrink(bytes.len());
+        Ok(super::bus2_stream::PreparedRead {
+            bytes,
+            audit,
+            hold: pending.hold,
+        })
     }
+
+    /// A v2 read on this thread. Tests use it. The guest awaits [`Self::begin_read`].
+    #[cfg(test)]
+    fn windowed_read(
+        &mut self,
+        request: &v2::elastos::bus::types::InvokeRequest,
+        had_body: bool,
+    ) -> V2Result<super::bus2_stream::PreparedRead> {
+        let pending = self.begin_read(request, had_body)?;
+        let raw = sync_bridge(&pending.bridge);
+        self.finish_read(pending, raw)
+    }
+
+    /// The book stays locked until the frame is stored. A revoke waits, then
+    /// drops the frame. The frame of a closed or revoked grant is never stored.
+    fn present_document(&mut self, media: &str, document: &[u8]) -> V2Result<()> {
+        if self.sealed {
+            return Err(V2BusError::Denied(SEALED_BRIDGE.into()));
+        }
+        if self.stop_requested.load(Ordering::Acquire)
+            || self.cancel_requested.load(Ordering::Acquire)
+        {
+            return Err(V2BusError::Denied("the grant book is closed".into()));
+        }
+        let book = self.grants.lock().expect("grant book");
+        #[cfg(test)]
+        if let Some(gate) = &self.present_gate {
+            gate.wait();
+        }
+        let frame = crate::providers::bus2_ui::present_frame(media, document, &book)
+            .map_err(present_error)?;
+        if self.stop_requested.load(Ordering::Acquire)
+            || self.cancel_requested.load(Ordering::Acquire)
+        {
+            return Err(V2BusError::Denied("the grant book is closed".into()));
+        }
+        self.frames.lock().expect("frames").insert(
+            self.capsule_id.clone(),
+            StoredFrame {
+                principal: self.principal_id.clone(),
+                frame,
+            },
+        );
+        Ok(())
+    }
+
+    fn open_bridge(&self, line: String) -> OpenBridge {
+        OpenBridge {
+            line,
+            async_host: self.async_hostcall.clone(),
+            sync_host: self.hostcall.clone(),
+            capsule_id: self.capsule_id.clone(),
+            principal: self.principal_id.clone(),
+        }
+    }
+}
+
+#[cfg(test)]
+fn sync_bridge(bridge: &OpenBridge) -> std::result::Result<String, String> {
+    let Some(call) = &bridge.sync_host else {
+        return Err("component bridge is not configured".into());
+    };
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        call(
+            &bridge.line,
+            &bridge.capsule_id,
+            bridge.principal.as_deref(),
+        )
+    })) {
+        Ok(result) => result,
+        Err(_) => Err("panicked".into()),
+    }
+}
+
+fn decode_bridge(
+    raw: std::result::Result<String, String>,
+) -> std::result::Result<RuntimeResponse, elastos::bus::types::BusError> {
+    let raw = raw.map_err(bridge_failure)?;
+    let envelope: ResponseEnvelope =
+        serde_json::from_str(&raw).map_err(|err| bus_error("internal", err.to_string()))?;
+    if matches!(&envelope.response, RuntimeResponse::Error { .. }) {
+        return Err(response_error(&envelope.response));
+    }
+    Ok(envelope.response)
 }
 
 impl elastos::bus::types::Host for ComponentState {}
@@ -2052,11 +2373,10 @@ impl elastos::bus::identity::Host for ComponentState {
 }
 
 impl ComponentState {
-    /// `bounded` is true for a v2 call. v1 passes false: same thread, no cap.
+    /// v1. The call stays on this thread. A refused hold still returns the token.
     fn capability_request(
         &mut self,
         request: elastos::bus::types::CapabilityRequest,
-        bounded: bool,
     ) -> std::result::Result<elastos::bus::types::CapabilityGrant, elastos::bus::types::BusError>
     {
         if request.actions.len() != 1 {
@@ -2073,13 +2393,13 @@ impl ComponentState {
                 reason: request.reason,
             })
             .map_err(|err| bus_error("invalid", err))?,
-            bounded,
         )?;
         let token = match response {
             RuntimeResponse::CapabilityToken { token } => token,
             response => return Err(response_error(&response)),
         };
-        self.grants
+        let _held = self
+            .grants
             .lock()
             .expect("grant book")
             .hold(&token, &resource, &action);
@@ -2098,7 +2418,83 @@ impl elastos::bus::capabilities::Host for ComponentState {
         request: elastos::bus::types::CapabilityRequest,
     ) -> std::result::Result<elastos::bus::types::CapabilityGrant, elastos::bus::types::BusError>
     {
-        self.capability_request(request, false)
+        self.capability_request(request)
+    }
+}
+
+impl ComponentState {
+    /// The epoch is the book's generation. Revoke-all moves it, so a grant
+    /// that arrives after that move is refused even when the host minted it.
+    fn begin_grant(
+        &self,
+        request: elastos::bus::types::CapabilityRequest,
+    ) -> std::result::Result<PendingGrant, elastos::bus::types::BusError> {
+        if self.sealed {
+            return Err(bus_error("denied", SEALED_BRIDGE));
+        }
+        if self.stop_requested.load(Ordering::Acquire)
+            || self.cancel_requested.load(Ordering::Acquire)
+        {
+            return Err(elastos::bus::types::BusError::Denied(
+                "the grant book is closed".into(),
+            ));
+        }
+        if request.actions.len() != 1 {
+            return Err(elastos::bus::types::BusError::Invalid(
+                "component capability requests currently require exactly one action".into(),
+            ));
+        }
+        let epoch = self.grants.lock().expect("grant book").epoch();
+        let resource = request.resource;
+        let action = request.actions[0].clone();
+        let line = guest_bus::bridge_envelope_json(
+            1,
+            guest_bus::capability_request(guest_bus::CapabilityRequest {
+                resource: resource.clone(),
+                actions: vec![action.clone()],
+                reason: request.reason,
+            })
+            .map_err(|err| bus_error("invalid", err))?,
+        )
+        .map_err(|err| bus_error("internal", err.to_string()))?;
+        Ok(PendingGrant {
+            bridge: self.open_bridge(line),
+            resource,
+            action,
+            epoch,
+        })
+    }
+
+    fn finish_grant(
+        &mut self,
+        pending: PendingGrant,
+        raw: std::result::Result<String, String>,
+    ) -> std::result::Result<elastos::bus::types::CapabilityGrant, elastos::bus::types::BusError>
+    {
+        if self.stop_requested.load(Ordering::Acquire)
+            || self.cancel_requested.load(Ordering::Acquire)
+        {
+            return Err(elastos::bus::types::BusError::Denied(
+                "the grant book is closed".into(),
+            ));
+        }
+        let response = decode_bridge(raw)?;
+        let token = match response {
+            RuntimeResponse::CapabilityToken { token } => token,
+            response => return Err(response_error(&response)),
+        };
+        let mut book = self.grants.lock().expect("grant book");
+        if book.epoch() != pending.epoch || !book.hold(&token, &pending.resource, &pending.action) {
+            return Err(elastos::bus::types::BusError::Denied(
+                "the grant was revoked".into(),
+            ));
+        }
+        Ok(elastos::bus::types::CapabilityGrant {
+            id: token,
+            resource: pending.resource,
+            actions: vec![pending.action],
+            expires_at_ms: None,
+        })
     }
 }
 
@@ -2114,15 +2510,12 @@ impl elastos::bus::providers::Host for ComponentState {
             ));
         };
         let body = json_body(&request.body)?;
-        let response = self.call_bridge(
-            guest_bus::invoke_request(guest_bus::InvokeRequest {
-                resource: request.resource,
-                operation: request.operation,
-                body,
-                grant: Some(grant),
-            }),
-            false,
-        )?;
+        let response = self.call_bridge(guest_bus::invoke_request(guest_bus::InvokeRequest {
+            resource: request.resource,
+            operation: request.operation,
+            body,
+            grant: Some(grant),
+        }))?;
         let (result, audit) = match response {
             RuntimeResponse::ResourceResult { result, audit } => (result, audit),
             response => return Err(response_error(&response)),
@@ -2251,21 +2644,36 @@ impl v2::elastos::bus::capabilities::HostWithStore<ComponentState> for HasSelf<C
         reason: String,
     ) -> std::result::Result<v2::elastos::bus::types::Grant, v2::elastos::bus::types::BusError>
     {
-        let decided = accessor.with(|mut access| {
+        let opened = accessor.with(|mut access| {
             let opened = charge_access(&mut access);
-            let _guard = opened.then(|| resume_guard(&access.get().fuel_bucket));
-            let result = access.get().capability_request(
-                elastos::bus::types::CapabilityRequest {
+            let bucket = access.get().fuel_bucket.clone();
+            let pending = access
+                .get()
+                .begin_grant(elastos::bus::types::CapabilityRequest {
                     resource,
                     actions,
                     reason,
-                },
-                true,
-            );
+                });
+            (opened, bucket, pending)
+        });
+        let (opened, bucket, pending) = opened;
+        let pending = pending.map_err(v2_error)?;
+        let host_bucket = if opened { bucket } else { None };
+        let _guard = resume_guard(&host_bucket);
+        let raw = await_v2_bridge(
+            &pending.bridge.async_host,
+            &pending.bridge.sync_host,
+            &pending.bridge.line,
+            &pending.bridge.capsule_id,
+            pending.bridge.principal.as_deref(),
+            V2_APPROVAL_DEADLINE,
+        )
+        .await;
+        let decided = accessor.with(|mut access| {
             if opened {
                 release_access(&mut access);
             }
-            result
+            access.get().finish_grant(pending, raw)
         });
         match decided {
             Ok(grant) => Ok(v2::elastos::bus::types::Grant {
@@ -2297,15 +2705,31 @@ impl v2::elastos::bus::providers::HostWithStore<ComponentState> for HasSelf<Comp
         if let Some(mut body) = body {
             let _ = accessor.with(|mut access| body.close(&mut access));
         }
+        let opened = accessor.with(|mut access| {
+            let opened = charge_access(&mut access);
+            let bucket = access.get().fuel_bucket.clone();
+            let pending = access.get().begin_read(&request, had_body);
+            (opened, bucket, pending)
+        });
+        let (opened, bucket, pending) = opened;
+        let pending = pending?;
+        let host_bucket = if opened { bucket } else { None };
+        let _guard = resume_guard(&host_bucket);
+        let raw = await_v2_bridge(
+            &pending.bridge.async_host,
+            &pending.bridge.sync_host,
+            &pending.bridge.line,
+            &pending.bridge.capsule_id,
+            pending.bridge.principal.as_deref(),
+            V2_HOST_DEADLINE,
+        )
+        .await;
         let super::bus2_stream::PreparedRead { bytes, audit, hold } =
             accessor.with(|mut access| {
-                let opened = charge_access(&mut access);
-                let _guard = opened.then(|| resume_guard(&access.get().fuel_bucket));
-                let result = access.get().windowed_read(&request, had_body);
                 if opened {
                     release_access(&mut access);
                 }
-                result
+                access.get().finish_read(pending, raw)
             })?;
         let (tx, rx) = tokio::sync::oneshot::channel();
         accessor
@@ -3212,22 +3636,48 @@ mod tests {
 
     #[test]
     fn a_bridge_call_ends_at_its_deadline() {
-        let slow: BridgeHostcall = Arc::new(|_, _, _| {
-            std::thread::sleep(Duration::from_secs(2));
-            Ok(String::new())
+        let slow: BridgeHostcallAsync = Arc::new(|_, _, _| {
+            Box::pin(async {
+                tokio::time::sleep(Duration::from_secs(2)).await;
+                Ok(String::new())
+            })
         });
-        let err = bounded_hostcall(&slow, "", "capsule", None, Duration::from_millis(40))
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .expect("runtime");
+        let err = rt
+            .block_on(await_v2_bridge(
+                &Some(slow),
+                &None,
+                "",
+                "capsule",
+                None,
+                Duration::from_millis(40),
+            ))
             .expect_err("the guest must unblock");
-        assert!(err.contains("deadline"), "{err}");
+        assert!(err.contains("timeout"), "{err}");
     }
 
     #[test]
     fn a_panicking_bridge_is_named_panicked() {
         let boom: BridgeHostcall = Arc::new(|_, _, _| panic!("bridge"));
-        let err = bounded_hostcall(&boom, "", "capsule", None, Duration::from_secs(2))
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .expect("runtime");
+        let err = rt
+            .block_on(await_v2_bridge(
+                &None,
+                &Some(boom),
+                "",
+                "capsule",
+                None,
+                Duration::from_secs(2),
+            ))
             .expect_err("a panic must not look like success");
         assert!(err.contains("panicked"), "{err}");
-        assert!(!err.contains("deadline"), "{err}");
+        assert!(!err.contains("timeout"), "{err}");
     }
 
     /// The compute invoke calls this closure on the caller thread and has no
@@ -3248,7 +3698,7 @@ mod tests {
                     "id": 1,
                     "response": {
                         "type": "resource_result",
-                        "result": { "status": "ok", "data": { "content": [7], "size": 1 } },
+                        "result": { "status": "ok", "data": { "content": {"b64": "Bw=="}, "size": 1 } },
                         "audit": "read-1"
                     }
                 })
@@ -3897,8 +4347,8 @@ mod tests {
         )
     }
 
-    /// Printable bytes travel as one JSON string. A number per byte of a
-    /// 16 MiB window blows the v2 host deadline.
+    /// Printable bytes travel as one JSON string. Anything else is standard
+    /// base64. A number per byte of a 16 MiB window is not a read result.
     fn content_value(bytes: &[u8]) -> serde_json::Value {
         let printable = bytes
             .iter()
@@ -3906,7 +4356,7 @@ mod tests {
         if printable {
             serde_json::Value::String(String::from_utf8(bytes.to_vec()).expect("printable"))
         } else {
-            serde_json::json!(bytes)
+            serde_json::json!({"b64": encode_b64(bytes)})
         }
     }
 
@@ -5824,5 +6274,530 @@ mod tests {
             format!("Capsule not found: {}", handle.id.0),
             "the provider cannot run the ended activation"
         );
+    }
+
+    #[test]
+    fn hold_refuses_a_revoked_id_and_a_closed_book() {
+        let mut book = crate::providers::bus2_ui::GrantBook::default();
+        book.revoke("grant-token");
+        assert!(!book.hold(
+            "grant-token",
+            "localhost://Users/self/Documents/note.bin",
+            "read"
+        ));
+        book.clear();
+        assert!(!book.hold(
+            "fresh-grant",
+            "localhost://Users/self/Documents/note.bin",
+            "read"
+        ));
+        assert!(book.blocks_read("fresh-grant"));
+    }
+
+    /// The host is inside the read. Revoke runs, then the bytes come back.
+    /// The bytes are not given to the guest, and the revoke stays.
+    #[test]
+    fn a_revoke_during_a_read_is_not_undone() {
+        let gate = TestGate::new();
+        let host_gate = gate.clone();
+        let mut state = ComponentState::new(
+            Some(Arc::new(move |_line, _capsule, _principal| {
+                host_gate.wait();
+                Ok(serde_json::json!({
+                    "id": 1,
+                    "response": {
+                        "type": "resource_result",
+                        "result": {
+                            "status": "ok",
+                            "data": { "content": "hello", "size": 5 }
+                        }
+                    }
+                })
+                .to_string())
+            })),
+            "capsule-1".into(),
+            None,
+        );
+        hold_note_grant(&state.grants);
+        let book = state.grants.clone();
+        let revoker_gate = gate.clone();
+        let revoker = std::thread::spawn(move || {
+            revoker_gate.entered();
+            book.lock().expect("grant book").revoke("grant-token");
+            revoker_gate.open();
+        });
+        let err = state
+            .windowed_read(&read_request(64), false)
+            .expect_err("a revoked read returns no bytes");
+        revoker.join().expect("revoker");
+        assert!(
+            matches!(err, V2BusError::Denied(ref message) if message.contains("closed")),
+            "{err:?}"
+        );
+        let mut book = state.grants.lock().expect("grant book");
+        assert!(book.blocks_read("grant-token"));
+        assert!(!book.hold(
+            "grant-token",
+            "localhost://Users/self/Documents/note.bin",
+            "read"
+        ));
+    }
+
+    /// Present holds the book until the frame is stored. The revoke waits,
+    /// then drops the frame. The frame does not outlive the revoke.
+    #[test]
+    fn a_revoke_during_present_does_not_leave_the_frame() {
+        let gate = TestGate::new();
+        let mut state = ComponentState::new(None, "capsule-1".into(), None);
+        state.present_gate = Some(gate.clone());
+        hold_note_grant(&state.grants);
+        let book = state.grants.clone();
+        let frames = state.frames.clone();
+        let id = state.capsule_id.clone();
+        let revoker_gate = gate.clone();
+        let revoker = std::thread::spawn(move || {
+            revoker_gate.entered();
+            let mut book = book.lock().expect("grant book");
+            book.revoke("grant-token");
+            drop_frame_naming(&frames, &id, "grant-token");
+        });
+        let waiter = gate.clone();
+        let opener = std::thread::spawn(move || {
+            waiter.entered();
+            std::thread::sleep(Duration::from_millis(40));
+            waiter.open();
+        });
+        state
+            .present_document(
+                crate::providers::bus2_ui::UI_MEDIA_TYPE,
+                br#"{"frame":[{"image":{"grant":"grant-token"}}]}"#,
+            )
+            .expect("present stores under the lock");
+        opener.join().expect("opener");
+        revoker.join().expect("revoker");
+        assert!(
+            state.frames.lock().expect("frames").is_empty(),
+            "the frame of a grant revoked during present is gone"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_revoke_during_a_request_is_not_undone() {
+        let gate = TestGate::new();
+        let host_gate = gate.clone();
+        let host: BridgeHostcallAsync = Arc::new(move |_line, _capsule, _principal| {
+            let host_gate = host_gate.clone();
+            Box::pin(async move {
+                tokio::task::spawn_blocking(move || host_gate.wait())
+                    .await
+                    .expect("gate");
+                Ok(serde_json::json!({
+                    "id": 1,
+                    "response": { "type": "capability_token", "token": "late-token" }
+                })
+                .to_string())
+            })
+        });
+        let mut state = ComponentState::new(None, "capsule-1".into(), None);
+        state.async_hostcall = Some(host);
+        let pending = state
+            .begin_grant(elastos::bus::types::CapabilityRequest {
+                resource: "localhost://Users/self/Documents/note.bin".into(),
+                actions: vec!["read".into()],
+                reason: "to read".into(),
+            })
+            .expect("the request can start");
+        let bridge_async = pending.bridge.async_host.clone();
+        let bridge_sync = pending.bridge.sync_host.clone();
+        let line = pending.bridge.line.clone();
+        let capsule = pending.bridge.capsule_id.clone();
+        let principal = pending.bridge.principal.clone();
+        let calling = tokio::spawn(async move {
+            await_v2_bridge(
+                &bridge_async,
+                &bridge_sync,
+                &line,
+                &capsule,
+                principal.as_deref(),
+                V2_APPROVAL_DEADLINE,
+            )
+            .await
+        });
+        tokio::task::spawn_blocking({
+            let gate = gate.clone();
+            move || gate.entered()
+        })
+        .await
+        .expect("entered");
+        state.grants.lock().expect("grant book").revoke_all_held();
+        gate.open();
+        let raw = calling.await.expect("call");
+        let err = state
+            .finish_grant(pending, raw)
+            .expect_err("the token is not recorded");
+        assert!(
+            matches!(err, elastos::bus::types::BusError::Denied(_)),
+            "{err:?}"
+        );
+        assert!(state
+            .grants
+            .lock()
+            .expect("grant book")
+            .blocks_read("late-token"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn revoke_all_includes_a_grant_recorded_while_it_waits() {
+        let provider = Arc::new(ComponentProvider::new());
+        let bytes = wat::parse_str(include_str!(
+            "../../../../tests/fixtures/components/v2-resident.wat"
+        ))
+        .unwrap();
+        let handle = load_v2_fixture(&provider, bytes).await;
+        provider
+            .testing_hold_grant(
+                &handle.id,
+                "kept",
+                "localhost://Users/self/Documents/note.bin",
+                "read",
+            )
+            .await;
+        provider.testing_store_v2_frame(
+            handle.id.as_str(),
+            None,
+            vec![crate::providers::bus2_ui::FrameNode::Text("one".into())],
+        );
+        let gate = TestGate::new();
+        *provider.revoke_gate.lock().expect("revoke gate") = Some(gate.clone());
+        let sweeping = {
+            let provider = provider.clone();
+            tokio::spawn(async move { provider.deliver_revoke_all().await })
+        };
+        tokio::task::spawn_blocking({
+            let gate = gate.clone();
+            move || gate.entered()
+        })
+        .await
+        .expect("entered");
+        provider
+            .testing_hold_grant(
+                &handle.id,
+                "late",
+                "localhost://Users/self/Documents/note.bin",
+                "read",
+            )
+            .await;
+        provider.testing_store_v2_frame(
+            handle.id.as_str(),
+            None,
+            vec![crate::providers::bus2_ui::FrameNode::Text("two".into())],
+        );
+        gate.open();
+        sweeping.await.expect("sweep");
+        let book = provider.instances.read().await[&handle.id].grants.clone();
+        let mut book = book.lock().expect("grant book");
+        assert!(book.blocks_read("kept"));
+        assert!(book.blocks_read("late"));
+        assert!(!book.hold("late", "localhost://Users/self/Documents/note.bin", "read"));
+        drop(book);
+        assert!(provider
+            .frames
+            .lock()
+            .expect("frames")
+            .get(handle.id.as_str())
+            .is_none());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_unawaited_read_does_not_park_a_burn() {
+        let provider = ComponentProvider::new();
+        let bytes = v2_variant(&[(
+            "i32.const -1 i32.eq\n        if\n          global.get $events global.get $set call $join",
+            "i32.const -1 i32.eq\n        if\n          i32.const 0 i32.const 0 i32.const 65536 memory.fill\n          (loop $burn br $burn)\n          global.get $events global.get $set call $join",
+        )]);
+        let handle = load_v2_fixture(&provider, bytes).await;
+        provider.start(&handle).await.expect("the burner starts");
+        v2_pending_read(&provider, &handle).await;
+        let ending = tokio::time::timeout(Duration::from_secs(1), v2_ending(&provider, &handle))
+            .await
+            .expect("the burn must reach the tick cap");
+        assert!(
+            ending.contains(ENDING_EPOCH_DEADLINE),
+            "an unawaited read left the burn running: {ending}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_resident_lives_through_2000_short_wakes() {
+        let provider = ComponentProvider::new();
+        let bytes = wat::parse_str(include_str!(
+            "../../../../tests/fixtures/components/v2-resident.wat"
+        ))
+        .unwrap();
+        let handle = load_v2_fixture(&provider, bytes).await;
+        provider
+            .instances
+            .write()
+            .await
+            .get_mut(&handle.id)
+            .unwrap()
+            .test_max_ticks = 4;
+        provider.start(&handle).await.expect("the resident starts");
+        for _ in 0..2_000 {
+            let sender = provider
+                .instances
+                .read()
+                .await
+                .get(&handle.id)
+                .and_then(|instance| instance.events.clone());
+            let Some(sender) = sender else {
+                panic!(
+                    "the resident ended during the short wakes: {:?}",
+                    provider.endings.read().await.get(&handle.id)
+                );
+            };
+            let _ = sender.send(v2::elastos::bus::types::Event::Message(Vec::new()));
+            tokio::time::sleep(Duration::from_millis(12)).await;
+        }
+        assert!(
+            provider.endings.read().await.get(&handle.id).is_none(),
+            "2000 short wakes ended the resident: {:?}",
+            provider.endings.read().await.get(&handle.id)
+        );
+        provider.stop(&handle).await.expect("stop");
+        assert_eq!(v2_ending(&provider, &handle).await, "stopped");
+    }
+
+    #[test]
+    fn read_cap_bounds_a_large_object_before_the_scan() {
+        let mut big = Vec::new();
+        big.extend_from_slice(br#"{"max_bytes":1,"#);
+        big.resize(2 * 1024 * 1024, b'x');
+        let started = Instant::now();
+        let err = crate::providers::bus2_stream::read_cap(&big).expect_err("over the param cap");
+        assert!(
+            started.elapsed() < Duration::from_millis(50),
+            "a {} byte object took {:?}",
+            big.len(),
+            started.elapsed()
+        );
+        assert!(err.contains("over 256"), "{err}");
+        let duplicate = br#"{"max_bytes":1,"max_bytes":2}"#;
+        let err = crate::providers::bus2_stream::read_cap(duplicate).expect_err("duplicate key");
+        assert!(err.contains("duplicate"), "{err}");
+        let broken = br#"{"max_bytes":1,}"#;
+        let err = crate::providers::bus2_stream::read_cap(broken).expect_err("malformed");
+        assert!(!err.contains("over 256"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn bridge_calls_add_no_thread_across_timeouts() {
+        fn threads() -> usize {
+            let output = std::process::Command::new("ps")
+                .args(["-M", &std::process::id().to_string()])
+                .output()
+                .expect("ps");
+            String::from_utf8_lossy(&output.stdout).lines().count()
+        }
+        let before = threads();
+        let ready: BridgeHostcallAsync =
+            Arc::new(|_line, _capsule, _principal| Box::pin(async { Ok("{}".to_string()) }));
+        for _ in 0..200 {
+            await_v2_bridge(
+                &Some(ready.clone()),
+                &None,
+                "",
+                "capsule",
+                None,
+                V2_HOST_DEADLINE,
+            )
+            .await
+            .expect("call");
+        }
+        let slow: BridgeHostcallAsync = Arc::new(|_line, _capsule, _principal| {
+            Box::pin(async {
+                tokio::time::sleep(Duration::from_secs(30)).await;
+                Ok(String::new())
+            })
+        });
+        for _ in 0..50 {
+            let err = await_v2_bridge(
+                &Some(slow.clone()),
+                &None,
+                "",
+                "capsule",
+                None,
+                Duration::from_millis(20),
+            )
+            .await
+            .expect_err("timeout");
+            assert!(err.contains("timeout"), "{err}");
+        }
+        let after = threads();
+        assert!(
+            after <= before + 1,
+            "thread count moved from {before} to {after}"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_approval_answered_after_10_seconds_succeeds() {
+        let host: BridgeHostcallAsync = Arc::new(|_line, _capsule, _principal| {
+            Box::pin(async {
+                tokio::time::sleep(Duration::from_secs(10)).await;
+                Ok(serde_json::json!({
+                    "id": 1,
+                    "response": { "type": "capability_token", "token": "late-grant" }
+                })
+                .to_string())
+            })
+        });
+        let mut state = ComponentState::new(None, "capsule-1".into(), None);
+        state.async_hostcall = Some(host);
+        let pending = state
+            .begin_grant(elastos::bus::types::CapabilityRequest {
+                resource: "localhost://Users/self/Documents/note.bin".into(),
+                actions: vec!["read".into()],
+                reason: "to read".into(),
+            })
+            .expect("begin");
+        let raw = await_v2_bridge(
+            &pending.bridge.async_host,
+            &pending.bridge.sync_host,
+            &pending.bridge.line,
+            &pending.bridge.capsule_id,
+            pending.bridge.principal.as_deref(),
+            V2_APPROVAL_DEADLINE,
+        )
+        .await
+        .expect("an answer inside 30s succeeds");
+        let grant = state.finish_grant(pending, Ok(raw)).expect("recorded");
+        assert_eq!(grant.id, "late-grant");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_task_is_in_hand_before_the_worker_is_published() {
+        let provider = ComponentProvider::new();
+        let bytes = wat::parse_str(include_str!(
+            "../../../../tests/fixtures/components/v2-resident.wat"
+        ))
+        .unwrap();
+        let handle = load_v2_fixture(&provider, bytes).await;
+        let gate = TestGate::new();
+        provider
+            .instances
+            .write()
+            .await
+            .get_mut(&handle.id)
+            .unwrap()
+            .publish_gate = Some(gate.clone());
+        let provider = Arc::new(provider);
+        let starting = {
+            let provider = provider.clone();
+            let handle = handle.clone();
+            tokio::spawn(async move { provider.start(&handle).await })
+        };
+        tokio::task::spawn_blocking({
+            let gate = gate.clone();
+            move || gate.entered()
+        })
+        .await
+        .expect("entered");
+        {
+            let instances = provider.instances.read().await;
+            let instance = &instances[&handle.id];
+            assert!(instance.task.is_none());
+            assert!(instance.worker.is_none());
+        }
+        gate.open();
+        starting.await.expect("start task").expect("start");
+        {
+            let instances = provider.instances.read().await;
+            let instance = &instances[&handle.id];
+            assert!(instance.task.is_some());
+            assert!(instance.worker.is_some());
+        }
+        provider.stop(&handle).await.expect("stop");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_natural_exit_joins_the_worker_before_the_slot_is_freed() {
+        let provider = ComponentProvider::new();
+        let bytes = v2_variant(&[(
+            "call $new global.set $set\n      call $next)",
+            "call $new global.set $set\n      i32.const 0 i32.const 0 i32.const 0 i32.const 0 call $done\n      i32.const 0)",
+        )]);
+        let handle = load_v2_fixture(&provider, bytes).await;
+        let gate = TestGate::new();
+        provider
+            .instances
+            .write()
+            .await
+            .get_mut(&handle.id)
+            .unwrap()
+            .exit_gate = Some(gate.clone());
+        provider.start(&handle).await.expect("start");
+        tokio::task::spawn_blocking({
+            let gate = gate.clone();
+            move || gate.entered()
+        })
+        .await
+        .expect("entered");
+        assert!(
+            provider.instances.read().await.contains_key(&handle.id),
+            "the slot is freed before the worker is joined"
+        );
+        assert!(provider.threads_live.load(Ordering::Acquire) >= 1);
+        gate.open();
+        assert_eq!(v2_ending(&provider, &handle).await, "returned");
+        assert!(provider.instances.read().await.is_empty());
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while provider.threads_live.load(Ordering::Acquire) != 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the worker is joined");
+    }
+
+    #[tokio::test]
+    async fn drop_closes_guest_events() {
+        let provider = ComponentProvider::new();
+        let bytes = wat::parse_str(include_str!(
+            "../../../../tests/fixtures/components/v2-resident.wat"
+        ))
+        .unwrap();
+        let handle = load_v2_fixture(&provider, bytes).await;
+        let (sender, mut receiver) = mpsc::unbounded_channel::<v2::elastos::bus::types::Event>();
+        provider
+            .instances
+            .write()
+            .await
+            .get_mut(&handle.id)
+            .unwrap()
+            .events = Some(sender);
+        drop(provider);
+        assert!(matches!(
+            receiver.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Disconnected)
+        ));
+    }
+
+    #[test]
+    fn owns_thread_is_true_only_when_a_thread_was_spawned() {
+        let wake = Arc::new(tokio::sync::Notify::new());
+        let inline = V2Join::prepare(
+            None,
+            None,
+            Arc::new(AtomicBool::new(false)),
+            wake.clone(),
+            true,
+        );
+        inline.start();
+        assert!(inline.started.load(Ordering::Acquire));
+        assert!(!inline.owns_thread());
+        let threaded = V2Join::prepare(None, None, Arc::new(AtomicBool::new(false)), wake, false);
+        threaded.start();
+        assert!(threaded.owns_thread());
     }
 }
