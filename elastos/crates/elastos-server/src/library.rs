@@ -8984,7 +8984,8 @@ fn fill_archive_preview_viewers(data_dir: &Path, map: &mut serde_json::Map<Strin
         .to_string();
     let viewers = viewer_options_for_name(data_dir, &path);
     if let Some(entry) = map.get_mut("entry").and_then(Value::as_object_mut) {
-        write_viewer_fields(entry, &viewers);
+        // The unfenced preview always has `viewers`, including an empty list.
+        entry.insert("viewers".to_string(), json!(viewers));
     }
 }
 
@@ -9111,6 +9112,65 @@ fn anyhow_error_detail(error: &anyhow::Error) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn archive_preview_viewers_match_the_unfenced_answer_including_an_empty_list() {
+        let data = tempfile::tempdir().unwrap();
+        let capsule = data.path().join("capsules/documents");
+        std::fs::create_dir_all(&capsule).unwrap();
+        std::fs::write(
+            capsule.join("index.html"),
+            "<!doctype html><title>Documents</title>",
+        )
+        .unwrap();
+        std::fs::write(
+            capsule.join("capsule.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "schema": "elastos.capsule/v1",
+                "name": "documents",
+                "version": "0.1.0",
+                "description": "Documents",
+                "author": "elastos",
+                "role": "viewer",
+                "type": "data",
+                "entrypoint": "index.html"
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            data.path().join("components.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "external": {
+                    "documents": { "install_path": "capsules/documents", "platforms": {} }
+                },
+                "capsules": {},
+                "profiles": {}
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        for name in ["note.txt", "blob.bin", ""] {
+            let unfenced = super::viewer_options_for_name(data.path(), name);
+            let mut value = serde_json::json!({
+                "schema": super::LIBRARY_ARCHIVE_PREVIEW_ENTRY_SCHEMA,
+                "entry": { "path": name, "viewers": ["stale"] }
+            });
+            super::fill_fenced_library_fields(data.path(), &mut value);
+            assert_eq!(
+                value["entry"]["viewers"],
+                serde_json::json!(unfenced),
+                "{name}"
+            );
+            assert!(value["entry"].get("viewers").is_some(), "{name}");
+            assert!(value["entry"].get("viewer").is_none(), "{name}");
+        }
+        assert!(
+            !super::viewer_options_for_name(data.path(), "note.txt").is_empty(),
+            "the documents capsule is the unfenced viewer for a text entry"
+        );
+        assert!(super::viewer_options_for_name(data.path(), "blob.bin").is_empty());
+    }
+
     /// A5-S3c-0b, class I: the object provider request no longer carries a
     /// client-named principal; the Runtime supplies the resolved root.
     /// Expected-fail: it deserializes an id. Flipped by A5-S3c-4.
