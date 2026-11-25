@@ -31,14 +31,16 @@ pub(crate) struct FuelBucket {
     at: Instant,
     /// This suspension was already charged. A spurious poll must not read fuel again.
     pub(crate) open: bool,
-    /// Sleep. The guest cannot run, so ticks do not count. An events read
-    /// that is only pending does not set this: the guest may still run.
+    /// The guest is suspended. [`Self::wake_from_park`] is the one place that
+    /// refills `window_ticks`, and only while this is set.
     pub(crate) parked: bool,
-    /// Ticks in the current execution window. A wait longer than one tick
-    /// refills it. It is not a lifetime sum.
+    /// Ticks since the last wake from a parked wait. An event that arrives
+    /// while the guest is executing does not refill this.
     pub(crate) window_ticks: u64,
-    /// When the events read last went pending, if it is still pending.
-    pub(crate) wait_since: Option<Instant>,
+    /// An event read is pending. The epoch callback marks [`Self::event_wait_ran`]
+    /// if the guest executes before the read completes.
+    event_wait_since: Option<Instant>,
+    event_wait_ran: bool,
     /// Refill below one fuel unit, kept across wakes.
     remainder: u64,
     /// `get_fuel` or `set_fuel` failed. The run ends with this name.
@@ -56,7 +58,8 @@ impl FuelBucket {
             open: false,
             parked: false,
             window_ticks: 0,
-            wait_since: None,
+            event_wait_since: None,
+            event_wait_ran: false,
             remainder: 0,
             fault: None,
             clock_ms: 0,
@@ -85,13 +88,52 @@ impl FuelBucket {
         Some(self.lent)
     }
 
-    pub(crate) fn resume(&mut self) {
-        self.open = false;
+    /// Idle time counts only while the guest is suspended (`parked`).
+    /// This is the one place a parked wait refills `window_ticks`.
+    pub(crate) fn wake_from_park(&mut self) {
+        if self.parked {
+            self.window_ticks = 0;
+        }
         self.parked = false;
+    }
+
+    pub(crate) fn resume(&mut self) {
+        self.wake_from_park();
+        self.open = false;
     }
 
     pub(crate) fn park(&mut self) {
         self.parked = true;
+    }
+
+    /// An event read went pending. This is not yet a parked wait: the guest
+    /// may still be burning. A second poll does not restart the clock.
+    pub(crate) fn begin_event_wait(&mut self, now: Instant) {
+        if self.event_wait_since.is_none() {
+            self.event_wait_since = Some(now);
+            self.event_wait_ran = false;
+        }
+    }
+
+    /// The guest executed while that read was still pending.
+    pub(crate) fn note_event_wait_ran(&mut self) {
+        if self.event_wait_since.is_some() {
+            self.event_wait_ran = true;
+        }
+    }
+
+    /// The read finished. A gap longer than one tick, with no guest execution
+    /// in it, was a suspension: mark `parked` so the wake refills the window.
+    /// A burn beside the read is left as it is.
+    pub(crate) fn end_event_wait(&mut self, now: Instant, tick: Duration) {
+        let Some(since) = self.event_wait_since.take() else {
+            return;
+        };
+        let ran = self.event_wait_ran;
+        self.event_wait_ran = false;
+        if !ran && now.saturating_duration_since(since) > tick {
+            self.parked = true;
+        }
     }
 
     /// The store-level burn sets the gap to zero so the assertion is the
@@ -301,5 +343,20 @@ mod tests {
         );
         assert_eq!(memory.memories(), 4);
         assert_eq!(memory.instances(), 16);
+    }
+
+    #[test]
+    fn a_parked_wake_refills_the_window_and_a_burn_does_not() {
+        let mut bucket = FuelBucket::full(10, Instant::now());
+        for _ in 0..2_000 {
+            bucket.window_ticks = 9;
+            bucket.park();
+            bucket.wake_from_park();
+            assert_eq!(bucket.window_ticks, 0);
+            assert!(!bucket.parked);
+        }
+        bucket.window_ticks = 9;
+        bucket.wake_from_park();
+        assert_eq!(bucket.window_ticks, 9, "an executing guest keeps its ticks");
     }
 }

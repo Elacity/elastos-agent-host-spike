@@ -1298,14 +1298,13 @@ impl ComponentProvider {
             if bucket.fault.is_some() {
                 return Ok(UpdateDeadline::Interrupt);
             }
-            // Parked means this guest cannot run. A sleep sets that. An events
-            // read that is only pending does not, so a burn beside it still counts.
-            // The count is this window. An idle wait refills it when the guest
-            // resumes, before these ticks, so a long fill is not itself a refill.
+            // A sleep or a host await is suspended. This tick is not execution,
+            // and `parked` stays set so the wake can refill the window.
+            // `FuelBucket::wake_from_park` is the one place that refill happens.
             if bucket.parked {
-                bucket.window_ticks = 0;
                 return Ok(UpdateDeadline::Continue(1));
             }
+            bucket.note_event_wait_ran();
             let used = bucket.window_ticks.saturating_add(1);
             bucket.window_ticks = used;
             if used >= max_ticks {
@@ -1403,8 +1402,8 @@ impl<D> StreamProducer<D> for V2EventFeed {
         }
         match self.0.poll_recv(cx) {
             Poll::Ready(Some(event)) => {
-                note_wait_ended(&self.4);
-                release_bucket(&self.4);
+                end_event_wait(&self.4);
+                close_wait_loan(&self.4, &mut store);
                 // Epochs that passed while the guest was parked are not ticks.
                 store.set_epoch_deadline(1);
                 note_delivered_event(&self.1, &self.2, &self.3, &event);
@@ -1412,23 +1411,25 @@ impl<D> StreamProducer<D> for V2EventFeed {
                 Poll::Ready(Ok(StreamResult::Completed))
             }
             Poll::Ready(None) => {
-                note_wait_ended(&self.4);
-                release_bucket(&self.4);
+                end_event_wait(&self.4);
+                close_wait_loan(&self.4, &mut store);
                 store.set_epoch_deadline(1);
                 Poll::Ready(Ok(StreamResult::Dropped))
             }
             Poll::Pending if finish => {
-                note_wait_ended(&self.4);
-                release_bucket(&self.4);
+                end_event_wait(&self.4);
+                close_wait_loan(&self.4, &mut store);
                 store.set_epoch_deadline(1);
                 Poll::Ready(Ok(StreamResult::Cancelled))
             }
             Poll::Pending => {
-                // The read is pending. The guest can still run, so this does not park.
-                let mut bucket = self.4.lock().expect("fuel");
-                if bucket.wait_since.is_none() {
-                    bucket.wait_since = Some(Instant::now());
-                }
+                // Not parked yet. The guest may still be burning, and the
+                // event that arrives then must not refill `window_ticks`.
+                // A gap where the guest never runs is marked parked when it ends.
+                self.4
+                    .lock()
+                    .expect("fuel")
+                    .begin_event_wait(Instant::now());
                 #[cfg(test)]
                 self.5.store(true, Ordering::Release);
                 Poll::Pending
@@ -1685,19 +1686,39 @@ fn resume_guard(
     ResumeOnDrop(bucket.clone())
 }
 
-fn release_bucket(bucket: &Mutex<crate::providers::fuel_bucket::FuelBucket>) {
-    bucket.lock().expect("fuel").resume();
+/// The wait is over. Settle the loan from the moment it was opened, write
+/// that fuel, and wake. A dropped guard still clears `open` without a store.
+/// The event read ended. An idle gap becomes a parked wait so
+/// [`FuelBucket::wake_from_park`] can refill the window. A burn does not.
+fn end_event_wait(bucket: &Mutex<crate::providers::fuel_bucket::FuelBucket>) {
+    bucket
+        .lock()
+        .expect("fuel")
+        .end_event_wait(Instant::now(), DEADLINE_TICK);
 }
 
-/// An idle wait longer than one tick starts a new tick window. The gap is the
-/// time the guest was not running. A fill after it resumes is not part of the gap.
-fn note_wait_ended(bucket: &Mutex<crate::providers::fuel_bucket::FuelBucket>) {
-    let mut bucket = bucket.lock().expect("fuel");
-    let Some(since) = bucket.wait_since.take() else {
-        return;
+fn close_wait_loan(
+    bucket: &Mutex<crate::providers::fuel_bucket::FuelBucket>,
+    store: &mut impl wasmtime::AsContextMut,
+) {
+    let lend = {
+        let mut slot = bucket.lock().expect("fuel");
+        let remaining = match read_fuel(store) {
+            Ok(value) => value,
+            Err(name) => {
+                slot.fault = Some(name);
+                return;
+            }
+        };
+        if slot.open {
+            slot.open = false;
+        }
+        let lend = slot.settle(remaining, Instant::now()).unwrap_or(0);
+        slot.resume();
+        lend
     };
-    if Instant::now().saturating_duration_since(since) > DEADLINE_TICK {
-        bucket.window_ticks = 0;
+    if let Err(name) = write_fuel(store, lend) {
+        bucket.lock().expect("fuel").fault = Some(name);
     }
 }
 
@@ -1710,10 +1731,26 @@ fn charge_access(access: &mut impl wasmtime::AsContextMut<Data = ComponentState>
 
 fn release_access(access: &mut impl wasmtime::AsContextMut<Data = ComponentState>) {
     if let Some(bucket) = access.as_context().data().fuel_bucket.clone() {
-        release_bucket(&bucket);
+        close_wait_loan(&bucket, access);
     }
     // The host call's wall time is not guest execution.
     access.as_context_mut().set_epoch_deadline(1);
+}
+
+/// The guard exists before `begin_grant` / `begin_read` can return an error.
+/// A successful wait parks so the wake can refill the tick window.
+fn arm_host_wait(
+    opened: bool,
+    bucket: &Option<Arc<Mutex<crate::providers::fuel_bucket::FuelBucket>>>,
+    pending_ok: bool,
+) -> ResumeOnDrop {
+    let guard = resume_guard(&if opened { bucket.clone() } else { None });
+    if opened && pending_ok {
+        if let Some(bucket) = bucket {
+            bucket.lock().expect("fuel").park();
+        }
+    }
+    guard
 }
 
 /// A v2 bridge on the guest runtime. An async host call is awaited and dropped
@@ -1765,9 +1802,24 @@ fn v2_slot(item: &ComponentActivation) -> bool {
 
 impl Drop for ComponentProvider {
     fn drop(&mut self) {
-        let Ok(mut instances) = self.instances.try_write() else {
-            tracing::error!("instance lock busy; a guest thread may still be running");
-            return;
+        let bound = Instant::now() + V2_HOST_DEADLINE;
+        let mut instances = loop {
+            if let Ok(guard) = self.instances.try_write() {
+                break guard;
+            }
+            if Instant::now() >= bound {
+                // The lock is still held. Keep the map so each worker's join
+                // handle is not dropped and the thread is not detached.
+                tracing::error!(
+                    "drop waited {} ms and the instance lock was still held; worker handles are kept",
+                    V2_HOST_DEADLINE.as_millis()
+                );
+                let kept =
+                    std::mem::replace(&mut self.instances, Arc::new(RwLock::new(HashMap::new())));
+                std::mem::forget(kept);
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(1));
         };
         let mut joins = Vec::new();
         for (id, instance) in instances.iter_mut() {
@@ -2027,6 +2079,7 @@ fn bus_error(code: &str, message: impl Into<String>) -> elastos::bus::types::Bus
         "invalid"
         | "invalid_action"
         | "invalid_resource_invoke"
+        | "root_not_offered"
         | "revision_required"
         | "revision_conflict"
         | "principal_root_protection_required"
@@ -2258,6 +2311,10 @@ impl ComponentState {
             )));
         }
         pending.hold.shrink(bytes.len());
+        self.grants
+            .lock()
+            .expect("grant book")
+            .spend(&pending.grant);
         Ok(super::bus2_stream::PreparedRead {
             bytes,
             audit,
@@ -2395,7 +2452,7 @@ impl ComponentState {
             .map_err(|err| bus_error("invalid", err))?,
         )?;
         let token = match response {
-            RuntimeResponse::CapabilityToken { token } => token,
+            RuntimeResponse::CapabilityToken { token, .. } => token,
             response => return Err(response_error(&response)),
         };
         let _held = self
@@ -2479,12 +2536,24 @@ impl ComponentState {
             ));
         }
         let response = decode_bridge(raw)?;
-        let token = match response {
-            RuntimeResponse::CapabilityToken { token } => token,
+        let (token, max_uses, expires_at_ms) = match response {
+            RuntimeResponse::CapabilityToken {
+                token,
+                max_uses,
+                expires_at_ms,
+            } => (token, max_uses, expires_at_ms),
             response => return Err(response_error(&response)),
         };
         let mut book = self.grants.lock().expect("grant book");
-        if book.epoch() != pending.epoch || !book.hold(&token, &pending.resource, &pending.action) {
+        if book.epoch() != pending.epoch
+            || !book.hold_limited(
+                &token,
+                &pending.resource,
+                &pending.action,
+                max_uses,
+                expires_at_ms,
+            )
+        {
             return Err(elastos::bus::types::BusError::Denied(
                 "the grant was revoked".into(),
             ));
@@ -2493,7 +2562,7 @@ impl ComponentState {
             id: token,
             resource: pending.resource,
             actions: vec![pending.action],
-            expires_at_ms: None,
+            expires_at_ms,
         })
     }
 }
@@ -2644,7 +2713,7 @@ impl v2::elastos::bus::capabilities::HostWithStore<ComponentState> for HasSelf<C
         reason: String,
     ) -> std::result::Result<v2::elastos::bus::types::Grant, v2::elastos::bus::types::BusError>
     {
-        let opened = accessor.with(|mut access| {
+        let (opened, bucket, pending) = accessor.with(|mut access| {
             let opened = charge_access(&mut access);
             let bucket = access.get().fuel_bucket.clone();
             let pending = access
@@ -2656,10 +2725,8 @@ impl v2::elastos::bus::capabilities::HostWithStore<ComponentState> for HasSelf<C
                 });
             (opened, bucket, pending)
         });
-        let (opened, bucket, pending) = opened;
+        let _guard = arm_host_wait(opened, &bucket, pending.is_ok());
         let pending = pending.map_err(v2_error)?;
-        let host_bucket = if opened { bucket } else { None };
-        let _guard = resume_guard(&host_bucket);
         let raw = await_v2_bridge(
             &pending.bridge.async_host,
             &pending.bridge.sync_host,
@@ -2705,16 +2772,14 @@ impl v2::elastos::bus::providers::HostWithStore<ComponentState> for HasSelf<Comp
         if let Some(mut body) = body {
             let _ = accessor.with(|mut access| body.close(&mut access));
         }
-        let opened = accessor.with(|mut access| {
+        let (opened, bucket, pending) = accessor.with(|mut access| {
             let opened = charge_access(&mut access);
             let bucket = access.get().fuel_bucket.clone();
             let pending = access.get().begin_read(&request, had_body);
             (opened, bucket, pending)
         });
-        let (opened, bucket, pending) = opened;
+        let _guard = arm_host_wait(opened, &bucket, pending.is_ok());
         let pending = pending?;
-        let host_bucket = if opened { bucket } else { None };
-        let _guard = resume_guard(&host_bucket);
         let raw = await_v2_bridge(
             &pending.bridge.async_host,
             &pending.bridge.sync_host,
@@ -4028,6 +4093,133 @@ mod tests {
         }
         assert!(!bucket.lock().unwrap().open);
         assert!(!bucket.lock().unwrap().parked);
+    }
+
+    #[test]
+    fn spend_b_minus_one_sleep_past_a_refill_then_spend_lives() {
+        let engine = quiet_v2_engine();
+        let bucket = Arc::new(Mutex::new(crate::providers::fuel_bucket::FuelBucket::full(
+            10_000,
+            Instant::now(),
+        )));
+        let mut store = Store::new(&engine, ());
+        store.set_fuel(10_000).unwrap();
+        bucket.lock().unwrap().close_the_gap();
+        store.set_fuel(1).unwrap();
+        assert!(charge_bucket(&bucket, &mut store).unwrap());
+        let loan = store.get_fuel().unwrap();
+        assert_eq!(loan, 1, "the loan is the remainder");
+        bucket.lock().unwrap().park();
+        std::thread::sleep(Duration::from_millis(300));
+        close_wait_loan(&bucket, &mut store);
+        let fuel = store.get_fuel().unwrap();
+        assert!(fuel > 1_000, "the wait wrote the refill, got {fuel}");
+        store.set_fuel(fuel - 1_000).unwrap();
+        assert!(charge_bucket(&bucket, &mut store).unwrap());
+        assert!(store.get_fuel().unwrap() > 0);
+    }
+
+    #[test]
+    fn an_error_from_begin_read_leaves_the_slot_usable() {
+        let engine = quiet_v2_engine();
+        let bucket = Arc::new(Mutex::new(crate::providers::fuel_bucket::FuelBucket::full(
+            1_000,
+            Instant::now(),
+        )));
+        let mut state = ComponentState::new(None, "capsule".into(), None);
+        state.fuel_bucket = Some(bucket.clone());
+        let mut store = Store::new(&engine, state);
+        store.set_fuel(1_000).unwrap();
+        let request = v2::elastos::bus::types::InvokeRequest {
+            resource: "localhost://Local/a".into(),
+            operation: "stat".into(),
+            grant: Some("g".into()),
+            params: Vec::new(),
+        };
+        let opened = charge_access(&mut store);
+        assert!(opened);
+        let pending = store.data().begin_read(&request, false);
+        let guard = arm_host_wait(opened, &Some(bucket.clone()), pending.is_ok());
+        assert!(pending.is_err(), "stat is not a read");
+        drop(guard);
+        assert!(!bucket.lock().unwrap().open, "the error left the loan open");
+        let left = store.get_fuel().unwrap();
+        store.set_fuel(left.saturating_sub(10)).unwrap();
+        assert!(charge_bucket(&bucket, &mut store).is_ok());
+        assert!(store.get_fuel().unwrap() > 0);
+    }
+
+    fn token_line(token: &str, extra: &str) -> String {
+        format!(r#"{{"id":1,"response":{{"type":"capability_token","token":"{token}"{extra}}}}}"#)
+    }
+
+    fn one_read_grant(state: &mut ComponentState) -> PendingGrant {
+        state
+            .begin_grant(elastos::bus::types::CapabilityRequest {
+                resource: "localhost://Local/a".into(),
+                actions: vec!["read".into()],
+                reason: String::new(),
+            })
+            .expect("begin grant")
+    }
+
+    #[test]
+    fn thirty_three_revokes_refuse_an_in_flight_grant() {
+        let mut state = ComponentState::new(None, "capsule".into(), None);
+        let pending = one_read_grant(&mut state);
+        let epoch = pending.epoch;
+        for n in 0..33 {
+            state
+                .grants
+                .lock()
+                .expect("grant book")
+                .revoke(&format!("other-{n}"));
+        }
+        let err = state
+            .finish_grant(pending, Ok(token_line("g0", "")))
+            .expect_err("the in-flight grant is refused");
+        let message = format!("{err:?}");
+        assert!(message.contains("revoked"), "{message}");
+        assert!(state.grants.lock().expect("grant book").blocks_read("g0"));
+        assert_ne!(state.grants.lock().expect("grant book").epoch(), epoch);
+    }
+
+    #[test]
+    fn a_once_grant_read_then_present_is_refused() {
+        let mut state = ComponentState::new(None, "capsule".into(), None);
+        let pending = one_read_grant(&mut state);
+        let grant = state
+            .finish_grant(pending, Ok(token_line("once", r#","max_uses":1"#)))
+            .expect("once grant");
+        let request = v2::elastos::bus::types::InvokeRequest {
+            resource: "localhost://Local/a".into(),
+            operation: "read".into(),
+            grant: Some(grant.id.clone()),
+            params: br#"{"max_bytes":8}"#.to_vec(),
+        };
+        let read = state.begin_read(&request, false).expect("begin read");
+        let body = r#"{"id":1,"response":{"type":"resource_result","result":{"status":"ok","data":{"content":{"b64":"aGk="},"size":2}}}}"#;
+        state
+            .finish_read(read, Ok(body.to_string()))
+            .expect("the one read");
+        assert!(state.grants.lock().expect("grant book").blocks_read("once"));
+        let doc = r#"{"frame":[{"image":{"grant":"once"}}]}"#;
+        let err = state
+            .present_document(crate::providers::bus2_ui::UI_MEDIA_TYPE, doc.as_bytes())
+            .expect_err("a spent grant is not presented");
+        assert!(format!("{err:?}").contains("spent"), "{err:?}");
+
+        let pending = one_read_grant(&mut state);
+        let grant = state
+            .finish_grant(pending, Ok(token_line("old", r#","expires_at_ms":1"#)))
+            .expect("expired grant");
+        assert_eq!(grant.id, "old");
+        assert!(state.grants.lock().expect("grant book").blocks_read("old"));
+        let doc = r#"{"frame":[{"image":{"grant":"old"}}]}"#;
+        let err = state
+            .present_document(crate::providers::bus2_ui::UI_MEDIA_TYPE, doc.as_bytes())
+            .expect_err("an expired grant is not presented");
+        assert!(format!("{err:?}").contains("expired"), "{err:?}");
     }
 
     fn quiet_v2_engine() -> Engine {
@@ -6528,6 +6720,134 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_unawaited_read_plus_a_burn_plus_an_event_each_15ms_is_ended() {
+        let provider = ComponentProvider::new();
+        let bytes = v2_variant(&[(
+            "i32.const -1 i32.eq\n        if\n          global.get $events global.get $set call $join",
+            "i32.const -1 i32.eq\n        if\n          i32.const 0 i32.const 0 i32.const 65536 memory.fill\n          (loop $burn br $burn)\n          global.get $events global.get $set call $join",
+        )]);
+        let handle = load_v2_fixture(&provider, bytes).await;
+        provider
+            .instances
+            .write()
+            .await
+            .get_mut(&handle.id)
+            .unwrap()
+            .test_max_ticks = 6;
+        provider.start(&handle).await.expect("the burner starts");
+        v2_pending_read(&provider, &handle).await;
+        let sender = provider.instances.read().await[&handle.id]
+            .events
+            .clone()
+            .expect("events");
+        let source = tokio::spawn(async move {
+            while sender
+                .send(v2::elastos::bus::types::Event::Message(Vec::new()))
+                .is_ok()
+            {
+                tokio::time::sleep(Duration::from_millis(15)).await;
+            }
+        });
+        let ending = tokio::time::timeout(Duration::from_secs(1), v2_ending(&provider, &handle))
+            .await
+            .expect("events every 15 ms must not keep the burn alive");
+        source.abort();
+        assert!(
+            ending.contains(ENDING_EPOCH_DEADLINE),
+            "an event during the burn kept it alive: {ending}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_resident_that_sleeps_and_wakes_2000_times_lives() {
+        let provider = ComponentProvider::new();
+        let source = include_str!("../../../../tests/fixtures/components/v2-sleep.wat")
+            .replace(
+                "(global $phase (mut i32) (i32.const 0))",
+                "(global $phase (mut i32) (i32.const 0))\n    (global $left (mut i32) (i32.const 2000))",
+            )
+            .replace(
+                "(func $begin (result i32)\n      (local $code i32)\n      ;; 400 ms on this guest's clock. The test's tick cap is shorter.\n      i64.const 400 call $sleep local.set $code\n      local.get $code i32.const 15 i32.and i32.const 2 i32.eq\n      if call $after-sleep return end\n      i32.const 0 global.set $phase\n      local.get $code i32.const 4 i32.shr_u call $park)",
+                "(func $one-sleep (result i32)\n      (local $code i32)\n      (loop $again\n        global.get $left i32.eqz\n        if call $after-sleep return end\n        global.get $left i32.const 1 i32.sub global.set $left\n        i32.const 2000 global.get $left i32.sub i64.extend_i32_u call $sleep local.set $code\n        local.get $code i32.const 15 i32.and i32.const 2 i32.eq\n        br_if $again)\n      i32.const 0 global.set $phase\n      local.get $code i32.const 4 i32.shr_u call $park)\n    (func $begin (result i32)\n      call $one-sleep)",
+            )
+            .replace(
+                "local.get $result i32.const 15 i32.and i32.const 2 i32.ne\n        if unreachable end\n        call $after-sleep",
+                "local.get $result i32.const 15 i32.and i32.const 2 i32.ne\n        if unreachable end\n        call $one-sleep",
+            );
+        assert!(
+            source.contains("i32.const 2000"),
+            "the sleep loop was not patched"
+        );
+        let handle = load_v2_fixture(&provider, wat::parse_str(source).unwrap()).await;
+        provider
+            .instances
+            .write()
+            .await
+            .get_mut(&handle.id)
+            .unwrap()
+            .test_max_ticks = 4;
+        provider.start(&handle).await.expect("the sleeper starts");
+        let started = Instant::now();
+        let ending = tokio::time::timeout(Duration::from_secs(25), async {
+            loop {
+                if let Some(ending) = provider.endings.read().await.get(&handle.id).cloned() {
+                    return ending;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("2000 sleeps did not finish");
+        assert_eq!(ending, "returned", "{ending}");
+        assert!(
+            started.elapsed() >= Duration::from_millis(1_500),
+            "2000 one-millisecond sleeps returned in {:?}",
+            started.elapsed()
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_resident_woken_every_5ms_lives() {
+        let provider = ComponentProvider::new();
+        let bytes = wat::parse_str(include_str!(
+            "../../../../tests/fixtures/components/v2-resident.wat"
+        ))
+        .unwrap();
+        let handle = load_v2_fixture(&provider, bytes).await;
+        provider
+            .instances
+            .write()
+            .await
+            .get_mut(&handle.id)
+            .unwrap()
+            .test_max_ticks = 4;
+        provider.start(&handle).await.expect("the resident starts");
+        for _ in 0..400 {
+            let sender = provider
+                .instances
+                .read()
+                .await
+                .get(&handle.id)
+                .and_then(|instance| instance.events.clone());
+            let Some(sender) = sender else {
+                panic!(
+                    "a 5 ms wake ended the resident: {:?}",
+                    provider.endings.read().await.get(&handle.id)
+                );
+            };
+            let _ = sender.send(v2::elastos::bus::types::Event::Message(Vec::new()));
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert!(
+            provider.endings.read().await.get(&handle.id).is_none(),
+            "5 ms wakes ended the resident: {:?}",
+            provider.endings.read().await.get(&handle.id)
+        );
+        provider.stop(&handle).await.expect("stop");
+        assert_eq!(v2_ending(&provider, &handle).await, "stopped");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_resident_lives_through_2000_short_wakes() {
         let provider = ComponentProvider::new();
         let bytes = wat::parse_str(include_str!(
@@ -6786,6 +7106,56 @@ mod tests {
             receiver.try_recv(),
             Err(tokio::sync::mpsc::error::TryRecvError::Disconnected)
         ));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn drop_joins_while_a_reader_holds_the_instance_lock() {
+        let provider = ComponentProvider::new();
+        let bytes = wat::parse_str(include_str!(
+            "../../../../tests/fixtures/components/v2-resident.wat"
+        ))
+        .unwrap();
+        let handle = load_v2_fixture(&provider, bytes).await;
+        provider.start(&handle).await.expect("start");
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while provider.threads_live.load(Ordering::Acquire) == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the worker is live");
+        let instances = provider.instances.clone();
+        let live = provider.threads_live.clone();
+        let gate = TestGate::new();
+        let reader_gate = gate.clone();
+        let reader = std::thread::spawn(move || {
+            let _lock = instances.blocking_read();
+            reader_gate.wait();
+        });
+        tokio::task::spawn_blocking({
+            let gate = gate.clone();
+            move || gate.entered()
+        })
+        .await
+        .expect("the reader holds the lock");
+        assert!(live.load(Ordering::Acquire) >= 1);
+        let dropping = std::thread::spawn(move || drop(provider));
+        std::thread::sleep(Duration::from_millis(50));
+        assert!(
+            !dropping.is_finished(),
+            "drop returned while the instance lock was held"
+        );
+        assert!(live.load(Ordering::Acquire) >= 1);
+        gate.open();
+        reader.join().expect("reader");
+        dropping.join().expect("drop");
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while live.load(Ordering::Acquire) != 0 {
+            if Instant::now() > deadline {
+                panic!("the worker was not joined");
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
     }
 
     #[test]

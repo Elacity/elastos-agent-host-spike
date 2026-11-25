@@ -7,6 +7,7 @@
 //! before a key, so those refusals stay the ones named here.
 
 use std::collections::HashSet;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::Value;
 
@@ -339,12 +340,34 @@ struct HeldGrant {
     id: String,
     resource: String,
     actions: Vec<String>,
+    uses_left: Option<u32>,
+    expires_at_ms: Option<u64>,
+}
+
+fn wall_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
 }
 
 impl GrantBook {
     /// Records a grant the host just gave. A closed book, or an id already
     /// revoked, is refused: a late hold must not undo that revoke.
     pub fn hold(&mut self, id: &str, resource: &str, action: &str) -> bool {
+        self.hold_limited(id, resource, action, None, None)
+    }
+
+    /// `uses_left` is the grant's remaining uses. `None` does not run out.
+    /// `expires_at_ms` is wall time. `None` does not expire.
+    pub fn hold_limited(
+        &mut self,
+        id: &str,
+        resource: &str,
+        action: &str,
+        uses_left: Option<u32>,
+        expires_at_ms: Option<u64>,
+    ) -> bool {
         if self.closed || self.revoked.iter().any(|kept| kept == id) {
             return false;
         }
@@ -363,8 +386,33 @@ impl GrantBook {
             id: id.to_string(),
             resource: resource.to_string(),
             actions: vec![action.to_string()],
+            uses_left,
+            expires_at_ms,
         });
         true
+    }
+
+    /// A successful read spends one use. An unlimited grant stays unlimited.
+    pub fn spend(&mut self, id: &str) {
+        if let Some(held) = self.grants.iter_mut().find(|grant| grant.id == id) {
+            if let Some(left) = held.uses_left.as_mut() {
+                *left = left.saturating_sub(1);
+            }
+        }
+    }
+
+    /// `spent`, `expired`, or `missing`. A live grant is `None`.
+    fn refusal(&self, id: &str) -> Option<&'static str> {
+        let Some(held) = self.grants.iter().find(|grant| grant.id == id) else {
+            return Some("missing");
+        };
+        if held.uses_left == Some(0) {
+            return Some("spent");
+        }
+        if held.expires_at_ms.is_some_and(|exp| wall_ms() >= exp) {
+            return Some("expired");
+        }
+        None
     }
 
     pub fn epoch(&self) -> u64 {
@@ -382,6 +430,9 @@ impl GrantBook {
     }
 
     pub fn revoke(&mut self, id: &str) {
+        // Every revoke moves the epoch, including one that finds nothing.
+        // An in-flight grant captured the previous value and will not record.
+        self.epoch = self.epoch.wrapping_add(1);
         let held = self.grants.iter().position(|grant| grant.id == id);
         if held.is_none()
             && (self.revoked.iter().any(|kept| kept == id)
@@ -418,7 +469,7 @@ impl GrantBook {
     /// is not one of the grants this guest holds cannot either, including an
     /// id that has fallen out of the dropped ring.
     pub fn blocks_read(&self, id: &str) -> bool {
-        self.closed || self.grants.iter().all(|grant| grant.id != id)
+        self.closed || self.refusal(id).is_some()
     }
 
     pub fn is_empty(&self) -> bool {
@@ -478,6 +529,15 @@ pub fn present_frame(
                         "{grant} is not a grant this guest holds"
                     )));
                 };
+                match book.refusal(&grant) {
+                    Some("spent") => {
+                        return Err(PresentError::Denied(format!("{grant} is spent")));
+                    }
+                    Some("expired") => {
+                        return Err(PresentError::Denied(format!("{grant} is expired")));
+                    }
+                    _ => {}
+                }
                 if !held.actions.iter().any(|action| action == "read") {
                     return Err(PresentError::Denied(format!("{grant} does not allow read")));
                 }
