@@ -5683,7 +5683,6 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
 
         let _guard = LocalAppsGuard::lock();
-        elastos_server::local_apps::set_local_apps_refusal_for_test(None);
         let bad_key = [0x31; 32];
         let good_key = [0x32; 32];
         let bad = TempDir::new().unwrap();

@@ -401,7 +401,7 @@ fn migration_io(path: &Path, why: &str, err: std::io::Error) -> anyhow::Error {
         return anyhow::anyhow!(text);
     }
     if let Some(sentence) = text.strip_prefix("localhost-refusal\n") {
-        return anyhow::anyhow!(sentence);
+        return anyhow::anyhow!("{sentence}");
     }
     if why == "cannot be replaced" {
         return localhost_write_refused(path, &text);
