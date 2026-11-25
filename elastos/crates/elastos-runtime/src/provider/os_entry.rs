@@ -901,6 +901,16 @@ mod tests {
             .to_string()
     }
 
+    #[cfg(all(
+        not(elastos_unsupported_os_check),
+        any(
+            target_os = "macos",
+            all(
+                target_os = "linux",
+                any(target_arch = "x86_64", target_arch = "aarch64")
+            )
+        )
+    ))]
     fn full_grant() -> ProviderAuthority {
         serde_json::from_value(serde_json::json!({
             "reason": "runtime grant",
@@ -1867,6 +1877,16 @@ mod tests {
         binary
     }
 
+    #[cfg(all(
+        not(elastos_unsupported_os_check),
+        any(
+            target_os = "macos",
+            all(
+                target_os = "linux",
+                any(target_arch = "x86_64", target_arch = "aarch64")
+            )
+        )
+    ))]
     fn probe_stdio() -> (ChildStdio, i32, i32) {
         let (input_read, input_write) = pipe_pair();
         let (output_read, output_write) = pipe_pair();
@@ -1881,6 +1901,16 @@ mod tests {
         (stdio, input_read, output_write)
     }
 
+    #[cfg(all(
+        not(elastos_unsupported_os_check),
+        any(
+            target_os = "macos",
+            all(
+                target_os = "linux",
+                any(target_arch = "x86_64", target_arch = "aarch64")
+            )
+        )
+    ))]
     fn wait_text(status: i32) -> String {
         if libc::WIFEXITED(status) {
             format!("exit {}", libc::WEXITSTATUS(status))
@@ -2112,6 +2142,16 @@ fn main() {
         );
     }
 
+    #[cfg(all(
+        not(elastos_unsupported_os_check),
+        any(
+            target_os = "macos",
+            all(
+                target_os = "linux",
+                any(target_arch = "x86_64", target_arch = "aarch64")
+            )
+        )
+    ))]
     fn reap_probe(pid: libc::pid_t, from_child: &OwnedFd) -> i32 {
         let fd = from_child.as_raw_fd();
         unsafe {

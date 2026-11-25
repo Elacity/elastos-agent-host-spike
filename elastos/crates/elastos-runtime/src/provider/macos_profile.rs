@@ -162,9 +162,12 @@ pub(super) fn render_path_allow_profile(
 
 #[cfg(test)]
 mod tests {
+    #[cfg(not(elastos_unsupported_os_check))]
     use super::*;
+    #[cfg(not(elastos_unsupported_os_check))]
     use std::collections::BTreeSet;
 
+    #[cfg(not(elastos_unsupported_os_check))]
     fn forms(profile: &str) -> Vec<&str> {
         profile
             .lines()
@@ -173,6 +176,7 @@ mod tests {
             .collect()
     }
 
+    #[cfg(not(elastos_unsupported_os_check))]
     fn path_arguments(profile: &str) -> Vec<&str> {
         let mut arguments = Vec::new();
         for line in profile.lines() {
