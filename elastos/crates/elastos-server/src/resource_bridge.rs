@@ -1355,9 +1355,10 @@ fn submit_agent_plan_response(
 /// Local, Public, and Users are offered. Any other localhost root is named.
 fn unoffered_v2_read_root(resource: &str) -> Option<&str> {
     let (root, _) = elastos_common::localhost::parse_localhost_uri(resource)?;
-    match root {
-        "Local" | "Public" | "Users" => None,
-        other => Some(other),
+    if elastos_common::localhost::v2_read_offers(root) {
+        None
+    } else {
+        Some(root)
     }
 }
 

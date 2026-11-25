@@ -13,7 +13,9 @@ use std::fs;
 use std::io::{self, BufRead, Read, Write};
 use std::path::{Path, PathBuf};
 
-use elastos_common::localhost::{is_plaintext_root, parse_localhost_path, parse_localhost_uri};
+use elastos_common::localhost::{
+    is_plaintext_root, parse_localhost_path, parse_localhost_uri, v2_read_offers,
+};
 
 /// Per-person (`Users`) and per-agent (`UsersAI`) areas. A request that reaches
 /// one of these roots must name it; a symlink from another root must not widen
@@ -842,17 +844,32 @@ impl LocalProvider {
     }
 }
 
-fn v2_read_code(err: &io::Error) -> String {
-    let message = err.to_string();
-    if message.contains("revision_conflict") {
-        "revision_conflict".to_string()
-    } else if message.contains("is not offered") {
-        "root_not_offered".to_string()
-    } else if message.contains("over the read cap") {
-        "invalid".to_string()
-    } else {
-        "read_failed".to_string()
+#[derive(Debug)]
+struct V2ReadFail {
+    code: &'static str,
+    message: String,
+}
+
+impl std::fmt::Display for V2ReadFail {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.message)
     }
+}
+
+impl std::error::Error for V2ReadFail {}
+
+fn v2_fail(code: &'static str, message: impl Into<String>) -> io::Error {
+    io::Error::other(V2ReadFail {
+        code,
+        message: message.into(),
+    })
+}
+
+fn v2_read_code(err: &io::Error) -> String {
+    err.get_ref()
+        .and_then(|inner| inner.downcast_ref::<V2ReadFail>())
+        .map(|fail| fail.code.to_string())
+        .unwrap_or_else(|| "read_failed".to_string())
 }
 
 /// Local, Public, and Users. Any other root is returned by name.
@@ -862,7 +879,7 @@ fn offered_v2_root(path: &str) -> Result<(), String> {
         .trim_start_matches("localhost://")
         .trim_start_matches('/');
     match parse_localhost_path(trimmed).map(|(root, _)| root) {
-        Some("Local" | "Public" | "Users") => Ok(()),
+        Some(name) if v2_read_offers(name) => Ok(()),
         Some(name) => Err(name.to_string()),
         None => Err(trimmed.split('/').next().unwrap_or(trimmed).to_string()),
     }
@@ -879,8 +896,28 @@ fn between_revision_reads() {
     }
 }
 
+/// Smallest plaintext a hex-JSON envelope of `file_len` bytes can hold.
+/// The wrapper and the 16-byte tag are taken at their largest, so a file
+/// this bound calls too big is too big. A smaller file is judged after decrypt.
+fn encrypted_plaintext_lower_bound(file_len: u64) -> u64 {
+    const MAX_WRAPPER: u64 = 96;
+    const TAG: u64 = 16;
+    (file_len.saturating_sub(MAX_WRAPPER) / 2).saturating_sub(TAG)
+}
+
+fn window_of(bytes: &[u8], start: u64, window: u64) -> Vec<u8> {
+    let start = usize::try_from(start)
+        .unwrap_or(usize::MAX)
+        .min(bytes.len());
+    let room = usize::try_from(window).unwrap_or(usize::MAX);
+    let end = start.saturating_add(room).min(bytes.len());
+    bytes[start..end].to_vec()
+}
+
 /// A v2 read. The file is refused before its body is read when it is larger
-/// than the window. The body is read twice; a change is `revision_conflict`.
+/// than the window. An encrypted file is judged by its plaintext, not the
+/// hex envelope. The body is read once. A change of length or mtime during
+/// that read is `revision_conflict`.
 fn read_v2_window(
     provider: &LocalProvider,
     path: &str,
@@ -889,8 +926,8 @@ fn read_v2_window(
     length: Option<u64>,
 ) -> io::Result<serde_json::Value> {
     if let Err(root) = offered_v2_root(path) {
-        return Err(io::Error::new(
-            io::ErrorKind::PermissionDenied,
+        return Err(v2_fail(
+            "root_not_offered",
             format!("{root} is not offered"),
         ));
     }
@@ -904,25 +941,36 @@ fn read_v2_window(
     }
     let start = offset.unwrap_or(0);
     let window = length.unwrap_or(u64::MAX);
-    if metadata.len().saturating_sub(start) > window {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "object is over the read cap",
-        ));
+    let encrypted = provider.encryption_key.is_some() && !LocalProvider::is_plaintext_path(path);
+    if encrypted {
+        if encrypted_plaintext_lower_bound(metadata.len()).saturating_sub(start) > window {
+            return Err(v2_fail("invalid", "object is over the read cap"));
+        }
+    } else if metadata.len().saturating_sub(start) > window {
+        return Err(v2_fail("invalid", "object is over the read cap"));
     }
-    let first = provider.read_file(path, token, offset, length)?;
+    let read_once = |provider: &LocalProvider| -> io::Result<Vec<u8>> {
+        if !encrypted {
+            return provider.read_file(path, token, offset, length);
+        }
+        let plain = provider.read_file(path, token, None, None)?;
+        if (plain.len() as u64).saturating_sub(start) > window {
+            return Err(v2_fail("invalid", "object is over the read cap"));
+        }
+        Ok(window_of(&plain, start, window))
+    };
+    let before_len = metadata.len();
+    let before_modified = metadata.modified().ok();
+    let bytes = read_once(provider)?;
     between_revision_reads();
-    let second = provider.read_file(path, token, offset, length)?;
-    if first != second {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "revision_conflict",
-        ));
+    let after = fs::metadata(&full_path)?;
+    if after.len() != before_len || after.modified().ok() != before_modified {
+        return Err(v2_fail("revision_conflict", "revision_conflict"));
     }
     Ok(serde_json::json!({
-        "content": { "b64": encode_b64(&first) },
-        "size": first.len(),
-        "revision": fnv_hex(&first),
+        "content": { "b64": encode_b64(&bytes) },
+        "size": bytes.len(),
+        "revision": fnv_hex(&bytes),
     }))
 }
 
@@ -1808,15 +1856,19 @@ mod tests {
     fn v2_windowed_read_bounds_an_encrypted_users_file() {
         let dir = setup_test_dir();
         fs::create_dir_all(dir.path().join("Users")).unwrap();
+        fs::create_dir_all(dir.path().join("Local")).unwrap();
         let mut provider = make_encrypted_provider(&dir);
         provider
             .write_file("Users/small.txt", "token", b"secret", false)
+            .unwrap();
+        provider
+            .write_file("Local/note.txt", "token", b"journal v1", false)
             .unwrap();
         let ok: ProviderRequest = serde_json::from_value(serde_json::json!({
             "op": "read",
             "path": "Users/small.txt",
             "offset": 0,
-            "length": 4096,
+            "length": 64,
             "check_revision": true
         }))
         .unwrap();
@@ -1824,6 +1876,18 @@ mod tests {
             panic!("a small encrypted file must be readable");
         };
         assert_eq!(data["content"]["b64"], encode_b64(b"secret"));
+        let local: ProviderRequest = serde_json::from_value(serde_json::json!({
+            "op": "read",
+            "path": "Local/note.txt",
+            "offset": 0,
+            "length": 64,
+            "check_revision": true
+        }))
+        .unwrap();
+        let ProviderResponse::Ok { data: Some(data) } = provider.handle_request(local) else {
+            panic!("a 10-byte encrypted Local file must fit a 64-byte window");
+        };
+        assert_eq!(data["content"]["b64"], encode_b64(b"journal v1"));
         provider
             .write_file("Users/big.txt", "token", &[7u8; 32], false)
             .unwrap();
@@ -1841,5 +1905,81 @@ mod tests {
             }
             other => panic!("the encrypted body was read: {other:?}"),
         }
+    }
+
+    #[test]
+    fn an_encrypted_local_file_over_half_the_window_is_the_plaintext() {
+        let dir = setup_test_dir();
+        fs::create_dir_all(dir.path().join("Local")).unwrap();
+        let mut provider = make_encrypted_provider(&dir);
+        let plain = vec![b'a'; 40_000];
+        provider
+            .write_file("Local/report.txt", "token", &plain, false)
+            .unwrap();
+        let window = 65_536u64;
+        assert!(plain.len() as u64 > window / 2);
+        let request: ProviderRequest = serde_json::from_value(serde_json::json!({
+            "op": "read",
+            "path": "Local/report.txt",
+            "offset": 0,
+            "length": window,
+            "check_revision": true
+        }))
+        .unwrap();
+        let ProviderResponse::Ok { data: Some(data) } = provider.handle_request(request) else {
+            panic!("plaintext over half the window must be returned");
+        };
+        assert_eq!(data["content"]["b64"], encode_b64(&plain));
+    }
+
+    #[test]
+    fn a_16mib_encrypted_local_read_stays_inside_two_seconds() {
+        let dir = setup_test_dir();
+        fs::create_dir_all(dir.path().join("Local")).unwrap();
+        let mut provider = make_encrypted_provider(&dir);
+        let cap = 16 * 1024 * 1024;
+        let plain = vec![b'b'; cap];
+        provider
+            .write_file("Local/report.bin", "token", &plain, false)
+            .unwrap();
+        let rss = || -> u64 {
+            let output = std::process::Command::new("ps")
+                .args(["-o", "rss=", "-p", &std::process::id().to_string()])
+                .output()
+                .expect("ps");
+            String::from_utf8_lossy(&output.stdout)
+                .split_whitespace()
+                .next()
+                .unwrap_or("0")
+                .parse()
+                .unwrap_or(0)
+        };
+        let before = rss();
+        let started = std::time::Instant::now();
+        let request: ProviderRequest = serde_json::from_value(serde_json::json!({
+            "op": "read",
+            "path": "Local/report.bin",
+            "offset": 0,
+            "length": cap,
+            "check_revision": true
+        }))
+        .unwrap();
+        let response = provider.handle_request(request);
+        let elapsed = started.elapsed();
+        let after = rss();
+        let ProviderResponse::Ok { data: Some(data) } = response else {
+            panic!("a 16 MiB plaintext must fit the cap");
+        };
+        assert_eq!(data["size"], cap);
+        println!(
+            "16mib elapsed_ms={} rss_kib_before={before} rss_kib_after={after}",
+            elapsed.as_millis()
+        );
+        assert!(
+            cfg!(debug_assertions) || elapsed < std::time::Duration::from_secs(2),
+            "the read took {elapsed:?}"
+        );
+        let growth = after.saturating_sub(before);
+        assert!(growth < 256 * 1024, "rss grew by {growth} KiB");
     }
 }

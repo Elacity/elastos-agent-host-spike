@@ -106,6 +106,14 @@ pub fn is_plaintext_root(root: &str) -> bool {
     matches!(root, "MyWebSite" | "Public")
 }
 
+/// Roots a v2 read may name. The bridge and the localhost provider both use
+/// this list, so the two processes cannot drift.
+pub const V2_READ_ROOTS: &[&str] = &["Local", "Public", "Users"];
+
+pub fn v2_read_offers(root: &str) -> bool {
+    V2_READ_ROOTS.contains(&root)
+}
+
 pub fn file_backed_prefixes() -> Vec<String> {
     FILE_BACKED_ROOTS
         .iter()
@@ -321,6 +329,13 @@ pub fn ensure_system_service_roots(base_dir: &Path) -> std::io::Result<Vec<PathB
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn v2_read_roots_are_local_public_and_users() {
+        assert_eq!(V2_READ_ROOTS, ["Local", "Public", "Users"]);
+        assert!(v2_read_offers("Local"));
+        assert!(!v2_read_offers("MyWebSite"));
+    }
 
     #[test]
     fn test_parse_localhost_uri() {

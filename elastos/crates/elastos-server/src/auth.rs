@@ -7022,10 +7022,9 @@ fn read_protected_principal_root_object_file(
 }
 
 /// The most content a Library read of this object can return, judged from
-/// its head and tail only, never its body (#481). A canonical envelope bound
-/// here under the current key opens only by decrypting, which returns less
-/// than three quarters of its length: the base64 ciphertext's share. Anything
-/// else counts its whole length, since a plaintext file is read whole.
+/// its head and tail only, never its body (#481). A canonical envelope counts
+/// the decoded ciphertext, not the JSON around it. The AES-GCM tag stays in
+/// that ceiling. Anything else counts its whole length.
 pub(crate) fn principal_root_object_content_bound(
     data_dir: &Path,
     principal_id: &str,
@@ -7051,9 +7050,33 @@ pub(crate) fn principal_root_object_content_bound(
     let probe = classify_principal_root_object_file(&mut file, len, &expected, &mut no_whole_reads)
         .with_context(|| format!("failed to read {path:?}"))?;
     Ok(match probe.class {
-        PrincipalRootObjectFileClass::Envelope => len / 4 * 3,
+        PrincipalRootObjectFileClass::Envelope => envelope_content_bound(len, &probe.prefix),
         _ => len,
     })
+}
+
+/// Decoded-byte ceiling of a no-pad base64 length. A length that is not
+/// base64 counts itself, so the ceiling never sits under the ciphertext.
+fn base64_decoded_upper(len: u64) -> u64 {
+    match len % 4 {
+        0 => len / 4 * 3,
+        2 => len / 4 * 3 + 1,
+        3 => len / 4 * 3 + 2,
+        _ => len,
+    }
+}
+
+/// Content ceiling of a canonical envelope: the ciphertext only. The tag is
+/// not subtracted. A head this probe cannot parse keeps the old three-quarter
+/// ceiling, which is still at least the ciphertext.
+fn envelope_content_bound(file_len: u64, prefix: &[u8]) -> u64 {
+    let CanonicalHeadParse::Complete(head) = parse_canonical_envelope_head(prefix) else {
+        return file_len / 4 * 3;
+    };
+    let Some(b64_len) = file_len.checked_sub(head.len as u64 + CANONICAL_TAIL.len() as u64) else {
+        return file_len / 4 * 3;
+    };
+    base64_decoded_upper(b64_len)
 }
 
 /// A file whose canonical label names another format, Home, place or key is
