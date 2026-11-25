@@ -282,6 +282,7 @@ fn enabled_file(agents: Vec<StoredAgent>) -> AgentRecordsFile {
             at: 5,
         }),
         agents,
+        last_audit: None,
     }
 }
 
@@ -1648,6 +1649,66 @@ fn a_lost_retire_row_is_appended_once_on_the_next_open() {
         .filter(|event| event.event_type == "agent.record.retire")
         .collect();
     assert_eq!(retires.len(), 1, "the repair appends the retire row once");
+    assert_eq!(
+        retires[0].principal_id.as_deref(),
+        Some(agent.agent_id.as_str())
+    );
+}
+
+/// Agent A is already retired and audited. Agent B's retire lands in the file
+/// and loses its audit row. The next open repairs B, and A's retire stays one row.
+#[test]
+fn a_lost_retire_repairs_the_agent_that_lost_its_row() {
+    if crate::agents::require_build().is_err() {
+        return;
+    }
+    let home = Home::new();
+    turn_on(&home);
+    let first = create_one(&home, "request-retire-a");
+    let second = create_one(&home, "request-retire-b");
+    retire_in_any_build(home.path(), &home.caller(), &first.agent_id, 11).unwrap();
+    let first_rows = home
+        .agent_events()
+        .into_iter()
+        .filter(|event| {
+            event.event_type == "agent.record.retire"
+                && event.principal_id.as_deref() == Some(first.agent_id.as_str())
+        })
+        .count();
+    crate::agents::FAIL_RECORD_AUDIT.store(true, std::sync::atomic::Ordering::SeqCst);
+    let failed = retire_in_any_build(home.path(), &home.caller(), &second.agent_id, 12);
+    assert!(failed.is_err(), "the injected append failure must surface");
+    let again = retire_in_any_build(home.path(), &home.caller(), &second.agent_id, 13);
+    assert_eq!(refusal_of(again), ALREADY_RETIRED);
+    let retires: Vec<_> = home
+        .agent_events()
+        .into_iter()
+        .filter(|event| event.event_type == "agent.record.retire")
+        .collect();
+    assert_eq!(
+        retires
+            .iter()
+            .filter(|event| event.principal_id.as_deref() == Some(first.agent_id.as_str()))
+            .count(),
+        first_rows,
+        "the earlier agent's retire is not written again"
+    );
+    assert_eq!(
+        retires
+            .iter()
+            .filter(|event| event.principal_id.as_deref() == Some(second.agent_id.as_str()))
+            .count(),
+        1,
+        "the lost row is the second agent's"
+    );
+    let file = loaded(&home);
+    let audit = file
+        .last_audit
+        .as_ref()
+        .expect("the sequence records its audit");
+    assert!(audit.confirmed);
+    assert_eq!(audit.subject, second.agent_id);
+    assert_eq!(audit.operation, "agent.record.retire");
 }
 
 #[test]

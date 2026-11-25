@@ -8,51 +8,45 @@ use std::path::Path;
 use elastos_runtime::auth::RuntimeAuditEventV1;
 use sha2::{Digest, Sha256};
 
-/// The retire write stores the tombstone and then appends `agent.record.retire`.
-/// If that append fails, the next open under the agent lock finds this
-/// sequence with no audit event and appends the retire row once.
-pub(crate) fn repair_missing_retire(
+/// The file write stores the operation and then appends its audit row. If
+/// that append fails, the next open under the agent lock appends the row for
+/// this sequence's operation and subject once. A later open that already
+/// finds the row only marks the file confirmed.
+pub(crate) fn repair_recorded_audit(
     data_dir: &Path,
-    sequence: u64,
-    agent_id: &str,
-    retired_at: Option<u64>,
-    owner_proof_binding_id: Option<&str>,
+    pending: &crate::agents::LastAudit,
     file_bytes: &[u8],
 ) -> anyhow::Result<()> {
-    if sequence == 0 {
+    if pending.sequence == 0 || pending.confirmed {
         return Ok(());
     }
-    let Some(retired_at) = retired_at else {
-        return Ok(());
-    };
     let digest = hex::encode(Sha256::digest(file_bytes));
-    let prefix = format!("audit:agent-records:{sequence}:");
-    let seq = format!("seq={sequence}");
+    let prefix = format!("audit:agent-records:{}:", pending.sequence);
+    let seq = format!("seq={}", pending.sequence);
     let state = crate::auth::load_auth_state(data_dir)?;
     let present = state.audit.iter().any(|event| {
         event.event_id.starts_with(&prefix)
-            || (event.event_type == "agent.record.retire" && event.reason.contains(&seq))
+            || (event.event_type == pending.operation
+                && event.principal_id.as_deref() == Some(pending.subject.as_str())
+                && event.reason.contains(&seq))
     });
     if present {
         return Ok(());
     }
-    let Some(proof_binding_id) = owner_proof_binding_id else {
-        anyhow::bail!("retired agent's owner is not in the sign-in file");
-    };
     crate::auth::append_audit_event(
         data_dir,
         RuntimeAuditEventV1 {
             schema: RuntimeAuditEventV1::SCHEMA.to_string(),
-            event_id: format!("audit:agent-records:{sequence}:{}", &digest[..16]),
-            event_type: "agent.record.retire".to_string(),
-            principal_id: Some(agent_id.to_string()),
-            proof_binding_id: Some(proof_binding_id.to_string()),
-            session_id: Some("agent-file-repair".to_string()),
+            event_id: format!("audit:agent-records:{}:{}", pending.sequence, &digest[..16]),
+            event_type: pending.operation.clone(),
+            principal_id: Some(pending.subject.clone()),
+            proof_binding_id: Some(pending.proof_binding_id.clone()),
+            session_id: Some(pending.session_id.clone()),
             challenge_id: None,
             capsule_id: None,
             result: "ok".to_string(),
-            reason: format!("seq={sequence} sha256={digest}"),
-            occurred_at: retired_at,
+            reason: format!("seq={} sha256={digest}", pending.sequence),
+            occurred_at: pending.at,
             signer_did: None,
             signature: None,
         },

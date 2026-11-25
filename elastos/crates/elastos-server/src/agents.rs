@@ -152,6 +152,24 @@ pub(crate) struct AgentRecordsFile {
     /// Who turned agents on for this Home, and when. Null while they are off.
     enabled: Option<Enabled>,
     agents: Vec<StoredAgent>,
+    /// The operation this sequence wrote, and whether its audit row landed.
+    /// Absent on a file written before this field. A lost append repairs this
+    /// operation once; it does not pick another agent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    last_audit: Option<LastAudit>,
+}
+
+/// The audit row a sequence promised. `confirmed` stays false until that row
+/// is in the chain, including after the chain has dropped older rows.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct LastAudit {
+    pub(crate) sequence: u64,
+    pub(crate) operation: String,
+    pub(crate) subject: String,
+    pub(crate) proof_binding_id: String,
+    pub(crate) session_id: String,
+    pub(crate) at: u64,
+    pub(crate) confirmed: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -186,6 +204,7 @@ impl AgentRecordsFile {
             sequence: 0,
             enabled: None,
             agents: Vec::new(),
+            last_audit: None,
         }
     }
 }
@@ -555,7 +574,7 @@ fn open(data_dir: &Path, for_write: bool) -> anyhow::Result<Opened> {
                 && record.proof_binding.kind != ProofBindingKind::AgentAdmission
         })
         .collect();
-    let file = match load(data_dir, &owner_file)? {
+    let mut file = match load(data_dir, &owner_file)? {
         AgentFile::Missing => AgentRecordsFile::unwritten(),
         AgentFile::Loaded(file) => file,
         AgentFile::Unavailable(reason) => {
@@ -563,30 +582,22 @@ fn open(data_dir: &Path, for_write: bool) -> anyhow::Result<Opened> {
         }
     };
     if for_write {
-        if let Some(agent) = file
-            .agents
-            .iter()
-            .find(|agent| agent.record.retired_at.is_some())
-        {
-            let bytes = std::fs::read(agent_file_path(data_dir)?)?;
-            let Some(owner_id) = agent.record.owner.as_deref() else {
-                anyhow::bail!("retired agent names no owner");
-            };
-            let proof = owner_file
+        if let Some(pending) = file.last_audit.clone().filter(|audit| {
+            !audit.confirmed && audit.sequence == file.sequence && audit.sequence != 0
+        }) {
+            let held = owner_file
                 .iter()
-                .find(|record| record.principal_id == owner_id)
-                .map(|record| record.proof_binding_id.as_str());
-            if proof.is_none() {
+                .any(|record| record.proof_binding_id == pending.proof_binding_id);
+            if !held {
                 anyhow::bail!("retired agent's owner is not in the sign-in file");
             }
-            crate::agent_record_audit::repair_missing_retire(
-                data_dir,
-                file.sequence,
-                &agent.record.principal_id,
-                agent.record.retired_at,
-                proof,
-                &bytes,
-            )?;
+            let bytes = std::fs::read(agent_file_path(data_dir)?)?;
+            crate::agent_record_audit::repair_recorded_audit(data_dir, &pending, &bytes)?;
+            if let Some(audit) = file.last_audit.as_mut() {
+                audit.confirmed = true;
+            }
+            let updated = serde_json::to_vec_pretty(&file)?;
+            crate::auth::atomic_write(&agent_file_path(data_dir)?, &updated)?;
         }
     }
     Ok(Opened {
@@ -616,7 +627,17 @@ fn write(
     if let Err(reason) = check(after, &opened.owner_file) {
         anyhow::bail!("agent file change refused: {reason}");
     }
-    let bytes = serde_json::to_vec_pretty(after)?;
+    let mut recorded = after.clone();
+    recorded.last_audit = Some(LastAudit {
+        sequence: after.sequence,
+        operation: operation.event_type().to_string(),
+        subject: subject.to_string(),
+        proof_binding_id: caller.proof_binding_id.to_string(),
+        session_id: caller.session_id.to_string(),
+        at: now,
+        confirmed: false,
+    });
+    let bytes = serde_json::to_vec_pretty(&recorded)?;
     crate::auth::atomic_write(&agent_file_path(data_dir)?, &bytes)?;
     #[cfg(test)]
     if FAIL_RECORD_AUDIT.swap(false, std::sync::atomic::Ordering::SeqCst) {
@@ -640,7 +661,13 @@ fn write(
             signer_did: None,
             signature: None,
         },
-    )
+    )?;
+    if let Some(audit) = recorded.last_audit.as_mut() {
+        audit.confirmed = true;
+    }
+    let confirmed = serde_json::to_vec_pretty(&recorded)?;
+    crate::auth::atomic_write(&agent_file_path(data_dir)?, &confirmed)?;
+    Ok(())
 }
 
 /// An agent that is off, retired, or on a Home with agents off cannot ask,
