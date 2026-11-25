@@ -560,9 +560,7 @@ async fn spawn_allow_listed_provider(
             .and_then(|value| value.as_str())
             .unwrap_or("");
         if elastos_identity::decode_did_key(did.trim()).is_err() {
-            return Err(provider::bridge::BridgeError::Refused(
-                "object helper spawn refused: no public runtime DID".into(),
-            ));
+            return Err(provider::bridge::BridgeError::NoPublicRuntimeDid);
         }
     }
     let authority = binaries::AdmittedProvider::admit(data_dir, component_key)
@@ -1324,13 +1322,10 @@ async fn setup_server_infrastructure_impl(
                         }
                         tracing::info!("object-provider capsule from {}", path.display());
                     }
-                    Err(e) => {
-                        if e.to_string().contains("no public runtime DID") {
-                            tracing::error!("{e}");
-                        } else {
-                            tracing::warn!("Failed to spawn object-provider: {e}");
-                        }
+                    Err(provider::bridge::BridgeError::NoPublicRuntimeDid) => {
+                        tracing::error!("object helper spawn refused: no public runtime DID");
                     }
+                    Err(e) => tracing::warn!("Failed to spawn object-provider: {e}"),
                 }
             }
         },
@@ -5184,6 +5179,10 @@ fn main() {
         let Err(err) = started else {
             panic!("a missing public runtime DID must refuse the spawn");
         };
+        assert!(matches!(
+            err,
+            provider::bridge::BridgeError::NoPublicRuntimeDid
+        ));
         assert_eq!(
             err.to_string(),
             "object helper spawn refused: no public runtime DID"

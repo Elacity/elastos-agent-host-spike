@@ -66,7 +66,7 @@ impl ObjectProviderProcess {
         }
         #[cfg(unix)]
         if let Err(message) = install_public_runtime_did(&config) {
-            return response_error("refused", &message);
+            return response_error("no_public_runtime_did", &message);
         }
         self.data_dir = Some(data_dir.clone());
         response_ok(json!({
@@ -232,7 +232,7 @@ mod tests {
             "config": { "base_path": dir.path().to_string_lossy().to_string() }
         }));
         assert_eq!(response["status"], "error");
-        assert_eq!(response["code"], "refused");
+        assert_eq!(response["code"], "no_public_runtime_did");
         assert_eq!(
             response["message"],
             "object helper spawn refused: no public runtime DID"

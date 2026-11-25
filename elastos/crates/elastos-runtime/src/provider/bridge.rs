@@ -2722,6 +2722,10 @@ impl ProviderBridge {
         match response {
             ProviderResponse::Ok { .. } => Ok(()),
             ProviderResponse::Error { code, message } => {
+                if code == "no_public_runtime_did" {
+                    let _ = self.shutdown().await;
+                    return Err(BridgeError::NoPublicRuntimeDid);
+                }
                 let shutdown_error = self.shutdown().await.err().map(|err| err.to_string());
                 let detail = match shutdown_error {
                     Some(shutdown_error) => {
