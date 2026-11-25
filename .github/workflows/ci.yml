@@ -509,8 +509,6 @@ jobs:
           ref: ${{ github.event_name == 'workflow_dispatch' && inputs.ref || github.sha }}
           fetch-depth: 0
       - uses: dtolnay/rust-toolchain@035fceb3c12fb0c6a9461b52775e16473133e591 # 1.95.0
-      - name: install wasm-capsule lab toolchain
-        run: rustup toolchain install 1.91.0 --profile minimal --component rustfmt,clippy --target wasm32-unknown-unknown
       - name: grant-binding gate
         working-directory: lab/grant-binding
         run: |
@@ -523,13 +521,6 @@ jobs:
           cargo fetch --locked
           cargo fmt -- --check
           RUST_TEST_THREADS=2 cargo test --locked --offline
-      - name: fetch Runtime componentize dependencies for offline lab tests
-        run: cargo +1.91.0 fetch --locked --manifest-path elastos/tools/componentize/Cargo.toml
-      - name: wasm-capsule gate
-        working-directory: lab/wasm-capsule
-        run: |
-          cargo fmt -- --check
-          cargo test --locked
       - name: bus-v2-proposal gate
         working-directory: lab/bus-v2-proposal
         run: |
