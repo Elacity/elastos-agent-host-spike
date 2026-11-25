@@ -1242,17 +1242,9 @@ async fn owner_stop_reaches_a_guest_when_the_agent_or_the_home_is_off() {
         StatusCode::OK,
         "another owner stopped an agent while agents are off: {other_body}"
     );
-    assert!(
-        guest_is_live(&world, &world.agent_a, &session).await,
-        "the guest was not live before Stop"
-    );
-    let (status, body) = stop(&world, &world.admin, &world.agent_a).await;
-    assert_eq!(
-        status,
-        StatusCode::OK,
-        "stop while the Home has agents off: {body}"
-    );
-    assert_eq!(live_principal(&live(&world).await, &world.agent_a), 0);
+    // This guest runs on the harness runtime. Off does not register that
+    // runtime, so this test does not claim Off left the guest for a later
+    // Stop. The product row is agents_off_ends_the_guest_ensure_running_started.
 }
 
 #[tokio::test]

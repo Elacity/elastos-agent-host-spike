@@ -148,14 +148,16 @@ impl Home {
     }
 
     async fn plane(&self) -> Plane {
-        let plane = crate::api::agent_plane::start(&self.data, None)
+        // The product Home registers the plane here. `start` alone leaves
+        // Off with nothing to stop.
+        crate::api::agent_plane::ensure_running(&self.data, None)
             .await
             .unwrap();
         let coords = wait_coords(&self.data).await;
         Plane {
             url: coords.api_url.clone(),
             secret: coords.attach_secret.clone(),
-            plane,
+            data: self.data.clone(),
         }
     }
 }
@@ -163,17 +165,21 @@ impl Home {
 struct Plane {
     url: String,
     secret: String,
-    plane: crate::api::agent_plane::AgentPlane,
+    data: PathBuf,
 }
 
 impl Plane {
+    fn runtime(&self) -> Arc<crate::runtime::Runtime> {
+        crate::api::agent_plane::plane_runtime(&self.data).expect("the plane is registered")
+    }
+
     async fn token(&self) -> String {
         shell_token(&self.url, &self.secret).await
     }
 
     async fn shutdown(self) {
         let url = self.url.clone();
-        self.plane.shutdown().await;
+        crate::api::agent_plane::stop_running(&self.data).await;
         port_closed(&url).await;
     }
 }
@@ -805,8 +811,7 @@ async fn a_restart_shows_no_orphan_ask() {
     let home = Home::open();
     let plane = home.plane().await;
     let (store, _, _) = plane
-        .plane
-        .runtime
+        .runtime()
         .instance_authority_plane()
         .expect("the plane set its instance authority");
     let request = store
@@ -1012,6 +1017,64 @@ async fn a_hung_guest_leaves_the_gateway_up() {
         .unwrap();
     assert!(!capsule_live(&gateway.agent_url, &gateway.secret, &session).await);
     gateway.health().await;
+    gateway.shutdown().await;
+}
+
+#[tokio::test]
+async fn agents_off_ends_the_guest_ensure_running_started() {
+    let home = Home::open();
+    let dir = home._temp.path().join("probe");
+    let cid = sign_probe(&dir);
+    let agent = home.create_agent("Live", &cid);
+    let gateway = Gateway::start(&home.data).await;
+    let session = home.launch(&agent, &dir).await;
+    assert!(
+        capsule_live(&gateway.agent_url, &gateway.secret, &session).await,
+        "the guest was not live before Off"
+    );
+    let proof = home.context.proof_binding_id().unwrap().to_string();
+    let mut state = crate::auth::load_auth_state(&home.data).unwrap();
+    let owner = state
+        .principals
+        .iter_mut()
+        .find(|principal| principal.principal_id == home.owner)
+        .expect("the owner is stored");
+    owner.proof_binding_id = proof;
+    owner.role = crate::auth::RuntimePrincipalRole::Admin;
+    crate::auth::save_auth_state(&home.data, &state, None).unwrap();
+    let token = super::super::gateway_home_token::issue_home_projection_launch_token_with_context(
+        &home.data,
+        "system",
+        "system",
+        &home.context,
+    )
+    .unwrap();
+    let response = reqwest::Client::new()
+        .post(format!(
+            "http://{}/api/apps/system/agents/disable",
+            gateway.addr
+        ))
+        .header("host", gateway.addr.clone())
+        .header("origin", "null")
+        .header("x-elastos-home-token", token)
+        .header("content-type", "application/json")
+        .body("{}")
+        .send()
+        .await
+        .unwrap();
+    let status = response.status();
+    let body = response.text().await.unwrap();
+    assert_eq!(status, reqwest::StatusCode::OK, "{body}");
+    port_closed(&gateway.agent_url).await;
+    let named = crate::auth::load_auth_state(&home.data)
+        .unwrap()
+        .audit
+        .into_iter()
+        .any(|event| {
+            event.event_type == "agent.stopped"
+                && event.session_id.as_deref() == Some(session.as_str())
+        });
+    assert!(named, "Off did not sign a stopped row for {session}");
     gateway.shutdown().await;
 }
 
@@ -1331,10 +1394,10 @@ async fn a_stopped_plan_is_not_minted() {
 async fn a_grant_with_no_live_session_is_refused_on_the_plane() {
     let home = Home::open();
     let plane = home.plane().await;
-    assert!(plane.plane.runtime.instance_authority_is_set());
-    let (store, _manager, _dir) = plane
-        .plane
-        .runtime
+    let runtime =
+        crate::api::agent_plane::plane_runtime(&home.data).expect("the plane is registered");
+    assert!(runtime.instance_authority_is_set());
+    let (store, _manager, _dir) = runtime
         .instance_authority_plane()
         .expect("the plane set its instance authority");
     let request = store
@@ -1366,8 +1429,7 @@ async fn a_used_storage_grant_is_refused_after_stop_on_the_plane() {
     let home = Home::open();
     let plane = home.plane().await;
     let (store, manager, dir) = plane
-        .plane
-        .runtime
+        .runtime()
         .instance_authority_plane()
         .expect("the plane set its instance authority");
     let session = "capsule:stored";
@@ -1462,8 +1524,7 @@ async fn the_owner_answer_is_refused_at_the_inbox_route() {
     let plane = home.plane().await;
     let session = "capsule:l1-live";
     plane
-        .plane
-        .runtime
+        .runtime()
         .insert_agent_session_for_test(crate::runtime::AgentSessionRecord {
             agent_id: agent_id.clone(),
             owner: home.owner.clone(),
@@ -1473,8 +1534,7 @@ async fn the_owner_answer_is_refused_at_the_inbox_route() {
         })
         .await;
     let (store, _, _) = plane
-        .plane
-        .runtime
+        .runtime()
         .instance_authority_plane()
         .expect("the plane set its instance authority");
     let resource = elastos_runtime::capability::ResourceId::new(format!("{root}/.AppData/journal"));
