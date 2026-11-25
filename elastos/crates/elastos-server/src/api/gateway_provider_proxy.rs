@@ -4010,19 +4010,10 @@ pub(crate) const HOSTED_AGENT_RUN_REFUSED: &str = "hosted_agent_run_refused";
 pub(crate) const HOSTED_AGENT_RUN_SENTENCE: &str =
     "An agent's hosted run needs its stored owner to be an admin with a current approval of this offer.";
 
-/// An admin's own hosted run is allowed. An admitted agent whose stored
-/// owner is an admin and has approved that offer is allowed only when
-/// `reserving_bus` is the Bus path that reserves the signed ceiling.
-pub(super) fn hosted_run_allowed(
-    data_dir: &std::path::Path,
-    context: &HomeLaunchTokenContext,
-    request: &serde_json::Value,
-    reserving_bus: bool,
-) -> bool {
-    hosted_run_refusal(data_dir, context, request, reserving_bus).is_none()
-}
-
-/// `None` when the hosted run is allowed. An agent principal gets
+/// `None` when the hosted run is allowed. An admin's own hosted run is
+/// allowed. An admitted agent whose stored owner is an admin and has
+/// approved that offer is allowed only when `reserving_bus` is the Bus
+/// path that reserves the signed ceiling. An agent principal gets
 /// `HOSTED_AGENT_RUN_REFUSED`. A person who is not an admin keeps
 /// `hosted_run_admin_only`.
 pub(crate) fn hosted_run_refusal(

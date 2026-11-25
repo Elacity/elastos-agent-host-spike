@@ -4,7 +4,7 @@
 
 use std::path::Path;
 
-use super::gateway_provider_proxy::hosted_run_allowed;
+use super::gateway_provider_proxy::hosted_run_refusal;
 use super::HomeLaunchTokenContext;
 
 pub(crate) fn http_hosted_run_with_principal_for_test(
@@ -22,5 +22,5 @@ pub(crate) fn http_hosted_run_with_principal_for_test(
         .map(|principal| principal.proof_binding_id);
     let context =
         HomeLaunchTokenContext::resolved(root, "s8-http".to_string(), proof, "s8-http".to_string());
-    hosted_run_allowed(data_dir, &context, request, false)
+    hosted_run_refusal(data_dir, &context, request, false).is_none()
 }
