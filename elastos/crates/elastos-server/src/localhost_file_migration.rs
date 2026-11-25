@@ -83,6 +83,7 @@ thread_local! {
     static BEFORE_RENAME: std::cell::RefCell<Option<MigrationReplaceHook>> =
         std::cell::RefCell::new(None);
     static PROGRESS_LINES: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
+    static PROGRESS_CLOCK: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
 }
 
 /// Stops the walk after this many migration writes. `None` writes normally.
@@ -114,6 +115,13 @@ pub(crate) fn set_localhost_migration_before_rename(hook: Option<MigrationReplac
 #[cfg(all(unix, test))]
 pub(crate) fn take_localhost_migration_progress_lines() -> Vec<String> {
     PROGRESS_LINES.with(|slot| std::mem::take(&mut *slot.borrow_mut()))
+}
+
+/// Sets the progress clock. `None` uses the wall clock. A test moves this
+/// forward inside the walk, so the progress row does not sleep.
+#[cfg(all(unix, test))]
+pub(crate) fn set_localhost_migration_progress_clock(now: Option<u64>) {
+    PROGRESS_CLOCK.with(|slot| slot.set(now));
 }
 
 #[cfg(all(unix, test))]
@@ -205,9 +213,18 @@ fn unix_secs() -> u64 {
 }
 
 #[cfg(unix)]
+fn progress_now() -> u64 {
+    #[cfg(test)]
+    if let Some(now) = PROGRESS_CLOCK.with(|slot| slot.get()) {
+        return now;
+    }
+    unix_secs()
+}
+
+#[cfg(unix)]
 fn set_migration_root(root: &Path) {
     MIGRATION_ROOT.with(|slot| *slot.borrow_mut() = root.to_path_buf());
-    PROGRESS_AT.with(|slot| slot.set((0, unix_secs())));
+    PROGRESS_AT.with(|slot| slot.set((0, progress_now())));
 }
 
 #[cfg(unix)]
@@ -258,7 +275,7 @@ fn note_progress() {
     PROGRESS_AT.with(|slot| {
         let (count, last) = slot.get();
         let count = count + 1;
-        let now = unix_secs();
+        let now = progress_now();
         if now.saturating_sub(last) >= 3 {
             let line = format!("localhost file migration checked {count} files");
             tracing::info!(target: "elastos", "{line}");

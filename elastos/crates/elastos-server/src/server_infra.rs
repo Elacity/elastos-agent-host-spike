@@ -2525,9 +2525,9 @@ mod tests {
     use crate::localhost_file_migration::{
         hold_localhost_migration_lock, localhost_bringup, localhost_file_key,
         localhost_provider_bridge_config, set_localhost_migration_before_rename,
-        set_localhost_migration_before_replace, set_localhost_migration_write_budget,
-        set_localhost_migration_write_error, take_localhost_migration_progress_lines,
-        LocalhostBringup,
+        set_localhost_migration_before_replace, set_localhost_migration_progress_clock,
+        set_localhost_migration_write_budget, set_localhost_migration_write_error,
+        take_localhost_migration_progress_lines, LocalhostBringup,
     };
     #[cfg(unix)]
     use std::ffi::CString;
@@ -4967,6 +4967,7 @@ mod tests {
             set_localhost_migration_write_error(None);
             set_localhost_migration_before_replace(None);
             set_localhost_migration_before_rename(None);
+            set_localhost_migration_progress_clock(None);
             let _ = take_localhost_migration_progress_lines();
         }
     }
@@ -6255,21 +6256,27 @@ mod tests {
         plant_device_envelope(&root.join("Users/a.bin"), &device_key, b"a");
         plant_device_envelope(&root.join("Users/b.bin"), &device_key, b"b");
         let _clear = ClearLocalhostMigrationFaults;
-        let slept = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let flag = slept.clone();
+        // The product clock starts at 1_000. The first file moves it to 1_003
+        // before the second file is counted. No sleep, and no tracing subscriber.
+        set_localhost_migration_progress_clock(Some(1_000));
+        let advanced = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = advanced.clone();
         set_localhost_migration_before_replace(Some(Box::new(move |_| {
             if flag.swap(true, std::sync::atomic::Ordering::SeqCst) {
                 return;
             }
-            std::thread::sleep(Duration::from_secs(4));
+            set_localhost_migration_progress_clock(Some(1_003));
         })));
+        let started = Instant::now();
         localhost_provider_bridge_config(root, &device_key).unwrap();
-        let lines = take_localhost_migration_progress_lines();
         assert!(
-            lines
-                .iter()
-                .any(|line| line == "localhost file migration checked 2 files"),
-            "{lines:?}"
+            started.elapsed() < Duration::from_secs(2),
+            "the progress row slept"
+        );
+        let lines = take_localhost_migration_progress_lines();
+        assert_eq!(
+            lines,
+            vec!["localhost file migration checked 2 files".to_string()]
         );
     }
 
