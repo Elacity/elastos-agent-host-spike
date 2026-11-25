@@ -34,4 +34,6 @@
 # authority, noted in #1802's description. Measured on main after the merge.
 # +5 for #1804 (P2-8 slice 4a: a capsule start requires the component closure; the gate in
 # capsule/manager.rs component_closure_required). Measured 23 Nov 2026 after merging main.
-13122
+# +10 for the request-map write hold used by the plan-grant drop row. The counter
+# does not treat cfg(any(test, feature = "test-hooks")) as test-only. Measured 25 Nov 2026.
+13132

@@ -473,30 +473,16 @@ impl Drop for UnsettledDispatch {
             serde_json::json!({"status": "unknown", "code": code}),
         );
         crate::runtime::resolve_unknown_plan_effect(&self.request_id);
-        revoke_abandoned_plan_grant_now(&self.request_id);
-    }
-}
-
-/// Revokes on this thread when no runtime is current, and on a joined thread when one is.
-fn revoke_abandoned_plan_grant_now(request_id: &str) {
-    let request_id = request_id.to_string();
-    let run = move || {
-        let Ok(runtime) = tokio::runtime::Builder::new_current_thread().build() else {
-            return;
-        };
-        runtime.block_on(crate::resource_bridge::revoke_abandoned_plan_grant(
-            &request_id,
-        ));
-    };
-    if tokio::runtime::Handle::try_current().is_err() {
-        run();
-        return;
-    }
-    if let Ok(worker) = std::thread::Builder::new()
-        .name("plan-grant-revoke".into())
-        .spawn(run)
-    {
-        let _ = worker.join();
+        let request_id = self.request_id.clone();
+        crate::resource_bridge::refuse_abandoned_plan_grant(&request_id);
+        // The grant table is process memory. A live runtime finishes the
+        // revoke later. With no runtime, the mark and the stored unknown
+        // are the whole end: this process is not going to spend it.
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn(async move {
+                crate::resource_bridge::revoke_abandoned_plan_grant(&request_id).await;
+            });
+        }
     }
 }
 

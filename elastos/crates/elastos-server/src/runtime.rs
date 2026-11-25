@@ -348,8 +348,6 @@ pub(crate) struct PlanBook {
     /// Effects whose record is unknown. Stop names these and then drops them,
     /// so a run of timeouts does not keep a flight or an instance.
     unknown: Vec<UnknownPlanStep>,
-    /// Sessions whose row left while a flight was still open.
-    row_gone: HashSet<String>,
     /// Live-run tokens kept while an effect of an ended session is still in
     /// flight. The last such effect, settled or unknown, drops the token.
     held_runs: HashMap<String, AgentLiveRun>,
@@ -375,7 +373,8 @@ struct UnknownPlanStep {
     session_id: String,
     agent_id: String,
     request_id: String,
-    /// Drop this name at this instant. A product name sets it when recorded.
+    /// Drop this name at this instant. None while its session is live.
+    /// The session's end, or a record made after that end, sets it.
     purge_at: Option<std::time::Instant>,
 }
 
@@ -435,7 +434,6 @@ fn new_plan_book() -> Arc<StdMutex<PlanBook>> {
         instances: HashMap::new(),
         inflight: HashMap::new(),
         unknown: Vec::new(),
-        row_gone: HashSet::new(),
         held_runs: HashMap::new(),
         next: 1,
         #[cfg(test)]
@@ -478,23 +476,18 @@ fn finish_flight(book: &mut PlanBook, id: u64, as_unknown: bool) {
     forget_open_effect(&flight.request_id);
     let session_id = flight.session_id.clone();
     if as_unknown {
-        // One retention from the moment the name is recorded, row or no row.
+        // No purge time while the session is live. After the end, one retention.
+        let purge_at = session_has_ended(book, &flight.session_id)
+            .then(|| book_now(book) + ENDED_CAPSULE_RETENTION);
         push_unknown(
             book,
             UnknownPlanStep {
                 session_id: flight.session_id,
                 agent_id: flight.agent_id,
                 request_id: flight.request_id,
-                purge_at: Some(book_now(book) + ENDED_CAPSULE_RETENTION),
+                purge_at,
             },
         );
-    }
-    if !book
-        .inflight
-        .values()
-        .any(|flight| flight.session_id == session_id)
-    {
-        book.row_gone.remove(&session_id);
     }
     reap(book, &session_id);
     release_held_live_run(book, &session_id);
@@ -538,21 +531,26 @@ fn push_unknown(book: &mut PlanBook, step: UnknownPlanStep) {
     }
 }
 
-/// Drops this session's names once their own purge time has come.
-/// A name that is not yet due stays when the row is swept.
-fn purge_unknown_session(book: &mut PlanBook, session_id: &str) {
+/// Drops names whose purge time has come. A live session's name has none,
+/// so a row sweep does not start its limit. The registry lock is not held.
+fn purge_unknown_session(book: &mut PlanBook, _session_id: &str) {
     drop_due_unknown(book);
-    let now = book_now(book);
-    book.unknown
-        .retain(|step| step.session_id != session_id || step.purge_at.is_some_and(|due| now < due));
-    if book
-        .inflight
-        .values()
-        .any(|flight| flight.session_id == session_id)
-    {
-        book.row_gone.insert(session_id.to_string());
-    } else {
-        book.row_gone.remove(session_id);
+}
+
+/// The plan instance is gone or already stopping.
+fn session_has_ended(book: &PlanBook, session_id: &str) -> bool {
+    book.instances
+        .get(session_id)
+        .is_none_or(|inst| inst.stopping)
+}
+
+/// Names of this session with no purge time get one retention from now.
+fn stamp_unknown_retention(book: &mut PlanBook, session_id: &str) {
+    let due = book_now(book) + ENDED_CAPSULE_RETENTION;
+    for step in &mut book.unknown {
+        if step.session_id == session_id && step.purge_at.is_none() {
+            step.purge_at = Some(due);
+        }
     }
 }
 
@@ -625,6 +623,7 @@ impl PlanBook {
         if let Some(inst) = self.instances.get_mut(session_id) {
             inst.stopping = true;
         }
+        stamp_unknown_retention(self, session_id);
         reap(self, session_id);
     }
 
@@ -801,7 +800,7 @@ const CAUSE_TASK_LOST: &str = "activation task ended before its outcome";
 struct StopCalls {
     cause: Option<String>,
     open: HashSet<u64>,
-    committed: u32,
+    committed: u64,
     next: u64,
 }
 
@@ -2537,12 +2536,23 @@ impl Runtime {
 
     #[cfg(all(test, unix))]
     pub(crate) fn plan_book_is_empty(&self) -> bool {
-        let book = plan_book(&self.plan_book);
+        let mut book = plan_book(&self.plan_book);
+        drop_due_unknown(&mut book);
         book.instances.is_empty()
             && book.inflight.is_empty()
             && book.unknown.is_empty()
-            && book.row_gone.is_empty()
             && book.held_runs.is_empty()
+    }
+
+    /// Instances, flights, and parked live-run tokens. Names are separate.
+    #[cfg(all(test, unix))]
+    pub(crate) fn plan_run_state_for_test(&self) -> (usize, usize, usize) {
+        let book = plan_book(&self.plan_book);
+        (
+            book.instances.len(),
+            book.inflight.len(),
+            book.held_runs.len(),
+        )
     }
 
     pub(crate) fn plan_effect_inflight(&self, session_id: &str) -> bool {
@@ -4675,7 +4685,7 @@ impl Runtime {
         info
     }
 
-    /// Drops unknown names for sessions whose registry row has been pruned.
+    /// Drops names whose purge time has come. A live session's name has none.
     /// The registry lock is not held.
     fn purge_unknown_sessions(&self, session_ids: &[String]) {
         if session_ids.is_empty() {

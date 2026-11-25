@@ -241,10 +241,9 @@ impl ComponentProvider {
         *self.bus_hostcall.write().unwrap() = Some(hostcall);
     }
 
-    /// The hostcall `set_provider_registry` installed. A dependent's tests call
-    /// it. `cfg(test)` is off on this crate when that dependent builds, so
-    /// debug builds keep the method. Release builds do not.
-    #[cfg(debug_assertions)]
+    /// The hostcall a dependent's tests call. This crate's tests compile it,
+    /// and so does `test-hooks`, which only a dev-dependency enables.
+    #[cfg(any(test, feature = "test-hooks"))]
     #[doc(hidden)]
     pub fn call_bus_hostcall_for_test(
         &self,

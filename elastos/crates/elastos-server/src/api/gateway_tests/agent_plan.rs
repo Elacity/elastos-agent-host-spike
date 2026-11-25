@@ -2834,6 +2834,8 @@ async fn a_hundred_timeouts_leave_no_flight_and_no_instance() {
         }}]})
     })
     .await;
+    let start = std::time::Instant::now();
+    plant.runtime.set_plan_clock_for_test(Some(start));
     for n in 0..100u64 {
         let session = format!("session-hundred-{n}");
         plant
@@ -2913,7 +2915,7 @@ async fn a_hundred_timeouts_leave_no_flight_and_no_instance() {
         set_approved(plant.dir.path(), &id);
         super::gateway_inspect_actions::set_plan_dispatch_wait_for_test(
             &id,
-            std::time::Duration::from_secs(2),
+            std::time::Duration::from_millis(200),
         );
         let pause = crate::resource_bridge::arm_plan_dispatch_hold(
             &id,
@@ -2950,10 +2952,23 @@ async fn a_hundred_timeouts_leave_no_flight_and_no_instance() {
         .runtime
         .evict_ended_session_for_test(&plant.session)
         .await;
-    assert!(
-        plant.runtime.plan_book_is_empty(),
+    assert_eq!(
+        plant.runtime.plan_run_state_for_test(),
+        (0, 0, 0),
         "a hundred timeouts left a flight or an instance"
     );
+    assert!(
+        plant.runtime.unknown_count_for_test(&plant.agent) <= 32,
+        "a hundred timeouts kept more than 32 names"
+    );
+    plant
+        .runtime
+        .set_plan_clock_for_test(Some(start + crate::runtime::ENDED_CAPSULE_RETENTION));
+    assert!(
+        plant.runtime.plan_book_is_empty(),
+        "names stayed after the retention that started at the end"
+    );
+    plant.runtime.set_plan_clock_for_test(None);
 }
 
 /// An effect already in flight when the instance ends is recorded as it
@@ -3860,6 +3875,33 @@ async fn an_unknown_name_leaves_after_the_row_when_the_timeout_is_longer() {
     super::gateway_inspect_actions::clear_plan_dispatch_wait_for_test(&plant.id);
 }
 
+/// Unknown at 5s on a live run. Stop at 70s still names the step.
+#[cfg(unix)]
+#[tokio::test]
+async fn an_unknown_on_a_live_run_is_named_when_stop_comes_later() {
+    let dir = tempfile::tempdir().unwrap();
+    let runtime = bare_runtime(dir.path()).await;
+    let agent = "agent:r7-live";
+    let session = "session-r7-live";
+    let start = std::time::Instant::now();
+    runtime.set_plan_clock_for_test(Some(start));
+    register_open_row(&runtime, agent, session).await;
+    runtime.set_plan_clock_for_test(Some(start + std::time::Duration::from_secs(5)));
+    leave_flight(&runtime, session, agent, "live-step");
+    crate::runtime::resolve_unknown_plan_effect("live-step");
+    runtime.set_plan_clock_for_test(Some(start + std::time::Duration::from_secs(70)));
+    assert_eq!(runtime.unknown_count_for_test(agent), 1);
+    let (status, body) = stop_one_capsule(runtime.clone(), session).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let named = body["unknown_steps"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .any(|step| step == "live-step");
+    assert!(named, "Stop did not name the live step: {body}");
+    runtime.set_plan_clock_for_test(None);
+}
+
 /// A capability poll watching the flag during a failing stop does not cancel.
 #[cfg(unix)]
 #[tokio::test]
@@ -4029,7 +4071,8 @@ async fn a_failed_stop_lets_start_say_already_running() {
 }
 
 /// Dropping an unsettled dispatch on a thread with no Tokio runtime settles
-/// once and revokes the parked grant.
+/// once. The grant stays in this process's memory and the spend is refused.
+/// Nothing waits on the async revoke.
 #[cfg(unix)]
 #[tokio::test]
 async fn a_dropped_dispatch_revokes_without_a_runtime() {
@@ -4063,6 +4106,7 @@ async fn a_dropped_dispatch_revokes_without_a_runtime() {
         )
         .await
         .expect("the grant is pending");
+    let spend_token = token.clone();
     crate::resource_bridge::park_abandoned_grant_for_test(
         &plant.id,
         plant.manager.clone(),
@@ -4094,19 +4138,153 @@ async fn a_dropped_dispatch_revokes_without_a_runtime() {
         unknown_audits, 1,
         "the drop wrote more than one unknown audit"
     );
+    let spent =
+        crate::resource_bridge::spend_plan_grant_for_test(&plant.manager, &spend_token).await;
+    assert!(
+        spent.is_err(),
+        "the dropped grant was still spendable: {spent:?}"
+    );
     let row = plant
         .store
         .get_request(pending.id.as_str())
         .await
         .expect("the pending row");
     assert!(
-        matches!(
-            row.status,
-            elastos_runtime::capability::pending::RequestStatus::Denied { ref reason, .. }
-                if reason == "plan dispatch abandoned"
-        ),
-        "the grant was left {row:?}"
+        row.is_granted(),
+        "a drop with no runtime revoked the in-memory row: {row:?}"
     );
+}
+
+/// Drop on a current-thread runtime returns while another task holds the
+/// request-map write lock. A spend in that window is refused. One audit.
+#[cfg(unix)]
+#[test]
+fn a_drop_on_a_current_thread_runtime_returns_while_the_write_lock_is_held() {
+    let setup = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
+    let (dir, path, manager, store, id, spend_token) = setup.block_on(async {
+        let plant = plant_approved(84, false, |_, target| {
+            json!({"steps": [{"scheme": "localhost", "operation": "write", "request": {
+                "path": target, "content": [112, 108, 97, 110]
+            }}]})
+        })
+        .await;
+        let pending = plant
+            .store
+            .create_request(
+                elastos_runtime::session::SessionId(plant.session.clone()),
+                elastos_runtime::capability::ResourceId::new("elastos://availability/status"),
+                elastos_runtime::capability::Action::Read,
+            )
+            .await;
+        let token = plant.manager.grant(
+            &plant.session,
+            pending.resource.clone(),
+            pending.action,
+            elastos_runtime::capability::TokenConstraints::new(0, false, None, None),
+            None,
+        );
+        plant
+            .store
+            .grant_request(
+                pending.id.as_str(),
+                token.clone(),
+                elastos_runtime::capability::pending::GrantDuration::Session,
+            )
+            .await
+            .expect("the grant is pending");
+        let spend_token = token.clone();
+        crate::resource_bridge::park_abandoned_grant_for_test(
+            &plant.id,
+            plant.manager.clone(),
+            plant.store.clone(),
+            token,
+            pending.id.as_str().to_string(),
+        );
+        let path = plant.dir.path().to_path_buf();
+        (
+            plant.dir,
+            path,
+            plant.manager,
+            plant.store,
+            plant.id,
+            spend_token,
+        )
+    });
+    let _keep_dir = dir;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            runtime.block_on(async move {
+                let entered = std::sync::Arc::new(tokio::sync::Notify::new());
+                let release = std::sync::Arc::new(tokio::sync::Notify::new());
+                let holding = store.clone();
+                let entered_hold = std::sync::Arc::clone(&entered);
+                let release_hold = std::sync::Arc::clone(&release);
+                tokio::spawn(async move {
+                    holding
+                        .hold_requests_write_for_test(&entered_hold, &release_hold)
+                        .await;
+                });
+                tokio::time::timeout(std::time::Duration::from_secs(5), entered.notified())
+                    .await
+                    .expect("the write lock was not taken");
+                ready_tx.send(()).expect("the ready signal");
+                super::gateway_inspect_actions::drop_unsettled_dispatch_for_test(&path, &id);
+                let spent =
+                    crate::resource_bridge::spend_plan_grant_for_test(&manager, &spend_token).await;
+                assert!(
+                    spent.is_err(),
+                    "the grant was spendable before revoke: {spent:?}"
+                );
+                let unknown_audits = crate::auth::load_auth_state(&path)
+                    .unwrap()
+                    .audit
+                    .iter()
+                    .filter(|event| {
+                        event.event_type == "agent_plan.dispatch.unknown"
+                            && event.challenge_id.as_deref() == Some(id.as_str())
+                    })
+                    .count();
+                assert_eq!(
+                    unknown_audits, 1,
+                    "the drop wrote more than one unknown audit"
+                );
+                release.notify_one();
+            });
+        }));
+        let message = match outcome {
+            Ok(()) => Ok(()),
+            Err(payload) => Err(panic_text(payload)),
+        };
+        let _ = done_tx.send(message);
+    });
+    ready_rx
+        .recv_timeout(std::time::Duration::from_secs(60))
+        .expect("the current-thread drop did not reach the lock");
+    match done_rx.recv_timeout(std::time::Duration::from_secs(3)) {
+        Ok(Ok(())) => {}
+        Ok(Err(message)) => panic!("{message}"),
+        Err(_) => panic!("the drop did not return while the write lock was held"),
+    }
+}
+
+fn panic_text(payload: Box<dyn std::any::Any + Send>) -> String {
+    if let Some(message) = payload.downcast_ref::<&str>() {
+        (*message).to_string()
+    } else if let Some(message) = payload.downcast_ref::<String>() {
+        message.clone()
+    } else {
+        "the drop row panicked".to_string()
+    }
 }
 
 /// A concurrent grant of the same pending row is revoked when registration fails.
@@ -4229,7 +4407,10 @@ async fn an_unknown_resolved_a_second_before_the_sweep_survives_it() {
         vec!["sweep-step".to_string()],
         "the sweep dropped a name one second old"
     );
-    runtime.set_plan_clock_for_test(Some(start + crate::runtime::ENDED_CAPSULE_RETENTION));
+    runtime.note_plan_instance_ended(session);
+    runtime.set_plan_clock_for_test(Some(
+        start + std::time::Duration::from_secs(1) + crate::runtime::ENDED_CAPSULE_RETENTION,
+    ));
     runtime.bind_plan_instance("session-r6-sweep-next", agent);
     assert!(
         runtime.unknown_ids_for_test(agent).is_empty(),
@@ -4259,6 +4440,8 @@ async fn a_watcherless_unregister_keeps_the_unknown_name() {
     register_open_row(&runtime, agent, "session-r6-due").await;
     leave_flight(&runtime, "session-r6-due", agent, "due-step");
     crate::runtime::resolve_unknown_plan_effect("due-step");
+    runtime.note_plan_instance_ended("session-r6-unreg");
+    runtime.note_plan_instance_ended("session-r6-due");
     runtime.set_plan_clock_for_test(Some(start + crate::runtime::ENDED_CAPSULE_RETENTION));
     runtime.unregister_capsule("session-r6-due").await;
     let ids = runtime.unknown_ids_for_test(agent);
@@ -4291,8 +4474,9 @@ async fn unknown_names_leave_after_retention_and_stay_within_thirty_two() {
     crate::runtime::resolve_unknown_plan_effect("cap-unreg");
     runtime.unregister_capsule("session-r6-cap-unreg").await;
     assert_eq!(runtime.unknown_ids_for_test(agent).len(), 2);
-    // Bound while both names are still inside their retention, so the later
-    // try_enter is the call that drops them.
+    runtime.note_plan_instance_ended("session-r6-cap-sweep");
+    runtime.note_plan_instance_ended("session-r6-cap-unreg");
+    // Both names are due at this clock. The later try_enter is what drops them.
     register_open_row(&runtime, agent, "session-r6-cap-live").await;
     runtime.set_plan_clock_for_test(Some(start + crate::runtime::ENDED_CAPSULE_RETENTION));
     leave_flight(&runtime, "session-r6-cap-live", agent, "cap-probe");

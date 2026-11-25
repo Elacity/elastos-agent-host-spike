@@ -859,6 +859,9 @@ struct AbandonedPlanGrant {
     store: Arc<elastos_runtime::capability::pending::PendingRequestStore>,
     token: CapabilityToken,
     pending_id: String,
+    /// Set when the dispatch is dropped. The spend path refuses this token
+    /// until the revoke below removes the entry.
+    refused: bool,
 }
 
 /// The one-use grant for a dispatch that has not finished. Dropping the
@@ -878,9 +881,10 @@ impl HeldPlanGrant {
 
 impl Drop for HeldPlanGrant {
     fn drop(&mut self) {
-        let Some(grant) = self.grant.take() else {
+        let Some(mut grant) = self.grant.take() else {
             return;
         };
+        grant.refused = true;
         abandoned_plan_grants()
             .lock()
             .unwrap_or_else(|err| err.into_inner())
@@ -930,26 +934,90 @@ pub(crate) fn park_abandoned_grant_for_test(
                 store,
                 token,
                 pending_id,
+                refused: false,
             },
         );
 }
 
-pub(crate) async fn revoke_abandoned_plan_grant(request_id: &str) {
-    let Some(grant) = abandoned_plan_grants()
+/// The dispatch is gone. A spend of this grant is refused before the revoke runs.
+pub(crate) fn refuse_abandoned_plan_grant(request_id: &str) {
+    if let Some(grant) = abandoned_plan_grants()
         .lock()
         .unwrap_or_else(|err| err.into_inner())
-        .remove(request_id)
-    else {
-        return;
+        .get_mut(request_id)
+    {
+        grant.refused = true;
+    }
+}
+
+fn plan_grant_spend_is_refused(token_id: &elastos_runtime::capability::token::TokenId) -> bool {
+    abandoned_plan_grants()
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+        .values()
+        .any(|grant| grant.refused && grant.token.id() == token_id)
+}
+
+pub(crate) async fn revoke_abandoned_plan_grant(request_id: &str) {
+    let held = {
+        let mut grants = abandoned_plan_grants()
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        let Some(grant) = grants.get_mut(request_id) else {
+            return;
+        };
+        grant.refused = true;
+        (
+            Arc::clone(&grant.manager),
+            Arc::clone(&grant.store),
+            grant.token.clone(),
+            grant.pending_id.clone(),
+        )
     };
     revoke_plan_grant(
-        &grant.manager,
-        &grant.store,
-        &grant.token,
-        &grant.pending_id,
+        &held.0,
+        &held.1,
+        &held.2,
+        &held.3,
         "plan dispatch abandoned",
     )
     .await;
+    abandoned_plan_grants()
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+        .remove(request_id);
+}
+
+/// The product spend of a bridge token. A dropped dispatch's grant is refused
+/// here before `validate` counts a use.
+async fn spend_invoked_capability(
+    manager: &CapabilityManager,
+    token: &CapabilityToken,
+    caller: &str,
+    action: Action,
+    resource: &ResourceId,
+) -> Result<(), elastos_runtime::capability::manager::ValidationError> {
+    if plan_grant_spend_is_refused(token.id()) {
+        return Err(elastos_runtime::capability::manager::ValidationError::TokenRevoked);
+    }
+    manager
+        .validate(token, caller, action, resource, None)
+        .await
+}
+
+#[cfg(all(test, unix))]
+pub(crate) async fn spend_plan_grant_for_test(
+    manager: &CapabilityManager,
+    token: &CapabilityToken,
+) -> Result<(), elastos_runtime::capability::manager::ValidationError> {
+    spend_invoked_capability(
+        manager,
+        token,
+        token.capsule(),
+        token.action(),
+        token.resource(),
+    )
+    .await
 }
 
 fn plan_effect_succeeded(response: &serde_json::Value) -> bool {
@@ -1180,6 +1248,7 @@ pub(crate) async fn dispatch_agent_plan_step(
             store: Arc::clone(&ctx.pending_store),
             token,
             pending_id,
+            refused: false,
         }),
     });
     #[cfg(all(test, unix))]
@@ -1770,17 +1839,15 @@ async fn authorize_and_dispatch_resource_invoke(
         }
     };
     let resource_id = ResourceId::new(&dispatch.resource);
-    if bridge_ctx
-        .capability_manager
-        .validate(
-            &token,
-            &bridge_ctx.capsule_id,
-            dispatch.required_action,
-            &resource_id,
-            None,
-        )
-        .await
-        .is_err()
+    if spend_invoked_capability(
+        &bridge_ctx.capability_manager,
+        &token,
+        &bridge_ctx.capsule_id,
+        dispatch.required_action,
+        &resource_id,
+    )
+    .await
+    .is_err()
     {
         guard.release();
         return finish_component_invoke(
