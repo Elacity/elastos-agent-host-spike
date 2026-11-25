@@ -38,6 +38,7 @@ use std::cell::Cell;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
+use std::time::Duration;
 
 use anyhow::Context;
 use elastos_runtime::auth::{
@@ -80,6 +81,9 @@ pub(crate) const CANNOT_READ: &str = "agent file cannot be read";
 const WINDOWS_AGENT_FILE: &str = "agent file custody is unsupported on Windows";
 pub(crate) const DOES_NOT_PARSE: &str = "agent file does not parse";
 pub(crate) const CANNOT_WRITE: &str = "agent file cannot be written";
+pub(crate) const SIGN_IN_CANNOT_READ: &str = "sign-in file cannot be read";
+const LOCK_NOT_FREE: &str = "agent file lock is not free";
+pub(crate) const HEAL_LOCK_WAIT: Duration = Duration::from_millis(200);
 pub(crate) const NO_OWNER: &str = "agent record names no owner";
 const NOT_OUR_FORM: &str = "agent file holds a field or value this Runtime does not write";
 const UNKNOWN_SCHEMA: &str = "agent file schema is unknown";
@@ -464,7 +468,7 @@ struct WriteLock {
 /// it, by the audit append, and nothing that holds the sign-in lock takes
 /// this one. The model budget mutex is taken before this lock. Holding this
 /// lock and then that mutex is refused (`LOCK_ORDER`).
-fn lock_for_write(data_dir: &Path) -> anyhow::Result<WriteLock> {
+fn lock_for_write(data_dir: &Path, wait: Option<Duration>) -> anyhow::Result<WriteLock> {
     if agent_file_lock_held() {
         return Err(Named(LOCK_ORDER).into());
     }
@@ -475,9 +479,25 @@ fn lock_for_write(data_dir: &Path) -> anyhow::Result<WriteLock> {
     if let Some(parent) = path.parent() {
         crate::auth_state_files::ensure_regular_auth_parent(data_dir, parent)?;
     }
-    let file = crate::auth_state_files::open_regular_lock_file(&path, "agent records")?;
+    let opened = crate::auth_state_files::open_regular_lock_file(&path, "agent records");
+    let file = match (wait, opened) {
+        (_, Ok(file)) => file,
+        (Some(_), Err(_)) => return Err(Named(LOCK_NOT_FREE).into()),
+        (None, Err(err)) => return Err(err),
+    };
+    let held = match wait {
+        Some(wait) => {
+            #[cfg(all(test, unix))]
+            let started = std::time::Instant::now();
+            let waited = FileLock::exclusive_within(file, wait);
+            #[cfg(all(test, unix))]
+            tests::note_agent_lock_wait(started.elapsed());
+            waited.map_err(|_| Named(LOCK_NOT_FREE))?
+        }
+        None => FileLock::exclusive(file).context("failed to lock agent records")?,
+    };
     Ok(WriteLock {
-        _file: FileLock::exclusive(file).context("failed to lock agent records")?,
+        _file: held,
         _process: process,
         _order: AgentFileLockFlag::take(),
     })
@@ -642,8 +662,12 @@ struct Opened {
 /// Loads both files, under the agent lock when the operation will write.
 /// Refuses when the agent file fails a rule.
 fn open(data_dir: &Path, for_write: bool) -> anyhow::Result<Opened> {
+    open_for(data_dir, for_write, None)
+}
+
+fn open_for(data_dir: &Path, for_write: bool, wait: Option<Duration>) -> anyhow::Result<Opened> {
     let lock = match for_write {
-        true => Some(lock_for_write(data_dir)?),
+        true => Some(lock_for_write(data_dir, wait)?),
         false => None,
     };
     // The sign-in loader hands agents through too. The sign-in file itself
@@ -743,24 +767,27 @@ pub(crate) fn hosted_charge_still_standing(
 /// floor. The caller already holds the host lock, or this is a charge, or
 /// turning an agent off or on. See [`crate::host_lock::start_host_for_agents`].
 /// An unreadable agents file, including a damaged file, a newer file, and
-/// Windows, is left as it is and this returns `Ok`. The managed runtime
-/// returns `Ok` and writes nothing.
+/// Windows, is left as it is and this returns `Ok`. A full disk, a read-only
+/// folder, an unreadable sign-in file, a lock that is not free, or a failed
+/// raised copy returns that cause. The managed runtime returns `Ok` and
+/// writes nothing.
 pub fn raise_spend_file_to_signed_floor(data_dir: &Path) -> Result<(), &'static str> {
     if !build_allows_for_home(data_dir) || crate::host_lock::is_subordinate_managed_runtime() {
         return Ok(());
     }
+    let audit = crate::model_budget::load_spend_audit(data_dir)?;
     let preview = match open(data_dir, false) {
         Ok(opened) => opened,
         Err(err) => return quiet_when_agents_are_unavailable(err),
     };
-    if raised_copy(data_dir, &preview.file)?.is_none() {
+    if raised_copy(data_dir, &audit, &preview.file)?.is_none() {
         return Ok(());
     }
-    let opened = match open(data_dir, true) {
+    let opened = match open_for(data_dir, true, Some(HEAL_LOCK_WAIT)) {
         Ok(opened) => opened,
         Err(err) => return quiet_when_agents_are_unavailable(err),
     };
-    let Some(after) = raised_copy(data_dir, &opened.file)? else {
+    let Some(after) = raised_copy(data_dir, &audit, &opened.file)? else {
         return Ok(());
     };
     let caller = Caller {
@@ -772,9 +799,12 @@ pub fn raise_spend_file_to_signed_floor(data_dir: &Path) -> Result<(), &'static 
 }
 
 fn quiet_when_agents_are_unavailable(err: anyhow::Error) -> Result<(), &'static str> {
-    match err.downcast_ref::<Named>() {
-        Some(Named(LOCK_ORDER)) => Err(LOCK_ORDER),
+    let named = err.downcast_ref::<Named>().map(|named| named.0);
+    match named {
+        Some(LOCK_ORDER) => Err(LOCK_ORDER),
+        Some(LOCK_NOT_FREE) => Err(LOCK_NOT_FREE),
         Some(_) => Ok(()),
+        None if err.to_string().contains("auth-state.json") => Err(SIGN_IN_CANNOT_READ),
         None => Err(reason_of(&err)),
     }
 }
@@ -783,6 +813,7 @@ fn quiet_when_agents_are_unavailable(err: anyhow::Error) -> Result<(), &'static 
 /// Retired agents stay as they were. `None` when nothing is behind.
 fn raised_copy(
     data_dir: &Path,
+    audit: &crate::model_budget::SpendAudit,
     file: &AgentRecordsFile,
 ) -> Result<Option<AgentRecordsFile>, &'static str> {
     let mut after = file.clone();
@@ -791,11 +822,11 @@ fn raised_copy(
         if agent.record.retired_at.is_some() {
             continue;
         }
-        let floor = crate::model_budget::signed_spend_floor(
+        let floor = audit.floor(
             data_dir,
             &agent.record.principal_id,
             agent.model_tokens_spent,
-        )?;
+        );
         if floor > agent.model_tokens_spent {
             agent.model_tokens_spent = floor;
             raised = true;
@@ -890,6 +921,10 @@ fn write(
     }
     let bytes = serde_json::to_vec_pretty(after)?;
     if operation == Operation::Heal {
+        #[cfg(all(test, unix))]
+        if tests::spend_file_write_fails() {
+            return Err(Named(CANNOT_WRITE).into());
+        }
         crate::auth::atomic_write(&agent_file_path(data_dir)?, &bytes)?;
         return Ok(());
     }

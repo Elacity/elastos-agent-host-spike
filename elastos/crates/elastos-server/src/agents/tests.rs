@@ -126,7 +126,7 @@ pub(crate) struct HeldAgentFileLock {
 
 pub(crate) fn hold_agent_file_lock_for_test(data_dir: &Path) -> anyhow::Result<HeldAgentFileLock> {
     Ok(HeldAgentFileLock {
-        _lock: lock_for_write(data_dir)?,
+        _lock: lock_for_write(data_dir, None)?,
     })
 }
 
@@ -140,6 +140,7 @@ enum SpendFault {
 
 thread_local! {
     static SPEND_FAULT: Cell<SpendFault> = const { Cell::new(SpendFault::None) };
+    static LOCK_WAIT: Cell<Option<std::time::Duration>> = const { Cell::new(None) };
 }
 
 pub(crate) struct SpendFaultGuard;
@@ -174,6 +175,14 @@ pub(crate) fn spend_append_fails() -> bool {
 
 pub(crate) fn spend_stops_before_file() -> bool {
     SPEND_FAULT.with(|fault| fault.get() == SpendFault::StopBeforeFile)
+}
+
+pub(crate) fn note_agent_lock_wait(elapsed: std::time::Duration) {
+    LOCK_WAIT.with(|slot| slot.set(Some(elapsed)));
+}
+
+fn take_agent_lock_wait() -> Option<std::time::Duration> {
+    LOCK_WAIT.with(|slot| slot.take())
 }
 
 pub(crate) fn spend_file_write_fails() -> bool {
@@ -3483,6 +3492,17 @@ fn host_starts_heal_after_the_lock_and_skip_no_agent() {
         !copy.contains("!agent.active"),
         "an inactive agent is skipped"
     );
+    assert!(!copy.contains("load_auth_state"));
+    assert!(!copy.contains("signed_spend_floor"));
+    assert!(copy.contains(".floor("));
+    assert_eq!(raise.matches("load_spend_audit(").count(), 1);
+    let lock_fn = source_until(source_from(agents, "fn lock_for_write"), "\nfn open(");
+    let open_fail = lock_fn.find("return Err(Named(LOCK_NOT_FREE)").unwrap();
+    let waited = lock_fn.find("exclusive_within").unwrap();
+    assert!(
+        open_fail < waited,
+        "a lock that cannot be opened waits out the bound"
+    );
 
     let start = source_until(
         source_from(include_str!("../host_lock.rs"), "fn start_host_for_agents"),
@@ -3491,6 +3511,9 @@ fn host_starts_heal_after_the_lock_and_skip_no_agent() {
     let lock = start.find("acquire_host_process_lock(").unwrap();
     let heal = start.find("raise_spend_file_to_signed_floor(").unwrap();
     assert!(lock < heal, "host lock, then the heal");
+    assert!(start.contains("tracing::warn!"));
+    assert!(start.contains("agent spend heal did not run"));
+    assert!(!start.contains(".map_err(anyhow::Error::msg)?"));
 
     let serve = source_from(include_str!("../serve_cmd.rs"), "pub async fn run_serve");
     let serve = source_until(serve, "\n#[cfg");
@@ -3597,4 +3620,312 @@ fn a_damaged_newer_unreadable_or_windows_agents_file_still_starts() {
     crate::auth::atomic_write(&path, &good).unwrap();
     let _windows = plant_windows_custody();
     assert_start_refuses(dir.path(), &owner, &agent, WINDOWS_AGENT_FILE);
+}
+
+#[derive(Clone)]
+struct HealLog(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl std::io::Write for HealLog {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+fn capture_warns(body: impl FnOnce()) -> String {
+    let buf = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let writer = HealLog(buf.clone());
+    let subscriber = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::WARN)
+        .with_ansi(false)
+        .without_time()
+        .with_writer(move || writer.clone())
+        .finish();
+    tracing::subscriber::with_default(subscriber, body);
+    let text = String::from_utf8(buf.lock().unwrap().clone()).unwrap();
+    text
+}
+
+fn file_spent(dir: &Path, agent: &str) -> u64 {
+    let path = agent_file_path(dir).unwrap();
+    let value: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    value["agents"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["record"]["principal_id"] == agent)
+        .and_then(|row| row["model_tokens_spent"].as_u64())
+        .unwrap_or(0)
+}
+
+fn event_floor(dir: &Path, agent: &str) -> u64 {
+    crate::auth::load_auth_state(dir)
+        .unwrap()
+        .audit
+        .iter()
+        .filter(|event| {
+            event.event_type == "agent.record.spend" && event.principal_id.as_deref() == Some(agent)
+        })
+        .filter_map(|event| {
+            event
+                .reason
+                .split_whitespace()
+                .find_map(|word| word.strip_prefix("spent=")?.parse::<u64>().ok())
+        })
+        .max()
+        .unwrap()
+}
+
+fn spend_events(dir: &Path) -> usize {
+    crate::auth::load_auth_state(dir)
+        .unwrap()
+        .audit
+        .iter()
+        .filter(|event| event.event_type == "agent.record.spend")
+        .count()
+}
+
+struct Behind {
+    dir: tempfile::TempDir,
+    owner: String,
+    agent: String,
+    other: String,
+    floor: u64,
+    other_floor: u64,
+}
+
+fn home_behind_its_floor() -> Behind {
+    let (dir, owner, agent) = fresh_agent_home();
+    let other = plant_another_dispatch(dir.path(), &owner, "request-b");
+    charge_model_spend(dir.path(), &owner, &agent, (0, 0), 40, 100, None).unwrap();
+    charge_model_spend(dir.path(), &owner, &other, (0, 0), 30, 100, None).unwrap();
+    let floor = event_floor(dir.path(), &agent);
+    let other_floor = event_floor(dir.path(), &other);
+    assert!(floor >= 40, "{floor}");
+    assert!(other_floor >= 30, "{other_floor}");
+    plant_stored_total(dir.path(), &agent, 0, true);
+    plant_stored_total(dir.path(), &other, 0, true);
+    assert_eq!(file_spent(dir.path(), &agent), 0);
+    assert_eq!(file_spent(dir.path(), &other), 0);
+    Behind {
+        dir,
+        owner,
+        agent,
+        other,
+        floor,
+        other_floor,
+    }
+}
+
+fn assert_named(err: SpendRefusal, reason: &str) {
+    match err {
+        SpendRefusal::Name(name) => assert_eq!(name, reason),
+        other => panic!("unnamed refusal {other:?}"),
+    }
+}
+
+fn assert_charge_refused(home: &Behind, reason: &str) {
+    let files = (
+        file_spent(home.dir.path(), &home.agent),
+        file_spent(home.dir.path(), &home.other),
+    );
+    let err = charge_model_spend(
+        home.dir.path(),
+        &home.owner,
+        &home.agent,
+        (0, 0),
+        1,
+        100,
+        None,
+    )
+    .unwrap_err();
+    assert_named(err, reason);
+    assert_eq!(
+        (
+            file_spent(home.dir.path(), &home.agent),
+            file_spent(home.dir.path(), &home.other),
+        ),
+        files,
+        "a refused charge wrote a total"
+    );
+}
+
+fn charge_then_restart_stays_above_the_floor(home: &Behind) {
+    let rows = spend_events(home.dir.path());
+    let _ = crate::model_budget::take_spend_audit_loads();
+    raise_spend_file_to_signed_floor(home.dir.path()).unwrap();
+    assert_eq!(
+        crate::model_budget::take_spend_audit_loads(),
+        1,
+        "a heal read the sign-in file once for two agents"
+    );
+    assert_eq!(
+        spend_events(home.dir.path()),
+        rows,
+        "the heal appended a spend"
+    );
+    assert_eq!(file_spent(home.dir.path(), &home.agent), home.floor);
+    assert_eq!(file_spent(home.dir.path(), &home.other), home.other_floor);
+    charge_model_spend(
+        home.dir.path(),
+        &home.owner,
+        &home.agent,
+        (0, 0),
+        1,
+        100,
+        None,
+    )
+    .unwrap();
+    let charged = file_spent(home.dir.path(), &home.agent);
+    assert!(charged > home.floor, "{charged} {}", home.floor);
+    assert_eq!(file_spent(home.dir.path(), &home.other), home.other_floor);
+    crate::host_lock::start_host_for_agents(home.dir.path(), "serve", "127.0.0.1:9").unwrap();
+    assert_eq!(file_spent(home.dir.path(), &home.agent), charged);
+    assert_eq!(file_spent(home.dir.path(), &home.other), home.other_floor);
+    charge_model_spend(
+        home.dir.path(),
+        &home.owner,
+        &home.agent,
+        (0, 0),
+        1,
+        100,
+        None,
+    )
+    .unwrap();
+    let again = file_spent(home.dir.path(), &home.agent);
+    assert!(again > charged, "{again} {charged}");
+    assert!(again > home.floor, "{again} {}", home.floor);
+}
+
+fn warn_once_on_start(dir: &Path, reason: &str) -> String {
+    let _ = crate::model_budget::take_spend_audit_loads();
+    let log = capture_warns(|| {
+        crate::host_lock::start_host_for_agents(dir, "gateway", "127.0.0.1:9").unwrap();
+    });
+    assert_eq!(
+        crate::model_budget::take_spend_audit_loads(),
+        1,
+        "start read the sign-in file once: {log}"
+    );
+    assert_eq!(log.matches(reason).count(), 1, "{log}");
+    log
+}
+
+/// A full disk is an injected write failure. Home starts, the charge is refused
+/// by name, and the next charge that can heal stays at or above the signed floor.
+#[test]
+fn a_full_disk_lets_home_start_and_the_charge_keeps_the_floor() {
+    let home = home_behind_its_floor();
+    let _fault = fail_spend_file_write();
+    let log = warn_once_on_start(home.dir.path(), CANNOT_WRITE);
+    assert!(
+        !log.contains(SIGN_IN_CANNOT_READ),
+        "a write failure was named as the sign-in file: {log}"
+    );
+    assert_eq!(file_spent(home.dir.path(), &home.agent), 0);
+    let rows = spend_events(home.dir.path());
+    assert_charge_refused(&home, CANNOT_WRITE);
+    assert_eq!(spend_events(home.dir.path()), rows);
+    drop(_fault);
+    charge_then_restart_stays_above_the_floor(&home);
+}
+
+/// An unreadable sign-in file keeps that file's name on the later charge.
+#[test]
+fn an_unreadable_sign_in_file_lets_home_start_and_the_charge_keeps_the_floor() {
+    use std::os::unix::fs::PermissionsExt;
+    let home = home_behind_its_floor();
+    let path = crate::auth::auth_state_path(home.dir.path()).unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+    crate::auth::invalidate_verified_auth_state_cache_for_test(home.dir.path());
+    let log = warn_once_on_start(home.dir.path(), SIGN_IN_CANNOT_READ);
+    assert!(
+        !log.contains(CANNOT_READ),
+        "the sign-in file was named as the agent file: {log}"
+    );
+    assert_eq!(file_spent(home.dir.path(), &home.agent), 0);
+    assert_charge_refused(&home, SIGN_IN_CANNOT_READ);
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    crate::auth::invalidate_verified_auth_state_cache_for_test(home.dir.path());
+    charge_then_restart_stays_above_the_floor(&home);
+}
+
+fn assert_heal_wait(elapsed: std::time::Duration) {
+    let slack = std::time::Duration::from_millis(20);
+    assert!(
+        elapsed + slack >= HEAL_LOCK_WAIT,
+        "the held lock did not wait: {elapsed:?}"
+    );
+    assert!(
+        elapsed <= HEAL_LOCK_WAIT + std::time::Duration::from_secs(2),
+        "the heal waited {elapsed:?}, bound {HEAL_LOCK_WAIT:?}"
+    );
+}
+
+/// A held agent lock makes start return within the bound. The charge is refused
+/// by name until the lock is free, then it stays at or above the signed floor.
+#[test]
+fn a_held_agent_lock_lets_home_start_within_the_bound() {
+    let home = home_behind_its_floor();
+    let path = agent_file_path(home.dir.path())
+        .unwrap()
+        .with_file_name("agent-records.json.lock");
+    let held = crate::host_lock::FileLock::exclusive(
+        std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .unwrap(),
+    )
+    .unwrap();
+    let _ = take_agent_lock_wait();
+    assert_eq!(
+        raise_spend_file_to_signed_floor(home.dir.path()),
+        Err(LOCK_NOT_FREE)
+    );
+    assert_heal_wait(take_agent_lock_wait().expect("the heal did not wait"));
+    let log = warn_once_on_start(home.dir.path(), LOCK_NOT_FREE);
+    assert_heal_wait(take_agent_lock_wait().expect("start did not wait"));
+    assert!(!log.contains(CANNOT_READ), "{log}");
+    let rows = spend_events(home.dir.path());
+    assert_charge_refused(&home, LOCK_NOT_FREE);
+    assert_heal_wait(take_agent_lock_wait().expect("the charge did not wait"));
+    assert_eq!(spend_events(home.dir.path()), rows);
+    assert_eq!(file_spent(home.dir.path(), &home.agent), 0);
+    drop(held);
+    charge_then_restart_stays_above_the_floor(&home);
+}
+
+/// A lock path that cannot be opened is the same name, and Home still starts.
+#[test]
+fn a_lock_that_cannot_be_opened_lets_home_start() {
+    let home = home_behind_its_floor();
+    let path = agent_file_path(home.dir.path())
+        .unwrap()
+        .with_file_name("agent-records.json.lock");
+    std::fs::remove_file(&path).unwrap();
+    std::fs::create_dir(&path).unwrap();
+    let _ = take_agent_lock_wait();
+    assert_eq!(
+        raise_spend_file_to_signed_floor(home.dir.path()),
+        Err(LOCK_NOT_FREE)
+    );
+    assert!(
+        take_agent_lock_wait().is_none(),
+        "a lock that cannot be opened waited"
+    );
+    warn_once_on_start(home.dir.path(), LOCK_NOT_FREE);
+    assert!(
+        take_agent_lock_wait().is_none(),
+        "start waited on a lock that cannot be opened"
+    );
+    let rows = spend_events(home.dir.path());
+    assert_charge_refused(&home, LOCK_NOT_FREE);
+    assert_eq!(spend_events(home.dir.path()), rows);
+    std::fs::remove_dir(&path).unwrap();
+    charge_then_restart_stays_above_the_floor(&home);
 }

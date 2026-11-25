@@ -3612,6 +3612,7 @@ pub(crate) mod tests {
     static LAUNCH_RELEASE_PLANT: StdMutex<Option<String>> = StdMutex::new(None);
 
     /// The next ceiling read for `capsule_id` drops that entry first.
+    #[cfg(all(test, unix))]
     pub(crate) fn arm_launch_release_plant(capsule_id: &str) {
         *LAUNCH_RELEASE_PLANT
             .lock()
@@ -3631,6 +3632,7 @@ pub(crate) mod tests {
     }
 
     /// A ceiling held for `capsule_id`, so a later read can release it.
+    #[cfg(all(test, unix))]
     pub(crate) struct PlantedModelLaunch {
         capsule_id: String,
         ceilings: Arc<StdRwLock<HashMap<String, AgentModelCeiling>>>,
@@ -3638,6 +3640,7 @@ pub(crate) mod tests {
         offers: Arc<StdRwLock<HashMap<String, crate::resource_bridge::ModelOfferBound>>>,
     }
 
+    #[cfg(all(test, unix))]
     pub(crate) fn plant_held_model_launch(
         capsule_id: &str,
         agent_id: &str,
@@ -3663,6 +3666,7 @@ pub(crate) mod tests {
     }
 
     /// The account read the hostcall uses, including a planted release.
+    #[cfg(all(test, unix))]
     pub(crate) fn read_planted_model_launch(
         planted: &PlantedModelLaunch,
     ) -> (

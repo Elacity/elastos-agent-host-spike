@@ -92,10 +92,12 @@ pub(crate) fn is_subordinate_managed_runtime() -> bool {
 /// pass `gateway`. The public gateway passes `gateway-public`. Standalone
 /// `elastos serve` passes `serve`. The managed runtime does not call this.
 /// The heal holds the agent file lock. The floor is already a signed spend
-/// event, so the heal appends none.
+/// event, so the heal appends none. When the heal cannot be done, the cause is logged once and this still returns the host lock.
 pub fn start_host_for_agents(data_dir: &Path, role: &str, addr: &str) -> anyhow::Result<FileLock> {
     let lock = acquire_host_process_lock(data_dir, role, addr)?;
-    crate::agents::raise_spend_file_to_signed_floor(data_dir).map_err(anyhow::Error::msg)?;
+    if let Err(reason) = crate::agents::raise_spend_file_to_signed_floor(data_dir) {
+        tracing::warn!("agent spend heal did not run: {reason}");
+    }
     Ok(lock)
 }
 

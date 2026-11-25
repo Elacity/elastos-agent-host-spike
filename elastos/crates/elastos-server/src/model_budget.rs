@@ -23,17 +23,61 @@ use std::sync::{Mutex, PoisonError};
 use elastos_model_contract::{model_run_id, RuntimeCreateBinding};
 
 use crate::agent_admission::AdmissionContext;
-use crate::agents::{charge_model_spend, model_spend, SpendRefusal, CANNOT_READ, NO_OWNER};
+use crate::agents::{charge_model_spend, model_spend, SpendRefusal, NO_OWNER, SIGN_IN_CANNOT_READ};
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 thread_local! {
     static NEWER_SPEND_CHECKS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    static SPEND_AUDIT_LOADS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
 /// How many newer spend events this thread signature-checked since the last take.
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub(crate) fn take_newer_spend_checks() -> u64 {
     NEWER_SPEND_CHECKS.with(|count| count.replace(0))
+}
+
+#[cfg(all(test, unix))]
+pub(crate) fn take_spend_audit_loads() -> u64 {
+    SPEND_AUDIT_LOADS.with(|count| count.replace(0))
+}
+
+pub(crate) struct SpendAudit(Vec<elastos_runtime::auth::RuntimeAuditEventV1>);
+
+impl SpendAudit {
+    pub(crate) fn floor(&self, data_dir: &Path, agent_id: &str, stored: u64) -> u64 {
+        let mut floor = stored;
+        for event in &self.0 {
+            if event.event_type != "agent.record.spend"
+                || event.principal_id.as_deref() != Some(agent_id)
+            {
+                continue;
+            }
+            let Some(spent) = spent_amount(&event.reason) else {
+                continue;
+            };
+            if spent <= stored {
+                continue;
+            }
+            #[cfg(all(test, unix))]
+            NEWER_SPEND_CHECKS.with(|count| count.set(count.get().saturating_add(1)));
+            if crate::auth::verify_signed_full_recovery_outcome_audit_event(data_dir, event)
+                .is_err()
+            {
+                continue;
+            }
+            floor = floor.max(spent);
+        }
+        floor
+    }
+}
+
+pub(crate) fn load_spend_audit(data_dir: &Path) -> Result<SpendAudit, &'static str> {
+    #[cfg(all(test, unix))]
+    SPEND_AUDIT_LOADS.with(|count| count.set(count.get().saturating_add(1)));
+    crate::auth::load_auth_state(data_dir)
+        .map(|state| SpendAudit(state.audit))
+        .map_err(|_| SIGN_IN_CANNOT_READ)
 }
 
 /// The spent total named by this agent's signed spend events that are newer
@@ -43,28 +87,7 @@ pub(crate) fn signed_spend_floor(
     agent_id: &str,
     stored: u64,
 ) -> Result<u64, &'static str> {
-    let state = crate::auth::load_auth_state(data_dir).map_err(|_| CANNOT_READ)?;
-    let mut floor = stored;
-    for event in &state.audit {
-        if event.event_type != "agent.record.spend"
-            || event.principal_id.as_deref() != Some(agent_id)
-        {
-            continue;
-        }
-        let Some(spent) = spent_amount(&event.reason) else {
-            continue;
-        };
-        if spent <= stored {
-            continue;
-        }
-        #[cfg(test)]
-        NEWER_SPEND_CHECKS.with(|count| count.set(count.get().saturating_add(1)));
-        if crate::auth::verify_signed_full_recovery_outcome_audit_event(data_dir, event).is_err() {
-            continue;
-        }
-        floor = floor.max(spent);
-    }
-    Ok(floor)
+    Ok(load_spend_audit(data_dir)?.floor(data_dir, agent_id, stored))
 }
 
 fn spent_amount(reason: &str) -> Option<u64> {
