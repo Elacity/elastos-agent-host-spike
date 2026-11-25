@@ -369,6 +369,98 @@ mod tests {
         assert!(private_exec_dir(&std::env::current_exe().unwrap()).is_none());
         let _ = fs::remove_dir_all(&path);
     }
+
+    /// Start from the private copy, age its lock past the reaper limit, and
+    /// start another process from the same bytes. The hold is the one `main`
+    /// takes for every host start.
+    #[test]
+    fn a_running_private_copy_is_held_through_the_reaper_and_starts_again() {
+        const TEST: &str = "setup::verified_executable::tests::a_running_private_copy_is_held_through_the_reaper_and_starts_again";
+        if std::env::var_os("ELASTOS_P28_REAP_GRAND").is_some() {
+            fs::write(
+                std::env::var("ELASTOS_P28_REAP_MARKER").unwrap(),
+                b"started",
+            )
+            .unwrap();
+            std::process::exit(0);
+        }
+        if std::env::var_os("ELASTOS_P28_REAP_CHILD").is_some() {
+            let guard = crate::host_lock::hold_running_exec_copy().unwrap();
+            if guard.is_none() {
+                eprintln!("child did not hold its private copy");
+                std::process::exit(3);
+            }
+            let exe = std::env::current_exe().unwrap();
+            fs::write(std::env::var("ELASTOS_P28_REAP_HELD").unwrap(), b"held").unwrap();
+            let go = std::env::var("ELASTOS_P28_REAP_GO").unwrap();
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(90);
+            while !Path::new(&go).exists() {
+                if std::time::Instant::now() > deadline {
+                    eprintln!("parent did not drop the copy");
+                    std::process::exit(4);
+                }
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            age(&exe.parent().unwrap().join(EXEC_COPY_LOCK));
+            reap_dead_exec_copies();
+            if !exe.exists() {
+                eprintln!("reaper deleted the running copy");
+                std::process::exit(5);
+            }
+            let output = std::process::Command::new(&exe)
+                .arg("--exact")
+                .arg(TEST)
+                .env("ELASTOS_P28_REAP_GRAND", "1")
+                .env(
+                    "ELASTOS_P28_REAP_MARKER",
+                    std::env::var("ELASTOS_P28_REAP_MARKER").unwrap(),
+                )
+                .output()
+                .unwrap();
+            if !output.status.success() {
+                eprintln!("{}", String::from_utf8_lossy(&output.stderr));
+                std::process::exit(6);
+            }
+            drop(guard);
+            std::process::exit(0);
+        }
+
+        let root = tempfile::tempdir().unwrap();
+        let held_flag = root.path().join("held");
+        let go = root.path().join("go");
+        let marker = root.path().join("started");
+        let exe = std::env::current_exe().unwrap();
+        let mut file = File::open(&exe).unwrap();
+        let digest = super::sha256_hex(&mut file).unwrap();
+        let mut prepared = VerifiedExecutable::prepare(&exe, &format!("sha256:{digest}")).unwrap();
+        let child = std::process::Command::new(prepared.exec_path())
+            .arg("--exact")
+            .arg(TEST)
+            .env("ELASTOS_P28_REAP_CHILD", "1")
+            .env("ELASTOS_P28_REAP_HELD", &held_flag)
+            .env("ELASTOS_P28_REAP_GO", &go)
+            .env("ELASTOS_P28_REAP_MARKER", &marker)
+            .spawn()
+            .unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(90);
+        while !held_flag.exists() {
+            if std::time::Instant::now() > deadline {
+                panic!("child did not take the private-copy lock");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        prepared.persist_private_copy();
+        drop(prepared);
+        fs::write(&go, b"go").unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(
+            output.status.success(),
+            "stdout {} stderr {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(fs::read(&marker).unwrap(), b"started");
+    }
 }
 
 #[cfg(target_os = "macos")]

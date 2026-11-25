@@ -31,9 +31,7 @@ pub async fn run_serve(
     capsule: Option<PathBuf>,
     cid: Option<String>,
 ) -> anyhow::Result<()> {
-    // Hold the macOS private copy before readiness, so the spawning parent can
-    // return without unlinking the image this process is running.
-    let _private_exec = elastos_server::host_lock::hold_running_exec_copy()?;
+    // The private-copy lock is the one in `main::run`, held for the process life.
     crate::runtime_control::watch_gateway_owner()?;
     let data_dir = crate::default_data_dir();
     let subordinate_host = std::env::var("ELASTOS_ALLOW_SUBORDINATE_RUNTIME_HOST")

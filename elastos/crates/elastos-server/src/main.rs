@@ -1328,6 +1328,10 @@ fn main() -> anyhow::Result<()> {
 }
 
 async fn run() -> anyhow::Result<()> {
+    // One hold for the life of this process. Gateway, the public gateway,
+    // `home --browser`, the update controller, and serve all enter here, and
+    // so does every later child that is this same binary.
+    let _running_exec = elastos_server::host_lock::hold_running_exec_copy()?;
     #[cfg(unix)]
     {
         let argv: Vec<String> = std::env::args().skip(1).collect();
