@@ -268,7 +268,12 @@ pub async fn run(
 
 /// The component's import and export names, as Wasmtime reads them.
 pub fn imports_and_exports(component: &Path) -> (Vec<String>, Vec<String>) {
-    let engine = wasmtime::Engine::new(wasmtime::Config::new().wasm_component_model(true)).unwrap();
+    // The Runtime engine uses signal traps. Wasmtime keeps one trap mode per
+    // process, so this engine uses that mode too.
+    let mut config = wasmtime::Config::new();
+    config.wasm_component_model(true);
+    config.macos_use_mach_ports(false);
+    let engine = wasmtime::Engine::new(&config).unwrap();
     let component = wasmtime::component::Component::from_file(&engine, component).unwrap();
     let ty = component.component_type();
     let imports = ty
@@ -413,6 +418,9 @@ pub mod measure {
         let mut config = Config::new();
         config.wasm_component_model(true);
         config.consume_fuel(true);
+        // The Runtime engine uses signal traps. Wasmtime keeps one trap mode
+        // per process, so this measuring engine uses that mode too.
+        config.macos_use_mach_ports(false);
         let engine = Engine::new(&config).unwrap();
         let component = Component::from_file(&engine, component).unwrap();
         let limits = StoreLimitsBuilder::new()
