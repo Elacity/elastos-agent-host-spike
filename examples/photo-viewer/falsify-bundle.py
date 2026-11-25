@@ -10,7 +10,7 @@ The file is restored from its saved bytes afterwards, also on error or Ctrl-C.
 The runner is the capsule kit's (examples/capsule-kit/falsify).
 
 PH6 stand-in cases extend this same runner.
-This test code stands in for the Runtime's launch by CID, which does not exist yet.
+This stand-in is not the Runtime start by CID (Runtime::start_by_bundle in elastos/crates/elastos-server/src/runtime.rs; POST /api/launch/open in elastos/crates/elastos-server/src/api/routes.rs).
 """
 import pathlib
 import sys
@@ -22,7 +22,7 @@ BUNDLE = pathlib.Path(__file__).resolve().parent / "bundle"
 
 # (name, file under bundle/src, [(exact old text, new text)], tests that must fail)
 CASES = [
-    # This test code stands in for the Runtime's launch by CID, which does not exist yet.
+    # This stand-in is not the Runtime start by CID (Runtime::start_by_bundle in elastos/crates/elastos-server/src/runtime.rs; POST /api/launch/open in elastos/crates/elastos-server/src/api/routes.rs).
     ("stand-in F4 selected viewer comparison is bypassed", "admit.rs",
      [("if resolved_viewer.cid != selected_viewer {",
        "if false && resolved_viewer.cid != selected_viewer {")],
@@ -31,7 +31,7 @@ CASES = [
      [("if resolved_cid != selected_cid || admitted_role != role || execution != required_execution {",
        "if false {")],
      ["stand_in_checks_resolved_roles_and_core_selection"]),
-    # This test code stands in for the Runtime's launch by CID, which does not exist yet.
+    # This stand-in is not the Runtime start by CID (Runtime::start_by_bundle in elastos/crates/elastos-server/src/runtime.rs; POST /api/launch/open in elastos/crates/elastos-server/src/api/routes.rs).
     ("stand-in F9 staged content admits without its claim", "admit.rs",
      [("        return Err(Refusal::ClaimMissing {\n            cid: loaded.cid.clone(),\n        });",
        "        return Ok(Admitted { cid: loaded.cid.clone(), name: String::new(), version: String::new(), role: String::new(), publisher_did: String::new(), path: loaded.path.clone() });")],

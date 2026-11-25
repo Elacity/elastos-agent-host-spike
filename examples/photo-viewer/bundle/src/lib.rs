@@ -26,7 +26,7 @@ pub mod sign;
 pub mod testing;
 
 pub use admit::{admit, load, resolve_requires, Admitted, Installed, Loaded};
-// This test code stands in for the Runtime's launch by CID, which does not exist yet.
+// This stand-in is not the Runtime start by CID (Runtime::start_by_bundle in elastos/crates/elastos-server/src/runtime.rs; POST /api/launch/open in elastos/crates/elastos-server/src/api/routes.rs).
 pub use admit::{
     admit_staged_for_stand_in, bind_content_stand_in, select_stand_in_dependencies,
     validate_content_stand_in, StandInDependencies, StandInResolveManifest,
@@ -127,20 +127,20 @@ pub enum Refusal {
         installed: String,
         offered: String,
     },
-    /// This test code stands in for the Runtime's launch by CID, which does not exist yet.
+    /// This stand-in is not the Runtime start by CID (Runtime::start_by_bundle in elastos/crates/elastos-server/src/runtime.rs; POST /api/launch/open in elastos/crates/elastos-server/src/api/routes.rs).
     /// The content CID is absent from the staged store.
     StagedMissing { cid: String },
-    /// This test code stands in for the Runtime's launch by CID, which does not exist yet.
+    /// This stand-in is not the Runtime start by CID (Runtime::start_by_bundle in elastos/crates/elastos-server/src/runtime.rs; POST /api/launch/open in elastos/crates/elastos-server/src/api/routes.rs).
     /// The staged content has no detached admission claim.
     ClaimMissing { cid: String },
-    /// This test code stands in for the Runtime's launch by CID, which does not exist yet.
+    /// This stand-in is not the Runtime start by CID (Runtime::start_by_bundle in elastos/crates/elastos-server/src/runtime.rs; POST /api/launch/open in elastos/crates/elastos-server/src/api/routes.rs).
     /// The content pins a different viewer from the launch selection.
     ViewerMismatch {
         cid: String,
         actual: String,
         expected: String,
     },
-    /// This test code stands in for the Runtime's launch by CID, which does not exist yet.
+    /// This stand-in is not the Runtime start by CID (Runtime::start_by_bundle in elastos/crates/elastos-server/src/runtime.rs; POST /api/launch/open in elastos/crates/elastos-server/src/api/routes.rs).
     /// A resolved dependency differs from the selected CID, role or execution.
     LaunchBindingInvalid { cid: String, role: String },
     /// The staged copy does not hash to its CID.
@@ -149,7 +149,7 @@ pub enum Refusal {
     StagedNotReadOnly(String),
     /// A capsule requirement with no `cid`.
     CoreUnpinned(String),
-    /// This test code stands in for the Runtime's launch by CID, which does not exist yet.
+    /// This stand-in is not the Runtime start by CID (Runtime::start_by_bundle in elastos/crates/elastos-server/src/runtime.rs; POST /api/launch/open in elastos/crates/elastos-server/src/api/routes.rs).
     /// A passive content viewer needs its own CID pin.
     ContentCoreUnpinned(String),
     /// The content profile or its viewer binding is malformed.
@@ -211,7 +211,7 @@ impl Refusal {
             Refusal::StagedMismatch { .. } => "staged_mismatch",
             Refusal::StagedNotReadOnly(_) => "staged_not_read_only",
             Refusal::CoreUnpinned(_) => "core_unpinned",
-            // This test code stands in for the Runtime's launch by CID, which does not exist yet.
+            // This stand-in is not the Runtime start by CID (Runtime::start_by_bundle in elastos/crates/elastos-server/src/runtime.rs; POST /api/launch/open in elastos/crates/elastos-server/src/api/routes.rs).
             Refusal::ContentCoreUnpinned(_) => "core_unpinned",
             Refusal::ContentBindingInvalid { .. } => "content_binding_invalid",
             Refusal::CoreMissing { .. } => "core_missing",
@@ -227,7 +227,7 @@ impl Refusal {
 impl std::fmt::Display for Refusal {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            // This test code stands in for the Runtime's launch by CID, which does not exist yet.
+            // This stand-in is not the Runtime start by CID (Runtime::start_by_bundle in elastos/crates/elastos-server/src/runtime.rs; POST /api/launch/open in elastos/crates/elastos-server/src/api/routes.rs).
             Refusal::StagedMissing { cid } => write!(f,
                 "staged_missing: Content CID {cid} is absent from the staged store; admit that exact capsule first."),
             Refusal::ClaimMissing { cid } => write!(f,
