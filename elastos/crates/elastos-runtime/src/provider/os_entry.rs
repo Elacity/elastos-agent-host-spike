@@ -651,7 +651,18 @@ fn dispatch(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::os::fd::{AsRawFd, FromRawFd};
+    #[cfg(all(
+        not(elastos_unsupported_os_check),
+        any(
+            target_os = "macos",
+            all(
+                target_os = "linux",
+                any(target_arch = "x86_64", target_arch = "aarch64")
+            )
+        )
+    ))]
+    use std::os::fd::AsRawFd;
+    use std::os::fd::FromRawFd;
     use std::os::unix::fs::PermissionsExt;
     use std::path::PathBuf;
 
