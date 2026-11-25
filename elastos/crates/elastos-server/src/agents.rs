@@ -1246,13 +1246,10 @@ fn release_agent_writer_pause(data_dir: &Path) {
 #[cfg(test)]
 fn pause_agent_writer(data_dir: &Path, point: &str) {
     let mut guard = writer_pause_lock();
-    loop {
-        let Some(index) = guard
-            .iter()
-            .position(|pause| pause.data_dir == data_dir && pause.point == point && !pause.release)
-        else {
-            break;
-        };
+    while let Some(index) = guard
+        .iter()
+        .position(|pause| pause.data_dir == data_dir && pause.point == point && !pause.release)
+    {
         guard[index].arrived = true;
         WRITER_PAUSE_CV.notify_all();
         guard = WRITER_PAUSE_CV
