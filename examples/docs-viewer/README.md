@@ -11,8 +11,9 @@ Two capsules, one role each:
 | `docs-viewer` | here | `app`, a Bus v1 component | Reads a shelf of documents by grant, checks each is text, parses markdown into typed blocks in the sandbox, writes the pages |
 | `docs-reader` | `surface/` | `viewer`, a render-only page | Draws the pages with `textContent` only; the block renderer is the kit's one owner, shipped as a verified copy |
 
-It stays outside the ElastOS Cargo workspace and all CI, setup, release and deployment lists, like
-`examples/photo-viewer`.
+It stays outside the ElastOS Cargo workspace and the setup, release and
+deployment lists, like `examples/photo-viewer`. The nightly `examples-nightly`
+workflow runs this folder's gate (`bash verify.sh`).
 
 ## The page's one renderer
 
