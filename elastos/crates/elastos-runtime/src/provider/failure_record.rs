@@ -170,7 +170,7 @@ fn directory_identity(path: &Path) -> Result<(u64, u64, OwnedFd), String> {
             std::io::Error::last_os_error()
         ));
     }
-    let held = super::super::root_pin::owned_fd_above_stdio(fd).map_err(|errno| {
+    let held = super::super::landlock_plan::owned_fd_above_stdio(fd).map_err(|errno| {
         format!(
             "provider start is refused: the storage root could not be opened: {}",
             std::io::Error::from_raw_os_error(errno)
@@ -204,7 +204,7 @@ fn open_dev_null() -> Result<OwnedFd, String> {
             std::io::Error::last_os_error()
         ));
     }
-    let held = super::super::root_pin::owned_fd_above_stdio(fd).map_err(|errno| {
+    let held = super::super::landlock_plan::owned_fd_above_stdio(fd).map_err(|errno| {
         format!(
             "provider start is refused: /dev/null could not be opened: {}",
             std::io::Error::from_raw_os_error(errno)

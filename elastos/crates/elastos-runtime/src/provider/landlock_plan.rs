@@ -7,7 +7,7 @@
 
 use super::rights::AdmittedRights;
 use super::rights_table::RuntimeProviderId;
-use std::os::fd::{AsRawFd, OwnedFd};
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::{
     io,
     path::{Path, PathBuf},
@@ -539,6 +539,25 @@ fn inspect_loader(candidate: &Path, root: &Path, trust_uid: u32) -> Result<Locat
     }
 }
 
+/// Dup `fd` to a descriptor at or above 3 and close `fd`. A held descriptor
+/// in 0, 1, or 2 is replaced when the child dup2s its standard streams.
+pub(super) fn owned_fd_above_stdio(fd: i32) -> Result<OwnedFd, i32> {
+    if fd < 0 {
+        return Err(std::io::Error::last_os_error()
+            .raw_os_error()
+            .unwrap_or(libc::EIO));
+    }
+    let dup = unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 3) };
+    let err = std::io::Error::last_os_error()
+        .raw_os_error()
+        .unwrap_or(libc::EIO);
+    unsafe { libc::close(fd) };
+    if dup < 0 {
+        return Err(err);
+    }
+    Ok(unsafe { OwnedFd::from_raw_fd(dup) })
+}
+
 #[cfg(unix)]
 fn open_loader_stat(path: &Path) -> std::io::Result<(libc::stat, OwnedFd)> {
     use std::os::unix::ffi::OsStrExt;
@@ -554,8 +573,7 @@ fn open_loader_stat(path: &Path) -> std::io::Result<(libc::stat, OwnedFd)> {
     if fd < 0 {
         return Err(std::io::Error::last_os_error());
     }
-    let held =
-        super::root_pin::owned_fd_above_stdio(fd).map_err(std::io::Error::from_raw_os_error)?;
+    let held = owned_fd_above_stdio(fd).map_err(std::io::Error::from_raw_os_error)?;
     let mut info = std::mem::MaybeUninit::<libc::stat>::uninit();
     if unsafe { libc::fstat(held.as_raw_fd(), info.as_mut_ptr()) } < 0 {
         return Err(std::io::Error::last_os_error());
@@ -576,7 +594,7 @@ fn hold_regular_nofollow(path: &Path) -> Option<OwnedFd> {
     if fd < 0 {
         return None;
     }
-    let held = super::root_pin::owned_fd_above_stdio(fd).ok()?;
+    let held = owned_fd_above_stdio(fd).ok()?;
     let mut info = std::mem::MaybeUninit::<libc::stat>::uninit();
     if unsafe { libc::fstat(held.as_raw_fd(), info.as_mut_ptr()) } < 0 {
         return None;
@@ -600,7 +618,7 @@ fn hold_regular_follow(path: &Path) -> Option<OwnedFd> {
     if fd < 0 {
         return None;
     }
-    let held = super::root_pin::owned_fd_above_stdio(fd).ok()?;
+    let held = owned_fd_above_stdio(fd).ok()?;
     let mut info = std::mem::MaybeUninit::<libc::stat>::uninit();
     if unsafe { libc::fstat(held.as_raw_fd(), info.as_mut_ptr()) } < 0 {
         return None;
@@ -620,7 +638,7 @@ fn hold_directory_path(path: &Path) -> Option<OwnedFd> {
     if fd < 0 {
         return None;
     }
-    let held = super::root_pin::owned_fd_above_stdio(fd).ok()?;
+    let held = owned_fd_above_stdio(fd).ok()?;
     let mut info = std::mem::MaybeUninit::<libc::stat>::uninit();
     if unsafe { libc::fstat(held.as_raw_fd(), info.as_mut_ptr()) } < 0 {
         return None;

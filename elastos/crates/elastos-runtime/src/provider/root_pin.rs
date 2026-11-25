@@ -6,7 +6,9 @@
 
 use std::ffi::CStr;
 use std::mem::MaybeUninit;
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+#[cfg(test)]
+use std::os::fd::FromRawFd;
+use std::os::fd::{AsRawFd, OwnedFd};
 
 #[cfg(target_os = "linux")]
 pub(super) const DIRECTORY_OPEN_FLAGS: libc::c_int =
@@ -40,27 +42,12 @@ fn stat_identity(info: &libc::stat) -> (u64, u64) {
 ///
 /// `DIRECTORY_OPEN_FLAGS` does not follow a symlink. The caller holds this
 /// descriptor until the rule is added, so the inode cannot be reused.
-/// Dup `fd` to a descriptor at or above 3 and close `fd`. A held descriptor
-/// in 0, 1, or 2 is replaced when the child dup2s its standard streams.
-pub(super) fn owned_fd_above_stdio(fd: i32) -> Result<OwnedFd, i32> {
-    if fd < 0 {
-        return Err(last_errno());
-    }
-    let dup = unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 3) };
-    let err = last_errno();
-    unsafe { libc::close(fd) };
-    if dup < 0 {
-        return Err(err);
-    }
-    Ok(unsafe { OwnedFd::from_raw_fd(dup) })
-}
-
 pub(super) fn hold_directory(path: &CStr) -> Result<OwnedFd, i32> {
     let fd = unsafe { libc::open(path.as_ptr(), DIRECTORY_OPEN_FLAGS) };
     if fd < 0 {
         return Err(last_errno());
     }
-    let directory = owned_fd_above_stdio(fd)?;
+    let directory = super::landlock_plan::owned_fd_above_stdio(fd)?;
     let mut info = MaybeUninit::<libc::stat>::uninit();
     if unsafe { libc::fstat(directory.as_raw_fd(), info.as_mut_ptr()) } < 0 {
         return Err(last_errno());
@@ -120,7 +107,7 @@ pub(super) fn open_pinned_directory(
         return Err(last_errno());
     }
     // The descriptor was just opened and is not owned by anyone else.
-    let directory = owned_fd_above_stdio(fd)?;
+    let directory = super::landlock_plan::owned_fd_above_stdio(fd)?;
     let mut info = MaybeUninit::<libc::stat>::uninit();
     if unsafe { libc::fstat(directory.as_raw_fd(), info.as_mut_ptr()) } < 0 {
         return Err(last_errno());
