@@ -5730,6 +5730,7 @@ mod tests {
         std::fs::OpenOptions::new()
             .write(true)
             .create(true)
+            .truncate(true)
             .open(&big)
             .unwrap()
             .set_len(32 * 1024 * 1024 + 1)
@@ -5799,9 +5800,7 @@ mod tests {
         let before = fs::read(&kept).unwrap();
         let marker_before =
             fs::read(restored.path().join("identity/localhost-file-key-v1")).unwrap();
-        let mismatch = format!(
-            "identity/localhost-file-key-v1 does not match this Home (restored or copied folder, changed device key). Make it readable or move it out of the folder, then restart."
-        );
+        let mismatch = "identity/localhost-file-key-v1 does not match this Home (restored or copied folder, changed device key). Make it readable or move it out of the folder, then restart.".to_string();
         expect_refusal(restored.path(), &other_key, &mismatch, false);
         assert_eq!(fs::read(&kept).unwrap(), before);
         assert_eq!(
@@ -6082,6 +6081,7 @@ mod tests {
         std::fs::OpenOptions::new()
             .write(true)
             .create(true)
+            .truncate(true)
             .open(&big)
             .unwrap()
             .set_len(1 << 30)

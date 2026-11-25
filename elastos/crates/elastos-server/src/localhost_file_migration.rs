@@ -131,7 +131,7 @@ fn kill_checkpoint(point: &str) {
 #[cfg(unix)]
 thread_local! {
     static MIGRATION_ROOT: std::cell::RefCell<std::path::PathBuf> =
-        std::cell::RefCell::new(std::path::PathBuf::new());
+        const { std::cell::RefCell::new(std::path::PathBuf::new()) };
     static PROGRESS_AT: std::cell::Cell<(u64, u64)> = const { std::cell::Cell::new((0, 0)) };
 }
 
