@@ -583,6 +583,117 @@ mod tests {
             started.bridge.shutdown().await.unwrap();
         }
 
+        fn base_restart_settings() -> serde_json::Value {
+            let text = std::fs::read_to_string(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../tests/fixtures/chain-base-restart.json"
+            ))
+            .unwrap();
+            serde_json::from_str(&text.replace("__ISSUER__", &issuer_hex())).unwrap()
+        }
+
+        struct OperatorEnv {
+            base: Option<String>,
+            bitcoin: Option<String>,
+        }
+
+        impl OperatorEnv {
+            fn set() -> Self {
+                let previous = Self {
+                    base: std::env::var("BASE_RPC_URL").ok(),
+                    bitcoin: std::env::var("BITCOIN_REST_URL").ok(),
+                };
+                std::env::set_var("BASE_RPC_URL", "https://127.0.0.1:8");
+                std::env::set_var("BITCOIN_REST_URL", "https://127.0.0.1:7");
+                previous
+            }
+        }
+
+        impl Drop for OperatorEnv {
+            fn drop(&mut self) {
+                restore_env("BASE_RPC_URL", self.base.as_deref());
+                restore_env("BITCOIN_REST_URL", self.bitcoin.as_deref());
+            }
+        }
+
+        fn restore_env(key: &str, value: Option<&str>) {
+            match value {
+                Some(value) => std::env::set_var(key, value),
+                None => std::env::remove_var(key),
+            }
+        }
+
+        async fn status_text(bridge: &ProviderBridge, id: &str) -> String {
+            bridge
+                .send_raw(&serde_json::json!({"op": "status", "network": id}))
+                .await
+                .unwrap_or_else(|err| panic!("{id}: {err}"))
+                .to_string()
+        }
+
+        fn display_name(value: &serde_json::Value, id: &str) -> String {
+            value["data"]["networks"]
+                .as_array()
+                .and_then(|nets| nets.iter().find(|net| net["id"] == id))
+                .and_then(|net| net["display_name"].as_str())
+                .unwrap_or("")
+                .to_string()
+        }
+
+        /// First start applies BASE_RPC_URL to the default network. The accepted
+        /// network keeps the rpc from its Init, including after a restart that
+        /// injects BASE_RPC_URL again. BITCOIN_REST_URL still fills btc-mainnet,
+        /// which this Init did not replace.
+        #[tokio::test]
+        async fn an_accepted_network_keeps_its_rpc_when_base_rpc_url_is_set() {
+            let _lock = tests_lock().lock().await;
+            let _env = OperatorEnv::set();
+            let mut extra = base_restart_settings();
+            let id = extra["accepted_id"].as_str().unwrap().to_string();
+            let accepted = extra["accepted_rpc_url"].as_str().unwrap().to_string();
+            let accepted_name = extra["accepted_display_name"].as_str().unwrap().to_string();
+            let object = extra.as_object_mut().unwrap();
+            object.remove("accepted_id");
+            object.remove("accepted_rpc_url");
+            object.remove("accepted_display_name");
+            let started = start(Some(b"nameserver 127.0.0.1\n")).await;
+            let first = status_text(&started.bridge, &id).await;
+            assert!(first.contains("127.0.0.1:8"), "{first}");
+            let bitcoin = status_text(&started.bridge, "btc-mainnet").await;
+            assert!(bitcoin.contains("127.0.0.1:7"), "{bitcoin}");
+            let applied = started
+                .bridge
+                .accept_following_init(ProviderConfig {
+                    extra,
+                    ..ProviderConfig::default()
+                })
+                .await
+                .unwrap();
+            assert!(
+                matches!(
+                    applied,
+                    super::super::super::bridge::ProviderResponse::Ok { .. }
+                ),
+                "{applied:?}"
+            );
+            let armed = networks(&started.bridge).await.unwrap();
+            assert_eq!(display_name(&armed, &id), accepted_name, "{armed}");
+            let armed_status = status_text(&started.bridge, &id).await;
+            assert!(armed_status.contains(&accepted), "{armed_status}");
+            assert!(!armed_status.contains("127.0.0.1:8"), "{armed_status}");
+            replace_by_rename(&started.resolv, b"nameserver 127.0.0.7\n");
+            let changed = networks(&started.bridge).await.unwrap_err();
+            assert_eq!(changed.to_string(), CHAIN_RESOLVER_CHANGED);
+            let after = networks(&started.bridge).await.unwrap();
+            assert_eq!(display_name(&after, &id), accepted_name, "{after}");
+            let after_status = status_text(&started.bridge, &id).await;
+            assert!(after_status.contains(&accepted), "{after_status}");
+            assert!(!after_status.contains("127.0.0.1:8"), "{after_status}");
+            let bitcoin_after = status_text(&started.bridge, "btc-mainnet").await;
+            assert!(bitcoin_after.contains("127.0.0.1:7"), "{bitcoin_after}");
+            started.bridge.shutdown().await.unwrap();
+        }
+
         /// resolv.conf changes after spawn and before Home's second Init.
         /// That Init meets `chain_resolver_changed` once, tries again once,
         /// and the protected settings land on the new helper.

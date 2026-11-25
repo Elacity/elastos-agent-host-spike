@@ -111,6 +111,70 @@ fn operator_settings_arrive_through_init_and_are_not_in_the_reply() {
 }
 
 #[test]
+fn an_accepted_network_keeps_its_rpc_when_operator_settings_arrive_with_it() {
+    let mut network = complete_protected_content_network("base-mainnet");
+    network["rpc_url"] = json!("https://accepted.example.invalid");
+    let mut provider = ChainProvider::new();
+    let init = provider.handle(Request::Init {
+        config: json!({
+            "extra": {
+                "protected_content_runtime_issuer": runtime_issuer_hex(0x42),
+                "protected_content_network": network,
+                "operator_settings": {
+                    "BASE_RPC_URL": "https://operator.example.test/rpc",
+                    "BITCOIN_REST_URL": "https://btc.example.test",
+                    "BITCOIN_RPC_USER": "rpc-user",
+                    "BITCOIN_RPC_PASSWORD": "rpc-password"
+                }
+            }
+        }),
+    });
+    assert!(matches!(init, Response::Ok { .. }), "{init:?}");
+    assert_eq!(
+        provider.rpc_url_for("base-mainnet"),
+        Some("https://accepted.example.invalid")
+    );
+    assert_eq!(
+        provider.rpc_url_for("btc-mainnet"),
+        Some("https://btc.example.test")
+    );
+    assert_eq!(provider.bitcoin_rpc_user_for_test(), Some("rpc-user"));
+
+    let mut listed = ChainProvider::new();
+    let listed_init = listed.handle(Request::Init {
+        config: json!({
+            "networks": [{
+                "id": "base-mainnet",
+                "display_name": "Listed",
+                "kind": "evm_json_rpc",
+                "chain_id": 8453,
+                "native_symbol": "ETH",
+                "provider": "test",
+                "mainnet": true,
+                "explorer_url": null,
+                "rpc_url": "https://listed.example.invalid"
+            }],
+            "extra": {
+                "operator_settings": {
+                    "BASE_RPC_URL": "https://operator.example.test/rpc",
+                    "BITCOIN_RPC_USER": "rpc-user",
+                    "BITCOIN_RPC_PASSWORD": "rpc-password"
+                }
+            }
+        }),
+    });
+    assert!(
+        matches!(listed_init, Response::Ok { .. }),
+        "{listed_init:?}"
+    );
+    assert_eq!(
+        listed.rpc_url_for("base-mainnet"),
+        Some("https://listed.example.invalid")
+    );
+    assert_eq!(listed.bitcoin_rpc_user_for_test(), Some("rpc-user"));
+}
+
+#[test]
 fn chain_provider_rejects_hidden_prepare_transaction_fields() {
     let request = json!({
         "op": "prepare_transaction",

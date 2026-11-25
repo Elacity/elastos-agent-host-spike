@@ -365,7 +365,22 @@ impl ChainProvider {
         }
         self.protected_content_network_id = next_protected_content_network_id;
         self.protected_content_runtime_issuer = next_runtime_issuer;
-        if let Err(response) = self.apply_operator_settings(extra.get("operator_settings")) {
+        // A network this Init replaced keeps the rpc it arrived with. Settings
+        // still fill a default this Init left in place, which is where they
+        // applied on the first start.
+        let replaced: std::collections::BTreeSet<String> = if configured_networks.is_some() {
+            self.networks
+                .iter()
+                .map(|network| network.id.clone())
+                .collect()
+        } else if configured_protected_content_network.is_some() {
+            self.protected_content_network_id.iter().cloned().collect()
+        } else {
+            std::collections::BTreeSet::new()
+        };
+        if let Err(response) =
+            self.apply_operator_settings(extra.get("operator_settings"), &replaced)
+        {
             return response;
         }
         Response::ok(json!({
@@ -377,8 +392,13 @@ impl ChainProvider {
 
     /// Closed list. Runtime copies these from its own environment into Init.
     /// This function does not read the process environment and does not log
-    /// the values.
-    fn apply_operator_settings(&mut self, settings: Option<&Value>) -> Result<(), Response> {
+    /// the values. `replaced` is the network ids this Init accepted. Those
+    /// keep their rpc. Bitcoin user and password are not a network record.
+    fn apply_operator_settings(
+        &mut self,
+        settings: Option<&Value>,
+        replaced: &std::collections::BTreeSet<String>,
+    ) -> Result<(), Response> {
         const KEYS: &[&str] = &[
             "BASE_RPC_URL",
             "BITCOIN_REST_URL",
@@ -403,21 +423,25 @@ impl ChainProvider {
             }
         }
         if let Some(url) = map.get("BASE_RPC_URL").and_then(Value::as_str) {
-            if let Some(network) = self
-                .networks
-                .iter_mut()
-                .find(|network| network.id == "base-mainnet")
-            {
-                network.rpc_url = url.to_string();
+            if !replaced.contains("base-mainnet") {
+                if let Some(network) = self
+                    .networks
+                    .iter_mut()
+                    .find(|network| network.id == "base-mainnet")
+                {
+                    network.rpc_url = url.to_string();
+                }
             }
         }
         if let Some(url) = map.get("BITCOIN_REST_URL").and_then(Value::as_str) {
-            if let Some(network) = self
-                .networks
-                .iter_mut()
-                .find(|network| network.id == "btc-mainnet")
-            {
-                network.rpc_url = url.to_string();
+            if !replaced.contains("btc-mainnet") {
+                if let Some(network) = self
+                    .networks
+                    .iter_mut()
+                    .find(|network| network.id == "btc-mainnet")
+                {
+                    network.rpc_url = url.to_string();
+                }
             }
         }
         let user = map.get("BITCOIN_RPC_USER").and_then(Value::as_str);

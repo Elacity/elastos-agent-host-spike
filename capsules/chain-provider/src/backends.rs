@@ -173,7 +173,12 @@ impl ChainProvider {
                 "params": params,
             }))
             .send()
-            .map_err(|_| Response::error("upstream_unreachable", "EVM RPC request failed"))?;
+            .map_err(|err| {
+                Response::error(
+                    "upstream_unreachable",
+                    &format!("EVM RPC request failed: {err}"),
+                )
+            })?;
         let status = response.status();
         if !status.is_success() {
             return Err(Response::error(
