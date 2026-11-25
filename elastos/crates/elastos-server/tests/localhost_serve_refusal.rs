@@ -23,7 +23,6 @@ const STUB_SHA256: &str = "fe4d4ae6392aba6ebd7b7b954f970c4f96b28335d86da2aa1eff3
 struct Serve {
     child: Child,
     output: Arc<Mutex<String>>,
-    addr: String,
     data: PathBuf,
 }
 
@@ -59,7 +58,13 @@ fn unreadable_users_file_keeps_serve_up_and_storage_answers_503() {
     let addr = format!("127.0.0.1:{port}");
 
     let mut child = Command::new(env!("CARGO_BIN_EXE_elastos"))
-        .args(["serve", "-a", &addr, "--storage", storage.to_str().unwrap()])
+        .args([
+            "serve",
+            "-a",
+            &addr,
+            "--storage-path",
+            storage.to_str().unwrap(),
+        ])
         .env_clear()
         .env("HOME", &home)
         .env("PATH", "/usr/bin:/bin")
@@ -75,7 +80,6 @@ fn unreadable_users_file_keeps_serve_up_and_storage_answers_503() {
     let mut serve = Serve {
         child,
         output,
-        addr: addr.clone(),
         data: data.clone(),
     };
 
