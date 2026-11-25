@@ -3107,6 +3107,9 @@ function recoveryRefusal(error) {
     /(\d+ agents? on this Home would belong to nobody\. This recovery changes the owner id (?:its record names|their records name)\.)/,
     /(This Home has an agents file this build cannot read, so a root-key change is refused\.)/,
     /(This Home cannot open the key that wraps an agent's data, so a root-key change is refused\.)/,
+    /(This passkey no longer names the account this recovery started with, so the recovery is refused\.)/,
+    /(The agents lock changed while this Home was taking it, so the write is refused\.)/,
+    /(agents are unavailable: (?:agent file path is not a regular file|agent file mode is wider than 0600|agent file cannot be read|agent file does not parse|agent file holds a field or value this Runtime does not write|agent file schema is unknown|agent file sequence is invalid|agent record version is unknown|agent file holds a record that is not an agent|agent record carries a role an agent never has|agent id is repeated|agent root is repeated|agent id, root or binding is held by a record in the sign-in file|agent storage protection is invalid|agent file custody is unsupported on Windows|agent kind binding mismatch|agent admission kind invalid|agent admission id invalid|agent admission subject mismatch|agent admission root mismatch|agent admission owner missing|agent admission request id missing|agent admission package name missing|agent admission package cid missing|agent admission binding id mismatch))/,
   ];
   for (const pattern of patterns) {
     const found = message.match(pattern);
@@ -4207,6 +4210,10 @@ function readText(value) {
 
 function publicSystemError(value, fallback) {
   const message = readText(value && value.message ? value.message : value);
+  const named = recoveryRefusal(message);
+  if (named && (named !== message || recoveryRefusal(`request failed: 409 ${message}`) === message)) {
+    return named;
+  }
   if (!message || /\b(schema|projection|provider|adapter|capability|affordance|runtime-owned|launch token|hostcall|request failed|failed to fetch|unauthorized|forbidden|[45]\d\d)\b|engine_[a-z_]+/i.test(message)) {
     return fallback;
   }

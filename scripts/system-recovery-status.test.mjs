@@ -340,6 +340,110 @@ test("import and Create Recovery Kit show the refusal, not a raw request failed"
   assert.equal(note.textContent.includes("Retire"), false);
 });
 
+const AGENT_REFUSALS = [
+  "1 agent on this Home would stop opening, so nothing was changed. Use this Recovery Kit on another Home instead.",
+  "2 agents on this Home would stop opening, so nothing was changed. Use this Recovery Kit on another Home instead.",
+  "1 agent on this Home uses a key this Home can't put in a Recovery Kit yet, so nothing was changed.",
+  "2 agents on this Home use a key this Home can't put in a Recovery Kit yet, so nothing was changed.",
+  "1 agent on this Home would belong to nobody. This recovery changes the owner id its record names.",
+  "2 agents on this Home would belong to nobody. This recovery changes the owner id their records name.",
+  "This Home has an agents file this build cannot read, so a root-key change is refused.",
+  "This Home cannot open the key that wraps an agent's data, so a root-key change is refused.",
+  "This passkey no longer names the account this recovery started with, so the recovery is refused.",
+  "The agents lock changed while this Home was taking it, so the write is refused.",
+  ...[
+    "agent file path is not a regular file",
+    "agent file mode is wider than 0600",
+    "agent file cannot be read",
+    "agent file does not parse",
+    "agent file holds a field or value this Runtime does not write",
+    "agent file schema is unknown",
+    "agent file sequence is invalid",
+    "agent record version is unknown",
+    "agent file holds a record that is not an agent",
+    "agent record carries a role an agent never has",
+    "agent id is repeated",
+    "agent root is repeated",
+    "agent id, root or binding is held by a record in the sign-in file",
+    "agent storage protection is invalid",
+    "agent file custody is unsupported on Windows",
+    "agent kind binding mismatch",
+    "agent admission kind invalid",
+    "agent admission id invalid",
+    "agent admission subject mismatch",
+    "agent admission root mismatch",
+    "agent admission owner missing",
+    "agent admission request id missing",
+    "agent admission package name missing",
+    "agent admission package cid missing",
+    "agent admission binding id mismatch",
+  ].map((cause) => `agents are unavailable: ${cause}`),
+];
+
+test("each named agent refusal is shown as the server said it", async () => {
+  const note = { hidden: true, textContent: "", dataset: {} };
+  let refused = AGENT_REFUSALS[0];
+  const context = vm.createContext({
+    hasShellAccess: () => true,
+    recoveryProfileStatus: "ready",
+    recoveryProfileRequired: false,
+    recoveryDownloadButton: { textContent: "Create Recovery Kit", disabled: false },
+    recoveryExportBusy: false,
+    recoveryProfileName: null,
+    recoveryPasswordInput: { value: "" },
+    recoveryImportInput: { value: "" },
+    pendingRecoveryImport: null,
+    recoveryNoteNode: note,
+    clearRecoveryPending: () => {},
+    setRecoveryButton: () => {},
+    showRecoveryStatus: () => {},
+    shellHeaders: () => ({}),
+    recoveryDownloadPassword: () => "",
+    requestPasskeyStepUp: async () => "step-up",
+    downloadRecoveryKit: () => "kit.json",
+    notifyHomeSummaryChanged: () => {},
+    refreshSystemSummary: async () => {},
+    fetchJson: async (url) => {
+      const path = String(url);
+      if (path.includes("/api/auth/recovery/full-export")) {
+        throw new Error(`request failed: 409 ${refused}`);
+      }
+      if (path.includes("/api/auth/recovery/status")) {
+        return {
+          principal_id: "person:current",
+          localhost_root: "localhost://Users/current",
+        };
+      }
+      throw new Error(`unexpected ${path}`);
+    },
+  });
+  const readerSource = source.slice(
+    source.indexOf("function readText(value) {"),
+    source.indexOf("const HOSTED_KEY_CHECK_PENDING"),
+  );
+  const noteSource = source.slice(
+    source.indexOf("function showRecoveryNote(message, tone) {"),
+    source.indexOf("async function refreshChainNetworks("),
+  );
+  const flow = source.slice(
+    source.indexOf("async function onRecoveryDownload("),
+    source.indexOf("function recoveryImportIsComplete"),
+  );
+  vm.runInContext(`${readerSource}\n${noteSource}\n${flow}`, context);
+  assert.equal(readerSource.includes("function publicSystemError("), true);
+  assert.equal(context.publicSystemError === undefined, false);
+  for (const sentence of AGENT_REFUSALS) {
+    refused = sentence;
+    await context.onRecoveryDownload();
+    assert.equal(note.textContent, sentence, sentence);
+    assert.equal(note.textContent.includes("request failed"), false, sentence);
+  }
+  refused = "agents are unavailable: not a cause this Runtime writes";
+  await context.onRecoveryDownload();
+  assert.equal(note.textContent, "Recovery action could not be completed.");
+  assert.equal(note.textContent.includes("request failed"), false);
+});
+
 test("onRecoveryImport reads agents_built and does not decide from a 409", async () => {
   const hidden = recoveryFlow();
   await hidden.context.onRecoveryImport({
