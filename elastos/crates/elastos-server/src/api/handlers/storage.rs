@@ -84,12 +84,12 @@ impl From<ProviderError> for StorageApiError {
             ProviderError::NoProvider(m) => {
                 StorageApiError::Internal(format!("No provider: {}", m))
             }
-            ProviderError::Provider(m)
-                if m.contains("Make it readable or move it out of the folder, then restart.") =>
-            {
-                StorageApiError::LocalApps(m)
+            ProviderError::Provider(m) => {
+                match crate::local_apps::sentence_from_local_apps_provider_error(&m) {
+                    Some(sentence) => StorageApiError::LocalApps(sentence.to_string()),
+                    None => StorageApiError::Internal(m),
+                }
             }
-            ProviderError::Provider(m) => StorageApiError::Internal(m),
             ProviderError::Unavailable(m) => {
                 StorageApiError::Internal(format!("Peer unavailable: {}", m))
             }
@@ -1158,6 +1158,25 @@ mod tests {
             .await
             .unwrap();
         (status, String::from_utf8(bytes.to_vec()).unwrap())
+    }
+
+    #[test]
+    fn a_provider_error_is_local_apps_only_with_the_refusal_mark() {
+        let sentence = "Users/note.bin is not readable. Make it readable or move it out of the folder, then restart.";
+        let marked = elastos_runtime::provider::ProviderError::Provider(
+            crate::local_apps::marked_local_apps_refusal(sentence),
+        );
+        match StorageApiError::from(marked) {
+            StorageApiError::LocalApps(got) => assert_eq!(got, sentence),
+            other => panic!("{other:?}"),
+        }
+        let foreign = elastos_runtime::provider::ProviderError::Provider(
+            "Make it readable or move it out of the folder, then restart.".into(),
+        );
+        assert!(
+            matches!(StorageApiError::from(foreign), StorageApiError::Internal(_)),
+            "a recovery substring is not the refusal"
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]

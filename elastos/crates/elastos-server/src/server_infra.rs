@@ -5590,7 +5590,12 @@ mod tests {
                 .await
                 .unwrap_err()
             {
-                provider::ProviderError::Provider(text) => assert_eq!(text, sentence),
+                provider::ProviderError::Provider(text) => {
+                    assert_eq!(
+                        elastos_server::local_apps::sentence_from_local_apps_provider_error(&text),
+                        Some(sentence)
+                    );
+                }
                 other => panic!("{other}"),
             }
         });

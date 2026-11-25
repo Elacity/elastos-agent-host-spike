@@ -12,6 +12,17 @@ use elastos_runtime::provider::{
     Provider, ProviderError, ProviderRegistry, ResourceRequest, ResourceResponse,
 };
 
+/// The provider error starts with this mark and a newline, then the sentence.
+pub const LOCAL_APPS_REFUSAL_MARK: &str = "local-apps-off\n";
+
+pub fn marked_local_apps_refusal(sentence: &str) -> String {
+    format!("{LOCAL_APPS_REFUSAL_MARK}{sentence}")
+}
+
+pub fn sentence_from_local_apps_provider_error(message: &str) -> Option<&str> {
+    message.strip_prefix(LOCAL_APPS_REFUSAL_MARK)
+}
+
 static LOCAL_APPS_REFUSAL: Mutex<HashMap<PathBuf, String>> = Mutex::new(HashMap::new());
 static LOCAL_APPS_HOMES: Mutex<HashMap<usize, PathBuf>> = Mutex::new(HashMap::new());
 
@@ -113,7 +124,9 @@ impl RefusingLocalhostProvider {
 #[async_trait::async_trait]
 impl Provider for RefusingLocalhostProvider {
     async fn handle(&self, _request: ResourceRequest) -> Result<ResourceResponse, ProviderError> {
-        Err(ProviderError::Provider(self.sentence.clone()))
+        Err(ProviderError::Provider(marked_local_apps_refusal(
+            &self.sentence,
+        )))
     }
 
     fn schemes(&self) -> Vec<&'static str> {
@@ -128,7 +141,9 @@ impl Provider for RefusingLocalhostProvider {
         &self,
         _request: &serde_json::Value,
     ) -> Result<serde_json::Value, ProviderError> {
-        Err(ProviderError::Provider(self.sentence.clone()))
+        Err(ProviderError::Provider(marked_local_apps_refusal(
+            &self.sentence,
+        )))
     }
 }
 
