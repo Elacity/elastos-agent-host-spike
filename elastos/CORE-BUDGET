@@ -45,4 +45,5 @@
 # +4: an unlisted syscall name is absent, and a declared ioctl selects ABI 5
 # +121: a loader is the first trusted file in a fixed directory list
 # +8: the object helper's missing DID is its own error
-14123
+# +285: round 18 pins the planned loader file, maps the optional libraries, and tightens an older chain directory
+14408
