@@ -36,8 +36,9 @@
 //! takes `host_lock.rs` `acquire_host_process_lock` before that
 //! (`serve_cmd.rs` `run_serve`) and skips the lock when
 //! `ELASTOS_ALLOW_SUBORDINATE_RUNTIME_HOST=1`. `elastos gateway`, including
-//! its public mode, and `elastos home --browser` also take that lock
-//! (`gateway_cmd.rs`). A second one of these stops with "another ElastOS
+//! its public mode, and `elastos home --browser` take that same lock and call
+//! `prepare_localhost_files` only after the lock is held, before auth creates
+//! `ElastOS` (`gateway_cmd.rs`). A second one of these stops with "another ElastOS
 //! host already owns". Gateway and `home --browser` call
 //! `setup_gateway_infrastructure` or `setup_control_plane_infrastructure`
 //! (`spawn_host_providers` is false). They run this same walk, so a bad file
@@ -317,19 +318,33 @@ fn localhost_refused(path: &Path, why: &str) -> anyhow::Error {
     }
     let (cause, remedy) = if why.starts_with("larger") {
         (why, "Move it out of the folder, then restart.")
-    } else if why.contains("link") {
+    } else if why.contains("directory link") {
         (
-            "linked",
-            "Replace the link with a regular file, then restart.",
+            "a directory link",
+            "Replace the link with a directory, then restart.",
         )
     } else if why.contains("changed") {
         ("changed while read", "Leave it unchanged, then restart.")
+    } else if why.contains("cut off") {
+        ("cut off", "Remove it, then restart.")
     } else if why.contains("decrypt") {
         ("not decryptable", "Remove it, then restart.")
+    } else if why.contains("not a directory") {
+        (
+            "not a directory",
+            "Replace it with a directory, then restart.",
+        )
+    } else if why.contains("not a file") {
+        ("not a file", "Remove the directory, then restart.")
     } else if why.contains("not a regular") {
         (
             "not a regular file",
             "Replace it with a regular file, then restart.",
+        )
+    } else if why.contains("link") {
+        (
+            "linked",
+            "Replace the link with a regular file, then restart.",
         )
     } else {
         ("not readable", "Make it readable, then restart.")
@@ -775,14 +790,17 @@ fn migrate_localhost_envelope(
         .read(&mut header)
         .with_context(|| localhost_refused(path, "cannot be read"))?;
     note_bytes_read(read);
-    if localhost_provider::header_rules_out_envelope(&header[..read])
-        || localhost_provider::header_is_file_key_envelope(&header[..read])
-    {
+    // A `{"version":2` header is not proof. The GCM tag is the last 16 bytes,
+    // so this file is settled only inside the hard limit and only when this
+    // Home's file key opens the whole body. A foreign key fails that check.
+    // A cut-off body is not an envelope. A longer file is not read past here.
+    if localhost_provider::header_rules_out_envelope(&header[..read]) {
         return Ok(MigratedFile::Settled);
     }
     if opened.len > localhost_provider::SEALED_READ_HARD_LIMIT {
         return Ok(MigratedFile::OverHard);
     }
+    let claims_file_key = localhost_provider::header_is_file_key_envelope(&header[..read]);
     let mut bytes = Vec::new();
     if bytes.try_reserve(opened.len as usize).is_err() {
         return Ok(MigratedFile::OverHard);
@@ -801,6 +819,9 @@ fn migrate_localhost_envelope(
     run_before_replace(path);
     opened_file_still_matches(path, &opened)?;
     match localhost_provider::rekey_device_envelope(device_key, file_key, bytes) {
+        Ok(localhost_provider::RekeyOutcome::NotEnvelope) if claims_file_key => {
+            Err(localhost_refused(path, "is cut off"))
+        }
         Ok(localhost_provider::RekeyOutcome::NotEnvelope)
         | Ok(localhost_provider::RekeyOutcome::AlreadyFileKey) => Ok(MigratedFile::Settled),
         Ok(localhost_provider::RekeyOutcome::Rewritten(sealed)) => {
@@ -984,7 +1005,9 @@ fn plan_for_this_home(
 #[cfg(unix)]
 fn identity_is_directory_or_absent(identity: &Path) -> anyhow::Result<()> {
     match std::fs::symlink_metadata(identity) {
-        Ok(meta) if meta.file_type().is_symlink() => Err(localhost_refused(identity, "is a link")),
+        Ok(meta) if meta.file_type().is_symlink() => {
+            Err(localhost_refused(identity, "is a directory link"))
+        }
         Ok(meta) if meta.is_dir() => Ok(()),
         Ok(_) => Err(localhost_refused(identity, "is not a directory")),
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -997,7 +1020,9 @@ fn ensure_identity_dir(identity: &Path) -> anyhow::Result<()> {
     use std::os::unix::fs::DirBuilderExt;
 
     match std::fs::symlink_metadata(identity) {
-        Ok(meta) if meta.file_type().is_symlink() => Err(localhost_refused(identity, "is a link")),
+        Ok(meta) if meta.file_type().is_symlink() => {
+            Err(localhost_refused(identity, "is a directory link"))
+        }
         Ok(meta) if meta.is_dir() => Ok(()),
         Ok(_) => Err(localhost_refused(identity, "is not a directory")),
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
@@ -1010,7 +1035,7 @@ fn ensure_identity_dir(identity: &Path) -> anyhow::Result<()> {
                 Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
                     match std::fs::symlink_metadata(identity) {
                         Ok(meta) if meta.file_type().is_symlink() => {
-                            Err(localhost_refused(identity, "is a link"))
+                            Err(localhost_refused(identity, "is a directory link"))
                         }
                         Ok(meta) if meta.is_dir() => Ok(()),
                         Ok(_) => Err(localhost_refused(identity, "is not a directory")),
@@ -1084,7 +1109,7 @@ fn sweep_owned_temp_dir(data_dir: &Path) -> anyhow::Result<()> {
         Ok(meta) => meta,
     };
     if meta.file_type().is_symlink() {
-        return Err(localhost_refused(&dir, "is a link"));
+        return Err(localhost_refused(&dir, "is a directory link"));
     }
     if !meta.is_dir() {
         return Err(localhost_refused(&dir, "is not a directory"));
@@ -1148,7 +1173,7 @@ fn migrate_localhost_files_to_file_key(
         let path = data_dir.join(root);
         match std::fs::symlink_metadata(&path) {
             Ok(meta) if meta.file_type().is_symlink() => {
-                return Err(localhost_refused(&path, "is a link"));
+                return Err(localhost_refused(&path, "is a directory link"));
             }
             Ok(meta) if meta.is_dir() => {
                 migrate_localhost_tree(

@@ -107,11 +107,31 @@ impl From<ProviderError> for StorageApiError {
 ///
 /// Read a file from a file-backed localhost root.
 /// Returns the file contents with appropriate content-type.
-fn refuse_local_apps(data_dir: &std::path::Path) -> Result<(), StorageApiError> {
-    match crate::local_apps::local_apps_refusal(data_dir) {
-        Some(sentence) => Err(StorageApiError::LocalApps(sentence)),
-        None => Ok(()),
+fn owner_shell(session: &Session, headers: &HeaderMap) -> bool {
+    session.is_shell() && !headers.contains_key("X-Elastos-Capsule-Id")
+}
+
+/// A caller who would be refused anyway gets that 403 first. The owner's
+/// shell sees the file sentence. Every other granted caller sees one plain line.
+async fn refuse_local_apps(
+    state: &ProviderStorageState,
+    session: &Session,
+    headers: &HeaderMap,
+    path: &str,
+    op: &str,
+) -> Result<(), StorageApiError> {
+    let Some(sentence) = crate::local_apps::local_apps_refusal(&state.data_dir) else {
+        return Ok(());
+    };
+    if owner_shell(session, headers) {
+        return Err(StorageApiError::LocalApps(sentence));
     }
+    let path = normalize_path(path);
+    reject_principal_root_storage_path(&path)?;
+    enforce_capability(state, session, headers, &path, row_right(op)?).await?;
+    Err(StorageApiError::LocalApps(
+        crate::local_apps::local_apps_refusal_body(&sentence, false),
+    ))
 }
 
 pub async fn read_file(
@@ -120,7 +140,7 @@ pub async fn read_file(
     headers: HeaderMap,
     Path(path): Path<String>,
 ) -> Result<Response, StorageApiError> {
-    refuse_local_apps(&state.data_dir)?;
+    refuse_local_apps(&state, &session, &headers, &path, "read").await?;
     let user_id = session_user_id(&session);
     let path = normalize_path(&path);
     reject_principal_root_storage_path(&path)?;
@@ -156,7 +176,7 @@ pub async fn write_file(
     Path(path): Path<String>,
     body: Bytes,
 ) -> Result<Json<WriteOutput>, StorageApiError> {
-    refuse_local_apps(&state.data_dir)?;
+    refuse_local_apps(&state, &session, &headers, &path, "write").await?;
     let user_id = session_user_id(&session);
     let path = normalize_path(&path);
     reject_principal_root_storage_path(&path)?;
@@ -220,7 +240,7 @@ pub async fn delete_path(
     Path(path): Path<String>,
     Query(query): Query<DeleteQuery>,
 ) -> Result<Json<DeleteOutput>, StorageApiError> {
-    refuse_local_apps(&state.data_dir)?;
+    refuse_local_apps(&state, &session, &headers, &path, "delete").await?;
     let user_id = session_user_id(&session);
     let path = normalize_path(&path);
     reject_principal_root_storage_path(&path)?;
@@ -273,7 +293,7 @@ pub async fn list_dir(
     headers: HeaderMap,
     Path(path): Path<String>,
 ) -> Result<Json<ListOutput>, StorageApiError> {
-    refuse_local_apps(&state.data_dir)?;
+    refuse_local_apps(&state, &session, &headers, &path, "list").await?;
     let user_id = session_user_id(&session);
     let path = normalize_path(&path);
     reject_principal_root_storage_path(&path)?;
@@ -356,7 +376,7 @@ pub async fn stat_path(
     headers: HeaderMap,
     Path(path): Path<String>,
 ) -> Result<Response, StorageApiError> {
-    refuse_local_apps(&state.data_dir)?;
+    refuse_local_apps(&state, &session, &headers, &path, "stat").await?;
     let user_id = session_user_id(&session);
     let path = normalize_path(&path);
     reject_principal_root_storage_path(&path)?;
@@ -406,7 +426,7 @@ pub async fn mkdir(
     headers: HeaderMap,
     Path(path): Path<String>,
 ) -> Result<Json<MkdirOutput>, StorageApiError> {
-    refuse_local_apps(&state.data_dir)?;
+    refuse_local_apps(&state, &session, &headers, &path, "mkdir").await?;
     let user_id = session_user_id(&session);
     let path = normalize_path(&path);
     reject_principal_root_storage_path(&path)?;
@@ -585,17 +605,19 @@ pub async fn handle_get_root(
     headers: HeaderMap,
     Query(query): Query<StorageQuery>,
 ) -> Result<Response, StorageApiError> {
-    refuse_local_apps(&state.data_dir)?;
-    let path = Path(String::new());
-    if query.list.unwrap_or(false) {
-        list_dir(state, session, headers, path)
-            .await
-            .map(|j| j.into_response())
-    } else {
-        Err(StorageApiError::InvalidPath(
+    if !query.list.unwrap_or(false) {
+        if owner_shell(&session, &headers) {
+            if let Some(sentence) = crate::local_apps::local_apps_refusal(&state.data_dir) {
+                return Err(StorageApiError::LocalApps(sentence));
+            }
+        }
+        return Err(StorageApiError::InvalidPath(
             "Cannot read root as file".to_string(),
-        ))
+        ));
     }
+    list_dir(state, session, headers, Path(String::new()))
+        .await
+        .map(|j| j.into_response())
 }
 
 /// Combined handler that routes based on query params and method.
@@ -1282,5 +1304,124 @@ mod tests {
             assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
             assert_eq!(body, sentence);
         }
+    }
+
+    #[tokio::test]
+    async fn a_private_file_name_is_only_for_the_owner_shell() {
+        let _guard = crate::local_apps::lock_local_apps_for_test();
+        let home = tempfile::tempdir().unwrap();
+        let sentence = "Users/secret.bin is not readable. Make it readable, then restart.";
+        crate::local_apps::set_local_apps_refusal(home.path(), Some(sentence.to_string()));
+        let cap = make_capability_manager();
+        let mut state = make_state(Some(cap.clone()));
+        state.data_dir = home.path().to_path_buf();
+        let path = "MyWebSite/index.html".to_string();
+
+        let shell = make_session(SessionType::Shell);
+        let (status, body) = refusal_body(
+            read_file(
+                State(state.clone()),
+                Extension(shell.clone()),
+                HeaderMap::new(),
+                Path(path.clone()),
+            )
+            .await
+            .unwrap_err(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body, sentence);
+        let (status, body) = refusal_body(
+            handle_get_root(
+                State(state.clone()),
+                Extension(shell),
+                HeaderMap::new(),
+                Query(StorageQuery {
+                    list: None,
+                    mkdir: None,
+                }),
+            )
+            .await
+            .unwrap_err(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body, sentence);
+
+        let capsule = make_session(SessionType::Capsule);
+        let (status, body) = refusal_body(
+            read_file(
+                State(state.clone()),
+                Extension(capsule.clone()),
+                HeaderMap::new(),
+                Path(path.clone()),
+            )
+            .await
+            .unwrap_err(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert!(body.contains("missing X-Capability-Token"), "{body}");
+        assert!(!body.contains("secret.bin"), "{body}");
+        assert_ne!(body, "Local apps are off.");
+        let (status, body) = refusal_body(
+            handle_get_root(
+                State(state.clone()),
+                Extension(capsule.clone()),
+                HeaderMap::new(),
+                Query(StorageQuery {
+                    list: None,
+                    mkdir: None,
+                }),
+            )
+            .await
+            .unwrap_err(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(body.contains("Cannot read root as file"), "{body}");
+        assert!(!body.contains("secret.bin"), "{body}");
+
+        let token = cap.grant(
+            capsule.id.as_str(),
+            ResourceId::new("localhost://MyWebSite/*"),
+            Action::Read,
+            TokenConstraints::default(),
+            None,
+        );
+        let mut granted = HeaderMap::new();
+        granted.insert(
+            "X-Capability-Token",
+            token.to_base64().unwrap().parse().unwrap(),
+        );
+        let (status, body) = refusal_body(
+            read_file(
+                State(state.clone()),
+                Extension(capsule),
+                granted,
+                Path(path.clone()),
+            )
+            .await
+            .unwrap_err(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body, "Local apps are off.");
+
+        let mut guest_headers = HeaderMap::new();
+        guest_headers.insert("X-Elastos-Capsule-Id", "guest-app".parse().unwrap());
+        let (status, body) = refusal_body(
+            read_file(
+                State(state),
+                Extension(make_session(SessionType::Shell)),
+                guest_headers,
+                Path(path),
+            )
+            .await
+            .unwrap_err(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body, "Local apps are off.");
     }
 }

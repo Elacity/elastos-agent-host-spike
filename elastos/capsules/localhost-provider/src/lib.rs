@@ -100,13 +100,21 @@ pub fn take_sealed_read_bytes() -> u64 {
 /// envelope is opened with `key` when that key matches, and refused by `name`
 /// when it does not.
 pub fn read_sealed_localhost_file(key: &[u8; 32], path: &Path, name: &str) -> io::Result<Vec<u8>> {
-    let len = std::fs::metadata(path)?.len();
+    // Open first, then fstat that descriptor, so a later growth cannot make
+    // the read use a size observed on a different inode.
+    let mut file = std::fs::File::open(path)?;
+    let len = file.metadata()?.len();
     if len <= ENVELOPE_BYTE_LIMIT {
-        let raw = std::fs::read(path)?;
+        let mut raw = Vec::new();
+        file.by_ref()
+            .take(ENVELOPE_BYTE_LIMIT + 1)
+            .read_to_end(&mut raw)?;
         note_sealed_bytes(raw.len() as u64);
+        if raw.len() as u64 > ENVELOPE_BYTE_LIMIT {
+            return Err(over_cap_refusal(name));
+        }
         return decrypt_bytes(key, &raw);
     }
-    let mut file = std::fs::File::open(path)?;
     let mut header = [0u8; ENVELOPE_HEADER];
     let read = file.read(&mut header)?;
     note_sealed_bytes(read as u64);
@@ -118,8 +126,12 @@ pub fn read_sealed_localhost_file(key: &[u8; 32], path: &Path, name: &str) -> io
     }
     let mut bytes = header[..read].to_vec();
     let had = bytes.len() as u64;
-    file.read_to_end(&mut bytes)?;
+    let room = SEALED_READ_HARD_LIMIT.saturating_sub(had).saturating_add(1);
+    file.by_ref().take(room).read_to_end(&mut bytes)?;
     note_sealed_bytes(bytes.len() as u64 - had);
+    if bytes.len() as u64 > SEALED_READ_HARD_LIMIT {
+        return Err(hard_limit_refusal(name));
+    }
     match decrypt_bytes(key, &bytes) {
         Ok(plain) => Ok(plain),
         Err(_) => Err(over_cap_refusal(name)),

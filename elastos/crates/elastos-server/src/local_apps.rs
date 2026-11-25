@@ -43,10 +43,21 @@ pub fn local_apps_health_line(sentence: &str) -> String {
     format!("  Local apps are off. {sentence}")
 }
 
+/// What a caller who is not the owner's shell is told. The file name stays out.
+pub const LOCAL_APPS_OFF_TO_OTHERS: &str = "Local apps are off.";
+
+pub fn local_apps_refusal_body(sentence: &str, owner_shell: bool) -> String {
+    if owner_shell {
+        sentence.to_string()
+    } else {
+        LOCAL_APPS_OFF_TO_OTHERS.to_string()
+    }
+}
+
 pub fn set_local_apps_refusal(data_dir: &Path, sentence: Option<String>) {
     let mut refusals = LOCAL_APPS_REFUSAL.lock().expect("local apps refusal");
     let key = refusal_key(data_dir);
-    #[cfg(debug_assertions)]
+    #[cfg(test)]
     note_guard_key(&key);
     match sentence {
         Some(sentence) => {
@@ -58,26 +69,26 @@ pub fn set_local_apps_refusal(data_dir: &Path, sentence: Option<String>) {
     }
 }
 
-#[cfg(debug_assertions)]
+#[cfg(test)]
 thread_local! {
     static GUARD_DEPTH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
     static GUARD_KEYS: std::cell::RefCell<Vec<PathBuf>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
-#[cfg(debug_assertions)]
+#[cfg(test)]
 fn note_guard_key(key: &Path) {
     if GUARD_DEPTH.with(|depth| depth.get()) > 0 {
         GUARD_KEYS.with(|slot| slot.borrow_mut().push(key.to_path_buf()));
     }
 }
 
-/// Remember keys set while this guard is held. Drop removes those keys only.
-#[cfg(debug_assertions)]
+/// Remember keys set while this guard is held. Drop clears those keys only.
+#[cfg(test)]
 pub fn begin_local_apps_guard() {
     GUARD_DEPTH.with(|depth| depth.set(depth.get() + 1));
 }
 
-#[cfg(debug_assertions)]
+#[cfg(test)]
 pub fn end_local_apps_guard() {
     let done = GUARD_DEPTH.with(|depth| {
         let next = depth.get().saturating_sub(1);
@@ -88,12 +99,8 @@ pub fn end_local_apps_guard() {
         return;
     }
     let keys = GUARD_KEYS.with(|slot| std::mem::take(&mut *slot.borrow_mut()));
-    if keys.is_empty() {
-        return;
-    }
-    let mut refusals = LOCAL_APPS_REFUSAL.lock().expect("local apps refusal");
     for key in keys {
-        refusals.remove(&key);
+        set_local_apps_refusal(&key, None);
     }
 }
 

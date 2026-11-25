@@ -18,7 +18,7 @@ use crate::provider_resource::{
 };
 use crate::resource_bridge::reject_localhost_user_area_path;
 use elastos_runtime::capability::{Action, CapabilityManager, CapabilityToken, ResourceId};
-use elastos_runtime::provider::ProviderRegistry;
+use elastos_runtime::provider::{ProviderError, ProviderRegistry};
 use elastos_runtime::session::Session;
 
 /// Shared state for the provider proxy handler
@@ -45,6 +45,7 @@ pub async fn provider_proxy(
     headers: HeaderMap,
     body: String,
 ) -> Result<Json<Value>, (StatusCode, String)> {
+    let owner_shell = session.is_shell() && !headers.contains_key("X-Elastos-Capsule-Id");
     // The Runtime owns IPFS and reaches the provider through its own registry
     // calls. A session body must not select host paths for that provider. The
     // registry lowercases schemes, so this gate ignores case too.
@@ -60,7 +61,9 @@ pub async fn provider_proxy(
             format!("{OBJECT_SESSION_PROXY_DENIED}: Runtime owns object storage access"),
         ));
     }
-    if scheme.eq_ignore_ascii_case("localhost") {
+    // The owner's shell hears the file sentence before the body is parsed.
+    // Every other caller meets the grant check first.
+    if scheme.eq_ignore_ascii_case("localhost") && owner_shell {
         if let Some(sentence) = crate::local_apps::local_apps_refusal(&state.data_dir) {
             return Err((StatusCode::SERVICE_UNAVAILABLE, sentence));
         }
@@ -140,6 +143,14 @@ pub async fn provider_proxy(
     }
 
     enforce_capability(&state, &session, &headers, &resource, required_action).await?;
+    if scheme.eq_ignore_ascii_case("localhost") {
+        if let Some(sentence) = crate::local_apps::local_apps_refusal(&state.data_dir) {
+            return Err((
+                StatusCode::SERVICE_UNAVAILABLE,
+                crate::local_apps::local_apps_refusal_body(&sentence, owner_shell),
+            ));
+        }
+    }
     attach_localhost_provider_wire_token(&scheme, &op, &headers, &mut request);
 
     // Forward to provider
@@ -148,16 +159,22 @@ pub async fn provider_proxy(
     let response = match response {
         Ok(value) => value,
         Err(e) => {
-            let message = e.to_string();
-            if let Some((_, sentence)) =
-                message.split_once(crate::local_apps::LOCAL_APPS_REFUSAL_MARK)
-            {
-                return Err((StatusCode::SERVICE_UNAVAILABLE, sentence.to_string()));
+            if scheme.eq_ignore_ascii_case("localhost") {
+                if let ProviderError::Provider(ref message) = e {
+                    if let Some(sentence) =
+                        crate::local_apps::sentence_from_local_apps_provider_error(message)
+                    {
+                        return Err((
+                            StatusCode::SERVICE_UNAVAILABLE,
+                            crate::local_apps::local_apps_refusal_body(sentence, owner_shell),
+                        ));
+                    }
+                }
             }
             return Ok(Json(serde_json::json!({
                 "status": "error",
                 "code": "provider_error",
-                "message": message,
+                "message": e.to_string(),
             })));
         }
     };
@@ -1785,5 +1802,180 @@ mod tests {
         .unwrap_err();
         assert_eq!(err.0, StatusCode::FORBIDDEN);
         assert!(err.1.contains(IPFS_SESSION_PROXY_DENIED));
+    }
+
+    struct MarkedContent;
+
+    #[async_trait::async_trait]
+    impl Provider for MarkedContent {
+        async fn handle(&self, _: ResourceRequest) -> Result<ResourceResponse, ProviderError> {
+            Err(ProviderError::Provider("unused".into()))
+        }
+
+        fn schemes(&self) -> Vec<&'static str> {
+            vec!["content"]
+        }
+
+        fn name(&self) -> &'static str {
+            "marked-content"
+        }
+
+        async fn send_raw(
+            &self,
+            _: &serde_json::Value,
+        ) -> Result<serde_json::Value, ProviderError> {
+            Err(ProviderError::Provider(
+                crate::local_apps::marked_local_apps_refusal(
+                    "Users/secret.bin is not readable. Make it readable, then restart.",
+                ),
+            ))
+        }
+    }
+
+    #[tokio::test]
+    async fn a_private_file_name_on_the_provider_is_only_for_the_owner_shell() {
+        let _guard = crate::local_apps::lock_local_apps_for_test();
+        let home = tempfile::tempdir().unwrap();
+        let sentence = "Users/secret.bin is not readable. Make it readable, then restart.";
+        crate::local_apps::set_local_apps_refusal(home.path(), Some(sentence.to_string()));
+        let capability_manager = Arc::new(CapabilityManager::new(
+            Arc::new(CapabilityStore::new()),
+            Arc::new(AuditLog::new()),
+            Arc::new(MetricsManager::new()),
+        ));
+        let state = ProviderProxyState {
+            data_dir: home.path().to_path_buf(),
+            registry: Arc::new(ProviderRegistry::new()),
+            capability_manager: Some(capability_manager.clone()),
+        };
+        let body = r#"{"path":"MyWebSite/index.html"}"#;
+
+        let err = provider_proxy(
+            State(state.clone()),
+            Extension(Session::new(SessionType::Shell, None)),
+            Path(("localhost".to_string(), "read".to_string())),
+            HeaderMap::new(),
+            "{".to_string(),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.0, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(err.1, sentence);
+
+        let capsule = Session::new(SessionType::Capsule, None);
+        let err = provider_proxy(
+            State(state.clone()),
+            Extension(capsule.clone()),
+            Path(("localhost".to_string(), "read".to_string())),
+            HeaderMap::new(),
+            body.to_string(),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.0, StatusCode::FORBIDDEN);
+        assert!(err.1.contains("Missing X-Capability-Token"), "{}", err.1);
+        assert!(!err.1.contains("secret.bin"), "{}", err.1);
+        assert_ne!(err.1, "Local apps are off.");
+        let bad = provider_proxy(
+            State(state.clone()),
+            Extension(capsule.clone()),
+            Path(("localhost".to_string(), "read".to_string())),
+            HeaderMap::new(),
+            "{".to_string(),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(bad.0, StatusCode::BAD_REQUEST);
+        assert!(bad.1.contains("Invalid JSON"), "{}", bad.1);
+        assert!(!bad.1.contains("secret.bin"), "{}", bad.1);
+
+        let mut guest = HeaderMap::new();
+        guest.insert("X-Elastos-Capsule-Id", "guest-app".parse().unwrap());
+        let err = provider_proxy(
+            State(state.clone()),
+            Extension(Session::new(SessionType::Shell, None)),
+            Path(("localhost".to_string(), "read".to_string())),
+            guest,
+            body.to_string(),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.0, StatusCode::FORBIDDEN);
+        assert!(err.1.contains("Missing X-Capability-Token"), "{}", err.1);
+        assert!(!err.1.contains("secret.bin"), "{}", err.1);
+
+        let token = capability_manager.grant(
+            capsule.id.as_str(),
+            ResourceId::new("localhost://MyWebSite/index.html"),
+            Action::Read,
+            TokenConstraints::default(),
+            None,
+        );
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "X-Capability-Token",
+            HeaderValue::from_str(&token.to_base64().unwrap()).unwrap(),
+        );
+        let err = provider_proxy(
+            State(state.clone()),
+            Extension(capsule),
+            Path(("localhost".to_string(), "read".to_string())),
+            headers,
+            body.to_string(),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.0, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(err.1, "Local apps are off.");
+
+        let guest_session = Session::new(SessionType::Shell, None);
+        let guest_token = capability_manager.grant(
+            guest_session.id.as_str(),
+            ResourceId::new("localhost://MyWebSite/index.html"),
+            Action::Read,
+            TokenConstraints::default(),
+            None,
+        );
+        let mut headers = HeaderMap::new();
+        headers.insert("X-Elastos-Capsule-Id", "guest-app".parse().unwrap());
+        headers.insert(
+            "X-Capability-Token",
+            HeaderValue::from_str(&guest_token.to_base64().unwrap()).unwrap(),
+        );
+        let err = provider_proxy(
+            State(state.clone()),
+            Extension(guest_session),
+            Path(("localhost".to_string(), "read".to_string())),
+            headers,
+            body.to_string(),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.0, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(err.1, "Local apps are off.");
+
+        let registry = Arc::new(ProviderRegistry::new());
+        registry
+            .register_sub_provider("content", Arc::new(MarkedContent))
+            .await
+            .unwrap();
+        let forwarded = provider_proxy(
+            State(ProviderProxyState {
+                data_dir: state.data_dir.clone(),
+                registry,
+                capability_manager: state.capability_manager.clone(),
+            }),
+            Extension(Session::new(SessionType::Shell, None)),
+            Path(("content".to_string(), "fetch".to_string())),
+            HeaderMap::new(),
+            "{}".to_string(),
+        )
+        .await
+        .expect("a content error keeps its JSON shape");
+        assert_eq!(forwarded.0["code"], "provider_error");
+        assert!(forwarded.0["message"]
+            .as_str()
+            .unwrap()
+            .contains(crate::local_apps::LOCAL_APPS_REFUSAL_MARK));
     }
 }

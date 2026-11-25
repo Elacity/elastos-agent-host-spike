@@ -5365,8 +5365,15 @@ mod tests {
         )
         .unwrap();
         let err = localhost_provider_bridge_config(linked_root.path(), &device_key).unwrap_err();
-        assert!(err.to_string().contains("Users is linked."), "{err}");
-        assert!(err.to_string().contains(" is linked."), "{err}");
+        assert!(
+            err.to_string().contains("Users is a directory link."),
+            "{err}"
+        );
+        assert!(
+            err.to_string()
+                .contains("Replace the link with a directory, then restart."),
+            "{err}"
+        );
         assert_eq!(
             fs::read(outside.path().join("real-users/note.bin")).unwrap(),
             original
@@ -5413,7 +5420,15 @@ mod tests {
         fs::create_dir(&identity_target).unwrap();
         symlink(&identity_target, identity_root.path().join("identity")).unwrap();
         let err = localhost_provider_bridge_config(identity_root.path(), &device_key).unwrap_err();
-        assert!(err.to_string().contains(" is linked."), "{err}");
+        assert!(
+            err.to_string().contains("identity is a directory link."),
+            "{err}"
+        );
+        assert!(
+            err.to_string()
+                .contains("Replace the link with a directory, then restart."),
+            "{err}"
+        );
         assert!(fs::read_dir(&identity_target).unwrap().next().is_none());
         assert_eq!(
             localhost_provider::decrypt_bytes(
@@ -5461,6 +5476,308 @@ mod tests {
             .unwrap(),
             b"linked-secret"
         );
+    }
+
+    #[test]
+    fn a_version_2_file_is_settled_only_when_our_key_opens_it() {
+        let _guard = LocalAppsGuard::lock();
+        let device_key = [0x93; 32];
+        let file_key = expected_localhost_file_key(&device_key);
+
+        let ours = TempDir::new().unwrap();
+        let ours_path = ours.path().join("Users/ours.bin");
+        let ours_bytes = localhost_provider::encrypt_file_key_bytes(&file_key, b"ours").unwrap();
+        fs::create_dir_all(ours_path.parent().unwrap()).unwrap();
+        fs::write(&ours_path, &ours_bytes).unwrap();
+        migrate_again(ours.path(), &device_key);
+        assert_eq!(fs::read(&ours_path).unwrap(), ours_bytes);
+
+        let foreign = TempDir::new().unwrap();
+        let foreign_path = foreign.path().join("Users/foreign.bin");
+        let foreign_bytes =
+            localhost_provider::encrypt_file_key_bytes(&[0x94; 32], b"not-ours").unwrap();
+        fs::create_dir_all(foreign_path.parent().unwrap()).unwrap();
+        fs::write(&foreign_path, &foreign_bytes).unwrap();
+        expect_refusal(
+            foreign.path(),
+            &device_key,
+            "Users/foreign.bin is not decryptable. Remove it, then restart.",
+            true,
+        );
+        assert_eq!(fs::read(&foreign_path).unwrap(), foreign_bytes);
+        fs::remove_file(&foreign_path).unwrap();
+        migrate_again(foreign.path(), &device_key);
+        home_is_up(foreign.path());
+
+        let cut = TempDir::new().unwrap();
+        let cut_path = cut.path().join("Users/cut.bin");
+        fs::create_dir_all(cut_path.parent().unwrap()).unwrap();
+        fs::write(&cut_path, br#"{"version":2"#).unwrap();
+        expect_refusal(
+            cut.path(),
+            &device_key,
+            "Users/cut.bin is cut off. Remove it, then restart.",
+            true,
+        );
+        assert_eq!(fs::read(&cut_path).unwrap(), br#"{"version":2"#);
+        fs::remove_file(&cut_path).unwrap();
+        migrate_again(cut.path(), &device_key);
+        home_is_up(cut.path());
+
+        let huge = TempDir::new().unwrap();
+        let huge_path = huge.path().join("Users/huge-v2.bin");
+        fs::create_dir_all(huge_path.parent().unwrap()).unwrap();
+        fs::write(&huge_path, br#"{"version":2"#).unwrap();
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&huge_path)
+            .unwrap()
+            .set_len(localhost_provider::SEALED_READ_HARD_LIMIT + 1)
+            .unwrap();
+        let _ = take_localhost_migration_bytes_read();
+        expect_refusal(
+            huge.path(),
+            &device_key,
+            "Users/huge-v2.bin is larger than this process can read. Move it out of the folder, then restart.",
+            false,
+        );
+        assert!(
+            take_localhost_migration_bytes_read() <= 64,
+            "a version 2 header past the hard limit was read past the first block"
+        );
+        assert_eq!(
+            fs::metadata(&huge_path).unwrap().len(),
+            localhost_provider::SEALED_READ_HARD_LIMIT + 1
+        );
+        let parked = huge.path().join("parked-v2.bin");
+        fs::rename(&huge_path, &parked).unwrap();
+        migrate_again(huge.path(), &device_key);
+        home_is_up(huge.path());
+        assert_eq!(
+            fs::metadata(&parked).unwrap().len(),
+            localhost_provider::SEALED_READ_HARD_LIMIT + 1
+        );
+        assert!(fs::read(&parked).unwrap().starts_with(br#"{"version":2"#));
+    }
+
+    #[test]
+    fn wrong_types_and_directory_links_name_a_remedy_and_a_restart_follows_it() {
+        let _guard = LocalAppsGuard::lock();
+        let device_key = [0x95; 32];
+        let file_key = expected_localhost_file_key(&device_key);
+
+        let file_root = TempDir::new().unwrap();
+        fs::write(file_root.path().join("Users"), b"not-a-directory").unwrap();
+        expect_refusal(
+            file_root.path(),
+            &device_key,
+            "Users is not a directory. Replace it with a directory, then restart.",
+            true,
+        );
+        fs::remove_file(file_root.path().join("Users")).unwrap();
+        let note = file_root.path().join("Users/note.bin");
+        plant_device_envelope(&note, &device_key, b"after-directory");
+        migrate_again(file_root.path(), &device_key);
+        assert_envelope_opens_with_exactly_one_key(
+            &note,
+            b"after-directory",
+            &device_key,
+            &file_key,
+        );
+
+        let marker_root = TempDir::new().unwrap();
+        let marker_note = marker_root.path().join("Local/note.bin");
+        plant_device_envelope(&marker_note, &device_key, b"after-marker");
+        fs::create_dir_all(marker_root.path().join("identity")).unwrap();
+        fs::create_dir(marker_root.path().join("identity/localhost-file-key-v1")).unwrap();
+        expect_refusal(
+            marker_root.path(),
+            &device_key,
+            "identity/localhost-file-key-v1 is not a file. Remove the directory, then restart.",
+            false,
+        );
+        assert!(marker_root
+            .path()
+            .join("identity/localhost-file-key-v1")
+            .is_dir());
+        fs::remove_dir(marker_root.path().join("identity/localhost-file-key-v1")).unwrap();
+        migrate_again(marker_root.path(), &device_key);
+        assert_envelope_opens_with_exactly_one_key(
+            &marker_note,
+            b"after-marker",
+            &device_key,
+            &file_key,
+        );
+
+        let linked_root = TempDir::new().unwrap();
+        let outside = TempDir::new().unwrap();
+        let outside_file = outside.path().join("kept.bin");
+        fs::write(&outside_file, b"outside-bytes").unwrap();
+        std::os::unix::fs::symlink(outside.path(), linked_root.path().join("Users")).unwrap();
+        expect_refusal(
+            linked_root.path(),
+            &device_key,
+            "Users is a directory link. Replace the link with a directory, then restart.",
+            true,
+        );
+        assert_eq!(fs::read(&outside_file).unwrap(), b"outside-bytes");
+        fs::remove_file(linked_root.path().join("Users")).unwrap();
+        let linked_note = linked_root.path().join("Users/note.bin");
+        plant_device_envelope(&linked_note, &device_key, b"after-link");
+        migrate_again(linked_root.path(), &device_key);
+        assert_envelope_opens_with_exactly_one_key(
+            &linked_note,
+            b"after-link",
+            &device_key,
+            &file_key,
+        );
+        assert_eq!(fs::read(&outside_file).unwrap(), b"outside-bytes");
+
+        let identity_root = TempDir::new().unwrap();
+        let identity_note = identity_root.path().join("Local/note.bin");
+        plant_device_envelope(&identity_note, &device_key, b"after-identity");
+        let elsewhere = TempDir::new().unwrap();
+        std::os::unix::fs::symlink(elsewhere.path(), identity_root.path().join("identity"))
+            .unwrap();
+        expect_refusal(
+            identity_root.path(),
+            &device_key,
+            "identity is a directory link. Replace the link with a directory, then restart.",
+            true,
+        );
+        assert!(fs::read_dir(elsewhere.path()).unwrap().next().is_none());
+        fs::remove_file(identity_root.path().join("identity")).unwrap();
+        fs::create_dir(identity_root.path().join("identity")).unwrap();
+        migrate_again(identity_root.path(), &device_key);
+        assert_envelope_opens_with_exactly_one_key(
+            &identity_note,
+            b"after-identity",
+            &device_key,
+            &file_key,
+        );
+        assert!(fs::read_dir(elsewhere.path()).unwrap().next().is_none());
+    }
+
+    fn second_host_data_dir(home: &std::path::Path, xdg: &std::path::Path) -> std::path::PathBuf {
+        if cfg!(target_os = "macos") {
+            home.join("Library/Application Support/elastos")
+        } else if cfg!(target_os = "windows") {
+            home.join("AppData/Roaming/elastos")
+        } else {
+            xdg.join("elastos")
+        }
+    }
+
+    fn second_host_child(kind: &str) {
+        let expect = std::path::PathBuf::from(std::env::var("ELASTOS_P24_EXPECT_DATA").unwrap());
+        let got = elastos_server::sources::default_data_dir();
+        assert_eq!(
+            got, expect,
+            "the child data folder does not match the locked one"
+        );
+        let error = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                match kind {
+                    "gateway" => {
+                        crate::gateway_entry::run_gateway(
+                            "127.0.0.1:1".to_string(),
+                            false,
+                            None,
+                            None,
+                        )
+                        .await
+                    }
+                    "public" => {
+                        crate::gateway_entry::run_gateway(
+                            "127.0.0.1:1".to_string(),
+                            true,
+                            None,
+                            None,
+                        )
+                        .await
+                    }
+                    "browser" => crate::gateway_entry::run_browser_home().await,
+                    other => panic!("unknown host kind {other}"),
+                }
+            })
+            .unwrap_err();
+        let text = error.to_string();
+        assert!(text.contains("another ElastOS host already owns"), "{text}");
+        assert!(
+            !expect.join("identity").exists(),
+            "the second host created identity before the lock refused it"
+        );
+        eprintln!("SL_R9_SECOND_HOST_REFUSED {kind}");
+    }
+
+    #[test]
+    fn a_second_host_is_refused_after_the_lock_and_leaves_identity_alone() {
+        if let Ok(kind) = std::env::var("ELASTOS_P24_SECOND_HOST") {
+            second_host_child(&kind);
+            return;
+        }
+        let home = TempDir::new().unwrap();
+        let xdg = TempDir::new().unwrap();
+        let data = second_host_data_dir(home.path(), xdg.path());
+        fs::create_dir_all(&data).unwrap();
+        let _lock =
+            elastos_server::host_lock::acquire_host_process_lock(&data, "serve", "127.0.0.1:1")
+                .unwrap();
+        let test = format!(
+            "{}::a_second_host_is_refused_after_the_lock_and_leaves_identity_alone",
+            module_path!().split_once("::").unwrap().1
+        );
+        for kind in ["gateway", "public", "browser"] {
+            let mut child = Command::new(std::env::current_exe().unwrap())
+                .env("HOME", home.path())
+                .env("XDG_DATA_HOME", xdg.path())
+                .env("ELASTOS_P24_SECOND_HOST", kind)
+                .env("ELASTOS_P24_EXPECT_DATA", &data)
+                .args(["--exact", test.as_str(), "--nocapture", "--test-threads=1"])
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap();
+            let started = std::time::Instant::now();
+            let status = loop {
+                if let Some(status) = child.try_wait().unwrap() {
+                    break status;
+                }
+                if started.elapsed() > std::time::Duration::from_secs(60) {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    panic!("{kind} did not exit within 60s");
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            };
+            let mut stderr = String::new();
+            let mut stdout = String::new();
+            use std::io::Read;
+            child
+                .stderr
+                .take()
+                .unwrap()
+                .read_to_string(&mut stderr)
+                .unwrap();
+            child
+                .stdout
+                .take()
+                .unwrap()
+                .read_to_string(&mut stdout)
+                .unwrap();
+            assert!(
+                status.success(),
+                "{kind} second host failed\nstdout {stdout}\nstderr {stderr}"
+            );
+            assert!(
+                stderr.contains(&format!("SL_R9_SECOND_HOST_REFUSED {kind}")),
+                "{kind} stderr {stderr}"
+            );
+            assert!(!data.join("identity").exists(), "{kind} created identity");
+        }
     }
 
     #[test]
@@ -5650,7 +5967,6 @@ mod tests {
         fn lock() -> Self {
             static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
             let guard = Self(LOCK.lock().unwrap_or_else(|err| err.into_inner()));
-            elastos_server::local_apps::begin_local_apps_guard();
             guard
         }
     }
@@ -5658,7 +5974,10 @@ mod tests {
     impl Drop for LocalAppsGuard {
         fn drop(&mut self) {
             let _kept = &self.0;
-            elastos_server::local_apps::end_local_apps_guard();
+            // The selective guard lives in the library's test build. This binary
+            // links the library without that build, and holds this mutex for the
+            // whole test, so clearing the map removes only this test's keys.
+            elastos_server::local_apps::clear_local_apps_refusals();
         }
     }
 

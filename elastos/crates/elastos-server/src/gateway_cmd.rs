@@ -31,44 +31,60 @@ fn verify_principal_roots_ready_and_report(data_dir: &std::path::Path) -> anyhow
     Ok(())
 }
 
-pub async fn run_gateway_direct<F, Fut>(
+pub async fn run_gateway_direct<F, Fut, P>(
     addr: String,
     public: bool,
     cache_dir: Option<PathBuf>,
     publish: Option<PathBuf>,
     setup_control_plane: F,
+    prepare_files: P,
 ) -> anyhow::Result<()>
 where
     F: Fn() -> Fut + Copy + Send + Sync + 'static,
     Fut: Future<Output = anyhow::Result<GatewayControlPlane>> + Send,
+    P: FnOnce(&Path) -> anyhow::Result<()>,
 {
-    run_gateway_direct_with_ready(addr, public, cache_dir, publish, setup_control_plane, None).await
+    run_gateway_direct_with_ready(
+        addr,
+        public,
+        cache_dir,
+        publish,
+        setup_control_plane,
+        prepare_files,
+        None,
+    )
+    .await
 }
 
-pub async fn run_gateway_direct_with_ready<F, Fut>(
+pub async fn run_gateway_direct_with_ready<F, Fut, P>(
     addr: String,
     public: bool,
     cache_dir: Option<PathBuf>,
     publish: Option<PathBuf>,
     setup_control_plane: F,
+    prepare_files: P,
     on_ready: Option<fn(&str)>,
 ) -> anyhow::Result<()>
 where
     F: Fn() -> Fut + Copy + Send + Sync + 'static,
     Fut: Future<Output = anyhow::Result<GatewayControlPlane>> + Send,
+    P: FnOnce(&Path) -> anyhow::Result<()>,
 {
     if public {
         anyhow::ensure!(
             on_ready.is_none(),
             "Home browser launch requires a local gateway"
         );
-        return run_gateway_public(addr, cache_dir, publish, setup_control_plane).await;
+        return run_gateway_public(addr, cache_dir, publish, setup_control_plane, prepare_files)
+            .await;
     }
 
     eprintln!("[gateway] ElastOS {} starting on {}", ELASTOS_VERSION, addr);
 
     let data_dir = default_data_dir();
     let _host_guard = crate::host_lock::acquire_host_process_lock(&data_dir, "gateway", &addr)?;
+    // After the host lock, before auth creates ElastOS/System/Auth.
+    prepare_files(&data_dir)?;
     crate::host_lock::spawn_installed_binary_supersession_watch(&data_dir, "gateway");
     crate::auth::verify_auth_audit_chain_ready(&data_dir)?;
     verify_principal_roots_ready_and_report(&data_dir)?;
@@ -98,15 +114,17 @@ where
     .await
 }
 
-async fn run_gateway_public<F, Fut>(
+async fn run_gateway_public<F, Fut, P>(
     addr: String,
     cache_dir: Option<PathBuf>,
     publish: Option<PathBuf>,
     setup_control_plane: F,
+    prepare_files: P,
 ) -> anyhow::Result<()>
 where
     F: Fn() -> Fut + Copy + Send + Sync + 'static,
     Fut: Future<Output = anyhow::Result<GatewayControlPlane>> + Send,
+    P: FnOnce(&Path) -> anyhow::Result<()>,
 {
     eprintln!(
         "[gateway] ElastOS {} starting public gateway on {}",
@@ -116,6 +134,8 @@ where
     let data_dir = default_data_dir();
     let _host_guard =
         crate::host_lock::acquire_host_process_lock(&data_dir, "gateway-public", &addr)?;
+    // After the host lock, before auth creates ElastOS/System/Auth.
+    prepare_files(&data_dir)?;
     crate::host_lock::spawn_installed_binary_supersession_watch(&data_dir, "gateway-public");
     crate::auth::verify_auth_audit_chain_ready(&data_dir)?;
     verify_principal_roots_ready_and_report(&data_dir)?;
@@ -571,6 +591,7 @@ mod tests {
             None,
             None,
             forbidden_setup,
+            |_| panic!("prepare ran before the public-mode refusal"),
             Some(|_| {}),
         )
         .await
