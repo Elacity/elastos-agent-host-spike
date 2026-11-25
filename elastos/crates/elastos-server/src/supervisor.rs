@@ -30,6 +30,10 @@ use elastos_runtime::session::{SessionRegistry, SessionType};
 /// Carrier-managed control network.
 const VM_PROVIDER_PORT: u16 = 7000;
 const CACHED_CID_FILE: &str = ".elastos-cid";
+#[cfg(test)]
+thread_local! {
+    static FAIL_SECOND_CAPSULE_RENAME: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
 const CHAT_RETURN_HOME_EXIT_CODE: i32 = 73;
 
 async fn checked_vm_rootfs_base(
@@ -871,14 +875,7 @@ impl Supervisor {
         archive.unpack(staged.path())?;
         std::fs::write(staged.path().join(CACHED_CID_FILE), format!("{}\n", cid))?;
         write_artifact_sha256_receipt(staged.path(), sha256)?;
-        crate::setup::record_install_cid(&self.data_dir, staged.path(), dest);
-        let retired = parent.join(format!(".capsule-retired-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&retired);
-        if dest.exists() {
-            std::fs::rename(dest, &retired)?;
-        }
-        std::fs::rename(staged.keep(), dest)?;
-        let _ = std::fs::remove_dir_all(&retired);
+        commit_staged_capsule(&self.data_dir, staged, dest)?;
         let _ = ownership::repair_path_recursive(dest);
 
         println!("  Extracted to {} (via content provider)", dest.display());
@@ -1526,6 +1523,35 @@ impl Supervisor {
 
         Ok(listen_addr)
     }
+}
+
+fn commit_staged_capsule(data_dir: &Path, staged: tempfile::TempDir, dest: &Path) -> Result<()> {
+    use crate::bundle_admission::BUNDLE_WALK_BUDGET;
+    use elastos_bundle_identity::checked_bundle_within;
+    let parent = dest.parent().context("capsule cache parent missing")?;
+    let walked = checked_bundle_within(staged.path(), BUNDLE_WALK_BUDGET).is_ok();
+    let retired = parent.join(format!(".capsule-retired-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&retired);
+    if dest.exists() {
+        std::fs::rename(dest, &retired)?;
+    }
+    #[cfg(test)]
+    if FAIL_SECOND_CAPSULE_RENAME.with(|flag| flag.replace(false)) {
+        std::fs::create_dir(dest)?;
+        std::fs::write(dest.join("blocker"), b"not the staged bytes")?;
+    }
+    let staged_path = staged.keep();
+    if let Err(error) = std::fs::rename(&staged_path, dest) {
+        crate::setup::clear_install_cid(data_dir, dest)?;
+        return Err(error.into());
+    }
+    if walked {
+        crate::setup::record_install_cid(data_dir, dest, dest);
+    } else {
+        crate::setup::clear_install_cid(data_dir, dest)?;
+    }
+    let _ = std::fs::remove_dir_all(&retired);
+    Ok(())
 }
 
 /// The published registry entry `name`.
@@ -3204,5 +3230,49 @@ mod tests {
 
         supervisor.reap_dead_capsules().await.unwrap();
         assert!(!supervisor.running.read().await.contains_key(handle));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_second_rename_leaves_no_install_cid_for_bytes_that_are_not_there() {
+        fn plant(dir: &Path) {
+            std::fs::create_dir_all(dir.join("browser")).unwrap();
+            std::fs::write(
+                dir.join("capsule.json"),
+                include_bytes!("../../../../capsules/chat-room/capsule.json"),
+            )
+            .unwrap();
+            std::fs::write(dir.join("browser/index.html"), b"old page").unwrap();
+        }
+        let root = tempfile::tempdir().unwrap();
+        let data = root.path();
+        let dest = data.join("capsules/chat-room");
+        plant(&dest);
+        crate::setup::record_install_cid(data, &dest, &dest);
+        assert!(crate::setup::recorded_install_cid(data, &dest).is_some());
+        let staged = tempfile::tempdir_in(dest.parent().unwrap()).unwrap();
+        plant(staged.path());
+        std::fs::write(staged.path().join("browser/index.html"), b"new page").unwrap();
+        FAIL_SECOND_CAPSULE_RENAME.with(|flag| flag.set(true));
+        let error = commit_staged_capsule(data, staged, &dest).unwrap_err();
+        assert!(
+            crate::setup::recorded_install_cid(data, &dest).is_none(),
+            "{error:#}"
+        );
+        assert!(!crate::setup::install_cid_record(&dest).unwrap().exists());
+        assert_eq!(
+            std::fs::read(dest.join("blocker")).unwrap(),
+            b"not the staged bytes"
+        );
+
+        let staged = tempfile::tempdir_in(dest.parent().unwrap()).unwrap();
+        plant(staged.path());
+        std::fs::write(staged.path().join("browser/index.html"), b"new page").unwrap();
+        commit_staged_capsule(data, staged, &dest).unwrap();
+        assert!(crate::setup::recorded_install_cid(data, &dest).is_some());
+        assert_eq!(
+            std::fs::read(dest.join("browser/index.html")).unwrap(),
+            b"new page"
+        );
     }
 }

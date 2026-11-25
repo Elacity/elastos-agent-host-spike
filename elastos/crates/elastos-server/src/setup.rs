@@ -3093,11 +3093,18 @@ fn write_install_cid_ledger(
 pub(crate) fn record_install_cid(data_dir: &Path, walked: &Path, dir: &Path) {
     if let Err(err) = write_install_cid(data_dir, walked, dir) {
         eprintln!("  No install CID record for {} ({err:#})", dir.display());
-        if let Ok(record) = install_cid_record(dir) {
-            let _ = fs::remove_file(record);
-        }
-        let _ = write_install_cid_ledger(data_dir, dir, None);
+        let _ = clear_install_cid(data_dir, dir);
     }
+}
+
+pub(crate) fn clear_install_cid(data_dir: &Path, dir: &Path) -> anyhow::Result<()> {
+    if let Ok(record) = install_cid_record(dir) {
+        match fs::remove_file(record) {
+            Err(err) if err.kind() != std::io::ErrorKind::NotFound => return Err(err.into()),
+            _ => {}
+        }
+    }
+    write_install_cid_ledger(data_dir, dir, None)
 }
 
 /// Records the walk CID of an installed component folder after an install wrote
