@@ -122,6 +122,7 @@ export function inertSystemApiResponse(pathname) {
       recovery_configured: true,
       recovery_download_available: true,
       protection_configured: true,
+      agents_built: true,
     };
   }
   if (pathname === "/api/capsules/catalog") {
