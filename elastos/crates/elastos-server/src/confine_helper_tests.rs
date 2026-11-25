@@ -827,6 +827,7 @@ async fn musl_release_helpers_start_under_the_fence() {
     if std::env::var_os("ELASTOS_MUSL_HELPER_FENCE").is_none() {
         return;
     }
+    use base64::Engine as _;
     use sha2::{Digest, Sha256};
     use std::io::Write as _;
     use std::os::unix::fs::PermissionsExt;
