@@ -1585,7 +1585,6 @@ async function main() {
   }
   pass("journal_in_agent_root", { root: state.rootA, files: journalFiles.map((file) => file.path) });
 
-  await stopAgent(state.agentB);
   const ownerRoot = storedOwnerRoot(owner.principal_id);
   const ownerNoteRel = ownerNoteRelative(ownerRoot);
   const ownerDocPath = ownerNoteRel ? path.join(data, ownerNoteRel) : "";
@@ -1611,9 +1610,12 @@ async function main() {
     } else if (submits.length > 1) {
       halt("plan_card_captured", "more than one plan submit request remained");
     }
-    const cards = planCards(summary);
+    const cards = planCards(summary).filter((card) => {
+      const text = `${card.title || ""} ${card.body || ""}`;
+      return text.includes(state.launchA.session_id);
+    });
     if (cards.length === 1) plan = cards[0];
-    else if (cards.length > 1) halt("one_pending_record", "more than one agent plan card");
+    else if (cards.length > 1) halt("one_pending_record", "more than one plan card for agent A");
     if (plan) {
       const stillUp = liveSessions(await capsules(), [state.launchA]);
       if (stillUp.length !== 1) {
@@ -1632,28 +1634,27 @@ async function main() {
   };
   state.requestId = state.card.action_id.replace("agent-plan-approve-request:", "");
   pass("plan_card_captured", state.card);
-  const pending = inspectRecords().filter((record) => record.status === "pending");
-  if (pending.length !== 1 || pending[0].request_id !== state.requestId) {
-    halt("one_pending_record", pending.map((record) => ({ id: record.request_id, status: record.status })));
-  }
-  pass("one_pending_record", state.requestId);
 
+  // B is still running while A's step is waiting. This stop is during that step.
   const stopping = await call("POST", "/api/apps/system/agents/stop", state.systemToken, {
     agent_id: state.agentB,
   });
   let stopNamed = stopping.status === 200 || stopping.status === 202;
   let stopFinal = null;
+  let stoppingRow = null;
   const stopDeadline = Date.now() + 20000;
   while (Date.now() < stopDeadline) {
     const rows = auditEvents().filter((event) => (
       event.event_type === "agent.stopped" && String(event.reason || "").includes(state.agentB)
     ));
-    const stoppingRow = rows.find((event) => event.result === "stopping");
+    stoppingRow = rows.find((event) => event.result === "stopping") || null;
     stopFinal = rows.find((event) => (
       (event.result === "ok" || event.result === "failed")
       && (!stoppingRow || event.session_id === stoppingRow.session_id)
     )) || null;
     if (stopFinal) break;
+    // A stopping row is confirmed at the next list. That appends the final row once.
+    await call("GET", "/api/apps/system/agents", state.systemToken);
     await sleep(300);
   }
   if (stopNamed && stopFinal) {
@@ -1661,10 +1662,23 @@ async function main() {
       http: stopping.status,
       result: stopFinal.result,
       session_id: stopFinal.session_id || "",
+      stopping: Boolean(stoppingRow),
     });
   } else {
     mark("stop_during_step", "fail", { status: stopping.status, body: stopping.text.slice(0, 240), final: Boolean(stopFinal) });
   }
+
+  let pending = [];
+  const pendingDeadline = Date.now() + 10000;
+  while (Date.now() < pendingDeadline) {
+    pending = inspectRecords().filter((record) => record.status === "pending");
+    if (pending.length === 1 && pending[0].request_id === state.requestId) break;
+    await sleep(300);
+  }
+  if (pending.length !== 1 || pending[0].request_id !== state.requestId) {
+    halt("one_pending_record", pending.map((record) => ({ id: record.request_id, status: record.status })));
+  }
+  pass("one_pending_record", state.requestId);
 
   const refused = await call("POST", "/api/apps/inbox/actions", state.inboxToken, {
     action_id: state.card.action_id,
