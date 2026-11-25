@@ -4,10 +4,9 @@
 # unreached tests/ files, and items behind a test cfg), no comment-only lines, no blank
 # lines. The goal is a core of about 10,000 lines.
 #
-# The verdict fails when the count is above this number, or more than 50 below it. Until the
-# M1 hardening pass the core-size CI job is advisory (CORE_BUDGET_MODE=advisory): a failed
-# verdict is a warning and the job passes. After it the mode is enforce and the job fails.
-# Refusals (exit 2) fail the job in both modes.
+# The verdict fails when the count is above this number, or more than 50 below it. Since
+# 25 Nov 2026 a failed verdict fails the core-size CI job (CORE_BUDGET_MODE=enforce); before
+# that it was a warning. Refusals (exit 2) fail the job too.
 #
 # To grow the core, raise this number in the same pull request as the code, so reviewers
 # see the growth and decide on it. When the core shrinks more than 50 lines below the
@@ -27,7 +26,7 @@
 # route) +21, unrecorded (#1831 then recorded its own +15 above, 12,305 -> 12,320, but the
 # count stood 21 over that line); #1827 (P2-11 Windows step 6: the Windows provider bridge
 # and Windows refusals in the Runtime) +110. Neither #1811 nor #1827 raised this file. The CI
-# core-size job is still advisory; the CTO's merge review now runs the check at the merge
+# core-size job was advisory then; the CTO's merge review ran the check at the merge
 # head, so growth is raised in the same pull request again.
 # +666 for #1802 (P2-8 slice 3: native providers start only from a checked, held executable;
 # provider/checked_executable.rs with the macOS private verified copies, and its Windows refusal
