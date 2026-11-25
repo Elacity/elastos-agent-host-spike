@@ -1183,15 +1183,12 @@ fn init_bitcoin_rpc_provider(provider: &mut ChainProvider, rpc_url: String) {
     assert!(matches!(init, Response::Ok { .. }));
 }
 
-fn write_node_supervisor_helper(data_dir: &Path) -> String {
-    let helper = data_dir.join("test-node-supervisor");
-    fs::write(&helper, "#!/bin/sh\nexit 0\n").unwrap();
-    fs::set_permissions(&helper, fs::Permissions::from_mode(0o755)).unwrap();
-    helper.to_string_lossy().into_owned()
-}
-
-fn add_test_node_supervisor(provider: &mut ChainProvider, network_id: &str, program: &str) {
-    let init = provider.handle(Request::Init {
+fn init_with_node_supervisor(
+    provider: &mut ChainProvider,
+    network_id: &str,
+    program: &str,
+) -> Response {
+    provider.handle(Request::Init {
         config: json!({
             "node_supervisor": {
                 "networks": {
@@ -1204,8 +1201,7 @@ fn add_test_node_supervisor(provider: &mut ChainProvider, network_id: &str, prog
                 }
             }
         }),
-    });
-    assert!(matches!(init, Response::Ok { .. }));
+    })
 }
 
 fn provider_with_bitcoin_rest(rpc_url: String) -> ChainProvider {
@@ -1787,47 +1783,52 @@ fn node_lifecycle_reports_status_and_fails_closed_for_control() {
 }
 
 #[test]
-fn node_lifecycle_runs_operator_supervisor_for_loopback_nodes() {
+fn node_supervisor_is_refused_at_admission_and_does_not_run() {
     let data_dir = TestDataDir::new();
     let mut provider =
         provider_with_bitcoin_rpc_in(data_dir.path(), "http://127.0.0.1:18446".to_string());
-    let supervisor_program = write_node_supervisor_helper(data_dir.path());
-    add_test_node_supervisor(&mut provider, "btc-local", &supervisor_program);
+    let marker = data_dir.path().join("supervisor-ran");
+    let program = data_dir.path().join("test-node-supervisor");
+    fs::write(
+        &program,
+        format!("#!/bin/sh\ntouch '{}'\nexit 0\n", marker.display()),
+    )
+    .unwrap();
+    fs::set_permissions(&program, fs::Permissions::from_mode(0o755)).unwrap();
+    let program_text = program.to_string_lossy().into_owned();
 
-    let status = ok_data(provider.handle(Request::NodeLifecycle {
-        network: "btc-local".to_string(),
-        action: NodeLifecycleAction::Status,
-    }));
-    assert_eq!(status["managed"], true);
-    assert_eq!(status["control_available"], true);
-    assert_eq!(status["state"], "managed_local");
-    assert_json_strings_do_not_contain(&status, &supervisor_program);
-    assert_json_strings_do_not_contain(&status, "18446");
+    let init = init_with_node_supervisor(&mut provider, "btc-local", &program_text);
+    assert_eq!(error_code(init), "node_supervisor_refused");
+    assert!(!marker.exists(), "admission ran the supervisor");
 
-    let start = ok_data(provider.handle(Request::NodeLifecycle {
+    let start = provider.handle(Request::NodeLifecycle {
         network: "btc-local".to_string(),
         action: NodeLifecycleAction::Start,
-    }));
-    assert_eq!(start["action"], "start");
-    assert_eq!(start["control_available"], true);
-    assert_eq!(start["state"], "managed_local");
-    assert_json_strings_do_not_contain(&start, &supervisor_program);
-    assert_json_strings_do_not_contain(&start, "18446");
+    });
+    assert_eq!(error_code(start), "managed_node_unavailable");
+    assert!(!marker.exists(), "a later control ran the supervisor");
 }
 
 #[test]
-fn node_lifecycle_rejects_supervisor_control_for_remote_backends() {
+fn node_supervisor_on_a_remote_network_is_refused_at_admission() {
     let data_dir = TestDataDir::new();
     let mut provider = provider_with_rpc("https://example.invalid/rpc".to_string());
-    let supervisor_program = write_node_supervisor_helper(data_dir.path());
-    add_test_node_supervisor(&mut provider, "esc-local", &supervisor_program);
+    let marker = data_dir.path().join("supervisor-ran");
+    let program = data_dir.path().join("test-node-supervisor");
+    fs::write(
+        &program,
+        format!("#!/bin/sh\ntouch '{}'\nexit 0\n", marker.display()),
+    )
+    .unwrap();
+    fs::set_permissions(&program, fs::Permissions::from_mode(0o755)).unwrap();
 
-    let response = provider.handle(Request::NodeLifecycle {
-        network: "esc-local".to_string(),
-        action: NodeLifecycleAction::Start,
-    });
-
-    assert_eq!(error_code(response), "managed_node_unavailable");
+    let init = init_with_node_supervisor(
+        &mut provider,
+        "esc-local",
+        &program.to_string_lossy(),
+    );
+    assert_eq!(error_code(init), "node_supervisor_refused");
+    assert!(!marker.exists(), "admission ran the supervisor");
 }
 
 #[test]

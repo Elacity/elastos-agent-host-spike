@@ -24,12 +24,15 @@ const NUMBERS: &str = concat!(
     "sendmmsg:307:269 setsockopt:54:208",
 );
 
-// An absent cell excludes that call by policy on this architecture. An absent row is an error.
+// An absent cell excludes that call by policy on this architecture. An absent
+// row is not admitted: the caller drops it, and the filter's default is deny.
 pub(super) fn number(name: &str, arch: AuditArch) -> Option<u32> {
-    let row = NUMBERS
+    let Some(row) = NUMBERS
         .split_whitespace()
         .find(|row| row.split(':').next() == Some(name))
-        .unwrap_or_else(|| panic!("{name} has no syscall number row"));
+    else {
+        return None;
+    };
     let cell = row
         .split(':')
         .nth(match arch {
@@ -249,9 +252,10 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "has no syscall number row")]
-    fn unknown_syscall_name_fails_loudly() {
-        number("missing_call", AuditArch::Aarch64);
+    fn an_unlisted_name_is_absent_and_does_not_panic() {
+        assert_eq!(number("missing_call", AuditArch::Aarch64), None);
+        assert_eq!(number("ioctl", AuditArch::X86_64), None);
+        assert_eq!(number("ioctl", AuditArch::Aarch64), None);
     }
 
     /// Measured decisions on both architectures. A classic BPF interpreter

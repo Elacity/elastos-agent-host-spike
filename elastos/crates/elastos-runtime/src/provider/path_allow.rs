@@ -123,8 +123,10 @@ fn require_real_root(data_dir: &Path, name: &str, path: &Path) -> Result<(u64, u
             "provider start is refused: {name} resolves outside the data directory"
         ));
     }
-    // Linux re-opens this directory in the child. macOS re-opens it immediately
-    // before sandbox-exec. Render records the device and inode from this stat.
+    // A directory swapped between create and this stat is pinned as found:
+    // render records that device and inode. Pin-to-install is enforced. The
+    // Linux child re-opens the directory, and macOS re-opens it before
+    // sandbox-exec. A mismatch starts nothing.
     Ok((metadata.dev(), metadata.ino()))
 }
 

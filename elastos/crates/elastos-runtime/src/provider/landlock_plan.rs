@@ -103,8 +103,8 @@ pub(super) fn handled_fs(abi: u32) -> u64 {
 }
 
 /// ABI this provider needs. Truncate stays in `STORAGE` and `renameat2` stays
-/// on the storage list, so refer is not subtracted. The literal name `ioctl`
-/// is subtracted when the seccomp list does not admit it.
+/// on the storage list, so refer is not subtracted. A declared `ioctl` selects
+/// ABI 5. The filter does not admit that name when it has no number row.
 pub(super) fn abi_required(names: &[&str]) -> u32 {
     if names.contains(&"ioctl") {
         5
@@ -120,13 +120,8 @@ pub(super) fn require_abi(
     admitted: &AdmittedRights,
     reported: io::Result<u32>,
 ) -> Result<u32, String> {
-    let arch = if cfg!(target_arch = "x86_64") {
-        super::seccomp_list::AuditArch::X86_64
-    } else {
-        super::seccomp_list::AuditArch::Aarch64
-    };
-    let needed = abi_required(&super::seccomp_list::linux_seccomp_list(
-        provider, admitted, arch,
+    let needed = abi_required(&super::seccomp_list::declared_linux_names(
+        provider, admitted,
     ));
     match reported { Ok(abi) if abi >= needed => Ok(abi), Ok(abi) => Err(format!("linux confinement refused: this kernel reports Landlock ABI {abi}; {} needs ABI {needed}", if needed >= 5 { "ioctl on devices" } else { "truncate" })), Err(_) => Err(NO_LANDLOCK.to_string()) }
 }
@@ -440,18 +435,23 @@ mod tests {
             } else {
                 super::super::rights::admit_runtime_grant(provider)
             };
+            let declared = super::super::seccomp_list::declared_linux_names(provider, &admitted);
+            assert!(!declared.contains(&"ioctl"), "{provider:?} declares ioctl");
+            let mut with_ioctl = declared.clone();
+            with_ioctl.push("ioctl");
+            assert_eq!(
+                abi_required(&with_ioctl),
+                5,
+                "{provider:?} declared ioctl does not select ABI 5"
+            );
             for arch in [AuditArch::X86_64, AuditArch::Aarch64] {
                 let names =
                     super::super::seccomp_list::linux_seccomp_list(provider, &admitted, arch);
-                let needed = abi_required(&names);
-                if names.contains(&"ioctl") {
-                    assert!(
-                        needed >= 5,
-                        "{provider:?} {arch:?} admits ioctl and ABI {needed} does not cover it"
-                    );
-                } else {
-                    assert_eq!(needed, 3, "{provider:?} {arch:?}");
-                }
+                assert!(
+                    !names.contains(&"ioctl"),
+                    "{provider:?} {arch:?} admits an unlisted ioctl"
+                );
+                assert_eq!(abi_required(&names), 3, "{provider:?} {arch:?}");
             }
         }
         assert_eq!(abi_required(&["openat", "ioctl"]), 5);

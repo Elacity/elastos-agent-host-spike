@@ -168,15 +168,15 @@ capability:
 - `managed`: persisted provider classification for the backend, retained with
   the lifecycle timestamps.
 - `first_seen_at` / `updated_at`: persisted status timestamps.
-- `control_available`: `true` only when the backend is loopback and an
-  operator-approved supervisor command set exists for that network.
-- `control_reason`: human-readable reason control is unavailable or configured.
+- `control_available`: stays false. Admission refuses `node_supervisor`.
+- `control_reason`: human-readable reason control is unavailable.
 
 Start, stop, and restart use explicit argv command config. The provider never
 accepts shell strings, never returns the command path, and never persists or
-returns raw node RPC URLs, credentials, ports, or process handles. Remote
-backends still fail closed for lifecycle control even if supervisor config is
-present.
+returns raw node RPC URLs, credentials, ports, or process handles. A set
+`node_supervisor` is refused at init with `node_supervisor_refused`, before
+any stored network or supervisor changes. The fence does not run that program.
+The example below is the shape that refusal matches. Null leaves the key unset.
 
 System may render Start, Stop, and Restart controls only from a
 `node_lifecycle` response where `control_available=true`. Public or remote RPC

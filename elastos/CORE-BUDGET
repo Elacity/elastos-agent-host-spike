@@ -42,4 +42,5 @@
 # atomic writes stay in that directory, and auth.rs is unchanged. Owner: Claude, CTO.
 # Review date 8 Dec 2026. Measured on this branch.
 # formatted; 93 lines that were packed
-13990
+# +4: an unlisted syscall name is absent, and a declared ioctl selects ABI 5
+13994

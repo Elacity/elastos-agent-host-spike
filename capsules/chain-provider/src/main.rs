@@ -254,6 +254,18 @@ impl ChainProvider {
 
     fn init(&mut self, config: Value) -> Response {
         let extra = config.get("extra").unwrap_or(&config);
+        // The fence grants execute only on the provider copy and the loader.
+        // An operator supervisor would fail at the later exec. Refuse it here,
+        // before this init changes any stored network or supervisor.
+        if extra
+            .get("node_supervisor")
+            .is_some_and(|value| !value.is_null())
+        {
+            return Response::error(
+                "node_supervisor_refused",
+                "node_supervisor is refused at admission: the fence does not run an operator supervisor",
+            );
+        }
         let configured_networks = config
             .get("extra")
             .and_then(|extra| extra.get("networks"))

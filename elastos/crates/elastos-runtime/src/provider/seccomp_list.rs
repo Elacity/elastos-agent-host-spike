@@ -29,11 +29,14 @@ const BASELINE: &str = concat!(
 // measured them and they do not carry an address family.
 const MODEL: &str = "epoll_create1 epoll_ctl epoll_pwait epoll_wait eventfd2 exit flock geteuid munmap rename renameat rseq accept4 bind connect dup2 getpgrp getpid getsockopt listen pipe2 readlink recvfrom rt_sigprocmask sendto setpgid waitid";
 
-/// The lab sorts names after it joins declared rights and the baseline.
-pub(super) fn linux_seccomp_list(
+/// Names the provider declares, before an unlisted name is dropped.
+///
+/// `abi_required` reads this list. A declared `ioctl` still selects Landlock
+/// ABI 5 when `number` has no row for it, and the filter below does not admit
+/// that name.
+pub(super) fn declared_linux_names(
     provider: RuntimeProviderId,
     admitted: &AdmittedRights,
-    arch: AuditArch,
 ) -> Vec<&'static str> {
     let mut names: Vec<_> = admitted
         .rows()
@@ -50,6 +53,16 @@ pub(super) fn linux_seccomp_list(
         RuntimeProviderId::Wallet => names.extend(["rename", "renameat"]),
         RuntimeProviderId::Model => names.extend(MODEL.split_whitespace()),
     }
+    names
+}
+
+/// The lab sorts names after it joins declared rights and the baseline.
+pub(super) fn linux_seccomp_list(
+    provider: RuntimeProviderId,
+    admitted: &AdmittedRights,
+    arch: AuditArch,
+) -> Vec<&'static str> {
+    let mut names = declared_linux_names(provider, admitted);
     names.retain(|name| number(name, arch).is_some());
     names.sort_unstable();
     names.dedup();
