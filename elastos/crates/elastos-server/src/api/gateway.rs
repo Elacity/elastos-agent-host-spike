@@ -115,6 +115,9 @@ mod gateway_origin;
 mod gateway_passkey_step_up;
 #[path = "gateway_provider_proxy.rs"]
 mod gateway_provider_proxy;
+#[cfg(all(test, unix))]
+#[path = "gateway_provider_proxy_tests/hosted_gate.rs"]
+mod hosted_gate;
 pub(crate) use gateway_provider_proxy::{HOSTED_AGENT_RUN_REFUSED, HOSTED_AGENT_RUN_SENTENCE};
 #[path = "gateway_room.rs"]
 mod gateway_room;

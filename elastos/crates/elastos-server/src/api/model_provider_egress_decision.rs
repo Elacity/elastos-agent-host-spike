@@ -820,3 +820,50 @@ pub(crate) fn approved_for_owner(data_dir: &Path, offer_id: &str, owner_proof: &
             && decision.owner_proof_binding_id.as_deref() == Some(owner_proof)
     })
 }
+
+/// Writes one approved decision for `offer_id` under `owner_proof`.
+#[cfg(all(test, unix))]
+pub(crate) fn plant_offer_approval(
+    data_dir: &Path,
+    offer_id: &str,
+    owner_proof: &str,
+    expires_at_ms: u64,
+) {
+    let providers = data_dir.join("providers");
+    let root = providers.join("model-provider");
+    std::fs::create_dir_all(&root).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::Permissions::from_mode(0o700);
+        std::fs::set_permissions(&providers, mode.clone()).unwrap();
+        std::fs::set_permissions(&root, mode).unwrap();
+    }
+    let file = DecisionFile {
+        schema: SCHEMA.into(),
+        decisions: vec![EgressDecision {
+            id: "model-egress-plant".into(),
+            scope: EgressScope {
+                offer_id: offer_id.into(),
+                effect: "text".into(),
+                method: "POST".into(),
+                url: "https://example.test/v1".into(),
+                origin: "https://example.test".into(),
+                recipient: "example.test".into(),
+                payer: "this Home".into(),
+                provider: "fixture".into(),
+                purpose: "text".into(),
+                configuration_id: "ab".repeat(32),
+            },
+            connection: None,
+            requested_by_proof: None,
+            owner_proof_binding_id: Some(owner_proof.into()),
+            requested_at_ms: 1,
+            decided_at_ms: Some(1),
+            ended_at_ms: None,
+            expires_at_ms,
+            status: DecisionStatus::Approved,
+        }],
+    };
+    write(data_dir, &file).unwrap();
+}
