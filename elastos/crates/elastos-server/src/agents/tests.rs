@@ -7,6 +7,7 @@ use super::*;
 use crate::api::routes::tests::make_admin;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::cell::Cell;
 
 static DISPATCH_FIXTURES: std::sync::OnceLock<Mutex<std::collections::HashSet<PathBuf>>> =
     std::sync::OnceLock::new();
@@ -118,6 +119,45 @@ pub(crate) fn hold_agent_file_lock_for_test(data_dir: &Path) -> anyhow::Result<H
     Ok(HeldAgentFileLock {
         _lock: lock_for_write(data_dir)?,
     })
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SpendFault {
+    None,
+    AppendFails,
+    StopBeforeFile,
+}
+
+thread_local! {
+    static SPEND_FAULT: Cell<SpendFault> = const { Cell::new(SpendFault::None) };
+}
+
+pub(crate) struct SpendFaultGuard;
+
+impl Drop for SpendFaultGuard {
+    fn drop(&mut self) {
+        SPEND_FAULT.with(|fault| fault.set(SpendFault::None));
+    }
+}
+
+/// The next charge append returns an error and does not write the agent file.
+pub(crate) fn fail_spend_append() -> SpendFaultGuard {
+    SPEND_FAULT.with(|fault| fault.set(SpendFault::AppendFails));
+    SpendFaultGuard
+}
+
+/// The next charge appends the spend event and returns before the file write.
+pub(crate) fn stop_before_spend_file() -> SpendFaultGuard {
+    SPEND_FAULT.with(|fault| fault.set(SpendFault::StopBeforeFile));
+    SpendFaultGuard
+}
+
+pub(crate) fn spend_append_fails() -> bool {
+    SPEND_FAULT.with(|fault| fault.get() == SpendFault::AppendFails)
+}
+
+pub(crate) fn spend_stops_before_file() -> bool {
+    SPEND_FAULT.with(|fault| fault.get() == SpendFault::StopBeforeFile)
 }
 
 /// Retires a planted agent. The spent total stays on the record.

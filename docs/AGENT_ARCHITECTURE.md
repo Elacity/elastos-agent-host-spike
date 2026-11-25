@@ -412,7 +412,7 @@ The repository already establishes several parts of this model:
 - The architecture already separates mutable capsule state from immutable
   capsule artifacts.
 
-The agent record keeps the tokens already charged as `model_tokens_spent` in the Home's agent file. A build of this fork from before that field refuses a file which carries it, by the name it uses for a field it does not write, and the Home still loads. Agents stay unavailable until a build that knows the field returns. A file that omits the field means zero spent, and both that older build and the current parser accept it.
+The agent record keeps the tokens already charged as `model_tokens_spent` in the Home's agent file. A charge appends its signed spend event and then writes that file. When the file's total is behind the event, the next open counts the event's total. A build of this fork from before that field refuses a file which carries it, by the name it uses for a field it does not write, and the Home still loads. Agents stay unavailable until a build that knows the field returns. A file that omits the field means zero spent, and both that older build and the current parser accept it.
 
 No product-readiness claim should be inferred from this architecture document.
 A conforming implementation must prove the exact installed Runtime, capsule,

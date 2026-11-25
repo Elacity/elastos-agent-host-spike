@@ -719,6 +719,7 @@ mod tests {
         assert_ne!(row.proof_binding_id, create.proof_binding_id);
         assert!(create.session_id.is_some());
         assert!(row.reason.starts_with(&format!("owner={owner} ")));
+        assert!(row.reason.split_whitespace().any(|word| word == "spent=40"));
         let proof = create.proof_binding_id.as_deref().unwrap();
         assert!(!row.reason.contains(proof));
         assert_eq!(stored_spent(dir.path(), &agent), 40);
@@ -978,5 +979,104 @@ mod tests {
             whole.reserve(&other_key, &run_key(&other, "more"), 1),
             Err(over_cap(1, 7, 7))
         );
+    }
+
+    #[cfg(unix)]
+    fn event_spent(dir: &std::path::Path, agent: &str) -> u64 {
+        let row = audit_of(dir)
+            .into_iter()
+            .rev()
+            .find(|event| {
+                event.event_type == "agent.record.spend"
+                    && event.principal_id.as_deref() == Some(agent)
+            })
+            .unwrap();
+        row.reason
+            .split_whitespace()
+            .find_map(|word| word.strip_prefix("spent=")?.parse().ok())
+            .unwrap()
+    }
+
+    /// The spend append fails. The charge is refused, the total stays, and
+    /// the bridge returns that refusal before the provider send.
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_spend_append_refuses_the_run_and_leaves_the_total() {
+        let bridge = include_str!("resource_bridge.rs");
+        let at = bridge.find("match reserve_model_create(").expect("reserve");
+        let send = bridge[at..].find(".send_raw(").expect("send");
+        let between = &bridge[at..at + send];
+        assert!(
+            between.contains("return finish_component_invoke"),
+            "a refused reserve returns before the provider send"
+        );
+        let (dir, _owner, agent) = planted_agent();
+        let (budget, key) = opened_on(dir.path(), &agent, 100);
+        let before = stored_spent(dir.path(), &agent);
+        let events = spend_rows(dir.path(), &agent);
+        let _fault = crate::agents::tests::fail_spend_append();
+        let err = budget.reserve(&key, &run_key(&agent, "fail"), 40);
+        assert!(
+            matches!(err, Err(Refusal::Record(crate::agents::CANNOT_WRITE))),
+            "{err:?}"
+        );
+        drop(_fault);
+        assert_eq!(stored_spent(dir.path(), &agent), before);
+        assert_eq!(spend_rows(dir.path(), &agent), events);
+        assert_eq!(budget.held_for_test(&key), 0);
+    }
+
+    /// The spend event is appended and the file write does not run. The next
+    /// open's total is the event's.
+    #[cfg(unix)]
+    #[test]
+    fn a_stop_between_the_spend_event_and_the_file_keeps_the_event_total() {
+        let (dir, _owner, agent) = planted_agent();
+        let (budget, key) = opened_on(dir.path(), &agent, 100);
+        let _fault = crate::agents::tests::stop_before_spend_file();
+        budget.reserve(&key, &run_key(&agent, "stop"), 40).unwrap();
+        drop(_fault);
+        let path = crate::agents::agent_file_path(dir.path()).unwrap();
+        let file = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            !file.contains("model_tokens_spent"),
+            "the file write ran: {file}"
+        );
+        let spent = event_spent(dir.path(), &agent);
+        assert!(spent >= 40, "{spent}");
+        drop(budget);
+        let (restarted, key) = opened_on(dir.path(), &agent, 100);
+        assert_eq!(restarted.held_for_test(&key), spent);
+        assert_eq!(stored_spent(dir.path(), &agent), spent);
+    }
+
+    /// The agent file is put behind its signed spend event. The next open
+    /// counts that event once.
+    #[cfg(unix)]
+    #[test]
+    fn a_file_behind_its_spend_event_counts_that_event_once() {
+        let (dir, _owner, agent) = planted_agent();
+        let (budget, key) = opened_on(dir.path(), &agent, 100);
+        budget.reserve(&key, &run_key(&agent, "plant"), 40).unwrap();
+        drop(budget);
+        let spent = event_spent(dir.path(), &agent);
+        assert!(spent >= 40, "{spent}");
+        let path = crate::agents::agent_file_path(dir.path()).unwrap();
+        let mut value: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        value["agents"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("model_tokens_spent");
+        crate::auth::atomic_write(&path, &serde_json::to_vec_pretty(&value).unwrap()).unwrap();
+        let (restarted, key) = opened_on(dir.path(), &agent, 100);
+        assert_eq!(restarted.held_for_test(&key), spent);
+        assert_eq!(stored_spent(dir.path(), &agent), spent);
+        restarted
+            .reserve(&key, &run_key(&agent, "next"), 1)
+            .unwrap();
+        let next = stored_spent(dir.path(), &agent);
+        assert!(next > spent, "{next} {spent}");
+        assert!(next < spent.saturating_mul(2), "{next} {spent}");
     }
 }
