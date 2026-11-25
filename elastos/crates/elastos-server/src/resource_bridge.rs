@@ -9194,8 +9194,10 @@ pub(crate) mod tests {
     }
 
     /// The ceiling is held, the capabilities are already copied, then the launch
-    /// drops the ceiling before the account read. The agent run is refused by
-    /// the account sentence, and the hosted gate does not answer.
+    /// drops the ceiling before the account read. With agents built in, the run
+    /// is refused by the account sentence and the hosted gate does not answer.
+    /// With agents off, the account check does not answer, so the hosted gate
+    /// refuses the run. The provider is not asked in either build.
     #[cfg(unix)]
     #[tokio::test]
     async fn a_released_launch_refuses_an_agent_run_before_the_gate() {
@@ -9222,8 +9224,14 @@ pub(crate) mod tests {
         )
         .await;
         let message = response["response"]["message"].as_str().unwrap_or("");
-        assert!(message.contains(AGENT_ACCOUNT_UNAVAILABLE), "{response}");
-        assert_ne!(response["response"]["code"], "hosted_agent_run_refused");
+        let code = response["response"]["code"].as_str().unwrap_or("");
+        if crate::agents::build_allows() {
+            assert!(message.contains(AGENT_ACCOUNT_UNAVAILABLE), "{response}");
+            assert_ne!(code, "hosted_agent_run_refused");
+        } else {
+            assert_eq!(code, "hosted_agent_run_refused", "{response}");
+            assert!(!message.contains(AGENT_ACCOUNT_UNAVAILABLE), "{response}");
+        }
         assert!(
             provider.requests.lock().await.is_empty(),
             "the provider was asked"

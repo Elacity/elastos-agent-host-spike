@@ -6,7 +6,6 @@
 
 pub(crate) mod agent_admission;
 pub(crate) mod agents;
-pub use agents::raise_spend_file_to_signed_floor;
 pub mod api;
 pub mod auth;
 pub(crate) mod auth_state_files;

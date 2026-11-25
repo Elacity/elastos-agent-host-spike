@@ -82,6 +82,10 @@ pub(crate) fn load_spend_audit(data_dir: &Path) -> Result<SpendAudit, &'static s
 
 /// The spent total named by this agent's signed spend events that are newer
 /// than `stored`. Events at or below the file total are not signature-checked.
+/// The signed history keeps its last 512 events. A floor is kept by the file
+/// once any heal or charge has written it. If a write of the file was lost
+/// and no heal succeeded and 512 other events came after, the floor is the
+/// file's.
 pub(crate) fn signed_spend_floor(
     data_dir: &Path,
     agent_id: &str,
@@ -304,6 +308,10 @@ impl ModelBudget {
     pub(crate) fn open(&self, agent: &AgentKey, ceiling: u64) -> Result<(), Refusal> {
         refuse_agent_lock_first()?;
         let home = self.home_dir();
+        let _waited = match home.as_deref() {
+            Some(dir) => Some(crate::agents::wait_agent_file_lock(dir).map_err(Refusal::Record)?),
+            None => None,
+        };
         let mut agents = self.agents.lock().unwrap_or_else(PoisonError::into_inner);
         let loaded = match home.as_deref() {
             Some(dir) => Some(model_spend(dir, agent.principal()).map_err(Refusal::Record)?),
@@ -351,6 +359,10 @@ impl ModelBudget {
     ) -> Result<Hold, Refusal> {
         refuse_agent_lock_first()?;
         let home = self.home_dir();
+        let _waited = match home.as_deref() {
+            Some(dir) => Some(crate::agents::wait_agent_file_lock(dir).map_err(Refusal::Record)?),
+            None => None,
+        };
         let mut agents = self.agents.lock().unwrap_or_else(PoisonError::into_inner);
         let account = agents.get_mut(&agent.0).ok_or(Refusal::UnknownAgent)?;
         if run.principal != agent.0 {
@@ -427,7 +439,7 @@ impl ModelBudget {
         self.home_dir()
     }
 
-    #[cfg(all(test, unix))]
+    #[cfg(test)]
     pub(crate) fn held_for_test(&self, agent: &AgentKey) -> u64 {
         self.agents
             .lock()
@@ -437,7 +449,7 @@ impl ModelBudget {
             .unwrap_or(0)
     }
 
-    #[cfg(all(test, unix))]
+    #[cfg(test)]
     pub(crate) fn charged_for_test(&self, agent: &AgentKey) -> u64 {
         self.agents
             .lock()
@@ -653,6 +665,17 @@ mod tests {
         assert_eq!(ghost, Err(Refusal::UnknownAgent));
     }
 
+    /// Windows test builds compile these helpers. The unix rows are the callers
+    /// on this host.
+    #[cfg(not(unix))]
+    #[test]
+    fn held_and_charged_for_test_compile() {
+        let budget = ModelBudget::new();
+        let agent = key(A);
+        assert_eq!(budget.held_for_test(&agent), 0);
+        assert_eq!(budget.charged_for_test(&agent), 0);
+    }
+
     #[cfg(unix)]
     fn planted_agent() -> (tempfile::TempDir, String, String) {
         let dir = tempfile::tempdir().unwrap();
@@ -778,6 +801,70 @@ mod tests {
             Err(Refusal::Record(crate::agents::ALREADY_RETIRED))
         );
         assert_eq!(budget.held_for_test(&b), 80);
+    }
+
+    /// Two agents charge together. Each spend lands. A held file lock does not
+    /// keep the budget mutex, so the second agent is not stuck behind the first.
+    #[cfg(unix)]
+    #[test]
+    fn two_agents_charging_at_once_both_succeed() {
+        let (dir, owner, first) = planted_agent();
+        let second = crate::agents::tests::plant_another_dispatch(dir.path(), &owner, "request-b");
+        let budget = Arc::new(ModelBudget::new());
+        budget.bind_home(dir.path().to_path_buf());
+        let key_a = AgentKey::for_test(&first);
+        let key_b = AgentKey::for_test(&second);
+        budget.open(&key_a, 100).unwrap();
+        budget.open(&key_b, 100).unwrap();
+        let start = Arc::new(Barrier::new(2));
+        let run = |budget: Arc<ModelBudget>, key: AgentKey, agent: String, start: Arc<Barrier>| {
+            std::thread::spawn(move || {
+                start.wait();
+                budget
+                    .reserve(&key, &run_key(&agent, "together"), 10)
+                    .is_ok()
+            })
+        };
+        let left = run(budget.clone(), key_a.clone(), first.clone(), start.clone());
+        let right = run(budget.clone(), key_b.clone(), second.clone(), start);
+        assert!(left.join().unwrap());
+        assert!(right.join().unwrap());
+        assert!(stored_spent(dir.path(), &first) >= 10);
+        assert!(stored_spent(dir.path(), &second) >= 10);
+
+        let path = crate::agents::agent_file_path(dir.path())
+            .unwrap()
+            .with_file_name("agent-records.json.lock");
+        let held = crate::host_lock::FileLock::exclusive(
+            std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&path)
+                .unwrap(),
+        )
+        .unwrap();
+        let refuse = |budget: Arc<ModelBudget>, key: AgentKey, agent: String, tag: &'static str| {
+            std::thread::spawn(move || budget.reserve(&key, &run_key(&agent, tag), 1))
+        };
+        let began = std::time::Instant::now();
+        let one = refuse(budget.clone(), key_a, first, "blocked-a");
+        let two = refuse(budget, key_b, second, "blocked-b");
+        let err_a = one.join().unwrap().unwrap_err();
+        let err_b = two.join().unwrap().unwrap_err();
+        let took = began.elapsed();
+        assert!(
+            matches!(err_a, Refusal::Record("agent file lock is not free")),
+            "{err_a:?}"
+        );
+        assert!(
+            matches!(err_b, Refusal::Record("agent file lock is not free")),
+            "{err_b:?}"
+        );
+        assert!(
+            took < std::time::Duration::from_millis(3500),
+            "one agent's lock wait held up the other: {took:?}"
+        );
+        drop(held);
     }
 
     /// Two opens in two Runtimes share the lock. The stale memory does not admit.
@@ -1377,7 +1464,8 @@ mod tests {
     }
 
     /// A crash leaves the spend event ahead of the file. Home start writes the
-    /// file up to that event, and 600 later rows do not lower the next charge.
+    /// file up to that event before the 600 later rows. Those rows come after
+    /// the file holds the floor, so they do not lower the next charge.
     #[cfg(unix)]
     #[test]
     fn a_crash_after_the_spend_append_is_healed_before_later_rows() {
@@ -1422,6 +1510,51 @@ mod tests {
         let (next, key) = opened_on(dir.path(), &agent, 100);
         next.reserve(&key, &run_key(&agent, "after"), 1).unwrap();
         assert!(file_spent(dir.path(), &agent) > floor);
+    }
+
+    /// The signed history keeps its last 512 events. A lost file write, with
+    /// no heal, and 512 later events: the floor is the file's.
+    #[cfg(unix)]
+    #[test]
+    fn a_lost_write_and_512_later_events_leave_the_files_floor() {
+        let (dir, _owner, agent) = planted_agent();
+        let (budget, key) = opened_on(dir.path(), &agent, 100);
+        budget.reserve(&key, &run_key(&agent, "kept"), 40).unwrap();
+        let file = file_spent(dir.path(), &agent);
+        drop(budget);
+        let lost = file + 50_000;
+        plant_spend_event(dir.path(), &agent, lost, "audit:lost-write");
+        assert_eq!(file_spent(dir.path(), &agent), file);
+        assert_eq!(
+            signed_spend_floor(dir.path(), &agent, file).unwrap(),
+            lost,
+            "the lost event was not ahead of the file"
+        );
+        for index in 0..512 {
+            let event = elastos_runtime::auth::RuntimeAuditEventV1 {
+                schema: elastos_runtime::auth::RuntimeAuditEventV1::SCHEMA.to_string(),
+                event_id: format!("audit:unhealed:{index}"),
+                event_type: "home.marker".to_string(),
+                principal_id: None,
+                proof_binding_id: None,
+                session_id: None,
+                challenge_id: None,
+                capsule_id: None,
+                result: "ok".to_string(),
+                reason: "later row".to_string(),
+                occurred_at: crate::auth::now_ts(),
+                signer_did: None,
+                signature: None,
+            };
+            crate::auth::append_audit_event(dir.path(), event).unwrap();
+        }
+        assert_eq!(signed_spend_floor(dir.path(), &agent, file).unwrap(), file);
+        assert_eq!(file_spent(dir.path(), &agent), file);
+        let (next, key) = opened_on(dir.path(), &agent, 100);
+        next.reserve(&key, &run_key(&agent, "after"), 1).unwrap();
+        let after = file_spent(dir.path(), &agent);
+        assert!(after > file, "{after} {file}");
+        assert!(after < lost, "the lost event was kept: {after}");
     }
 
     /// The same run is refused when the agent is turned off, and again when the
@@ -1691,7 +1824,8 @@ mod tests {
 
     /// A crash leaves the signed spend ahead of the file. Turning the agent
     /// off and on, then restarting by gateway and by serve, keeps that floor
-    /// for the next charge. An inactive agent is healed in the same write.
+    /// for the next charge. The file holds the floor before the later rows.
+    /// An inactive agent is healed in the same write.
     #[cfg(unix)]
     #[test]
     fn a_crash_then_on_off_and_a_host_restart_keeps_the_spend_floor() {

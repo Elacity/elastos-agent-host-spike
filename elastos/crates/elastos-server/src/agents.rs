@@ -84,6 +84,8 @@ pub(crate) const CANNOT_WRITE: &str = "agent file cannot be written";
 pub(crate) const SIGN_IN_CANNOT_READ: &str = "sign-in file cannot be read";
 const LOCK_NOT_FREE: &str = "agent file lock is not free";
 pub(crate) const HEAL_LOCK_WAIT: Duration = Duration::from_millis(200);
+/// Charge, spend, and standing checks wait this long for the agent file lock.
+pub(crate) const CHARGE_LOCK_WAIT: Duration = Duration::from_secs(2);
 pub(crate) const NO_OWNER: &str = "agent record names no owner";
 const NOT_OUR_FORM: &str = "agent file holds a field or value this Runtime does not write";
 const UNKNOWN_SCHEMA: &str = "agent file schema is unknown";
@@ -433,6 +435,7 @@ static AGENT_WRITE: Mutex<()> = Mutex::new(());
 
 thread_local! {
     static AGENT_FILE_LOCK_HELD: Cell<bool> = const { Cell::new(false) };
+    static CHARGE_LOCK_WAITED: Cell<bool> = const { Cell::new(false) };
 }
 
 pub(crate) fn agent_file_lock_held() -> bool {
@@ -464,26 +467,51 @@ struct WriteLock {
     _order: AgentFileLockFlag,
 }
 
-/// Takes the agent lock. The owner's sign-in lock is only ever taken inside
-/// it, by the audit append, and nothing that holds the sign-in lock takes
-/// this one. The model budget mutex is taken before this lock. Holding this
-/// lock and then that mutex is refused (`LOCK_ORDER`).
+fn charge_lock_already_waited() -> bool {
+    CHARGE_LOCK_WAITED.with(Cell::get)
+}
+
+/// After the outside lock wait, a later take on this thread retries briefly.
+#[must_use]
+pub(crate) struct ChargeLockWaited;
+
+impl ChargeLockWaited {
+    fn idle() -> Self {
+        Self
+    }
+
+    fn arm() -> Self {
+        CHARGE_LOCK_WAITED.with(|flag| flag.set(true));
+        Self
+    }
+}
+
+impl Drop for ChargeLockWaited {
+    fn drop(&mut self) {
+        CHARGE_LOCK_WAITED.with(|flag| flag.set(false));
+    }
+}
+
+/// Takes the agent lock. The flock wait finishes before this process's agent
+/// mutex. The owner's sign-in lock is only taken inside this lock, and the
+/// budget mutex is taken before this lock. The reverse is `LOCK_ORDER`.
 fn lock_for_write(data_dir: &Path, wait: Option<Duration>) -> anyhow::Result<WriteLock> {
     if agent_file_lock_held() {
         return Err(Named(LOCK_ORDER).into());
     }
-    let process = AGENT_WRITE
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let path = agent_file_path(data_dir)?.with_file_name(format!("{AGENT_RECORDS_FILE}.lock"));
     if let Some(parent) = path.parent() {
         crate::auth_state_files::ensure_regular_auth_parent(data_dir, parent)?;
     }
     let opened = crate::auth_state_files::open_regular_lock_file(&path, "agent records");
-    let file = match (wait, opened) {
-        (_, Ok(file)) => file,
-        (Some(_), Err(_)) => return Err(Named(LOCK_NOT_FREE).into()),
-        (None, Err(err)) => return Err(err),
+    let file = match opened {
+        Ok(file) => file,
+        Err(_) => return Err(Named(LOCK_NOT_FREE).into()),
+    };
+    // The 2s wait ran outside the mutex. Retry briefly so another caller can leave the lock.
+    let wait = match (charge_lock_already_waited(), wait) {
+        (true, Some(_)) => Some(Duration::from_millis(500)),
+        (_, kept) => kept,
     };
     let held = match wait {
         Some(wait) => {
@@ -496,6 +524,9 @@ fn lock_for_write(data_dir: &Path, wait: Option<Duration>) -> anyhow::Result<Wri
         }
         None => FileLock::exclusive(file).context("failed to lock agent records")?,
     };
+    let process = AGENT_WRITE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     Ok(WriteLock {
         _file: held,
         _process: process,
@@ -673,7 +704,8 @@ fn open_for(data_dir: &Path, for_write: bool, wait: Option<Duration>) -> anyhow:
     // The sign-in loader hands agents through too. The sign-in file itself
     // holds none, and every rule below compares this file with the records
     // that file holds, so agent records are left out here.
-    let owner_file: Vec<PrincipalRecord> = crate::auth::load_owner_principals(data_dir)?
+    let owner_file: Vec<PrincipalRecord> = crate::auth::load_owner_principals(data_dir)
+        .map_err(|_| Named(SIGN_IN_CANNOT_READ))?
         .into_iter()
         .filter(|record| {
             record.kind != PrincipalKind::Agent
@@ -726,11 +758,31 @@ fn agent_of<'a>(
     Ok(agent)
 }
 
+/// Takes the agent file lock for at most [`CHARGE_LOCK_WAIT`] and releases it.
+/// This does not take the process mutex, so the wait cannot pin the file lock
+/// while another caller holds that mutex. The budget mutex is still free.
+pub(crate) fn wait_agent_file_lock(data_dir: &Path) -> Result<ChargeLockWaited, &'static str> {
+    if !build_allows_for_home(data_dir) {
+        return Ok(ChargeLockWaited::idle());
+    }
+    let path = agent_file_path(data_dir)
+        .map_err(|err| reason_of(&err))?
+        .with_file_name(format!("{AGENT_RECORDS_FILE}.lock"));
+    if let Some(parent) = path.parent() {
+        crate::auth_state_files::ensure_regular_auth_parent(data_dir, parent)
+            .map_err(|err| reason_of(&err))?;
+    }
+    let file = crate::auth_state_files::open_regular_lock_file(&path, "agent records")
+        .map_err(|_| LOCK_NOT_FREE)?;
+    FileLock::exclusive_within(file, CHARGE_LOCK_WAIT).map_err(|_| LOCK_NOT_FREE)?;
+    Ok(ChargeLockWaited::arm())
+}
+
 pub(crate) fn model_spend(data_dir: &Path, agent_id: &str) -> Result<(String, u64), &'static str> {
     if !build_allows_for_home(data_dir) {
         return Err(FEATURE_OFF);
     }
-    let opened = open(data_dir, true).map_err(|err| reason_of(&err))?;
+    let opened = open_for(data_dir, true, Some(CHARGE_LOCK_WAIT)).map_err(|err| reason_of(&err))?;
     let agent = agent_of(&opened.file, agent_id, None)?;
     let owner = agent.record.owner.clone().ok_or(NO_OWNER)?;
     let floor =
@@ -755,7 +807,8 @@ pub(crate) fn hosted_charge_still_standing(
     agent_id: &str,
     offer_id: &str,
 ) -> Result<(), SpendRefusal> {
-    let opened = open(data_dir, true).map_err(|err| SpendRefusal::Name(reason_of(&err)))?;
+    let opened = open_for(data_dir, true, Some(CHARGE_LOCK_WAIT))
+        .map_err(|err| SpendRefusal::Name(reason_of(&err)))?;
     agent_of(&opened.file, agent_id, Some(owner)).map_err(SpendRefusal::Name)?;
     if !hosted_owner_still_approved(data_dir, agent_id, Some(offer_id)) {
         return Err(SpendRefusal::HostedRun);
@@ -803,8 +856,8 @@ fn quiet_when_agents_are_unavailable(err: anyhow::Error) -> Result<(), &'static 
     match named {
         Some(LOCK_ORDER) => Err(LOCK_ORDER),
         Some(LOCK_NOT_FREE) => Err(LOCK_NOT_FREE),
+        Some(SIGN_IN_CANNOT_READ) => Err(SIGN_IN_CANNOT_READ),
         Some(_) => Ok(()),
-        None if err.to_string().contains("auth-state.json") => Err(SIGN_IN_CANNOT_READ),
         None => Err(reason_of(&err)),
     }
 }
@@ -852,7 +905,8 @@ pub(crate) fn charge_model_spend(
         return Err(SpendRefusal::Name(FEATURE_OFF));
     }
     raise_spend_file_to_signed_floor(data_dir).map_err(SpendRefusal::Name)?;
-    let opened = open(data_dir, true).map_err(|err| SpendRefusal::Name(reason_of(&err)))?;
+    let opened = open_for(data_dir, true, Some(CHARGE_LOCK_WAIT))
+        .map_err(|err| SpendRefusal::Name(reason_of(&err)))?;
     let agent = agent_of(&opened.file, agent_id, Some(owner)).map_err(SpendRefusal::Name)?;
     let floor =
         crate::model_budget::signed_spend_floor(data_dir, agent_id, agent.model_tokens_spent)

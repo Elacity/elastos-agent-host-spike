@@ -3499,10 +3499,37 @@ fn host_starts_heal_after_the_lock_and_skip_no_agent() {
     let lock_fn = source_until(source_from(agents, "fn lock_for_write"), "\nfn open(");
     let open_fail = lock_fn.find("return Err(Named(LOCK_NOT_FREE)").unwrap();
     let waited = lock_fn.find("exclusive_within").unwrap();
+    let process = lock_fn.find("AGENT_WRITE").unwrap();
     assert!(
         open_fail < waited,
         "a lock that cannot be opened waits out the bound"
     );
+    assert!(waited < process, "the flock wait holds the process mutex");
+    assert!(!agents.contains("auth-state.json"));
+    let bounded = [
+        source_until(
+            source_from(agents, "fn wait_agent_file_lock"),
+            "\npub(crate) fn model_spend",
+        ),
+        source_until(
+            source_from(agents, "fn model_spend"),
+            "\nfn hosted_owner_still_approved",
+        ),
+        source_until(
+            source_from(agents, "fn hosted_charge_still_standing"),
+            "\n/// Writes every non-retired",
+        ),
+        source_until(
+            source_from(agents, "fn charge_model_spend"),
+            "\n/// Writes `after`",
+        ),
+    ];
+    for body in bounded {
+        assert!(
+            body.contains("CHARGE_LOCK_WAIT"),
+            "a charge, spend, or standing check does not bound the agent file lock"
+        );
+    }
 
     let start = source_until(
         source_from(include_str!("../host_lock.rs"), "fn start_host_for_agents"),
@@ -3928,4 +3955,128 @@ fn a_lock_that_cannot_be_opened_lets_home_start() {
     assert_eq!(spend_events(home.dir.path()), rows);
     std::fs::remove_dir(&path).unwrap();
     charge_then_restart_stays_above_the_floor(&home);
+}
+
+fn home_at_its_floor() -> (tempfile::TempDir, String, String) {
+    let (dir, owner, agent) = fresh_agent_home();
+    charge_model_spend(dir.path(), &owner, &agent, (0, 0), 40, 100, None).unwrap();
+    assert_eq!(
+        file_spent(dir.path(), &agent),
+        event_floor(dir.path(), &agent)
+    );
+    (dir, owner, agent)
+}
+
+fn hold_external_agent_lock(dir: &Path) -> crate::host_lock::FileLock {
+    let path = agent_file_path(dir)
+        .unwrap()
+        .with_file_name("agent-records.json.lock");
+    crate::host_lock::FileLock::exclusive(
+        std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .unwrap(),
+    )
+    .unwrap()
+}
+
+fn assert_charge_wait(elapsed: std::time::Duration) {
+    let slack = std::time::Duration::from_millis(50);
+    assert!(
+        elapsed + slack >= CHARGE_LOCK_WAIT,
+        "the held lock did not wait out the bound: {elapsed:?}"
+    );
+    assert!(
+        elapsed <= CHARGE_LOCK_WAIT + std::time::Duration::from_secs(2),
+        "the check waited {elapsed:?}, bound {CHARGE_LOCK_WAIT:?}"
+    );
+}
+
+/// The file already holds its signed floor. A held lock refuses the charge,
+/// the spend read, and the standing check by name, within the bound, and the
+/// three waits overlap.
+#[test]
+fn a_held_lock_on_a_current_file_refuses_within_two_seconds() {
+    let (dir, owner, agent) = home_at_its_floor();
+    let _held = hold_external_agent_lock(dir.path());
+    let started = std::time::Instant::now();
+    let spawn = |owner: String, agent: String, kind: u8| {
+        let dir = dir.path().to_path_buf();
+        std::thread::spawn(move || {
+            let _ = take_agent_lock_wait();
+            let name = |err: SpendRefusal| match err {
+                SpendRefusal::Name(name) => name,
+                other => panic!("{other:?}"),
+            };
+            let refusal = match kind {
+                0 => name(
+                    charge_model_spend(&dir, &owner, &agent, (0, 0), 1, 100, None).unwrap_err(),
+                ),
+                1 => model_spend(&dir, &agent).unwrap_err(),
+                _ => name(
+                    hosted_charge_still_standing(&dir, &owner, &agent, "offer-held").unwrap_err(),
+                ),
+            };
+            (refusal, take_agent_lock_wait())
+        })
+    };
+    let charge = spawn(owner.clone(), agent.clone(), 0);
+    let spend = spawn(owner.clone(), agent.clone(), 1);
+    let standing = spawn(owner, agent.clone(), 2);
+    let charge = charge.join().unwrap();
+    let spend = spend.join().unwrap();
+    let standing = standing.join().unwrap();
+    let elapsed = started.elapsed();
+    for (refusal, wait) in [&charge, &spend, &standing] {
+        assert_eq!(*refusal, LOCK_NOT_FREE);
+        assert_charge_wait(wait.expect("the check did not wait"));
+    }
+    assert!(
+        elapsed < CHARGE_LOCK_WAIT + std::time::Duration::from_millis(1500),
+        "the three waits were one after another: {elapsed:?}"
+    );
+    assert_eq!(
+        file_spent(dir.path(), &agent),
+        event_floor(dir.path(), &agent)
+    );
+}
+
+/// A directory at the lock path is the lock name, on a file that is current.
+#[test]
+fn a_lock_directory_on_a_current_file_is_named_lock_not_free() {
+    let (dir, owner, agent) = home_at_its_floor();
+    let path = agent_file_path(dir.path())
+        .unwrap()
+        .with_file_name("agent-records.json.lock");
+    std::fs::remove_file(&path).unwrap();
+    std::fs::create_dir(&path).unwrap();
+    let _ = take_agent_lock_wait();
+    let err = charge_model_spend(dir.path(), &owner, &agent, (0, 0), 1, 100, None).unwrap_err();
+    assert_named(err, LOCK_NOT_FREE);
+    assert!(take_agent_lock_wait().is_none(), "a lock directory waited");
+    assert_eq!(model_spend(dir.path(), &agent), Err(LOCK_NOT_FREE));
+    assert!(take_agent_lock_wait().is_none(), "spend waited");
+    let standing =
+        hosted_charge_still_standing(dir.path(), &owner, &agent, "offer-dir").unwrap_err();
+    assert_named(standing, LOCK_NOT_FREE);
+    assert!(take_agent_lock_wait().is_none(), "standing waited");
+}
+
+/// An unreadable sign-in file is named at the open, with no message-text test.
+#[test]
+fn an_unreadable_sign_in_file_is_named_where_the_agents_file_opens() {
+    use std::os::unix::fs::PermissionsExt;
+    let (dir, owner, agent) = home_at_its_floor();
+    assert!(!include_str!("../agents.rs").contains("auth-state.json"));
+    let path = crate::auth::auth_state_path(dir.path()).unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+    crate::auth::invalidate_verified_auth_state_cache_for_test(dir.path());
+    assert_eq!(model_spend(dir.path(), &agent), Err(SIGN_IN_CANNOT_READ));
+    let standing =
+        hosted_charge_still_standing(dir.path(), &owner, &agent, "offer-sign").unwrap_err();
+    assert_named(standing, SIGN_IN_CANNOT_READ);
+    let err = charge_model_spend(dir.path(), &owner, &agent, (0, 0), 1, 100, None).unwrap_err();
+    assert_named(err, SIGN_IN_CANNOT_READ);
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
 }

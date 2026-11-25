@@ -86,7 +86,10 @@ pub(crate) fn is_subordinate_managed_runtime() -> bool {
 }
 
 /// Take the host lock, then write every non-retired agent's stored total up
-/// to its signed spend floor, before anything else appends to the audit.
+/// to its signed spend floor when that write can be done. The signed history
+/// keeps its last 512 events. A floor is kept by the file once any heal or
+/// charge has written it. If a write of the file was lost and no heal
+/// succeeded and 512 other events came after, the floor is the file's.
 ///
 /// `elastos gateway` and `elastos home --browser` (it starts this gateway)
 /// pass `gateway`. The public gateway passes `gateway-public`. Standalone
