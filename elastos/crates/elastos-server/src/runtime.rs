@@ -3605,6 +3605,26 @@ fn table_holds<T>(table: &StdRwLock<HashMap<String, T>>, id: &str) -> bool {
         .contains_key(id)
 }
 
+#[cfg(all(test, target_os = "macos"))]
+fn live_thread_count() -> u32 {
+    extern "C" {
+        fn mach_task_self() -> libc::mach_port_t;
+    }
+    // SAFETY: `mach_task_self` is this process. `task_threads` writes a kernel
+    // array that this function releases with `vm_deallocate` before it returns.
+    unsafe {
+        let mut list: libc::thread_act_array_t = std::ptr::null_mut();
+        let mut count: libc::mach_msg_type_number_t = 0;
+        let task = mach_task_self();
+        let kr = libc::task_threads(task, &mut list, &mut count);
+        if kr == 0 && !list.is_null() {
+            let bytes = (count as usize).saturating_mul(std::mem::size_of::<libc::thread_act_t>());
+            libc::vm_deallocate(task, list as libc::vm_address_t, bytes as libc::vm_size_t);
+        }
+        count
+    }
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
@@ -7417,25 +7437,5 @@ pub(crate) mod tests {
             joined.is_ok(),
             "the blocking bridge call panicked: {joined:?}"
         );
-    }
-}
-
-#[cfg(all(test, target_os = "macos"))]
-fn live_thread_count() -> u32 {
-    extern "C" {
-        fn mach_task_self() -> libc::mach_port_t;
-    }
-    // SAFETY: `mach_task_self` is this process. `task_threads` writes a kernel
-    // array that this function releases with `vm_deallocate` before it returns.
-    unsafe {
-        let mut list: libc::thread_act_array_t = std::ptr::null_mut();
-        let mut count: libc::mach_msg_type_number_t = 0;
-        let task = mach_task_self();
-        let kr = libc::task_threads(task, &mut list, &mut count);
-        if kr == 0 && !list.is_null() {
-            let bytes = (count as usize).saturating_mul(std::mem::size_of::<libc::thread_act_t>());
-            libc::vm_deallocate(task, list as libc::vm_address_t, bytes as libc::vm_size_t);
-        }
-        count
     }
 }
