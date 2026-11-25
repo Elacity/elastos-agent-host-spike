@@ -684,6 +684,7 @@ fn read_seen(path: &Path) -> anyhow::Result<std::collections::HashMap<String, Se
 }
 
 #[cfg(unix)]
+#[rustfmt::skip]
 fn write_seen(
     path: &Path,
     seen: &std::collections::HashMap<String, SeenFile>,
@@ -695,10 +696,9 @@ fn write_seen(
         let item = &seen[key];
         let flag = if item.hard { "h" } else { "s" };
         let coded = hex::encode(key.as_bytes());
-        text.push_str(&format!(
-            "{} {} {} {} {}\n",
-            item.len, item.mtime, item.mtime_nsec, flag, coded
-        ));
+        let line = format!("{} {} {} {} {}\n", item.len, item.mtime, item.mtime_nsec, flag, coded);
+        if text.len() + line.len() > localhost_provider::ENVELOPE_BYTE_LIMIT as usize { break; }
+        text.push_str(&line);
     }
     let parent = path
         .parent()
@@ -804,6 +804,7 @@ fn opened_file_still_matches(path: &Path, opened: &OpenedIdentity) -> anyhow::Re
 }
 
 #[cfg(unix)]
+#[rustfmt::skip]
 fn migrate_localhost_envelope(
     path: &Path,
     device_key: &[u8; 32],
@@ -841,9 +842,10 @@ fn migrate_localhost_envelope(
     if localhost_provider::header_is_file_key_envelope(&header[..read]) {
         return Ok(MigratedFile::Settled);
     }
-    if localhost_provider::reads_as_plain_bytes(&header[..read], opened.len) {
-        return Ok(MigratedFile::Settled);
-    }
+    let (plain, extra) = localhost_provider::reads_as_plain_bytes(&header[..read], opened.len, &mut file).with_context(|| localhost_refused(path, "cannot be read"))?;
+    note_bytes_read(extra as usize);
+    if plain { return Ok(MigratedFile::Settled); }
+    if extra > 0 { std::io::Seek::seek(&mut file, std::io::SeekFrom::Start(read as u64))?; }
     if opened.len > localhost_provider::SEALED_READ_HARD_LIMIT {
         return Ok(MigratedFile::OverHard);
     }
@@ -1113,21 +1115,13 @@ fn ensure_identity_dir(identity: &Path) -> anyhow::Result<()> {
 
 #[cfg(unix)]
 fn acquire_migration_lock(data_dir: &Path) -> anyhow::Result<LocalhostMigrationLock> {
-    use std::os::unix::fs::{FileTypeExt, MetadataExt, OpenOptionsExt};
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 
     let identity = data_dir.join("identity");
     ensure_identity_dir(&identity)?;
     let lock_path = identity.join(LOCALHOST_MIGRATION_LOCK);
     if let Ok(meta) = std::fs::symlink_metadata(&lock_path) {
-        if meta.file_type().is_symlink() {
-            return Err(localhost_refused(&lock_path, "is a link"));
-        }
-        if meta.file_type().is_fifo() {
-            return Err(localhost_refused(&lock_path, "is a pipe"));
-        }
-        if !meta.is_file() {
-            return Err(localhost_refused(&lock_path, "is not a file"));
-        }
+        refuse_special(&lock_path, &meta, "is a link")?;
     }
     charge_migration_write()?;
     if let Some(err) = injected_create_error() {
@@ -1365,4 +1359,30 @@ fn refuse_special(path: &Path, meta: &std::fs::Metadata, link: &str) -> anyhow::
         "is not a regular file"
     };
     Err(localhost_refused(path, why))
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::{parse_seen, write_seen, SeenFile};
+
+    #[test]
+    fn a_seen_file_stays_within_the_envelope_cap() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("localhost-file-key-v1.seen");
+        let mut seen = std::collections::HashMap::new();
+        let kept = SeenFile {
+            len: 1,
+            mtime: 2,
+            mtime_nsec: 3,
+            hard: false,
+        };
+        seen.insert("Users/a.bin".to_string(), kept.clone());
+        seen.insert("z".repeat(20_000_000), kept);
+        write_seen(&path, &seen).unwrap();
+        let bytes = std::fs::read(&path).unwrap();
+        assert!(bytes.len() as u64 <= localhost_provider::ENVELOPE_BYTE_LIMIT);
+        let parsed = parse_seen(&bytes);
+        assert!(parsed.contains_key("Users/a.bin"));
+        assert_eq!(parsed.len(), 1);
+    }
 }

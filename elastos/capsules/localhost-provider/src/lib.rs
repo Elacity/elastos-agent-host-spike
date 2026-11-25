@@ -114,35 +114,74 @@ fn read_body_within_hard_limit(
     Ok(bytes)
 }
 
-const PLAIN_JSON_LOOK: usize = 32;
-
-pub fn reads_as_plain_bytes(header: &[u8], len: u64) -> bool {
-    if header_rules_out_envelope(header) {
-        return true;
+/// Envelope keys are `version`, `nonce`, and `ciphertext`. Over 32 MiB the stream stops at any other key and keeps no value.
+#[rustfmt::skip]
+mod scan {
+    use super::{header_rules_out_envelope, ENVELOPE_BYTE_LIMIT};
+    use std::io::{self, Read};
+    pub fn reads_as_plain_bytes(header: &[u8], len: u64, rest: &mut dyn Read) -> io::Result<(bool, u64)> {
+        if header_rules_out_envelope(header) || len <= ENVELOPE_BYTE_LIMIT { return Ok((header_rules_out_envelope(header), 0)); }
+        let mut s = Src { rest, n: 0, b: [0; 8192], i: 0, j: header.len() };
+        s.b[..header.len()].copy_from_slice(header);
+        Ok((!s.open()?, s.n))
     }
-    len > ENVELOPE_BYTE_LIMIT && quoted_json_in_look(header)
+    struct Src<'a> { rest: &'a mut dyn Read, n: u64, b: [u8; 8192], i: usize, j: usize }
+    impl Src<'_> {
+        fn fill(&mut self) -> io::Result<bool> { self.i = 0; self.j = self.rest.read(&mut self.b)?; self.n += self.j as u64; Ok(self.j != 0) }
+        fn byte(&mut self) -> io::Result<Option<u8>> { if self.i == self.j && !self.fill()? { return Ok(None); } self.i += 1; Ok(Some(self.b[self.i - 1])) }
+        fn ws(&mut self) -> io::Result<Option<u8>> {
+            loop { let Some(b) = self.byte()? else { return Ok(None); }; if !matches!(b, b' ' | b'\t' | b'\n' | b'\r') { return Ok(Some(b)); } }
+        }
+        fn key(&mut self) -> io::Result<Option<u8>> {
+            let (mut name, mut k) = ([0u8; 10], 0);
+            while let Some(b) = self.byte()? {
+                if b == b'"' { return Ok([b"version".as_slice(), b"nonce", b"ciphertext"].iter().position(|x| *x == &name[..k]).map(|id| id as u8)); }
+                if k == 10 || b == b'\\' { return Ok(None); }
+                name[k] = b; k += 1;
+            }
+            Ok(None)
+        }
+        fn hex(&mut self) -> io::Result<Option<u64>> {
+            let mut count = 0u64;
+            loop {
+                if self.i == self.j && !self.fill()? { return Ok(None); }
+                let start = self.i;
+                while self.i < self.j && self.b[self.i].is_ascii_hexdigit() { self.i += 1; }
+                count += (self.i - start) as u64;
+                if self.i < self.j { if self.b[self.i] != b'"' { return Ok(None); } self.i += 1; return Ok(Some(count)); }
+            }
+        }
+        fn open(&mut self) -> io::Result<bool> {
+            if self.ws()? != Some(b'{') { return Ok(false); }
+            let mut seen = 0u8;
+            loop {
+                if self.ws()? != Some(b'"') { return Ok(false); }
+                let Some(id) = self.key()? else { return Ok(false); };
+                if (seen & (1 << id)) != 0 || self.ws()? != Some(b':') { return Ok(false); }
+                let lead = self.ws()?;
+                let ok = if id == 0 { self.ver(lead)? } else {
+                    let n = if lead == Some(b'"') { self.hex()? } else { None };
+                    n == Some(24) && id == 1 || n.is_some_and(|n| id == 2 && n >= 32 && n.is_multiple_of(2))
+                };
+                if !ok { return Ok(false); }
+                seen |= 1 << id;
+                match self.ws()? {
+                    Some(b',') => {}
+                    Some(b'}') => return Ok(seen == 7 && self.ws()?.is_none()),
+                    _ => return Ok(false),
+                }
+            }
+        }
+        fn ver(&mut self, lead: Option<u8>) -> io::Result<bool> {
+            let good = matches!(lead, Some(b'1' | b'2'));
+            let next = if good { self.byte()? } else { None };
+            let bad = matches!(next, Some(b'0'..=b'9' | b'.' | b'e' | b'E' | b'+' | b'-'));
+            if good && next.is_some() && !bad { self.i -= 1; }
+            Ok(good && next.is_some() && !bad)
+        }
+    }
 }
-
-fn quoted_json_in_look(header: &[u8]) -> bool {
-    let Some(at) = header.iter().position(|b| !b.is_ascii_whitespace()) else {
-        return false;
-    };
-    if header[at] != b'{' {
-        return false;
-    }
-    let end = (at + 1 + PLAIN_JSON_LOOK).min(header.len());
-    let body = header[at + 1..end].trim_ascii_start();
-    if body.first() != Some(&b'"') {
-        return false;
-    }
-    let Some(rest) = body.strip_prefix(br#""version""#) else {
-        return true;
-    };
-    let Some(rest) = rest.trim_ascii_start().strip_prefix(b":") else {
-        return true;
-    };
-    !matches!(rest.trim_ascii_start().first(), Some(b'1' | b'2'))
-}
+pub use scan::reads_as_plain_bytes;
 
 pub fn is_plain_localhost_file(path: &Path) -> io::Result<bool> {
     let mut file = std::fs::File::open(path)?;
@@ -150,7 +189,9 @@ pub fn is_plain_localhost_file(path: &Path) -> io::Result<bool> {
     let mut header = [0u8; ENVELOPE_HEADER];
     let n = file.read(&mut header)?;
     note_sealed_bytes(n as u64);
-    Ok(reads_as_plain_bytes(&header[..n], len))
+    let (plain, extra) = reads_as_plain_bytes(&header[..n], len, &mut file)?;
+    note_sealed_bytes(extra);
+    Ok(plain)
 }
 
 pub fn read_plain_localhost_range(
@@ -205,6 +246,7 @@ pub fn stream_plain_localhost_file(
     }
 }
 
+#[rustfmt::skip]
 pub fn read_sealed_localhost_file(key: &[u8; 32], path: &Path, name: &str) -> io::Result<Vec<u8>> {
     let mut file = std::fs::File::open(path)?;
     let len = file.metadata()?.len();
@@ -212,10 +254,14 @@ pub fn read_sealed_localhost_file(key: &[u8; 32], path: &Path, name: &str) -> io
     let read = file.read(&mut header_buf)?;
     note_sealed_bytes(read as u64);
     let header = &header_buf[..read];
-    if reads_as_plain_bytes(header, len) {
+    let (plain, extra) = reads_as_plain_bytes(header, len, &mut file)?;
+    note_sealed_bytes(extra);
+    if plain {
+        if len > SEALED_READ_HARD_LIMIT { return Err(hard_limit_refusal(name)); }
         drop(file);
         return read_plain_localhost_range(path, name, 0, None);
     }
+    if extra > 0 { std::io::Seek::seek(&mut file, std::io::SeekFrom::Start(read as u64))?; }
     if len <= ENVELOPE_BYTE_LIMIT {
         let mut raw = header.to_vec();
         let room = (ENVELOPE_BYTE_LIMIT + 1).saturating_sub(read as u64);
@@ -468,6 +514,13 @@ pub fn decrypt_bytes(key: &[u8; 32], data: &[u8]) -> io::Result<Vec<u8>> {
 mod tests {
     use super::*;
 
+    fn plain_bytes(bytes: &[u8], len: u64) -> bool {
+        let n = bytes.len().min(ENVELOPE_HEADER);
+        reads_as_plain_bytes(&bytes[..n], len, &mut &bytes[n..])
+            .unwrap()
+            .0
+    }
+
     #[test]
     fn a_device_envelope_is_rewritten_in_its_own_buffer() {
         let device = [1u8; 32];
@@ -542,13 +595,13 @@ mod tests {
             .unwrap()
             .set_len(ENVELOPE_BYTE_LIMIT + 1)
             .unwrap();
-        let err = read_sealed_localhost_file(&key, &brace, "Users/brace.bin").unwrap_err();
-        let text = err.to_string();
-        assert_eq!(
-            text,
-            "Users/brace.bin is larger than 32 MiB. Move it out of the folder."
+        let opened = read_sealed_localhost_file(&key, &brace, "Users/brace.bin").unwrap();
+        assert!(
+            opened.starts_with(b"{not-an-envelope"),
+            "{:?}",
+            &opened[..16]
         );
-        assert!(!text.contains("then restart"), "{text}");
+        assert_eq!(opened.len() as u64, ENVELOPE_BYTE_LIMIT + 1);
 
         let small = dir.path().join("small.bin");
         let sealed = encrypt_bytes(&key, b"small").unwrap();
@@ -586,27 +639,29 @@ mod tests {
     #[test]
     fn a_40_mib_plain_file_is_one_buffer_a_slice_and_a_stream() {
         const SIZE: u64 = 40 * 1024 * 1024;
-        assert!(reads_as_plain_bytes(b"ftyp", SIZE));
-        assert!(reads_as_plain_bytes(br#"{"note":"plain"#, SIZE));
-        assert!(reads_as_plain_bytes(b"{\n  \"records\":[", SIZE));
-        assert!(reads_as_plain_bytes(b"{ \"records\":[", SIZE));
-        assert!(!reads_as_plain_bytes(br#"{"version":1,"nonce":"abc"#, SIZE));
-        assert!(!reads_as_plain_bytes(br#"{"version":2,"nonce":"abc"#, SIZE));
-        assert!(!reads_as_plain_bytes(
-            b"{\n\"version\":2,\"nonce\":\"abc",
+        assert!(plain_bytes(b"ftyp", SIZE));
+        assert!(plain_bytes(br#"{"note":"plain"#, SIZE));
+        assert!(plain_bytes(b"{\n  \"records\":[", SIZE));
+        assert!(plain_bytes(b"{ \"records\":[", SIZE));
+        assert!(!plain_bytes(
+            br#"{"version":1,"nonce":"00112233445566778899aabb","ciphertext":"00112233445566778899aabbccddeeff"}"#,
             SIZE
         ));
-        assert!(!reads_as_plain_bytes(
-            b"{ \"version\": 2,\"nonce\":\"abc",
+        assert!(!plain_bytes(
+            br#"{"version":2,"nonce":"00112233445566778899aabb","ciphertext":"00112233445566778899aabbccddeeff"}"#,
             SIZE
         ));
-        assert!(!reads_as_plain_bytes(br#"{"note":"plain"#, 32));
+        assert!(!plain_bytes(
+            b"{\n\"version\": 2,\"nonce\":\"00112233445566778899aabb\",\"ciphertext\":\"00112233445566778899aabbccddeeff\"}",
+            SIZE
+        ));
+        assert!(!plain_bytes(br#"{"note":"plain"#, 32));
         let mut spaced = vec![b'{'];
-        spaced.extend(std::iter::repeat_n(b' ', PLAIN_JSON_LOOK));
+        spaced.extend(std::iter::repeat_n(b' ', 80));
         spaced.extend(br#""records":["#);
         assert!(
-            !reads_as_plain_bytes(&spaced, SIZE),
-            "the plain decision looked past {PLAIN_JSON_LOOK} bytes"
+            plain_bytes(&spaced, SIZE),
+            "a records key past the 64-byte look stayed sealed"
         );
 
         let dir = tempfile::tempdir().unwrap();
@@ -695,7 +750,7 @@ mod tests {
         let mut sealed = sealed_compact;
         sealed.insert(1, b'\n');
         assert!(
-            !reads_as_plain_bytes(&sealed[..sealed.len().min(64)], SIZE),
+            !plain_bytes(&sealed, SIZE),
             "a version envelope with white space was plain"
         );
         assert_eq!(decrypt_bytes(&key, &sealed).unwrap(), b"secret-envelope");
@@ -704,6 +759,201 @@ mod tests {
         assert_eq!(
             read_sealed_localhost_file(&key, &spaced_path, "Users/spaced.bin").unwrap(),
             b"secret-envelope"
+        );
+    }
+
+    struct Fill<'a> {
+        pre: &'a [u8],
+        pre_at: usize,
+        left: u64,
+        post: &'a [u8],
+        post_at: usize,
+    }
+
+    impl Read for Fill<'_> {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            if self.pre_at < self.pre.len() {
+                let n = (self.pre.len() - self.pre_at).min(buf.len());
+                buf[..n].copy_from_slice(&self.pre[self.pre_at..self.pre_at + n]);
+                self.pre_at += n;
+                return Ok(n);
+            }
+            if self.left > 0 {
+                let n = (self.left as usize).min(buf.len());
+                buf[..n].fill(b'a');
+                self.left -= n as u64;
+                return Ok(n);
+            }
+            if self.post_at < self.post.len() {
+                let n = (self.post.len() - self.post_at).min(buf.len());
+                buf[..n].copy_from_slice(&self.post[self.post_at..self.post_at + n]);
+                self.post_at += n;
+                return Ok(n);
+            }
+            Ok(0)
+        }
+    }
+
+    fn envelope_parts(order: [&str; 3], version: &str, nonce: &str) -> (Vec<u8>, Vec<u8>) {
+        let mut pre = vec![b'{'];
+        let mut post = Vec::new();
+        let mut after = false;
+        for (i, key) in order.iter().enumerate() {
+            let dest = if after { &mut post } else { &mut pre };
+            if i > 0 {
+                dest.push(b',');
+            }
+            dest.extend(format!("\"{key}\":").bytes());
+            match *key {
+                "version" => dest.extend(version.bytes()),
+                "nonce" => {
+                    dest.push(b'"');
+                    dest.extend(nonce.bytes());
+                    dest.push(b'"');
+                }
+                "ciphertext" => dest.push(b'"'),
+                _ => panic!("{key}"),
+            }
+            if *key == "ciphertext" {
+                after = true;
+                post.push(b'"');
+            }
+        }
+        post.push(b'}');
+        (pre, post)
+    }
+
+    fn decide(mut body: impl Read, len: u64) -> (bool, u64) {
+        let mut header = [0u8; ENVELOPE_HEADER];
+        let n = body.read(&mut header).unwrap();
+        let (plain, extra) = reads_as_plain_bytes(&header[..n], len, &mut body).unwrap();
+        (plain, n as u64 + extra)
+    }
+
+    #[test]
+    fn an_envelope_is_what_the_openers_could_open() {
+        const MID: u64 = 40 * 1024 * 1024;
+        const BIG: u64 = SEALED_READ_HARD_LIMIT + 1;
+        let nonce = "00112233445566778899aabb";
+        let orders = [
+            ["version", "nonce", "ciphertext"],
+            ["version", "ciphertext", "nonce"],
+            ["nonce", "version", "ciphertext"],
+            ["nonce", "ciphertext", "version"],
+            ["ciphertext", "version", "nonce"],
+            ["ciphertext", "nonce", "version"],
+        ];
+        for order in orders {
+            for len in [MID, BIG] {
+                let (pre, mut post) = envelope_parts(order, "1", nonce);
+                let mut span = pre.len() + post.len();
+                if (len - span as u64) % 2 == 1 {
+                    let end = post.len() - 1;
+                    post.insert(end, b' ');
+                    span += 1;
+                }
+                let fill = len - span as u64;
+                assert!(fill >= 32 && fill.is_multiple_of(2), "{fill}");
+                let started = std::time::Instant::now();
+                let (plain, read) = decide(
+                    Fill {
+                        pre: &pre,
+                        pre_at: 0,
+                        left: fill,
+                        post: &post,
+                        post_at: 0,
+                    },
+                    len,
+                );
+                let elapsed = started.elapsed();
+                assert!(!plain, "{order:?} at {len} was plain");
+                assert_eq!(read, len, "{order:?} stopped at {read}");
+                if len == BIG && order[0] == "ciphertext" {
+                    eprintln!("1 GiB envelope scan: {elapsed:?} order {order:?}");
+                }
+            }
+        }
+        let shapes = [
+            r#"{"version":10,"records":["#,
+            r#"{"version":2026,"records":["#,
+            r#"{"version":"1","records":["#,
+            r#"{"version":1.0,"records":["#,
+            r#"{"version":{"version":1},"records":["#,
+            r#"{"version":1,"version":1,"nonce":"aa""#,
+        ];
+        for shape in shapes {
+            for len in [MID, BIG] {
+                let (plain, read) = decide(
+                    Fill {
+                        pre: shape.as_bytes(),
+                        pre_at: 0,
+                        left: len.saturating_sub(shape.len() as u64),
+                        post: b"",
+                        post_at: 0,
+                    },
+                    len,
+                );
+                assert!(plain, "{shape} at {len} was an envelope");
+                assert!(read <= ENVELOPE_HEADER as u64, "{shape} read {read}");
+            }
+        }
+        let mut past = vec![b'{'];
+        past.extend(std::iter::repeat_n(b' ', 80));
+        past.extend(br#""records":["#);
+        for len in [MID, BIG] {
+            let (plain, read) = decide(
+                Fill {
+                    pre: &past,
+                    pre_at: 0,
+                    left: len.saturating_sub(past.len() as u64),
+                    post: b"",
+                    post_at: 0,
+                },
+                len,
+            );
+            assert!(plain, "records past the look at {len}");
+            assert!(
+                read <= ENVELOPE_HEADER as u64 + 8192,
+                "records past the look read {read}"
+            );
+        }
+
+        let key = [9u8; 32];
+        let sealed = encrypt_bytes(&key, b"secret").unwrap();
+        let v10 = String::from_utf8(sealed.clone()).unwrap().replacen(
+            "\"version\":1",
+            "\"version\":10",
+            1,
+        );
+        assert_eq!(decrypt_bytes(&key, v10.as_bytes()).unwrap(), b"secret");
+        assert!(plain_bytes(v10.as_bytes(), MID));
+        assert!(matches!(
+            rekey_device_envelope(&key, &[3u8; 32], v10.into_bytes()).unwrap(),
+            RekeyOutcome::NotEnvelope
+        ));
+        let dup = format!(
+            r#"{{"version":1,"version":1,"nonce":"{nonce}","ciphertext":"00112233445566778899aabbccddeeff"}}"#
+        );
+        assert!(decrypt_bytes(&key, dup.as_bytes()).is_err());
+        assert!(plain_bytes(dup.as_bytes(), MID));
+
+        let plain_text = vec![0u8; 20 * 1024 * 1024];
+        let real = encrypt_bytes(&key, &plain_text).unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&real).unwrap();
+        let object = value.as_object().unwrap();
+        let mut map = serde_json::Map::new();
+        for name in ["ciphertext", "nonce", "version"] {
+            map.insert(name.to_string(), object[name].clone());
+        }
+        let reordered = serde_json::to_vec(&serde_json::Value::Object(map)).unwrap();
+        assert!(reordered.starts_with(br#"{"ciphertext":"#));
+        assert!(!plain_bytes(&reordered, reordered.len() as u64));
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("reordered.bin");
+        std::fs::write(&path, &reordered).unwrap();
+        assert_eq!(
+            read_sealed_localhost_file(&key, &path, "Users/reordered.bin").unwrap(),
+            plain_text
         );
     }
 }

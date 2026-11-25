@@ -5670,13 +5670,9 @@ mod tests {
         migrate_again(over.path(), &device_key);
         let opened =
             localhost_provider::read_sealed_localhost_file(&file_key, &brace, "Users/brace.bin")
-                .unwrap_err()
-                .to_string();
-        assert_eq!(
-            opened,
-            "Users/brace.bin is larger than 32 MiB. Move it out of the folder."
-        );
-        assert!(!opened.contains("then restart"), "{opened}");
+                .unwrap();
+        assert!(opened.starts_with(b"{not-an-envelope"));
+        assert_eq!(opened.len(), 32 * 1024 * 1024 + 1);
         let parked = over.path().join("brace-parked.bin");
         fs::rename(&brace, &parked).unwrap();
         assert_envelope_opens_with_exactly_one_key(&other, b"other", &device_key, &file_key);
@@ -6455,13 +6451,6 @@ mod tests {
         });
     }
 
-    fn assert_read_refused_by_name(path: &std::path::Path, key: &[u8; 32], name: &str) {
-        let err = localhost_provider::read_sealed_localhost_file(key, path, name).unwrap_err();
-        let text = err.to_string();
-        assert!(text.contains(name), "{text}");
-        assert!(text.contains("larger than 32 MiB"), "{text}");
-    }
-
     #[test]
     fn each_migration_cause_keeps_home_healthy_and_a_restart_migrates() {
         use std::os::unix::fs::{FileTypeExt, PermissionsExt};
@@ -6590,8 +6579,8 @@ mod tests {
         let read = take_localhost_migration_bytes_read();
         let opens = take_localhost_migration_opens();
         assert!(
-            read > 32 * 1024 * 1024,
-            "the new over-cap file was not read: {read}"
+            read < 1024 * 1024,
+            "a padded envelope was loaded whole: {read}"
         );
         assert_eq!(opens, 1, "a settled file was opened: {opens}");
         home_is_up(huge.path());
@@ -6600,7 +6589,11 @@ mod tests {
         migrate_again(huge.path(), &device_key);
         assert_eq!(take_localhost_migration_bytes_read(), 0);
         assert_eq!(take_localhost_migration_opens(), 0);
-        assert_read_refused_by_name(&over, &file_key, "Users/over.bin");
+        let over_opened =
+            localhost_provider::read_sealed_localhost_file(&file_key, &over, "Users/over.bin")
+                .unwrap();
+        assert!(over_opened.starts_with(&envelope));
+        assert_eq!(over_opened.len(), 32 * 1024 * 1024 + 1);
         let big_opened =
             localhost_provider::read_sealed_localhost_file(&file_key, &big, "Users/big.bin")
                 .unwrap();
@@ -6968,10 +6961,7 @@ mod tests {
         localhost_provider_bridge_config(root, &device_key).unwrap();
         let read = take_localhost_migration_bytes_read();
         let opens = take_localhost_migration_opens();
-        assert!(
-            read > 32 * 1024 * 1024,
-            "the new files were not read: {read}"
-        );
+        assert!(read < 1024 * 1024, "plain files were loaded whole: {read}");
         assert_eq!(opens, 2, "the settled plain file was opened: {opens}");
         home_is_up(root);
         let _ = take_localhost_migration_bytes_read();
@@ -6979,8 +6969,14 @@ mod tests {
         localhost_provider_bridge_config(root, &device_key).unwrap();
         assert_eq!(take_localhost_migration_bytes_read(), 0);
         assert_eq!(take_localhost_migration_opens(), 0);
-        assert_read_refused_by_name(&brace, &file_key, "Users/brace.bin");
-        assert_read_refused_by_name(&over, &file_key, "Users/over.bin");
+        let brace_opened =
+            localhost_provider::read_sealed_localhost_file(&file_key, &brace, "Users/brace.bin")
+                .unwrap();
+        assert!(brace_opened.starts_with(b"{not-an-envelope"));
+        let over_opened =
+            localhost_provider::read_sealed_localhost_file(&file_key, &over, "Users/over.bin")
+                .unwrap();
+        assert!(over_opened.starts_with(&envelope));
         let plain_opened =
             localhost_provider::read_sealed_localhost_file(&file_key, &plain, "Users/video.bin")
                 .unwrap();
@@ -7413,6 +7409,112 @@ mod tests {
     }
 
     #[test]
+    fn a_reordered_envelope_opens_and_other_json_stays_plain() {
+        let _guard = LocalAppsGuard::lock();
+        let device_key = [0x52; 32];
+        let file_key = expected_localhost_file_key(&device_key);
+        let root = TempDir::new().unwrap();
+        let users = root.path().join("Users");
+        fs::create_dir_all(&users).unwrap();
+        let shapes = [
+            ("v10", r#"{"version":10,"records":["#),
+            ("v2026", r#"{"version":2026,"records":["#),
+            ("vstr", r#"{"version":"1","records":["#),
+            ("vfloat", r#"{"version":1.0,"records":["#),
+            ("nested", r#"{"version":{"version":1},"records":["#),
+            ("dup", r#"{"version":1,"version":1,"nonce":"aa""#),
+        ];
+        let mut past = vec![b'{'];
+        past.extend(std::iter::repeat_n(b' ', 80));
+        past.extend(br#""records":["#);
+        for (name, prefix) in shapes {
+            for (tag, len) in [
+                ("m", 40 * 1024 * 1024u64),
+                ("g", localhost_provider::SEALED_READ_HARD_LIMIT + 1),
+            ] {
+                let path = users.join(format!("{name}-{tag}.json"));
+                fs::write(&path, prefix).unwrap();
+                std::fs::OpenOptions::new()
+                    .write(true)
+                    .open(&path)
+                    .unwrap()
+                    .set_len(len)
+                    .unwrap();
+            }
+        }
+        for (tag, len) in [
+            ("m", 40 * 1024 * 1024u64),
+            ("g", localhost_provider::SEALED_READ_HARD_LIMIT + 1),
+        ] {
+            let path = users.join(format!("past-{tag}.json"));
+            fs::write(&path, &past).unwrap();
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open(&path)
+                .unwrap()
+                .set_len(len)
+                .unwrap();
+        }
+        let plain_body = vec![9u8; 16 * 1024 * 1024 + 64];
+        let sealed = localhost_provider::encrypt_bytes(&device_key, &plain_body).unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&sealed).unwrap();
+        let object = value.as_object().unwrap();
+        let mut map = serde_json::Map::new();
+        for name in ["ciphertext", "nonce", "version"] {
+            map.insert(name.to_string(), object[name].clone());
+        }
+        let reordered = serde_json::to_vec(&serde_json::Value::Object(map)).unwrap();
+        assert!(reordered.len() as u64 > 32 * 1024 * 1024);
+        assert!(reordered.starts_with(br#"{"ciphertext":"#));
+        let env_path = users.join("reordered.bin");
+        fs::write(&env_path, &reordered).unwrap();
+        let _ = take_localhost_migration_bytes_read();
+        let _ = take_localhost_migration_opens();
+        match localhost_bringup(root.path(), &device_key) {
+            LocalhostBringup::Start(_) => {}
+            LocalhostBringup::Refuse(got) => panic!("{got}"),
+        }
+        let read = take_localhost_migration_bytes_read();
+        assert!(read > 32 * 1024 * 1024, "{read}");
+        assert!(read < 80 * 1024 * 1024, "{read}");
+        home_is_up(root.path());
+        let now = fs::read(&env_path).unwrap();
+        assert_ne!(now, reordered);
+        assert_eq!(
+            localhost_provider::decrypt_bytes(&file_key, &now).unwrap(),
+            plain_body
+        );
+        assert!(localhost_provider::decrypt_bytes(&device_key, &now).is_err());
+        for (name, prefix) in shapes {
+            for tag in ["m", "g"] {
+                let path = users.join(format!("{name}-{tag}.json"));
+                assert!(
+                    localhost_provider::is_plain_localhost_file(&path).unwrap(),
+                    "{name}-{tag}"
+                );
+                let mut head = vec![0u8; prefix.len()];
+                std::io::Read::read_exact(&mut fs::File::open(&path).unwrap(), &mut head).unwrap();
+                assert_eq!(head, prefix.as_bytes());
+            }
+        }
+        let mid = users.join("v2026-m.json");
+        let opened =
+            localhost_provider::read_sealed_localhost_file(&file_key, &mid, "Users/v2026-m.json")
+                .unwrap();
+        assert!(opened.starts_with(br#"{"version":2026"#));
+        assert_eq!(opened.len(), 40 * 1024 * 1024);
+        let big = users.join("v2026-g.json");
+        let err =
+            localhost_provider::read_sealed_localhost_file(&file_key, &big, "Users/v2026-g.json")
+                .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("larger than this process can read"),
+            "{err}"
+        );
+    }
+
+    #[test]
     fn a_refused_prepare_keeps_the_write_error_and_does_not_make_roots() {
         use std::os::unix::fs::PermissionsExt;
 
@@ -7682,6 +7784,29 @@ mod tests {
             &device_key,
             &expected_localhost_file_key(&device_key),
         );
+    }
+
+    #[test]
+    fn a_socket_lock_says_remove_the_pipe() {
+        let _guard = LocalAppsGuard::lock();
+        let device_key = [0x4c; 32];
+        let file_key = expected_localhost_file_key(&device_key);
+        let root = TempDir::new().unwrap();
+        let note = root.path().join("Users/note.bin");
+        plant_device_envelope(&note, &device_key, b"note");
+        let lock = root.path().join("identity/localhost-file-key.lock");
+        fs::create_dir_all(lock.parent().unwrap()).unwrap();
+        let listener = std::os::unix::net::UnixListener::bind(&lock).unwrap();
+        expect_refusal(
+            root.path(),
+            &device_key,
+            "identity/localhost-file-key.lock is a pipe. Remove the pipe, then restart.",
+            true,
+        );
+        drop(listener);
+        fs::remove_file(&lock).unwrap();
+        migrate_again(root.path(), &device_key);
+        assert_envelope_opens_with_exactly_one_key(&note, b"note", &device_key, &file_key);
     }
 
     #[test]
