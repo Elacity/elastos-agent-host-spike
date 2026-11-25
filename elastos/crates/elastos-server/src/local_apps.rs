@@ -6,7 +6,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{LazyLock, Mutex};
 
 use elastos_runtime::provider::{
     Provider, ProviderError, ProviderRegistry, ResourceRequest, ResourceResponse,
@@ -23,8 +23,10 @@ pub fn sentence_from_local_apps_provider_error(message: &str) -> Option<&str> {
     message.strip_prefix(LOCAL_APPS_REFUSAL_MARK)
 }
 
-static LOCAL_APPS_REFUSAL: Mutex<HashMap<PathBuf, String>> = Mutex::new(HashMap::new());
-static LOCAL_APPS_HOMES: Mutex<HashMap<usize, PathBuf>> = Mutex::new(HashMap::new());
+static LOCAL_APPS_REFUSAL: LazyLock<Mutex<HashMap<PathBuf, String>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+static LOCAL_APPS_HOMES: LazyLock<Mutex<HashMap<usize, PathBuf>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 
 fn refusal_key(data_dir: &Path) -> PathBuf {
     std::fs::canonicalize(data_dir).unwrap_or_else(|_| data_dir.to_path_buf())
