@@ -21,6 +21,7 @@ import {
   LIVE_SESSION_COORDS,
   gatewayHealthOk,
   grantWaitSatisfied,
+  rootsStayWithTheirAgent,
   journalFileInRoot,
   ownerDocumentUnchanged,
   ownerNoteRelative,
@@ -192,6 +193,25 @@ test("grant wait ignores the route row's marker files", () => {
     { status: 200, resource: rootA },
     { status: 200, resource: rootB },
   ]), true);
+});
+
+test("each root stays in its own grant, including the planted cross-read", () => {
+  const grants = [
+    { status: 200, resource: `${rootA}/journal` },
+    { status: 200, resource: `${rootB}/journal` },
+  ];
+  const plants = {
+    own: { resource: `${rootA}/Documents/own-marker.txt`, status: 403 },
+    other: { resource: `${rootB}/Documents/cross-read.txt`, status: 403 },
+  };
+  assert.equal(rootsStayWithTheirAgent(rootA, rootB, grants, plants), true);
+  assert.equal(rootsStayWithTheirAgent(rootA, rootB, [
+    { status: 200, resource: `${rootA}/${rootB}` },
+  ], plants), false);
+  assert.equal(rootsStayWithTheirAgent(rootA, rootB, grants, {
+    own: plants.own,
+    other: { resource: `${rootB}/Documents/cross-read.txt`, status: 200 },
+  }), false);
 });
 
 test("journal row requires the file under the agent root", () => {

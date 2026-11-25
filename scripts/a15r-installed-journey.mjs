@@ -58,14 +58,14 @@ const names = [
   "u3_agents_enabled", "u3_owner_field_refused", "u3_agent_created",
   "u3_unknown_id_refused", "u3_guest_refused", "u3_agent_activated",
   "u3_agent_started", "u4_second_agent_created", "u4_both_running",
-  "u4_distinct_roots", "u4_route_refuses_user_area", "journal_in_agent_root",
+  "u4_distinct_roots", "u4_route_refuses_user_area", "roots_in_own_grants", "journal_in_agent_root",
   "plan_card_captured", "one_pending_record", "approve_without_step_up_refused",
   "step_up_approve", "one_authorised_write", "owner_document_unchanged",
   "one_result_and_receipt", "signed_start_audit", "signed_completion_audit",
   "card_removed", "replay_zero", "restart_zero",
   "install_with_hashes_key_deleted", "u4_unknown_agent_refused", "u4_two_agents_one_host",
   "card_step_up_approve_one_write_one_receipt", "owner_denial_signed_row",
-  "stop_during_step", "agents_off_during_run", "panic_in_host_call",
+  "stop_during_step", "agents_off_during_run",
   "home_restart_history",
 ];
 
@@ -489,6 +489,36 @@ export function grantWaitSatisfied(files, roots, grants) {
     ));
     return fileHit || grantHit;
   });
+}
+
+// The old wait refused one resource that held both agents' roots. A resource
+// is one path, so that wait could not succeed. What it was for is isolation:
+// each root is granted only to its own agent. The planted cross-read is part
+// of the same check.
+export function rootsStayWithTheirAgent(rootA, rootB, grants, plants) {
+  if (typeof rootA !== "string" || typeof rootB !== "string" || rootA === "" || rootA === rootB) {
+    return false;
+  }
+  const rows = Array.isArray(grants) ? grants : [];
+  const ownGrant = (root, other) => rows.some((grant) => (
+    grant?.status === 200
+    && String(grant.resource || "").includes(root)
+    && !String(grant.resource || "").includes(other)
+  ));
+  const leaked = rows.some((grant) => {
+    const resource = String(grant?.resource || "");
+    return resource.includes(rootA) && resource.includes(rootB);
+  });
+  const own = plants?.own;
+  const other = plants?.other;
+  const planted = typeof own?.resource === "string"
+    && own.resource.includes(rootA)
+    && !own.resource.includes(rootB)
+    && typeof other?.resource === "string"
+    && other.resource.includes(rootB)
+    && !other.resource.includes(rootA)
+    && other.status !== 200;
+  return ownGrant(rootA, rootB) && ownGrant(rootB, rootA) && !leaked && planted;
 }
 
 export function journalFileInRoot(files, root) {
@@ -1111,10 +1141,6 @@ async function approveGrants(deadlineMs) {
       const action = entry.action_ref?.action_id || "";
       if (!action.startsWith("capability-approve-request:")) continue;
       const resource = resourceOf(entry.body);
-      if (resource.includes(state.rootA) && resource.includes(state.rootB)) {
-        state.grants.push({ resource, status: "refused-by-runner", body: entry.body });
-        return "cross";
-      }
       if (resource.startsWith("elastos://inspect/submit_agent_plan")) continue;
       const reply = await call("POST", "/api/apps/inbox/actions", state.inboxToken, { action_id: action });
       state.grants.push({ resource, status: reply.status, body: entry.body, result: reply.text.slice(0, 180) });
@@ -1259,10 +1285,39 @@ function gitFields() {
   };
 }
 
+function coveredByUnitRow() {
+  const row = "a_panicking_host_call_leaves_the_session_and_home_up";
+  const args = [
+    "test", "-p", "elastos-server", "--lib", "--features", "prototype-agents",
+    "--offline", "--locked", "--", row,
+  ];
+  const cwd = path.join(root || path.resolve(path.dirname(fileURLToPath(import.meta.url)), ".."), "elastos");
+  const result = spawnSync("cargo", args, {
+    cwd,
+    env: {
+      ...process.env,
+      CARGO_NET_OFFLINE: "1",
+      CARGO_TARGET_DIR: process.env.CARGO_TARGET_DIR || path.join(path.dirname(cwd), "target-build"),
+    },
+    encoding: "utf8",
+    timeout: 600000,
+  });
+  const output = `${result.stdout || ""}\n${result.stderr || ""}`.slice(-6000);
+  const passed = result.status === 0 && output.includes("test result: ok");
+  return {
+    row,
+    command: `cargo ${args.join(" ")}`,
+    source_commit: process.env.A15R_SOURCE_COMMIT || "",
+    result: passed ? "pass" : "fail",
+    output,
+  };
+}
+
 function writeReceipt() {
   if (process.env.A15R_ONLY === "u3-create") return writeU3Receipt();
   const assertions = names.map((name) => marks.get(name) || { name, status: "not reached", detail: "" });
-  const proved = assertions.every((item) => item.status === "pass");
+  const unitRow = coveredByUnitRow();
+  const proved = assertions.every((item) => item.status === "pass") && unitRow.result === "pass";
   const install = fs.existsSync(path.join(out, "install.json"))
     ? redactInstall(readJson(path.join(out, "install.json")))
     : {};
@@ -1281,6 +1336,7 @@ function writeReceipt() {
     carrier: carrierProof,
     browser: browserProof,
     install,
+    "covered by a unit row, not installed": unitRow,
     timings_ms: { ...timings, total: Date.now() - started },
     assertions,
     card: state.card,
@@ -1584,6 +1640,20 @@ async function main() {
     halt("journal_in_agent_root", { grantResult, files: filesAfterGrants.map((file) => file.path) });
   }
   pass("journal_in_agent_root", { root: state.rootA, files: journalFiles.map((file) => file.path) });
+  const rootsOwned = rootsStayWithTheirAgent(state.rootA, state.rootB, state.grants, routeReads);
+  if (rootsOwned) {
+    pass("roots_in_own_grants", {
+      a: state.rootA,
+      b: state.rootB,
+      grants: state.grants.map((grant) => grant.resource),
+      plant_cross: routeReads.other?.resource || "",
+    });
+  } else {
+    mark("roots_in_own_grants", "fail", {
+      grants: state.grants,
+      plant: { own: routeReads.own?.resource, other: routeReads.other?.resource, other_status: routeReads.other?.status },
+    });
+  }
 
   const ownerRoot = storedOwnerRoot(owner.principal_id);
   const ownerNoteRel = ownerNoteRelative(ownerRoot);
@@ -1636,39 +1706,6 @@ async function main() {
   state.requestId = state.card.action_id.replace("agent-plan-approve-request:", "");
   pass("plan_card_captured", state.card);
 
-  // B is still running while A's step is waiting. This stop is during that step.
-  const stopping = await call("POST", "/api/apps/system/agents/stop", state.systemToken, {
-    agent_id: state.agentB,
-  });
-  let stopNamed = stopping.status === 200 || stopping.status === 202;
-  let stopFinal = null;
-  let stoppingRow = null;
-  const stopDeadline = Date.now() + 20000;
-  while (Date.now() < stopDeadline) {
-    const rows = auditEvents().filter((event) => (
-      event.event_type === "agent.stopped" && String(event.reason || "").includes(state.agentB)
-    ));
-    stoppingRow = rows.find((event) => event.result === "stopping") || null;
-    stopFinal = rows.find((event) => (
-      (event.result === "ok" || event.result === "failed")
-      && (!stoppingRow || event.session_id === stoppingRow.session_id)
-    )) || null;
-    if (stopFinal) break;
-    // A stopping row is confirmed at the next list. That appends the final row once.
-    await call("GET", "/api/apps/system/agents", state.systemToken);
-    await sleep(300);
-  }
-  if (stopNamed && stopFinal) {
-    pass("stop_during_step", {
-      http: stopping.status,
-      result: stopFinal.result,
-      session_id: stopFinal.session_id || "",
-      stopping: Boolean(stoppingRow),
-    });
-  } else {
-    mark("stop_during_step", "fail", { status: stopping.status, body: stopping.text.slice(0, 240), final: Boolean(stopFinal) });
-  }
-
   let pending = [];
   const pendingDeadline = Date.now() + 10000;
   while (Date.now() < pendingDeadline) {
@@ -1711,12 +1748,50 @@ async function main() {
     keep("step_up_approve", approved.status === 200, approved.text.slice(0, 300));
   }
   let settled = null;
+  let stopDuringStep = null;
   const settleDeadline = Date.now() + 30000;
   while (Date.now() < settleDeadline) {
+    if (!stopDuringStep && state.approveBody) {
+      stopDuringStep = await call("POST", "/api/apps/system/agents/stop", state.systemToken, {
+        agent_id: state.agentA,
+      });
+    }
     settled = inspectRecords().find((record) => record.request_id === state.requestId) || null;
     if (settled && settled.status !== "pending") break;
     await sleep(300);
   }
+  const stepOutcome = settled
+    ? `${settled.status}${settled.result?.status ? `/${settled.result.status}` : ""}`
+    : "";
+  const stopRows = auditEvents().filter((event) => (
+    event.event_type === "agent.stopped" && event.session_id === state.launchA?.session_id
+  ));
+  const namedStop = stopRows.find((event) => (
+    event.result === "ok" || event.result === "failed" || event.result === "stopping"
+  ));
+  if ((stopDuringStep?.status === 200 || stopDuringStep?.status === 202) && namedStop && stepOutcome) {
+    pass("stop_during_step", {
+      http: stopDuringStep.status,
+      session_id: namedStop.session_id,
+      stop_result: namedStop.result,
+      step_outcome: stepOutcome,
+    });
+  } else {
+    mark("stop_during_step", "fail", {
+      http: stopDuringStep?.status || 0,
+      body: String(stopDuringStep?.text || "").slice(0, 240),
+      step_outcome: stepOutcome,
+      rows: stopRows.map((event) => event.result),
+    });
+  }
+  state.stoppingSession = namedStop?.result === "stopping" ? namedStop.session_id : "";
+  state.stoppingConfirmedBeforeRestart = state.stoppingSession
+    ? auditEvents().some((event) => (
+      event.event_type === "agent.stopped"
+      && event.result === "ok"
+      && event.session_id === state.stoppingSession
+    ))
+    : false;
   const recordResources = JSON.stringify(settled || {}).match(/localhost:\/\/[^"\\\s]+/g) || [];
   // The guest submits localhost://UsersAI/self. The Runtime scopes that alias
   // to this agent. The file check below is the proof the bytes landed in A's
@@ -1805,6 +1880,37 @@ async function main() {
     try { fs.unlinkSync(ownerDocPath); } catch { /* already gone */ }
   }
 
+  const liveBeforeOff = liveSessions(await capsules(), [state.launchB]);
+  const off = await call("POST", "/api/apps/system/agents/disable", state.systemToken);
+  let again = { status: 0, text: "" };
+  try {
+    const step = await stepUp(state.systemToken, "agent.start", { agent_id: state.agentB });
+    again = await call("POST", "/api/apps/system/agents/launch", state.systemToken, {
+      agent_id: state.agentB, step_up_token: step,
+    });
+  } catch (error) {
+    again = { status: 0, text: String(error.message || error) };
+  }
+  const stoppedB = auditEvents().find((event) => (
+    event.event_type === "agent.stopped" && event.session_id === state.launchB?.session_id
+  ));
+  if (liveBeforeOff.length === 1 && off.status === 200 && again.status !== 200 && again.text.includes("not turned on") && stoppedB) {
+    pass("agents_off_during_run", {
+      off: off.status,
+      session_id: stoppedB.session_id,
+      result: stoppedB.result,
+      start: again.status,
+    });
+  } else {
+    mark("agents_off_during_run", "fail", {
+      live: liveBeforeOff.length,
+      off: off.status,
+      start: again.status,
+      body: again.text.slice(0, 180),
+      stopped: Boolean(stoppedB),
+    });
+  }
+
   try {
     await stopServe();
     await startServe();
@@ -1824,14 +1930,27 @@ async function main() {
     const chain = auditEvents();
     const finished = chain.some((event) => String(event.event_type).includes("completed") && event.result === "ok");
     const unfinished = chain.some((event) => event.result === "stopping" || String(event.event_type).endsWith(".requested"));
-    if (restartClean && finished && unfinished) {
+    const confirmedStop = Boolean(state.stoppingSession)
+      && state.stoppingConfirmedBeforeRestart !== true
+      && chain.some((event) => (
+        event.event_type === "agent.stopped"
+        && event.result === "ok"
+        && event.session_id === state.stoppingSession
+      ));
+    if (restartClean && confirmedStop) {
       pass("home_restart_history", {
-        finished: "completed",
-        unfinished: "requested or stopping",
+        session_id: state.stoppingSession,
+        confirmed: "ok",
         replay: restart.status,
       });
     } else {
-      mark("home_restart_history", "fail", { finished, unfinished, restart: restart.status });
+      mark("home_restart_history", "fail", {
+        finished,
+        unfinished,
+        restart: restart.status,
+        stopping_session: state.stoppingSession || "",
+        confirmed: confirmedStop,
+      });
     }
   } catch (error) {
     mark("restart_zero", "fail", String(error.message || error));
@@ -1846,25 +1965,6 @@ async function main() {
   if (guestStop.status !== 200 && denial) pass("owner_denial_signed_row", { status: guestStop.status });
   else mark("owner_denial_signed_row", "fail", { status: guestStop.status, denial });
 
-  const off = await call("POST", "/api/apps/system/agents/disable", state.systemToken);
-  let again = { status: 0, text: "" };
-  try {
-    const step = await stepUp(state.systemToken, "agent.start", { agent_id: state.agentA });
-    again = await call("POST", "/api/apps/system/agents/launch", state.systemToken, {
-      agent_id: state.agentA, step_up_token: step,
-    });
-  } catch (error) {
-    again = { status: 0, text: String(error.message || error) };
-  }
-  const agentsOffRefused = off.status === 200
-    && again.status !== 200
-    && again.text.includes("not turned on");
-  if (agentsOffRefused) {
-    pass("agents_off_during_run", { off: off.status, start: again.status, body: again.text.slice(0, 180) });
-  } else {
-    mark("agents_off_during_run", "fail", { off: off.status, start: again.status, body: again.text.slice(0, 180) });
-  }
-  mark("panic_in_host_call", "fail", "the signed host has no panic switch; the unit row is a_panicking_host_call_leaves_the_session_and_home_up");
 }
 
 function loadInstall() {
