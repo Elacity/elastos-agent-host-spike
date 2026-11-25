@@ -532,6 +532,7 @@ pub(crate) fn plan_one_use_count(data_dir: &Path, capsule_id: &str) -> usize {
         .unwrap_or(0)
 }
 
+#[cfg(test)]
 fn note_plan_one_use(data_dir: &Path, capsule_id: &str, token: &CapabilityToken) {
     let key = PlanUseKey {
         data_dir: data_dir.to_path_buf(),

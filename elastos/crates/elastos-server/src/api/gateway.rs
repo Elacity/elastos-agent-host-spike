@@ -97,6 +97,7 @@ mod gateway_inbox;
 pub(crate) use gateway_inbox::inbox_request_entries_for_test;
 #[path = "gateway_inspect_actions.rs"]
 mod gateway_inspect_actions;
+#[cfg(test)]
 pub(crate) use gateway_inspect_actions::agent_plan_approval_block;
 pub(crate) use gateway_inspect_actions::agent_plan_result_for_requester;
 pub(crate) use gateway_inspect_actions::close_agent_plans;
