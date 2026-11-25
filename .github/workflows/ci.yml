@@ -2113,7 +2113,7 @@ jobs:
     runs-on: ubuntu-24.04
     # Lane PRs (spark/*) run only the quick checks; the full CI runs on the twice-daily batch PR (batch/*).
     if: (needs.installed-app-paths.outputs.run != 'false') && !(github.event_name == 'pull_request' && startsWith(github.head_ref, 'spark/'))
-    timeout-minutes: 45
+    timeout-minutes: 75
     needs: [installed-app-paths, fork-gate]
     env:
       # musl-tools is the only host package the musl release check needs.
@@ -2138,13 +2138,16 @@ jobs:
       - name: check native musl release crates
         timeout-minutes: 30
         run: bash scripts/check-release-musl.sh x86_64-unknown-linux-musl
+      - name: start musl helpers under the fence
+        timeout-minutes: 30
+        run: bash scripts/musl-helper-fence.sh x86_64-unknown-linux-musl
 
   musl-check-linux-arm64:
     name: musl-check-linux-arm64
     runs-on: ubuntu-22.04-arm
     # Lane PRs (spark/*) run only the quick checks; the full CI runs on the twice-daily batch PR (batch/*).
     if: (needs.installed-app-paths.outputs.run != 'false') && !(github.event_name == 'pull_request' && startsWith(github.head_ref, 'spark/'))
-    timeout-minutes: 45
+    timeout-minutes: 75
     needs: [installed-app-paths, fork-gate]
     env:
       # musl-tools is the only host package the musl release check needs.
@@ -2169,6 +2172,9 @@ jobs:
       - name: check native musl release crates
         timeout-minutes: 30
         run: bash scripts/check-release-musl.sh aarch64-unknown-linux-musl
+      - name: start musl helpers under the fence
+        timeout-minutes: 30
+        run: bash scripts/musl-helper-fence.sh aarch64-unknown-linux-musl
 
   # The one check that sums up the run, for branch protection to require: it fails
   # unless every job succeeded or was skipped by its own guard for a reason pinned
