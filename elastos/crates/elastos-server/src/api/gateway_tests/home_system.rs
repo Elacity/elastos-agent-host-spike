@@ -115,7 +115,7 @@ async fn home_frame_comes_from_the_managed_runtime() {
         Some(provider.clone()),
     ));
     let secret = "frame-attach";
-    let (api_url, runtime_task, frame_shells, _frame_audit) =
+    let (api_url, runtime_task, frame_shells, _frame_audit, _sessions) =
         spawn_frame_runtime(runtime, secret).await;
     write_frame_coords(dir.path(), &api_url, secret);
     let app = gateway_router(test_state(dir.path()));
@@ -126,6 +126,7 @@ async fn home_frame_comes_from_the_managed_runtime() {
     assert_eq!(owner_frame["nodes"][0]["text"], "<script>alert(1)</script>");
     assert_eq!(owner_frame["nodes"][1]["resource"], "localhost://photo");
     assert!(owner_frame.get("grant").is_none());
+    assert!(owner_frame["nodes"][1].get("grant").is_none());
 
     let (other_status, other_body) = frame_body(&app, &other.home_token, "app=app-frame").await;
     assert_eq!(other_status, StatusCode::OK, "{other_body}");
@@ -338,6 +339,7 @@ async fn spawn_frame_runtime(
     tokio::task::JoinHandle<()>,
     crate::api::handlers::attach::AttachShells,
     Arc<elastos_runtime::primitives::audit::AuditLog>,
+    Arc<elastos_runtime::session::SessionRegistry>,
 ) {
     let shells = crate::api::handlers::attach::AttachShells::default();
     let audit = Arc::new(elastos_runtime::primitives::audit::AuditLog::new());
@@ -364,7 +366,7 @@ async fn spawn_frame_runtime(
                     get(crate::api::routes::resident_frame),
                 )
                 .layer(Extension(runtime))
-                .layer(Extension(sessions))
+                .layer(Extension(sessions.clone()))
                 .layer(Extension(shells.clone())),
         );
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -372,7 +374,7 @@ async fn spawn_frame_runtime(
     let task = tokio::spawn(async move {
         axum::serve(listener, app).await.unwrap();
     });
-    (api_url, task, shells, audit)
+    (api_url, task, shells, audit, sessions)
 }
 
 #[cfg(unix)]
@@ -412,6 +414,36 @@ fn recent_session_labels(
 
 #[cfg(unix)]
 #[tokio::test]
+async fn a_frame_poll_that_gets_401_attaches_once_more() {
+    let dir = tempfile::tempdir().unwrap();
+    let owner = passkey_authority(dir.path());
+    let storage = elastos_storage::providers::LocalFSProvider::new(dir.path().join("storage"));
+    let runtime = Arc::new(crate::runtime::Runtime::with_providers_and_component(
+        Arc::new(storage.await.unwrap()),
+        Vec::new(),
+        None,
+    ));
+    let secret = "frame-attach-401";
+    let (api_url, task, shells, audit, sessions) = spawn_frame_runtime(runtime, secret).await;
+    write_frame_coords(dir.path(), &api_url, secret);
+    let app = gateway_router(test_state(dir.path()));
+    let (status, body) = frame_body(&app, &owner.home_token, "app=app-frame").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(shell_created(&audit), 1);
+    let token = shells.held()[0].clone();
+    sessions.invalidate_session(&token).await;
+    let (status, body) = frame_body(&app, &owner.home_token, "app=app-frame").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(shell_created(&audit), 2, "a 401 mints one new shell");
+    assert_eq!(shells.held().len(), 1);
+    let (status, _) = frame_body(&app, &owner.home_token, "app=app-frame").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(shell_created(&audit), 2, "the new shell is reused");
+    task.abort();
+}
+
+#[cfg(unix)]
+#[tokio::test]
 async fn a_thousand_frame_polls_keep_one_shell_and_a_restart_mints_once() {
     let dir = tempfile::tempdir().unwrap();
     let owner = passkey_authority(dir.path());
@@ -422,7 +454,7 @@ async fn a_thousand_frame_polls_keep_one_shell_and_a_restart_mints_once() {
         None,
     ));
     let secret = "frame-attach-poll";
-    let (api_url, task, shells, audit) = spawn_frame_runtime(runtime, secret).await;
+    let (api_url, task, shells, audit, _sessions) = spawn_frame_runtime(runtime, secret).await;
     write_frame_coords(dir.path(), &api_url, secret);
     let app = gateway_router(test_state(dir.path()));
     let (first_status, second_status) = tokio::join!(
@@ -442,25 +474,18 @@ async fn a_thousand_frame_polls_keep_one_shell_and_a_restart_mints_once() {
         1,
         "a thousand polls keep one shell, have {first:?}"
     );
-    // The concurrent polls above assert exactly one shell. Each later poll
-    // re-checks the attach secret as a client session, which the ring records
-    // as `created:capsule`. The ring holds 1000 events, so that one shell
-    // event is no longer in it. A shell minted on every poll would leave
-    // `created:shell` in the newest rows.
+    // A poll reuses the shell. It does not attach a client session, so the
+    // ring still holds that one shell and nothing else.
     let shells_in_ring = shell_created(&audit);
     let recent = recent_session_labels(&audit, 6);
     assert_eq!(
-        shells_in_ring, 0,
-        "a thousand client attaches push the one shell out of the ring, recent {recent:?}"
+        shells_in_ring, 1,
+        "a thousand polls keep the one shell, recent {recent:?}"
     );
     assert_eq!(
-        recent.len(),
-        6,
-        "the newest six rows are session creates, recent {recent:?}"
-    );
-    assert!(
-        recent.iter().all(|label| label == "created:capsule"),
-        "the newest rows are client attaches, recent {recent:?}"
+        recent,
+        vec!["created:shell".to_string()],
+        "a poll does not attach a client session, recent {recent:?}"
     );
     let frame_token = first[0].clone();
     let client = reqwest::Client::new();
@@ -486,7 +511,7 @@ async fn a_thousand_frame_polls_keep_one_shell_and_a_restart_mints_once() {
         Vec::new(),
         None,
     ));
-    let (next_url, next_task, next_shells, next_audit) =
+    let (next_url, next_task, next_shells, next_audit, _next_sessions) =
         spawn_frame_runtime(restarted, "frame-attach-next").await;
     write_frame_coords(dir.path(), &next_url, "frame-attach-next");
     for _ in 0..2 {
@@ -513,7 +538,7 @@ async fn a_thousand_frame_polls_keep_one_shell_and_a_restart_mints_once() {
         Vec::new(),
         None,
     ));
-    let (evict_url, evict_task, evict_shells, _) =
+    let (evict_url, evict_task, evict_shells, _, _) =
         spawn_frame_runtime(third, "frame-attach-evict").await;
     evict_shells.note("not-a-session");
     let missed = reqwest::Client::new()

@@ -284,7 +284,14 @@ pub(in crate::api) fn capsule_icon_variants(
 
 pub(super) fn home_targets(data_dir: &std::path::Path) -> Vec<HomeTargetSummary> {
     let catalog = capsule_catalog_summary(data_dir);
-    home_targets_from_catalog(&catalog)
+    let mut targets = home_targets_from_catalog(&catalog);
+    append_component_targets(data_dir, &mut targets);
+    targets.sort_by(|left, right| {
+        left.title
+            .cmp(&right.title)
+            .then_with(|| left.target.cmp(&right.target))
+    });
+    targets
 }
 
 pub(super) fn home_targets_from_catalog(
@@ -382,8 +389,52 @@ fn home_browser_targets(
                 viewer_title: None,
             })
             .collect();
+    append_component_targets(data_dir, &mut targets);
     targets.sort_by(|left, right| left.title.cmp(&right.title));
     targets
+}
+
+/// A v2 component app has no `browser/index.html`. Home still lists it, and
+/// the frame is the component, not an iframe.
+fn append_component_targets(data_dir: &std::path::Path, targets: &mut Vec<HomeTargetSummary>) {
+    let root = crate::api::capsule_inventory::installed_capsules_root(data_dir);
+    let mut additions = Vec::new();
+    for manifest in crate::api::capsule_inventory::list_active_capsule_manifests(data_dir) {
+        if manifest.role != CapsuleRole::App
+            || manifest.bus_contract.as_deref() != Some(elastos_common::ELASTOS_BUS_V2_CONTRACT)
+            || manifest.entrypoint.ends_with(".html")
+            || !crate::api::gateway::capsule_is_offered(data_dir, &manifest.name)
+        {
+            continue;
+        }
+        let dir = root.join(&manifest.name);
+        if dir.join("browser/index.html").is_file() {
+            continue;
+        }
+        additions.push(HomeTargetSummary {
+            window_policy: manifest.window_policy,
+            route: format!("/apps/{}/", manifest.name),
+            title: app_shell_title(&manifest.name),
+            description: app_shell_description(&manifest.name, manifest.description),
+            icon: capsule_icon_variants(
+                &manifest.name,
+                &manifest.entrypoint,
+                manifest.icon.as_deref(),
+            ),
+            target: manifest.name,
+            attach_kind: "component".to_string(),
+            role: manifest.role,
+            target_kind: HomeTargetKind::App,
+            viewer: None,
+            viewer_title: None,
+        });
+    }
+    let names: std::collections::BTreeSet<_> = additions
+        .iter()
+        .map(|target| target.target.clone())
+        .collect();
+    targets.retain(|target| !names.contains(&target.target));
+    targets.extend(additions);
 }
 
 fn home_viewer_targets(data_dir: &std::path::Path) -> Vec<HomeTargetSummary> {
@@ -2143,6 +2194,60 @@ async fn home_list_runtime_capsules(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_v2_component_without_html_is_a_home_target() {
+        let data = tempfile::tempdir().unwrap();
+        let root = data.path();
+        std::fs::create_dir_all(root.join("capsules/v2-note")).unwrap();
+        std::fs::create_dir_all(root.join("capsules/page-app")).unwrap();
+        std::fs::write(
+            root.join("capsules/page-app/index.html"),
+            b"<!doctype html>",
+        )
+        .unwrap();
+        let wit = elastos_common::elastos_bus_v2_wit_sha256();
+        let contract = elastos_common::ELASTOS_BUS_V2_CONTRACT;
+        std::fs::write(
+            root.join("capsules/v2-note/capsule.json"),
+            format!(
+                r#"{{"schema":"elastos.capsule/v1","version":"0.1.0","name":"v2-note","role":"app","type":"wasm","runtime_abi":"elastos.component/v1","execution":"component","entrypoint":"main.component.wasm","bus_contract":"{contract}","wit_world_sha256":"{wit}"}}"#
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("capsules/page-app/capsule.json"),
+            r#"{"schema":"elastos.capsule/v1","version":"0.1.0","name":"page-app","role":"app","type":"data","entrypoint":"index.html"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("components.json"),
+            serde_json::json!({
+                "external": {
+                    "v2-note": {"install_path": "capsules/v2-note", "platforms": {}},
+                    "page-app": {"install_path": "capsules/page-app", "platforms": {}}
+                },
+                "capsules": {},
+                "profiles": {}
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let launch = home_launch_targets(root);
+        let v2 = launch
+            .iter()
+            .find(|item| item.target == "v2-note")
+            .expect("v2");
+        assert_eq!(v2.attach_kind, "component");
+        let page = launch
+            .iter()
+            .find(|item| item.target == "page-app")
+            .expect("page");
+        assert_eq!(page.attach_kind, "iframe");
+        assert!(home_targets(root)
+            .iter()
+            .any(|item| { item.target == "v2-note" && item.attach_kind == "component" }));
+    }
 
     #[cfg(unix)]
     #[test]

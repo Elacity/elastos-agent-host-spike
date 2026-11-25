@@ -1528,42 +1528,86 @@ async fn frame_bytes(mut response: reqwest::Response) -> Vec<u8> {
     bytes
 }
 
-/// The managed Runtime's stored nodes for this session's principal. A down
-/// Runtime, a stopped app, or a bad answer is an empty panel.
-async fn managed_frame_nodes(
-    data_dir: &std::path::Path,
-    context: &HomeLaunchTokenContext,
+/// Coords for a frame poll. The file is read and not checked by attaching.
+fn frame_coords(data_dir: &std::path::Path) -> Option<crate::runtime_control::RuntimeCoords> {
+    let path = crate::runtime_control::home_runtime_coord_path(data_dir);
+    let data = std::fs::read(path).ok()?;
+    let coords: crate::runtime_control::RuntimeCoords = serde_json::from_slice(&data).ok()?;
+    crate::local_http::LoopbackHttpBaseUrl::parse(&coords.api_url).ok()?;
+    Some(coords)
+}
+
+enum FrameAnswer {
+    Nodes(Vec<serde_json::Value>),
+    Unauthorized,
+    Other,
+}
+
+async fn ask_resident_frame(
+    client: &reqwest::Client,
+    api_url: &str,
+    shell: &str,
+    principal: &str,
     app: &str,
-) -> Vec<serde_json::Value> {
-    let principal = context.principal_id();
-    let Some(coords) = load_live_runtime_coords(data_dir).await else {
-        return Vec::new();
-    };
-    let Some((client, shell)) = frame_shell(&coords.api_url, &coords.attach_secret, context).await
-    else {
-        return Vec::new();
-    };
+) -> FrameAnswer {
     let Ok(response) = client
         .get(format!(
             "{}/api/residents/frame",
-            coords.api_url.trim_end_matches('/')
+            api_url.trim_end_matches('/')
         ))
         .header(AUTHORIZATION, format!("Bearer {shell}"))
         .query(&[("app", app), ("principal", principal)])
         .send()
         .await
     else {
-        drop_frame_shell(&coords.api_url, &coords.attach_secret, principal).await;
-        return Vec::new();
+        return FrameAnswer::Other;
     };
-    if response.status() == StatusCode::UNAUTHORIZED || response.status() == StatusCode::FORBIDDEN {
-        drop_frame_shell(&coords.api_url, &coords.attach_secret, principal).await;
-        return Vec::new();
+    if response.status() == StatusCode::UNAUTHORIZED {
+        return FrameAnswer::Unauthorized;
     }
     if !response.status().is_success() {
-        return Vec::new();
+        return FrameAnswer::Other;
     }
-    accepted_frame_nodes(&frame_bytes(response).await)
+    FrameAnswer::Nodes(accepted_frame_nodes(&frame_bytes(response).await))
+}
+
+/// The managed Runtime's stored nodes for this session's principal. A down
+/// Runtime, a stopped app, or a bad answer is an empty panel. A poll reuses
+/// the shell it already holds. A 401 attaches once more. A connection error
+/// does not attach.
+async fn managed_frame_nodes(
+    data_dir: &std::path::Path,
+    context: &HomeLaunchTokenContext,
+    app: &str,
+) -> Vec<serde_json::Value> {
+    let Some(coords) = frame_coords(data_dir) else {
+        return Vec::new();
+    };
+    let principal = context.principal_id();
+    let Some((client, shell)) = frame_shell(&coords.api_url, &coords.attach_secret, context).await
+    else {
+        return Vec::new();
+    };
+    match ask_resident_frame(&client, &coords.api_url, &shell, principal, app).await {
+        FrameAnswer::Nodes(nodes) => nodes,
+        FrameAnswer::Other => Vec::new(),
+        FrameAnswer::Unauthorized => {
+            drop_frame_shell(&coords.api_url, &coords.attach_secret, principal).await;
+            let Some((client, shell)) =
+                frame_shell(&coords.api_url, &coords.attach_secret, context).await
+            else {
+                return Vec::new();
+            };
+            match ask_resident_frame(&client, &coords.api_url, &shell, principal, app).await {
+                FrameAnswer::Nodes(nodes) => nodes,
+                FrameAnswer::Unauthorized => {
+                    drop_frame_shell(&coords.api_url, &coords.attach_secret, principal).await;
+                    Vec::new()
+                }
+                FrameAnswer::Other => Vec::new(),
+            }
+        }
+    }
 }
 
 fn accepted_frame_nodes(bytes: &[u8]) -> Vec<serde_json::Value> {

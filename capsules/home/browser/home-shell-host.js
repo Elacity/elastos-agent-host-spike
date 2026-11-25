@@ -599,9 +599,10 @@ async function launchHomeTarget(target, query = {}) {
       launchedAppContexts.get(token).pickerOwner = pickerOwner;
     }
   }
-  // The launch line already carries the capsule id. A launch with none
-  // clears the frame so another app is not left on screen.
-  showV2App(capsuleId);
+  // A component app draws in the v2 frame. An iframe launch, a renewal, and
+  // a launch with no capsule id leave the frame that is already showing.
+  // Closing that app clears it.
+  if (launched?.attach_kind === "component" && capsuleId) showV2App(capsuleId);
   return launched;
 }
 

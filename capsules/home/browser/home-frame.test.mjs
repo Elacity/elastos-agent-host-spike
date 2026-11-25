@@ -132,6 +132,21 @@ test("a deadline aborts the fetch", async () => {
   }
 });
 
+test("a component launch paints above the shell and an iframe launch leaves it", () => {
+  const page = fs.readFileSync(new URL("./index.html", import.meta.url), "utf8");
+  const host = fs.readFileSync(new URL("./home-shell-host.js", import.meta.url), "utf8");
+  const css = fs.readFileSync(new URL("./style.css", import.meta.url), "utf8");
+  assert.match(page, /id="home-v2-frame"/);
+  assert.match(css, /\.active-shell-root\s*\{[^}]*z-index:\s*190000/);
+  assert.match(css, /#home-v2-frame:not\(\[hidden\]\)\s*\{[^}]*z-index:\s*200000/);
+  assert.match(css, /#home-v2-frame:not\(\[hidden\]\)\s*\{[^}]*position:\s*fixed/);
+  assert.match(
+    host,
+    /if \(launched\?\.attach_kind === "component" && capsuleId\) showV2App\(capsuleId\);/,
+  );
+  assert.equal((host.match(/showV2App\(capsuleId\)/g) || []).length, 1);
+});
+
 test("the running app is the only frame requested", async () => {
   const page = fs.readFileSync(new URL("./index.html", import.meta.url), "utf8");
   const host = fs.readFileSync(new URL("./home-shell-host.js", import.meta.url), "utf8");
@@ -170,6 +185,98 @@ test("the running app is the only frame requested", async () => {
     assert.equal(panel.children.length, 0);
     assert.ok(asked.every((id) => id === ""));
     assert.ok(!asked.includes("app-b"));
+  } finally {
+    clearInterval(timer);
+  }
+});
+
+function pageFrame(tag) {
+  const children = [];
+  const attrs = new Map();
+  if (tag.includes("hidden")) attrs.set("hidden", "");
+  return {
+    id: "home-v2-frame",
+    dataset: {},
+    children,
+    get hidden() {
+      return attrs.has("hidden");
+    },
+    ownerDocument: {
+      createElement() {
+        return { textContent: "", children: [] };
+      },
+    },
+    replaceChildren() {
+      children.length = 0;
+    },
+    appendChild(child) {
+      children.push(child);
+    },
+    setAttribute(name, value) {
+      attrs.set(name, String(value));
+    },
+    removeAttribute(name) {
+      attrs.delete(name);
+    },
+  };
+}
+
+test("the real page shows a fixture then the next app", async () => {
+  const page = fs.readFileSync(new URL("./index.html", import.meta.url), "utf8");
+  const host = fs.readFileSync(new URL("./home-shell-host.js", import.meta.url), "utf8");
+  const tag = page.match(/<section id="home-v2-frame"[^>]*>/);
+  assert.ok(tag, "index.html has #home-v2-frame");
+  const homeV2Frame = pageFrame(tag[0]);
+  const showSrc = host.slice(
+    host.indexOf("function showV2App("),
+    host.indexOf("function retireLaunchedAppContext("),
+  );
+  const showV2App = new Function(
+    "bindV2App",
+    "clearV2App",
+    "homeV2Frame",
+    `let shownV2App = "";\n${showSrc}\nreturn showV2App;`,
+  )(bindV2App, clearV2App, homeV2Frame);
+  const callAt = host.indexOf("startHomeFrame(homeV2Frame, (signal) => {");
+  const fetchLine = "encodeURIComponent(app), { signal });";
+  const afterFetch = host.indexOf(fetchLine, callAt) + fetchLine.length;
+  const callbackSrc = host.slice(
+    callAt + "startHomeFrame(homeV2Frame, ".length,
+    host.indexOf("}", afterFetch) + 1,
+  );
+  const asked = [];
+  const frames = {
+    "component-one": { nodes: [{ kind: "text", text: "fixture-one" }] },
+    "component-two": { nodes: [{ kind: "text", text: "fixture-two" }] },
+  };
+  const fetchJson = (url) => {
+    asked.push(url);
+    const app = new URL(url, "http://home.invalid").searchParams.get("app");
+    return Promise.resolve(frames[app] || { nodes: [] });
+  };
+  const readFrame = new Function("fetchJson", "homeV2Frame", `return ${callbackSrc};`)(
+    fetchJson,
+    homeV2Frame,
+  );
+  const timer = startHomeFrame(homeV2Frame, readFrame, 15, {
+    deadlineMs: 200,
+    hidden: () => false,
+  });
+  const until = async (done) => {
+    const start = Date.now();
+    while (!done()) {
+      if (Date.now() - start > 1000) throw new Error("the frame did not update");
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+  };
+  try {
+    showV2App("component-one");
+    await until(() => homeV2Frame.children[0]?.textContent === "fixture-one");
+    assert.equal(homeV2Frame.hidden, false);
+    assert.ok(asked.includes("/api/apps/home/frame?app=component-one"));
+    showV2App("component-two");
+    await until(() => homeV2Frame.children[0]?.textContent === "fixture-two");
+    assert.ok(homeV2Frame.children.every((child) => child.textContent !== "fixture-one"));
   } finally {
     clearInterval(timer);
   }
