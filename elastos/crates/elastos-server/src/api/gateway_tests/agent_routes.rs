@@ -393,6 +393,56 @@ mod off {
             .to_string();
         assert_eq!(err, crate::agents::AGENTS_FILE_UNREADABLE);
     }
+
+    /// A retired record does not stop a root-key change. An unretired one
+    /// does, and that refusal opens no key and creates no key file.
+    #[tokio::test]
+    async fn root_key_change_counts_unretired_records_and_creates_no_key_file() {
+        let home = owner_home();
+        let retired = serde_json::to_vec(&json!({
+            "agents": [{ "record": { "owner": home.principal_id, "retired_at": 4 } }]
+        }))
+        .unwrap();
+        write_0600(&agent_file(home.dir.path()), &retired);
+        let kit = different_key(&home);
+        let response = import_kit(&home, kit)
+            .await
+            .expect("a retired record does not stop a root-key change");
+        assert_eq!(response.status, "imported");
+        assert_eq!(std::fs::read(agent_file(home.dir.path())).unwrap(), retired);
+
+        let home = owner_home();
+        let mixed = serde_json::to_vec(&json!({
+            "agents": [
+                { "record": { "owner": home.principal_id, "retired_at": 4 } },
+                { "record": { "owner": home.principal_id, "retired_at": null } }
+            ]
+        }))
+        .unwrap();
+        write_0600(&agent_file(home.dir.path()), &mixed);
+        let kit = different_key(&home);
+        let key_file = home
+            .dir
+            .path()
+            .join("ElastOS/System/Auth/recovery-archive.key");
+        assert!(
+            key_file.is_file(),
+            "building the kit writes the archive key, so the import can be checked for creating one"
+        );
+        std::fs::remove_file(&key_file).unwrap();
+        let err = import_kit(&home, kit)
+            .await
+            .expect_err(
+                "one unretired record refuses, and the retired one does not add to the count",
+            )
+            .to_string();
+        assert_eq!(err, crate::agents::agents_would_stop_opening(1));
+        assert!(
+            !key_file.exists(),
+            "the decision opens no key and creates no key file"
+        );
+        assert_eq!(std::fs::read(agent_file(home.dir.path())).unwrap(), mixed);
+    }
 }
 
 #[cfg(feature = "prototype-agents")]
