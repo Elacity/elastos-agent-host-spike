@@ -651,6 +651,7 @@ mod tests {
                 };
                 let response = crate::runtime::Runtime::block_on_component_bridge(
                     &host,
+                    elastos_compute::providers::component_bridge_leg(),
                     handle_component_resource_request(line, ctx),
                 )
                 .map_err(|err| err.to_string())?;
@@ -930,6 +931,7 @@ mod tests {
                 };
                 let response = crate::runtime::Runtime::block_on_component_bridge(
                     &host,
+                    elastos_compute::providers::component_bridge_leg(),
                     handle_component_resource_request(line, ctx),
                 )
                 .map_err(|err| err.to_string())?;

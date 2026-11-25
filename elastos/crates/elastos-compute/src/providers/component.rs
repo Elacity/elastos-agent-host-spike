@@ -32,7 +32,7 @@ use elastos_guest::{
 
 use crate::{CapsuleHandle, CapsuleInfo, ComputeProvider};
 
-use super::BridgeHostcall;
+use super::{BridgeHostcall, BridgeLegGuard, ComponentBridgeLeg};
 
 bindgen!({
     path: "../../wit",
@@ -1440,6 +1440,7 @@ fn bounded_hostcall(
     std::thread::Builder::new()
         .name("component-bridge".into())
         .spawn(move || {
+            let _leg = BridgeLegGuard::enter(ComponentBridgeLeg::Side);
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 hostcall(&line, &capsule_id, principal.as_deref())
             }));
@@ -1760,6 +1761,7 @@ impl ComponentState {
                 V2_HOST_DEADLINE,
             )
         } else {
+            let _leg = BridgeLegGuard::enter(ComponentBridgeLeg::Caller);
             hostcall(&line, &self.capsule_id, self.principal_id.as_deref())
         };
         self.in_bus += asked.elapsed();
@@ -2915,6 +2917,9 @@ mod tests {
         assert!(!err.contains("deadline"), "{err}");
     }
 
+    /// The compute invoke calls this closure on the caller thread and has no
+    /// 2 s cap. The thread `block_on_component_bridge` adds is the server row
+    /// `v1_bridge_on_a_blocking_thread_adds_no_thread`.
     #[test]
     fn v1_read_slower_than_two_seconds_stays_on_the_caller_thread() {
         let caller = std::thread::current().id();

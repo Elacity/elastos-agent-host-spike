@@ -11,7 +11,9 @@ use crate::model_budget::{AgentKey, ModelBudget};
 use crate::resource_bridge::{BridgePrincipal, LaunchContent};
 use elastos_bundle_identity::{checked_bundle_within, Budget, CheckedBundle, LabCid};
 use elastos_common::{AuthorityBound, CapsuleManifest, CapsuleType, ElastosError, Result};
-use elastos_compute::providers::{BridgeHostcall, ComponentProvider, STOPPED_BEFORE_RUN};
+use elastos_compute::providers::{
+    component_bridge_leg, BridgeHostcall, ComponentBridgeLeg, ComponentProvider, STOPPED_BEFORE_RUN,
+};
 use elastos_compute::{CapsuleHandle, ComputeProvider};
 use elastos_storage::StorageProvider;
 
@@ -978,25 +980,27 @@ impl Runtime {
         }
     }
 
-    /// Runs one bridge future on `handle`. A v2 guest is already inside its own
-    /// runtime, so that wait runs on a side thread. A v1 guest calls from
-    /// `spawn_blocking`, which has no runtime, and waits on this thread.
+    /// Runs one bridge future on `handle`. `leg` is chosen by the component
+    /// call: v1 passes [`ComponentBridgeLeg::Caller`] and stays on this thread,
+    /// including a `spawn_blocking` worker whose runtime handle is entered. v2
+    /// passes [`ComponentBridgeLeg::Side`] and waits on one scoped thread.
     pub(crate) fn block_on_component_bridge<T>(
         handle: &tokio::runtime::Handle,
+        leg: ComponentBridgeLeg,
         fut: impl std::future::Future<Output = T> + Send,
     ) -> T
     where
         T: Send,
     {
-        if tokio::runtime::Handle::try_current().is_err() {
-            return handle.block_on(fut);
+        match leg {
+            ComponentBridgeLeg::Caller => handle.block_on(fut),
+            ComponentBridgeLeg::Side => std::thread::scope(|scope| {
+                scope
+                    .spawn(|| handle.block_on(fut))
+                    .join()
+                    .unwrap_or_else(|err| std::panic::resume_unwind(err))
+            }),
         }
-        std::thread::scope(|scope| {
-            scope
-                .spawn(|| handle.block_on(fut))
-                .join()
-                .unwrap_or_else(|err| std::panic::resume_unwind(err))
-        })
     }
 
     /// Set the provider registry and capability manager for provider dispatch
@@ -1090,6 +1094,7 @@ impl Runtime {
                 };
                 let response = Self::block_on_component_bridge(
                     &host_handle,
+                    component_bridge_leg(),
                     crate::resource_bridge::handle_component_resource_request(line, ctx),
                 )
                 .map_err(|err| err.to_string())?;
@@ -6778,5 +6783,60 @@ pub(crate) mod tests {
                 "{stops:?}"
             );
         });
+    }
+
+    /// A v1 bridge future runs on the `spawn_blocking` thread that called it.
+    /// That thread has a runtime handle entered, so a choice made by
+    /// `Handle::try_current` would add a thread for the call.
+    #[cfg(target_os = "macos")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn v1_bridge_on_a_blocking_thread_adds_no_thread() {
+        let handle = tokio::runtime::Handle::current();
+        let joined = tokio::task::spawn_blocking(move || {
+            assert!(
+                tokio::runtime::Handle::try_current().is_ok(),
+                "a spawn_blocking worker has a runtime handle entered"
+            );
+            let caller = std::thread::current().id();
+            let before = super::live_thread_count();
+            let (ran_on, during) = Runtime::block_on_component_bridge(
+                &handle,
+                elastos_compute::providers::ComponentBridgeLeg::Caller,
+                async move {
+                    tokio::task::yield_now().await;
+                    (std::thread::current().id(), super::live_thread_count())
+                },
+            );
+            assert_eq!(
+                during, before,
+                "a v1 bridge on a blocking thread adds no thread"
+            );
+            assert_eq!(ran_on, caller, "a v1 bridge future stays on the caller");
+        })
+        .await;
+        assert!(
+            joined.is_ok(),
+            "the blocking bridge call panicked: {joined:?}"
+        );
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+fn live_thread_count() -> u32 {
+    extern "C" {
+        fn mach_task_self() -> libc::mach_port_t;
+    }
+    // SAFETY: `mach_task_self` is this process. `task_threads` writes a kernel
+    // array that this function releases with `vm_deallocate` before it returns.
+    unsafe {
+        let mut list: libc::thread_act_array_t = std::ptr::null_mut();
+        let mut count: libc::mach_msg_type_number_t = 0;
+        let task = mach_task_self();
+        let kr = libc::task_threads(task, &mut list, &mut count);
+        if kr == 0 && !list.is_null() {
+            let bytes = (count as usize).saturating_mul(std::mem::size_of::<libc::thread_act_t>());
+            libc::vm_deallocate(task, list as libc::vm_address_t, bytes as libc::vm_size_t);
+        }
+        count
     }
 }
