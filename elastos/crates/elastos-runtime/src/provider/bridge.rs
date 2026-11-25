@@ -1814,45 +1814,52 @@ impl ProviderBridge {
         Ok((stdin_read, stdout_write, stdio))
     }
 
-    /// `chain-provider/` must be a real directory before the path allow-list
-    /// renders. Create it when Home has not yet. A symlink is refused.
-    /// A directory that already existed keeps its mode. The create path is
-    /// the one that can lose a race.
+    /// `chain-provider/` must be a real directory this user owns before the
+    /// path allow-list renders. Create it at mode 0700 when it is missing.
+    /// A directory that already existed, and one that appears in the create
+    /// race, are accepted only through an opened handle: `O_DIRECTORY |
+    /// O_NOFOLLOW`, then `fstat` on that handle. The mode check is the full
+    /// permission word, `0o7777`, so set-id and sticky bits are refused.
+    #[rustfmt::skip]
     fn ensure_chain_provider_root(data_dir: &Path) -> Result<(), BridgeError> {
         let root = data_dir.join("chain-provider");
-        match std::fs::symlink_metadata(&root) {
-            Ok(metadata) if metadata.file_type().is_symlink() => Err(BridgeError::Refused(
-                "provider start is refused: chain-provider is a symlink".into(),
-            )),
-            Ok(metadata) if !metadata.is_dir() => Err(BridgeError::Refused(
-                "provider start is refused: chain-provider is not a directory. Replace it with a directory you own, then start Home again.".into(),
-            )),
-            Ok(_) => Ok(()),
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Self::create_chain_provider_root(&root),
-            Err(err) => Err(BridgeError::Io(err)),
+        match Self::accept_chain_provider_root(&root) {
+            Ok(()) => Ok(()),
+            Err(BridgeError::Io(err)) if err.kind() == std::io::ErrorKind::NotFound => Self::create_chain_provider_root(&root),
+            Err(err) => Err(err),
         }
     }
 
     /// Create `chain-provider` at mode 0700. `AlreadyExists` means another
-    /// start created it after this one saw `NotFound`. That path is accepted
-    /// only when it is a real directory, owned by this user, with mode 0700.
-    #[rustfmt::skip]
+    /// start created it after this one saw `NotFound`. That path uses the
+    /// same opened-handle check as a directory that was already there.
     fn create_chain_provider_root(root: &Path) -> Result<(), BridgeError> {
-        use std::os::unix::fs::{DirBuilderExt, MetadataExt};
+        use std::os::unix::fs::DirBuilderExt;
         let mut builder = std::fs::DirBuilder::new();
         builder.mode(0o700);
         match builder.create(root) {
             Ok(()) => Ok(()),
             Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
-                let metadata = std::fs::symlink_metadata(root).map_err(BridgeError::Io)?;
-                if !metadata.file_type().is_symlink() && metadata.is_dir() && metadata.uid() == unsafe { libc::geteuid() } && metadata.mode() & 0o777 == 0o700 {
-                    Ok(())
-                } else {
-                    Err(BridgeError::Refused("provider start is refused: chain-provider appeared during start and is not a directory this user owns with mode 0700".into()))
-                }
+                Self::accept_chain_provider_root(root)
             }
             Err(err) => Err(BridgeError::Io(err)),
         }
+    }
+
+    /// Open `root` with `O_DIRECTORY | O_NOFOLLOW` and require the owner and
+    /// the full mode `0700`. `NotFound` stays an I/O error so the create path
+    /// can run. Every other open failure, and a handle whose mode is not
+    /// exactly `0700`, is the same refusal.
+    #[rustfmt::skip]
+    fn accept_chain_provider_root(root: &Path) -> Result<(), BridgeError> {
+        use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+        let refused = BridgeError::Refused("provider start is refused: chain-provider is not a directory this user owns with mode 0700. Replace it with a directory you own, then start Home again.".into());
+        let dir = match std::fs::OpenOptions::new().read(true).custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW).open(root) {
+            Ok(dir) => dir,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Err(BridgeError::Io(err)),
+            Err(_) => return Err(refused),
+        };
+        let meta = dir.metadata().map_err(BridgeError::Io)?; if meta.uid() == unsafe { libc::geteuid() } && meta.mode() & 0o7777 == 0o700 { Ok(()) } else { Err(refused) }
     }
 
     /// Start localhost, object, or chain on that provider's path allow-list.
@@ -6385,7 +6392,7 @@ int main(void) {
         ProviderBridge::ensure_chain_provider_root(temp.path()).unwrap();
         let meta = fs::symlink_metadata(temp.path().join("chain-provider")).unwrap();
         assert!(meta.is_dir());
-        assert_eq!(meta.permissions().mode() & 0o777, 0o700);
+        assert_eq!(meta.permissions().mode() & 0o7777, 0o700);
     }
 
     /// `AlreadyExists` is the race where two starts both saw a missing root.
@@ -6422,8 +6429,44 @@ int main(void) {
             .unwrap_err()
             .to_string();
         assert!(text.contains("0700"), "{text}");
-        ProviderBridge::ensure_chain_provider_root(temp.path()).unwrap();
-        let mode = fs::symlink_metadata(&root).unwrap().permissions().mode() & 0o777;
-        assert_eq!(mode, 0o755, "an existing directory keeps its mode");
+        let text = ProviderBridge::ensure_chain_provider_root(temp.path())
+            .unwrap_err()
+            .to_string();
+        assert!(text.contains("0700"), "{text}");
+        assert_eq!(
+            fs::symlink_metadata(&root).unwrap().permissions().mode() & 0o7777,
+            0o755,
+            "a refused directory keeps the mode it had"
+        );
+
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o2700)).unwrap();
+        let planted = fs::symlink_metadata(&root).unwrap().permissions().mode() & 0o7777;
+        assert_eq!(
+            planted, 0o2700,
+            "the setgid bit has to be stored to prove the full mode word"
+        );
+        for refused in [
+            ProviderBridge::ensure_chain_provider_root(temp.path()),
+            ProviderBridge::create_chain_provider_root(&root),
+        ] {
+            let text = refused.unwrap_err().to_string();
+            assert!(text.contains("0700"), "{text}");
+        }
+
+        fs::remove_dir(&root).unwrap();
+        let good = temp.path().join("good-chain-root");
+        fs::create_dir(&good).unwrap();
+        fs::set_permissions(&good, fs::Permissions::from_mode(0o700)).unwrap();
+        std::os::unix::fs::symlink(&good, &root).unwrap();
+        for refused in [
+            ProviderBridge::ensure_chain_provider_root(temp.path()),
+            ProviderBridge::create_chain_provider_root(&root),
+        ] {
+            let text = refused.unwrap_err().to_string();
+            assert!(
+                text.contains("chain-provider") && text.contains("0700"),
+                "{text}"
+            );
+        }
     }
 }
