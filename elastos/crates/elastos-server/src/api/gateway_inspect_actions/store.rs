@@ -139,9 +139,10 @@ pub(super) fn claim_pending_inspect_action_record(
 
 /// Claims one pending agent plan for its owner under the store lock. The card's
 /// whole binding must equal both the stored and the recomputed one, so a changed
-/// plan becomes stale and claims nothing. The passkey check runs before any
-/// state write: a failed passkey leaves the record pending, and a second click
-/// finds it claimed.
+/// plan becomes stale and claims nothing. On the success path the caller writes
+/// the signed row before the passkey is spent. A failed row leaves the record
+/// pending and the passkey unused. A changed card spends the passkey and stays
+/// stale, so that token cannot approve the new bytes.
 pub(super) fn claim_pending_agent_plan_for_owner(
     data_dir: &Path,
     request_id: &str,
@@ -149,7 +150,7 @@ pub(super) fn claim_pending_agent_plan_for_owner(
     approver_is_human: bool,
     card_binding: &serde_json::Value,
     updated_at: u64,
-    consume_step_up: impl FnOnce(&InspectActionRequestRecord) -> anyhow::Result<()>,
+    commit: impl FnOnce(&InspectActionRequestRecord, bool) -> anyhow::Result<()>,
 ) -> anyhow::Result<InspectActionRequestRecord> {
     let _guard = inspect_action_store_lock()?;
     let mut record = read_inspect_action_record_unlocked(data_dir, request_id)?;
@@ -169,10 +170,12 @@ pub(super) fn claim_pending_agent_plan_for_owner(
     }
     let card: EspRequestBinding = serde_json::from_value(card_binding.clone())
         .map_err(|err| anyhow::anyhow!("agent plan card binding is invalid: {err}"))?;
-    consume_step_up(&record)?;
     if record.request_binding.as_ref() != Some(&card)
         || super::agent_plan::agent_plan_request_binding(&record) != Some(card.clone())
     {
+        // A changed card spends the passkey, then stays stale. The token
+        // cannot approve the new bytes.
+        commit(&record, false)?;
         let message = "agent plan changed before Inbox approval; it is stale";
         record.status = "stale".to_string();
         record.error = Some(message.to_string());
@@ -180,8 +183,13 @@ pub(super) fn claim_pending_agent_plan_for_owner(
         write_inspect_action_record_unlocked(data_dir, &record)?;
         anyhow::bail!(message);
     }
-    record.status = "approved".to_string();
-    record.updated_at = updated_at;
+    // The signed row comes first. A failed append leaves the card pending
+    // and does not spend the passkey, so the owner can approve again.
+    let mut approved = record.clone();
+    approved.status = "approved".to_string();
+    approved.updated_at = updated_at;
+    commit(&approved, true)?;
+    record = approved;
     write_inspect_action_record_unlocked(data_dir, &record)?;
     Ok(record)
 }
@@ -786,7 +794,7 @@ mod tests {
             true,
             &binding,
             2,
-            |_| Ok(()),
+            |_, _| Ok(()),
         )
         .unwrap();
         let claimed =
@@ -842,7 +850,7 @@ mod tests {
             true,
             &binding,
             2,
-            |_| Ok(()),
+            |_, _| Ok(()),
         )
         .unwrap();
         super::claim_approved_agent_plan_for_dispatch(dir.path(), &request_id, owner, 3).unwrap();
@@ -883,6 +891,83 @@ mod tests {
             super::read_inspect_action_record(dir.path(), &request_id)
                 .unwrap()
                 .audit_recorded
+        );
+    }
+
+    /// The signed approval is written before the card becomes approved.
+    /// A failed append leaves the card pending and does not spend the passkey.
+    #[test]
+    fn a_failed_approval_audit_leaves_the_card_pending_and_the_passkey() {
+        let dir = tempfile::tempdir().unwrap();
+        let owner = "person:owner";
+        let plan = serde_json::json!({
+            "steps": [{ "scheme": "availability", "operation": "status", "request": {} }]
+        });
+        let created = super::super::submit_pending_agent_plan(
+            dir.path(),
+            owner,
+            "agent:v2:0123456789abcdef0123456789abcdef",
+            "capsule:agent-host",
+            "session:agent-1",
+            &plan,
+            1,
+        )
+        .unwrap();
+        let request_id = created["request_id"].as_str().unwrap().to_string();
+        let binding = created["request_binding"].clone();
+        let mut spent = false;
+        let error = super::claim_pending_agent_plan_for_owner(
+            dir.path(),
+            &request_id,
+            owner,
+            true,
+            &binding,
+            2,
+            |_, audit_first| {
+                if audit_first {
+                    anyhow::bail!("injected agent plan approval audit failure");
+                }
+                spent = true;
+                Ok(())
+            },
+        )
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("injected agent plan approval audit failure"),
+            "{error}"
+        );
+        assert!(!spent, "a failed approval audit spent the passkey");
+        assert_eq!(
+            super::read_inspect_action_record(dir.path(), &request_id)
+                .unwrap()
+                .status,
+            "pending"
+        );
+        let approved = super::claim_pending_agent_plan_for_owner(
+            dir.path(),
+            &request_id,
+            owner,
+            true,
+            &binding,
+            3,
+            |record, audit_first| {
+                if audit_first {
+                    assert_eq!(record.status, "approved");
+                }
+                spent = true;
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert!(spent, "the passkey is spent only after the audit lands");
+        assert_eq!(approved.status, "approved");
+        assert_eq!(
+            super::read_inspect_action_record(dir.path(), &request_id)
+                .unwrap()
+                .status,
+            "approved"
         );
     }
 }

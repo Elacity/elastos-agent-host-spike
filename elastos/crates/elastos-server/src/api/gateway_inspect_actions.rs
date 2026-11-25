@@ -413,14 +413,22 @@ pub(super) fn approve_agent_plan_request(
     if let Some(block) = agent_plan_approval_block(&state.data_dir, request_id) {
         anyhow::bail!(block);
     }
-    let claimed = store::claim_pending_agent_plan_for_owner(
+    store::claim_pending_agent_plan_for_owner(
         &state.data_dir,
         request_id,
         context.principal_id(),
         context.root().kind() == Some(crate::auth::PrincipalKind::Human),
         card_binding,
         now_ts(),
-        |record| {
+        |record, audit_first| {
+            if audit_first {
+                append_agent_plan_decision_audit(
+                    &state.data_dir,
+                    record,
+                    "agent.plan.approved",
+                    "approved",
+                )?;
+            }
             let token = step_up_token.ok_or_else(|| {
                 anyhow::anyhow!("fresh passkey is required to approve an agent plan")
             })?;
@@ -434,7 +442,6 @@ pub(super) fn approve_agent_plan_request(
             )
         },
     )?;
-    append_agent_plan_decision_audit(&state.data_dir, &claimed, "agent.plan.approved", "approved")?;
     crate::resource_bridge::notify_plan_waiters();
     Ok("Approved agent plan. The step is ready for Runtime dispatch.".to_string())
 }
