@@ -2919,7 +2919,7 @@ async function onRecoveryImport(event) {
     if (plan.reassign) {
       pendingRecoveryImport = { imported };
       showRecoveryStatus("Review", "muted");
-      showRecoveryPending(plan);
+      showRecoveryPending(plan, await runtimeBuildsAgents());
       return;
     }
     pendingRecoveryImport = { imported };
@@ -2931,7 +2931,7 @@ async function onRecoveryImport(event) {
     }
   } catch (error) {
     showRecoveryStatus("Import failed", "error");
-    showRecoveryNote(String(error.message || error), "error");
+    showRecoveryNote(recoveryRefusal(error), "error");
   } finally {
     if (recoveryImportInput) {
       recoveryImportInput.value = "";
@@ -2964,7 +2964,7 @@ async function onRecoveryAttach() {
     }
   } catch (error) {
     showRecoveryStatus("Attach failed", "error");
-    showRecoveryNote(String(error.message || error), "error");
+    showRecoveryNote(recoveryRefusal(error), "error");
     if (recoveryAttachButton) {
       recoveryAttachButton.disabled = false;
     }
@@ -2994,11 +2994,12 @@ async function submitRecoveryImport(body, terminalRetryToken = "") {
     if (recoveryPasswordInput) {
       recoveryPasswordInput.value = "";
     }
+    const agentsBuilt = await runtimeBuildsAgents();
     showRecoveryStatus("", "success");
     showRecoveryNote(
       response.status === "reassigned"
-        ? `Recovered root attached. ${recoveryImportSuccessMessage(response)}`
-        : recoveryImportSuccessMessage(response),
+        ? `Recovered root attached. ${recoveryImportSuccessMessage(response, agentsBuilt)}`
+        : recoveryImportSuccessMessage(response, agentsBuilt),
       "success",
     );
   } else {
@@ -3094,7 +3095,19 @@ function fullRecoveryImportRequest(principalId, localhostRoot, bundle, recoveryP
   return request;
 }
 
-function recoveryImportSuccessMessage(response) {
+const AGENTS_STAY_ON_THIS_HOME = "Agents and their data stay on the Home where you created them; this bundle does not carry them.";
+
+function runtimeBuildsAgents() {
+  return fetchJson("/api/apps/system/agents", { headers: shellHeaders() }).then(() => true, (error) => !String((error && error.message) || "").includes("agents are not built into this Runtime"));
+}
+
+function recoveryRefusal(error) {
+  const message = String((error && error.message) || error || "");
+  const found = message.match(/(\d+ agents? on this Home would stop opening\. Retire (?:that agent|them) first, or import on another Home\.)/);
+  return found ? found[1] : message;
+}
+
+function recoveryImportSuccessMessage(response, agentsBuilt) {
   const count = Number(response && response.wallet_restore && response.wallet_restore.imported_count
     ? response.wallet_restore.imported_count
     : 0);
@@ -3111,7 +3124,8 @@ function recoveryImportSuccessMessage(response) {
       parts.push("This device is now authorized for your Profile; contacts learn it automatically.");
     }
   }
-  return parts.length > 0 ? `Recovery Kit imported. ${parts.join(" ")}` : "Recovery Kit imported.";
+  const base = parts.length > 0 ? `Recovery Kit imported. ${parts.join(" ")}` : "Recovery Kit imported.";
+  return agentsBuilt ? `${base} ${AGENTS_STAY_ON_THIS_HOME}` : base;
 }
 
 function recoveryImportIsComplete(response) {
@@ -3187,12 +3201,13 @@ function setRecoveryButton(label, disabled) {
   }
 }
 
-function showRecoveryPending(plan) {
+function showRecoveryPending(plan, agentsBuilt) {
   if (!recoveryPendingNode || !recoveryPendingTextNode) {
     return;
   }
   const root = shortText(readText(plan && plan.kitRoot), 14) || "this root";
-  recoveryPendingTextNode.textContent = `This kit belongs to another Home account (${root}). Recover that account with this passkey? The current temporary account will be replaced.`;
+  const stay = agentsBuilt ? ` ${AGENTS_STAY_ON_THIS_HOME}` : "";
+  recoveryPendingTextNode.textContent = `This kit belongs to another Home account (${root}). Recover that account with this passkey? The current temporary account will be replaced.${stay}`;
   recoveryPendingNode.hidden = false;
   showRecoveryNote("", "muted");
   if (recoveryAttachButton) {

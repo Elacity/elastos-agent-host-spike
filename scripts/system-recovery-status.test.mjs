@@ -71,6 +71,69 @@ test("plaintext that arrived while Home runs is explained", () => {
   assert.equal(unprotected.note, `Some files in your protected Home folders are not encrypted yet. ${encrypts}`);
 });
 
+const STAY = "Agents and their data stay on the Home where you created them; this bundle does not carry them.";
+const recoverySource = source.slice(
+  source.indexOf("const AGENTS_STAY_ON_THIS_HOME"),
+  source.indexOf("function recoveryImportIsComplete"),
+);
+const pendingSource = source.slice(
+  source.indexOf("function showRecoveryPending"),
+  source.indexOf("function showWalletRestorePending"),
+);
+
+function recoveryPage(agentsBuilt) {
+  const shown = {};
+  const pending = { hidden: true, textContent: "" };
+  const note = { hidden: true, textContent: "", dataset: {} };
+  const button = { textContent: "", disabled: false };
+  const context = vm.createContext({
+    readText: (value) => (typeof value === "string" ? value.trim() : ""),
+    shortText: (value) => (typeof value === "string" ? value.trim() : ""),
+    recoveryPendingNode: pending,
+    recoveryPendingTextNode: pending,
+    recoveryNoteNode: note,
+    recoveryAttachButton: button,
+    hasShellAccess: () => true,
+    showRecoveryNote: (text) => {
+      note.textContent = text;
+    },
+    fetchJson: () => Promise.resolve({ agents: [] }),
+    shellHeaders: () => ({}),
+  });
+  vm.runInContext(`${recoverySource}\n${pendingSource}`, context);
+  return {
+    pendingText: (plan) => {
+      context.showRecoveryPending(plan, agentsBuilt);
+      return pending.textContent;
+    },
+    success: (response) => context.recoveryImportSuccessMessage(response, agentsBuilt),
+    refusal: (error) => context.recoveryRefusal(error),
+    builds: (fetchJson) => {
+      context.fetchJson = fetchJson;
+      return context.runtimeBuildsAgents();
+    },
+  };
+}
+
+test("recovery text says agents stay on the Home where they were created", async () => {
+  const on = recoveryPage(true);
+  const off = recoveryPage(false);
+  const plan = { kitRoot: "localhost://Users/ab" };
+  assert.equal(on.pendingText(plan).endsWith(STAY), true);
+  assert.equal(off.pendingText(plan).includes(STAY), false);
+  assert.equal(on.success({}).endsWith(STAY), true);
+  assert.equal(off.success({}), "Recovery Kit imported.");
+  const sentence = "1 agent on this Home would stop opening. Retire that agent first, or import on another Home.";
+  assert.equal(on.refusal({ message: `request failed: 409 ${sentence}` }), sentence);
+  assert.equal(await on.builds(() => Promise.resolve({ agents: [] })), true);
+  assert.equal(
+    await off.builds(() => Promise.reject(new Error("request failed: 409 agents are not built into this Runtime"))),
+    false,
+  );
+  const rust = readFileSync(new URL("../elastos/crates/elastos-server/src/api/auth_gateway.rs", import.meta.url), "utf8");
+  assert.equal(rust.includes(`const AGENTS_STAY_ON_THIS_HOME: &str = "${STAY}";`), true);
+});
+
 test("a Home whose Profile needs backup still sees files needing attention", () => {
   const action = "Documents/a.bin does not carry the label this Home writes on encrypted files.";
   const shown = render({
