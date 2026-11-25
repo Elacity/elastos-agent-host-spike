@@ -1077,10 +1077,8 @@ fn receipt_round_trip_keeps_non_utf8_launch_args_environment_and_working_directo
     assert_eq!(receipt.launch_sha256, launch_hash);
     let generation = "c".repeat(32);
     for restart in [false, true] {
-        let command = receipt
-            .launch
-            .command(&fixture.binary, &generation, restart)
-            .unwrap();
+        let command =
+            command_unchecked(&receipt.launch, &fixture.binary, &generation, restart).unwrap();
         let command = command.as_std();
         assert_eq!(command.get_program(), fixture.binary.as_os_str());
         assert_eq!(
@@ -1109,7 +1107,7 @@ fn receipt_round_trip_keeps_non_utf8_launch_args_environment_and_working_directo
     }
     let mut bad = receipt.launch.clone();
     bad.args[0] = "invalid base64!".into();
-    assert!(bad.command(&fixture.binary, &generation, true).is_err());
+    assert!(command_unchecked(&bad, &fixture.binary, &generation, true).is_err());
     assert_ne!(bad.sha256().unwrap(), receipt.launch_sha256);
 }
 
@@ -1124,13 +1122,13 @@ fn launch_capture_and_restart_preserve_carrier_mdns_choice() {
         });
         let launch = LaunchPlan::capture_environment(environment, PathBuf::from("/Home fixture"));
         for restarting in [false, true] {
-            let command = launch
-                .command(
-                    Path::new("/Home fixture/bin/elastos"),
-                    &"c".repeat(32),
-                    restarting,
-                )
-                .unwrap();
+            let command = command_unchecked(
+                &launch,
+                Path::new("/Home fixture/bin/elastos"),
+                &"c".repeat(32),
+                restarting,
+            )
+            .unwrap();
             let retained = command
                 .as_std()
                 .get_envs()
@@ -1211,9 +1209,13 @@ fn launch_capture_and_retained_commands_exclude_unrelated_credentials() {
         )
     }));
     let retained_hash = retained.sha256().unwrap();
-    let command = retained
-        .command(Path::new("/private/runtime"), &"a".repeat(32), false)
-        .unwrap();
+    let command = command_unchecked(
+        &retained,
+        Path::new("/private/runtime"),
+        &"a".repeat(32),
+        false,
+    )
+    .unwrap();
     assert_eq!(retained.sha256().unwrap(), retained_hash);
     let values = command
         .as_std()
@@ -1348,8 +1350,7 @@ async fn desktop_and_wallet_bindings_reach_captured_and_retained_child_commands(
         .collect::<String>();
     for plan in [captured, retained] {
         let hash = plan.sha256().unwrap();
-        let output = plan
-            .command(Path::new("/bin/sh"), &"a".repeat(32), false)
+        let output = command_unchecked(&plan, Path::new("/bin/sh"), &"a".repeat(32), false)
             .unwrap()
             .output()
             .await
@@ -5863,4 +5864,152 @@ async fn first_home_start_notes_progress_while_it_waits() {
     let mut quick = Vec::new();
     note_while_starting(async {}, |seconds| quick.push(seconds)).await;
     assert!(quick.is_empty());
+}
+
+fn command_unchecked(
+    launch: &LaunchPlan,
+    binary: &Path,
+    generation: &str,
+    restart: bool,
+) -> Result<tokio::process::Command> {
+    let mut command = tokio::process::Command::new(binary);
+    launch.fill_command(&mut command, generation, restart)?;
+    Ok(command)
+}
+
+fn replace_mode(path: &Path, bytes: &[u8], mode: u32) {
+    let mut file = OpenOptions::new()
+        .write(true)
+        .truncate(true)
+        .mode(mode)
+        .open(path)
+        .unwrap();
+    file.set_permissions(fs::Permissions::from_mode(mode))
+        .unwrap();
+    file.write_all(bytes).unwrap();
+}
+
+fn fn_body<'a>(source: &'a str, signature: &str) -> &'a str {
+    let start = source
+        .find(signature)
+        .unwrap_or_else(|| panic!("missing {signature}"));
+    let rest = &source[start..];
+    let next = ["\nfn ", "\n    fn "]
+        .iter()
+        .filter_map(|marker| rest[signature.len()..].find(marker))
+        .min()
+        .unwrap_or(rest.len().saturating_sub(signature.len()));
+    &rest[..signature.len() + next]
+}
+
+#[test]
+fn own_program_starts_hold_signed_bytes_before_exec() {
+    let controller = include_str!("../update_controller.rs");
+    let command = fn_body(controller, "fn command(");
+    assert!(
+        command.find("hold_home_binary(").unwrap()
+            < command.find("Command::new(prepared.exec_path())").unwrap()
+    );
+    assert!(!command.contains("attach_"));
+    let hold = fn_body(controller, "fn hold_home_binary(");
+    assert!(hold.contains("checked_running_runtime("));
+    assert!(hold.contains("VerifiedExecutable::prepare("));
+    let exec = fn_body(controller, "fn exec_controller(");
+    assert!(
+        exec.find("hold_signed_controller(").unwrap()
+            < exec.find("Command::new(prepared.exec_path())").unwrap()
+    );
+    assert!(exec.find("attach_std(").unwrap() < exec.find(".exec()").unwrap());
+    let spawn = fn_body(controller, "fn spawn(");
+    assert!(spawn.contains("spawn_held(") && spawn.contains("Some(&prepared)"));
+    let child = include_str!("child.rs");
+    let held = fn_body(child, "fn spawn_held(");
+    let pipe = held.find("pre_exec(").unwrap();
+    let attach = held.find("attach_tokio(").unwrap();
+    let start = held.find(".spawn()").unwrap();
+    assert!(pipe < attach && attach < start);
+    let update = include_str!("../update.rs");
+    let probe = fn_body(update, "fn verify_installed_binary_version(");
+    assert!(
+        probe.find("VerifiedExecutable::prepare(").unwrap()
+            < probe.find("Command::new(prepared.exec_path())").unwrap()
+    );
+    assert!(probe.find("attach_tokio(").unwrap() < probe.find(".spawn()").unwrap());
+}
+
+#[test]
+fn home_restart_checks_the_release_then_installed_and_refuses_a_gap() {
+    let old_bytes = b"signed fixture Runtime";
+    let new_bytes = b"#!/bin/sh\nprintf 'elastos 0.7.1\\n'\n";
+    let fixture = PrivateFixture::new();
+    fixture.publish_installed_release();
+    let launch = LaunchPlan::capture_environment(
+        std::iter::empty::<(OsString, OsString)>(),
+        fixture.data.clone(),
+    );
+    let generation = "a".repeat(32);
+    let admitted = |bytes: &[u8]| {
+        let (prepared, _) = launch
+            .command(&fixture.data, &fixture.binary, &generation, false)
+            .unwrap();
+        assert_eq!(
+            prepared.signed_checksum().unwrap(),
+            format!("sha256:{}", digest(bytes))
+        );
+    };
+    admitted(old_bytes);
+    replace_mode(&fixture.binary, new_bytes, 0o755);
+    let gap = launch
+        .command(&fixture.data, &fixture.binary, &generation, false)
+        .unwrap_err();
+    let gap_text = format!("{gap:#}");
+    assert!(
+        gap_text.contains("Installed artifact differs from its signed checksum")
+            || gap_text.contains("installed executable differs from signed release digest"),
+        "{gap_text}"
+    );
+    fs::remove_dir_all(fixture.data.join("installation")).unwrap();
+    fixture.publish_installed_release();
+    admitted(new_bytes);
+    replace_mode(&fixture.binary, old_bytes, 0o755);
+    fs::remove_dir_all(fixture.data.join("installation")).unwrap();
+    fixture.publish_installed_release();
+    admitted(old_bytes);
+}
+
+#[test]
+fn source_home_restart_uses_dev_mode_and_refuses_without_it() {
+    let root = tempfile::tempdir().unwrap();
+    let data = fs::canonicalize(root.path()).unwrap();
+    let binary = data.join("elastos");
+    fs::write(&binary, b"source home bytes").unwrap();
+    let launch =
+        LaunchPlan::capture_environment(std::iter::empty::<(OsString, OsString)>(), data.clone());
+    let generation = "b".repeat(32);
+    let missing = launch
+        .command(&data, &binary, &generation, false)
+        .unwrap_err();
+    let text = format!("{missing:#}");
+    assert!(text.contains("No trusted source configured"), "{text}");
+    assert!(text.contains("dev_mode = true"), "{text}");
+    fs::write(data.join("config.toml"), b"dev_mode = true\n").unwrap();
+    let (prepared, _) = launch.command(&data, &binary, &generation, true).unwrap();
+    assert!(prepared.signed_checksum().is_err());
+}
+
+#[test]
+fn retained_controller_is_held_against_its_signed_receipt() {
+    let fixture = PrivateFixture::new();
+    publish_retained_receipt(&fixture);
+    let expected = digest(b"signed fixture Runtime");
+    let prepared =
+        hold_signed_controller(&fixture.controller(), &fixture.directory.join(RECEIPT)).unwrap();
+    assert_eq!(
+        prepared.signed_checksum().unwrap(),
+        format!("sha256:{expected}")
+    );
+    replace_mode(&fixture.controller(), b"other controller bytes", 0o700);
+    let error = hold_signed_controller(&fixture.controller(), &fixture.directory.join(RECEIPT))
+        .unwrap_err();
+    assert!(format!("{error:#}").contains("signed"), "{error:#}");
 }

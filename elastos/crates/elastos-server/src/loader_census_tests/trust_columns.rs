@@ -1059,9 +1059,9 @@ fn columns() -> Vec<TrustColumn> {
             function: "verify_installed_binary_version",
             call: "command",
             class: "other",
-            trust_root: "none",
-            verified_when: "never",
-            evidence: ["Command::ne", "w(bin_path)"].concat(),
+            trust_root: own_command_trust_root(),
+            verified_when: own_command_verified_when(),
+            evidence: ["Command::new(prepared", ".exec_path())"].concat(),
             os_path: "",
         },
         TrustColumn {
@@ -1069,9 +1069,9 @@ fn columns() -> Vec<TrustColumn> {
             function: "verify_installed_binary_version",
             call: "spawn()",
             class: "other",
-            trust_root: "none",
-            verified_when: "never",
-            evidence: ["Command::ne", "w(bin_path)"].concat(),
+            trust_root: own_command_trust_root(),
+            verified_when: own_command_verified_when(),
+            evidence: ["prepared.attach", "_tokio("].concat(),
             os_path: "",
         },
         TrustColumn {
@@ -1079,9 +1079,9 @@ fn columns() -> Vec<TrustColumn> {
             function: "command",
             call: "command",
             class: "other",
-            trust_root: "none",
-            verified_when: "never",
-            evidence: ["Command::n", "ew(binary)"].concat(),
+            trust_root: own_command_trust_root(),
+            verified_when: own_command_verified_when(),
+            evidence: ["Command::new(prepared", ".exec_path())"].concat(),
             os_path: "",
         },
         TrustColumn {
@@ -1089,19 +1089,19 @@ fn columns() -> Vec<TrustColumn> {
             function: "exec_controller",
             call: "command",
             class: "other",
-            trust_root: "none",
-            verified_when: "never",
-            evidence: ["Command::new", "(controller)"].concat(),
+            trust_root: own_command_trust_root(),
+            verified_when: own_command_verified_when(),
+            evidence: ["Command::new(prepared", ".exec_path())"].concat(),
             os_path: "",
         },
         TrustColumn {
             file: "elastos-server/src/update_controller/child.rs",
-            function: "spawn",
+            function: "spawn_held",
             call: "spawn()",
             class: "other",
-            trust_root: "none",
-            verified_when: "never",
-            evidence: ["command", ".spawn()"].concat(),
+            trust_root: own_command_trust_root(),
+            verified_when: own_command_verified_when(),
+            evidence: ["prepared.attach", "_tokio("].concat(),
             os_path: "",
         },
         TrustColumn {
@@ -1697,8 +1697,8 @@ fn trust_column_counts_and_chokepoint_queue() {
     assert_eq!(roots.get("publisher-did-signature"), Some(&2));
     #[cfg(not(windows))]
     {
-        assert_eq!(roots.get("none"), Some(&51));
-        assert_eq!(roots.get("release-signature"), Some(&29));
+        assert_eq!(roots.get("none"), Some(&46));
+        assert_eq!(roots.get("release-signature"), Some(&34));
     }
     #[cfg(windows)]
     {
@@ -1711,16 +1711,19 @@ fn trust_column_counts_and_chokepoint_queue() {
     );
     assert_eq!(roots.get("staged-cid"), Some(&8));
     #[cfg(not(windows))]
-    assert_eq!(times.get("at-every-start"), Some(&38));
+    assert_eq!(times.get("at-every-start"), Some(&43));
     #[cfg(windows)]
     {
         assert_eq!(times.get("at-every-start"), Some(&33));
-        assert_eq!(times.get(own_command_verified_when()), Some(&3));
+        assert_eq!(times.get(own_command_verified_when()), Some(&8));
         assert_eq!(times.get(managed_runtime_verified_when()), Some(&2));
     }
     assert_eq!(times.get("at-install-only"), Some(&7));
     assert_eq!(times.get("at-stage-and-start"), Some(&9));
-    assert_eq!(times.get("never"), Some(&51));
+    assert_eq!(times.get("never"), Some(&46));
+    #[cfg(not(windows))]
+    assert_eq!(to_gate, 26);
+    #[cfg(windows)]
     assert_eq!(to_gate, 31);
 }
 

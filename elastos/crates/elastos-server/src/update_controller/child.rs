@@ -25,8 +25,16 @@ pub(crate) struct OwnedChild {
 }
 
 impl OwnedChild {
-    /// `command` is a fresh, single-use command for an already verified binary.
+    #[cfg(test)]
     pub(crate) fn spawn(command: &mut Command) -> Result<Self> {
+        Self::spawn_held(command, None, false)
+    }
+
+    pub(crate) fn spawn_held(
+        command: &mut Command,
+        prepared: Option<&crate::setup::verified_executable::VerifiedExecutable>,
+        clear_env: bool,
+    ) -> Result<Self> {
         let (reader, writer) = parent_pipe().context("create child ownership pipe")?;
         let reader_fd = reader.as_raw_fd();
         let writer_fd = writer.as_raw_fd();
@@ -57,6 +65,9 @@ impl OwnedChild {
                 }
                 Ok(())
             });
+        }
+        if let Some(prepared) = prepared {
+            prepared.attach_tokio(command, clear_env)?;
         }
         let child = crate::install_transaction::retry_text_file_busy(|| command.spawn())
             .context("spawn owned update child")?;

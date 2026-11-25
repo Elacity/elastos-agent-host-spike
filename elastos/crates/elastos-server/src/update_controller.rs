@@ -12,6 +12,8 @@ pub fn watch_parent() -> anyhow::Result<()> {
 }
 
 #[cfg(unix)]
+use crate::setup::verified_executable::VerifiedExecutable;
+#[cfg(unix)]
 use std::fs::OpenOptions;
 use std::fs::{self, File};
 #[cfg(unix)]
@@ -180,18 +182,51 @@ fn exec_controller(controller: &Path, receipt: &Path, lease: &FileLock) -> anyho
     if inherited < 0 {
         return std::io::Error::last_os_error().into();
     }
-    let mut command = std::process::Command::new(controller);
+    let close_lease = |fd| unsafe { libc::close(fd) };
+    let prepared = match hold_signed_controller(controller, receipt) {
+        Ok(prepared) => prepared,
+        Err(error) => {
+            close_lease(inherited);
+            return error;
+        }
+    };
+    let mut command = std::process::Command::new(prepared.exec_path());
     command
         .args(["__update-controller", "--receipt"])
         .arg(receipt)
         .env(LEASE_ENV, inherited.to_string());
+    if let Err(error) = prepared.attach_std(&mut command, false) {
+        close_lease(inherited);
+        return error;
+    }
     // exec returns only on failure; retry a controller copy that was just written.
     let error = crate::install_transaction::retry_text_file_busy(|| Err::<(), _>(command.exec()))
         .unwrap_err();
-    unsafe {
-        libc::close(inherited);
-    }
+    close_lease(inherited);
     error.into()
+}
+
+#[cfg(unix)]
+fn hold_signed_controller(controller: &Path, receipt_path: &Path) -> Result<VerifiedExecutable> {
+    let receipt: Receipt = read_private_json(receipt_path)?;
+    validate_retained_receipt(&receipt)?;
+    anyhow::ensure!(
+        receipt.controller == controller,
+        "Installed controller receipt is incompatible."
+    );
+    VerifiedExecutable::prepare(controller, &format!("sha256:{}", receipt.controller_sha256))
+}
+
+#[cfg(unix)]
+fn hold_home_binary(data_dir: &Path, binary: &Path) -> Result<VerifiedExecutable> {
+    if !crate::install_transaction::pending_restart_recovery(data_dir, binary)? {
+        return crate::binaries::checked_running_runtime(data_dir, binary)?.prepare();
+    }
+    let Some(source) = crate::setup::installed_release_source(data_dir)? else {
+        return Err(crate::setup::missing_trusted_source_error());
+    };
+    let digest = crate::installed_release::controller_restart_digest(data_dir, binary, &source)?;
+    VerifiedExecutable::prepare(binary, &format!("sha256:{digest}"))
 }
 
 #[cfg(windows)]
@@ -244,14 +279,27 @@ impl LaunchPlan {
     #[cfg(unix)]
     fn command(
         &self,
+        data_dir: &Path,
         binary: &Path,
         generation: &str,
         restart: bool,
-    ) -> Result<tokio::process::Command> {
+    ) -> Result<(VerifiedExecutable, tokio::process::Command)> {
+        let prepared = hold_home_binary(data_dir, binary)?;
+        let mut command = tokio::process::Command::new(prepared.exec_path());
+        self.fill_command(&mut command, generation, restart)?;
+        Ok((prepared, command))
+    }
+
+    #[cfg(unix)]
+    fn fill_command(
+        &self,
+        command: &mut tokio::process::Command,
+        generation: &str,
+        restart: bool,
+    ) -> Result<()> {
         let decode = |value: &str| -> Result<std::ffi::OsString> {
             Ok(std::ffi::OsString::from_vec(BASE64.decode(value)?))
         };
-        let mut command = tokio::process::Command::new(binary);
         command
             .env_clear()
             .current_dir(decode(&self.cwd)?)
@@ -269,7 +317,7 @@ impl LaunchPlan {
             .env(HOST_ENV, "1")
             .env("ELASTOS_UPDATE_GENERATION", generation)
             .env("ELASTOS_UPDATE_RESTART", if restart { "1" } else { "0" });
-        Ok(command)
+        Ok(())
     }
 
     #[cfg(windows)]
@@ -1125,12 +1173,31 @@ impl Controller {
             "controller already owns a Home process"
         );
         let log = open_start_log(&self.directory, purpose, generation)?;
-        let mut command =
-            self.receipt
-                .launch
-                .command(&self.receipt.binary, generation, restarting)?;
-        command.stdout(log.try_clone()?).stderr(log);
-        self.child = Some(child::OwnedChild::spawn(&mut command)?);
+        #[cfg(unix)]
+        {
+            let (mut prepared, mut command) = self.receipt.launch.command(
+                &self.receipt.data_dir,
+                &self.receipt.binary,
+                generation,
+                restarting,
+            )?;
+            command.stdout(log.try_clone()?).stderr(log);
+            self.child = Some(child::OwnedChild::spawn_held(
+                &mut command,
+                Some(&prepared),
+                true,
+            )?);
+            prepared.persist_private_copy();
+        }
+        #[cfg(windows)]
+        {
+            let mut command =
+                self.receipt
+                    .launch
+                    .command(&self.receipt.binary, generation, restarting)?;
+            command.stdout(log.try_clone()?).stderr(log);
+            self.child = Some(child::OwnedChild::spawn(&mut command)?);
+        }
         self.generation = generation.into();
         self.host_ready = false;
         Ok(())

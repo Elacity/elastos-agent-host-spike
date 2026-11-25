@@ -223,10 +223,10 @@ fn places() -> Vec<Place> {
         ),
         place(
             "elastos-server/src/update_controller/child.rs",
-            "spawn",
+            "spawn_held",
             "spawn()".to_string(),
             1,
-            "owned update child process; outside capsule start",
+            "held signed-release bytes, then the owned update child starts",
         ),
         place(
             "elastos-server/src/api/gateway_home_terminal.rs",
@@ -296,7 +296,7 @@ fn places() -> Vec<Place> {
             "verify_installed_binary_version",
             "spawn()".to_string(),
             1,
-            "update version probe; outside capsule start",
+            "signed release digest held before the version probe",
         ),
         place(
             "elastos-runtime/src/capsule/manager.rs",

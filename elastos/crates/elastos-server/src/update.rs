@@ -394,6 +394,7 @@ async fn verify_candidate_before_migration(
     transaction: &InstallTransaction,
     bytes: &[u8],
     version: &str,
+    digest: &str,
 ) -> anyhow::Result<()> {
     use std::io::Write;
     use std::os::unix::fs::PermissionsExt;
@@ -415,7 +416,8 @@ async fn verify_candidate_before_migration(
     probe.as_file().sync_all()?;
     // Linux requires the writer descriptor to close before executing these bytes.
     let path = probe.into_temp_path();
-    verify_installed_binary_version(&path, version, installed_binary_version_timeout()).await
+    verify_installed_binary_version(&path, version, installed_binary_version_timeout(), digest)
+        .await
 }
 
 #[cfg(windows)]
@@ -423,6 +425,7 @@ async fn verify_candidate_before_migration(
     _transaction: &InstallTransaction,
     _bytes: &[u8],
     _version: &str,
+    _digest: &str,
 ) -> anyhow::Result<()> {
     Err(std::io::Error::new(
         std::io::ErrorKind::Unsupported,
@@ -436,17 +439,23 @@ async fn verify_installed_binary_version(
     bin_path: &Path,
     expected_version: &str,
     timeout: std::time::Duration,
+    digest: &str,
 ) -> anyhow::Result<()> {
     use std::os::unix::process::CommandExt;
     use tokio::io::AsyncReadExt;
 
-    let mut command = tokio::process::Command::new(bin_path);
+    let prepared = crate::setup::verified_executable::VerifiedExecutable::prepare(
+        bin_path,
+        &format!("sha256:{digest}"),
+    )?;
+    let mut command = tokio::process::Command::new(prepared.exec_path());
     command
         .arg("--version")
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true);
     command.as_std_mut().process_group(0);
+    prepared.attach_tokio(&mut command, false)?;
     let mut child = crate::install_transaction::retry_text_file_busy_async(|| command.spawn())
         .await
         .map_err(|error| {
@@ -1678,7 +1687,10 @@ async fn run_upgrade_with_restart(
             (ReleaseFile::ReleaseManifest, release_bytes.as_slice()),
         ];
         transaction.preflight_prepare(&files, &previous.head, &previous.release)?;
-        on_heap(|| verify_candidate_before_migration(&transaction, &binary_data, version)).await?;
+        on_heap(|| {
+            verify_candidate_before_migration(&transaction, &binary_data, version, binary_sha256)
+        })
+        .await?;
         crate::installed_release::load_or_migrate_for_update(
             data_dir,
             &bin_path,
@@ -1890,7 +1902,10 @@ async fn run_upgrade_with_restart(
         (ReleaseFile::ReleaseManifest, release_bytes.as_slice()),
     ];
     transaction.preflight_prepare(&files, &previous.head, &previous.release)?;
-    on_heap(|| verify_candidate_before_migration(&transaction, &binary_data, version)).await?;
+    on_heap(|| {
+        verify_candidate_before_migration(&transaction, &binary_data, version, binary_sha256)
+    })
+    .await?;
     crate::installed_release::load_or_migrate_for_update(
         data_dir,
         bin_path,
@@ -5135,9 +5150,16 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (bin, release) =
             crate::install_transaction::tests::briefly_busy_binary(dir.path(), "0.1.0");
-        verify_installed_binary_version(&bin, "0.1.0", TEST_INSTALLED_BINARY_VERSION_TIMEOUT)
-            .await
-            .unwrap();
+        use sha2::Digest;
+        let bytes = std::fs::read(&bin).unwrap();
+        verify_installed_binary_version(
+            &bin,
+            "0.1.0",
+            TEST_INSTALLED_BINARY_VERSION_TIMEOUT,
+            &hex::encode(sha2::Sha256::digest(&bytes)),
+        )
+        .await
+        .unwrap();
         release.join().unwrap();
         assert!(
             crate::install_transaction::TEXT_FILE_BUSY_SEEN.get() >= 1,
@@ -5152,16 +5174,61 @@ mod tests {
         assert_eq!(INSTALLED_BINARY_VERSION_TIMEOUT.as_secs(), 5);
         let dir = tempfile::tempdir().unwrap();
         let bin = dir.path().join("slow-version");
-        std::fs::write(&bin, b"#!/bin/sh\nsleep 60\n").unwrap();
+        use sha2::Digest;
+        let bytes = b"#!/bin/sh\nsleep 60\n";
+        std::fs::write(&bin, bytes).unwrap();
         std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o700)).unwrap();
-        let error =
-            verify_installed_binary_version(&bin, "0.1.0", std::time::Duration::from_secs(1))
-                .await
-                .unwrap_err();
+        let error = verify_installed_binary_version(
+            &bin,
+            "0.1.0",
+            std::time::Duration::from_secs(1),
+            &hex::encode(sha2::Sha256::digest(bytes)),
+        )
+        .await
+        .unwrap_err();
         assert_eq!(
             error.to_string(),
             "installed binary version check timed out after 1 seconds"
         );
+    }
+
+    #[tokio::test]
+    async fn version_probe_runs_only_bytes_that_match_the_signed_release() {
+        use sha2::Digest;
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("elastos");
+        let marker = dir.path().join("ran");
+        let script = format!(
+            "#!/bin/sh\ntouch '{}'\nprintf 'elastos 0.1.0\\n'\n",
+            marker.display()
+        );
+        std::fs::write(&bin, &script).unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let wrong = verify_installed_binary_version(
+            &bin,
+            "0.1.0",
+            std::time::Duration::from_secs(15),
+            &"ab".repeat(32),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            wrong
+                .to_string()
+                .contains("installed executable differs from signed release digest"),
+            "{wrong:#}"
+        );
+        assert!(!marker.exists(), "refused bytes must not run");
+        verify_installed_binary_version(
+            &bin,
+            "0.1.0",
+            std::time::Duration::from_secs(15),
+            &hex::encode(sha2::Sha256::digest(script.as_bytes())),
+        )
+        .await
+        .unwrap();
+        assert!(marker.exists(), "checked bytes must run");
     }
 
     /// install.sh admission and recovery through the shared installation writer.

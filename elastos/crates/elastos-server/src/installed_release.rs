@@ -197,6 +197,16 @@ pub(crate) fn read_signed_release(
         .map(|(installed, components, _)| (installed.release, components))
 }
 
+#[cfg(unix)]
+pub(crate) fn controller_restart_digest(
+    data: &Path,
+    binary: &Path,
+    source: &TrustedSource,
+) -> Result<String> {
+    let (installed, _, _) = read_signed_release_after_gate(data, binary, source, false, true)?;
+    Ok(installed.binary_sha256)
+}
+
 /// Tests drive the host-start gate with an explicit update generation and
 /// process id; production reads both from the environment and this process.
 #[cfg(test)]
