@@ -389,8 +389,6 @@ impl LocalProvider {
             ));
         }
 
-        // With encryption: open the sealed file, then apply offset and length.
-        // A file over the cap is refused by name unless this key opens it.
         if let Some(ref key) = self.encryption_key {
             if Self::is_plaintext_path(path) {
                 let mut file = fs::File::open(&full_path)?;
@@ -410,6 +408,15 @@ impl LocalProvider {
                 let bytes_read = file.read(&mut buffer)?;
                 buffer.truncate(bytes_read);
                 return Ok(buffer);
+            }
+
+            if localhost_provider::is_plain_localhost_file(&full_path)? {
+                return localhost_provider::read_plain_localhost_range(
+                    &full_path,
+                    path,
+                    offset.unwrap_or(0),
+                    length,
+                );
             }
 
             let plaintext = read_sealed_localhost_file(key, &full_path, path)?;
@@ -1430,26 +1437,114 @@ mod tests {
             .unwrap()
             .set_len(32 * 1024 * 1024 + 1)
             .unwrap();
-        let err = provider
+        let whole = provider
             .read_file("Users/video.bin", "token", None, None)
-            .unwrap_err();
-        let text = err.to_string();
-        assert!(text.contains("Users/video.bin"), "{text}");
-        assert!(text.contains("larger than 32 MiB"), "{text}");
+            .unwrap();
+        assert!(whole.starts_with(b"ftyp"));
+        assert_eq!(whole.len(), 32 * 1024 * 1024 + 1);
         assert_eq!(
             provider
                 .read_file("Users/small.bin", "token", None, None)
                 .unwrap(),
             b"small"
         );
-        let append = provider
-            .write_file("Users/video.bin", "token", b"more", true)
-            .unwrap_err();
-        assert!(append.to_string().contains("Users/video.bin"), "{append}");
-        assert!(
-            append.to_string().contains("larger than 32 MiB"),
-            "{append}"
+        let slice = provider
+            .read_file("Users/video.bin", "token", Some(0), Some(4))
+            .unwrap();
+        assert_eq!(slice, b"ftyp");
+    }
+
+    /// 40 MiB plain bytes, and plain JSON that starts with `{"`, through the
+    /// provider read the Home routes send.
+    ///
+    /// Whole: `GET /api/localhost/*` and a registry read (no offset).
+    /// Sliced: `POST /api/provider/localhost/read` and a bridge invoke, which
+    /// forward `offset` and `length`.
+    /// Streamed: those same reads, one window at a time, and
+    /// [`stream_plain_localhost_file`], which keeps one chunk.
+    #[test]
+    fn a_40_mib_plain_file_is_read_whole_sliced_and_streamed() {
+        const SIZE: u64 = 40 * 1024 * 1024;
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir(dir.path().join("Users")).unwrap();
+        let mut provider = make_encrypted_provider(&dir);
+        let video = dir.path().join("Users/video.bin");
+        fs::write(&video, b"ftyp").unwrap();
+        let marker_at = 20 * 1024 * 1024;
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&video)
+            .unwrap();
+        use std::io::{Seek, Write};
+        file.seek(std::io::SeekFrom::Start(marker_at)).unwrap();
+        file.write_all(b"MARK").unwrap();
+        file.set_len(SIZE).unwrap();
+        drop(file);
+
+        let mut digest = 0u64;
+        let mut widest = 0usize;
+        let streamed =
+            localhost_provider::stream_plain_localhost_file(&video, 64 * 1024, |chunk| {
+                widest = widest.max(chunk.len());
+                for byte in chunk {
+                    digest = digest.wrapping_add(*byte as u64);
+                }
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(streamed, SIZE);
+        assert_eq!(digest, 750, "the stream did not see ftyp and MARK");
+        assert!(widest <= 64 * 1024, "a stream chunk held {widest} bytes");
+
+        let slice = provider.handle_request(ProviderRequest::Read {
+            path: "Users/video.bin".into(),
+            token: Some("token".into()),
+            encoding: None,
+            offset: Some(marker_at),
+            length: Some(4),
+        });
+        let slice = match slice {
+            ProviderResponse::Ok { data: Some(data) } => data,
+            other => panic!("slice {other:?}"),
+        };
+        assert_eq!(
+            slice["content"],
+            serde_json::json!([b'M', b'A', b'R', b'K'])
         );
+        assert_eq!(slice["size"], 4);
+
+        let whole = provider
+            .read_file("Users/video.bin", "token", None, None)
+            .unwrap();
+        assert_eq!(whole.len() as u64, SIZE);
+        assert!(whole.starts_with(b"ftyp"));
+        assert_eq!(&whole[marker_at as usize..marker_at as usize + 4], b"MARK");
+        assert!(
+            whole.capacity() <= SIZE as usize + 8,
+            "whole read held {} bytes",
+            whole.capacity()
+        );
+        drop(whole);
+
+        let json_path = dir.path().join("Users/note.json");
+        fs::write(&json_path, br#"{"note":"plain"#).unwrap();
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&json_path)
+            .unwrap()
+            .set_len(SIZE)
+            .unwrap();
+        let json_slice = provider
+            .read_file("Users/note.json", "token", Some(0), Some(7))
+            .unwrap();
+        assert_eq!(json_slice, br#"{"note""#);
+        assert!(json_slice.capacity() <= 16);
+        let json_whole = provider
+            .read_file("Users/note.json", "token", None, None)
+            .unwrap();
+        assert_eq!(json_whole.len() as u64, SIZE);
+        assert!(json_whole.starts_with(br#"{"note":"plain"#));
+        assert!(json_whole.capacity() <= SIZE as usize + 8);
     }
 
     #[test]

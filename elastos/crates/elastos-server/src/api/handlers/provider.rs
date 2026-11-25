@@ -34,6 +34,11 @@ pub struct ProviderProxyState {
 pub const IPFS_SESSION_PROXY_DENIED: &str = "ipfs_session_proxy_denied";
 pub const OBJECT_SESSION_PROXY_DENIED: &str = "object_session_proxy_denied";
 
+#[rustfmt::skip]
+pub(crate) fn inspect_name(scheme: String) -> String {
+    if scheme.eq_ignore_ascii_case("inspect") { "inspect".into() } else { scheme }
+}
+
 /// POST /api/provider/:scheme/:op
 ///
 /// Generic proxy — validates capability, forwards JSON to provider, returns response.
@@ -102,7 +107,7 @@ pub async fn provider_proxy(
         return dispatch_private_carrier(&state, &session, &headers, &op, &request).await;
     }
 
-    // Build capability resource
+    let scheme = inspect_name(scheme);
     let resource = build_capability_resource(&scheme, &op, &request)
         .map_err(|msg| (StatusCode::BAD_REQUEST, msg))?;
     let required_action = provider_operation_action(&scheme, &op).ok_or_else(|| {
@@ -1998,6 +2003,16 @@ mod tests {
         .expect("the owner shell reads inspect");
         let owner_text = owner.0.to_string();
         assert!(owner_text.contains("secret.bin"), "{owner_text}");
+        let mixed = provider_proxy(
+            State(inspect_state.clone()),
+            Extension(Session::new(SessionType::Shell, None)),
+            Path(("Inspect".to_string(), "capsules".to_string())),
+            HeaderMap::new(),
+            "{}".to_string(),
+        )
+        .await
+        .expect("Inspect matches inspect");
+        assert!(mixed.0.to_string().contains("secret.bin"), "{mixed:?}");
         let capsule = Session::new(SessionType::Capsule, None);
         let token = capability_manager.grant(
             capsule.id.as_str(),

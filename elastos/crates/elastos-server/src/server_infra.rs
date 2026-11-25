@@ -5563,23 +5563,20 @@ mod tests {
         .to_string();
         assert_eq!(
             foreign_open,
-            "Users/foreign.bin is not decryptable. Remove it, then restart."
+            "Users/foreign.bin is not decryptable. Remove it."
         );
         let cut_open =
             localhost_provider::read_sealed_localhost_file(&file_key, &cut, "Users/cut.bin")
                 .unwrap_err()
                 .to_string();
-        assert_eq!(
-            cut_open,
-            "Users/cut.bin is cut off. Remove it, then restart."
-        );
+        assert_eq!(cut_open, "Users/cut.bin is cut off. Remove it.");
         let huge_open =
             localhost_provider::read_sealed_localhost_file(&file_key, &huge, "Users/huge-v2.bin")
                 .unwrap_err()
                 .to_string();
         assert_eq!(
             huge_open,
-            "Users/huge-v2.bin is larger than this process can read. Move it out of the folder, then restart."
+            "Users/huge-v2.bin is larger than this process can read. Move it out of the folder."
         );
         for (path, name, bytes) in [
             (&plain, "Users/plain.json", plain_bytes.as_slice()),
@@ -5679,10 +5676,12 @@ mod tests {
                 .to_string();
         assert_eq!(
             opened,
-            "Users/brace.bin is larger than 32 MiB. Move it out of the folder, then restart."
+            "Users/brace.bin is larger than 32 MiB. Move it out of the folder."
         );
+        assert!(!opened.contains("then restart"), "{opened}");
         let parked = over.path().join("brace-parked.bin");
         fs::rename(&brace, &parked).unwrap();
+        assert_envelope_opens_with_exactly_one_key(&other, b"other", &device_key, &file_key);
         migrate_again(over.path(), &device_key);
         home_is_up(over.path());
         assert_envelope_opens_with_exactly_one_key(&other, b"other", &device_key, &file_key);
@@ -5743,15 +5742,57 @@ mod tests {
             .is_file());
     }
 
-    #[test]
-    fn a_rewrite_temp_stays_on_the_file_system_of_its_target() {
+    fn prove_temp_on_the_targets_file_system(root: &std::path::Path) {
         use std::os::unix::fs::{MetadataExt, PermissionsExt};
         use std::sync::atomic::{AtomicUsize, Ordering};
 
         let _clear = ClearLocalhostMigrationFaults;
-        let _guard = LocalAppsGuard::lock();
         let device_key = [0x93; 32];
         let file_key = expected_localhost_file_key(&device_key);
+        let users = root.join("Users");
+        let cross = users.join("cross.bin");
+        plant_device_envelope(&cross, &device_key, b"cross");
+        fs::set_permissions(&cross, fs::Permissions::from_mode(0o400)).unwrap();
+        let local = root.join("Local/local.bin");
+        plant_device_envelope(&local, &device_key, b"local");
+        let identity_dev = fs::metadata(root).unwrap().dev();
+        let hits = std::sync::Arc::new(AtomicUsize::new(0));
+        let seen = hits.clone();
+        set_localhost_migration_before_rename(Some(Box::new(move |path: &std::path::Path| {
+            if path.file_name().and_then(|name| name.to_str()) != Some("cross.bin") {
+                return;
+            }
+            seen.fetch_add(1, Ordering::Relaxed);
+            let parent = path.parent().unwrap();
+            let mut temps = Vec::new();
+            for entry in fs::read_dir(parent).unwrap() {
+                let entry = entry.unwrap();
+                if entry
+                    .file_name()
+                    .to_string_lossy()
+                    .contains("elastos-localhost-file-key-v1.tmp")
+                {
+                    temps.push(entry.path());
+                }
+            }
+            assert_eq!(temps.len(), 1, "the temp is in the target directory");
+            let temp = fs::symlink_metadata(&temps[0]).unwrap();
+            let file = fs::symlink_metadata(path).unwrap();
+            assert_eq!(temp.dev(), file.dev());
+            assert_ne!(file.dev(), identity_dev);
+            assert_eq!(temp.mode() & 0o777, 0o400);
+        })));
+        migrate_again(root, &device_key);
+        assert_eq!(hits.load(Ordering::Relaxed), 1);
+        assert_envelope_opens_with_exactly_one_key(&cross, b"cross", &device_key, &file_key);
+        assert_envelope_opens_with_exactly_one_key(&local, b"local", &device_key, &file_key);
+        set_localhost_migration_before_rename(None);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_rewrite_temp_stays_on_the_file_system_of_its_target() {
+        let _guard = LocalAppsGuard::lock();
         let root = TempDir::new().unwrap();
         let image = root.path().join("vol.dmg");
         let users = root.path().join("Users");
@@ -5789,42 +5830,90 @@ mod tests {
             }
         }
         let _detach = Detach(users.clone());
-        let cross = users.join("cross.bin");
-        plant_device_envelope(&cross, &device_key, b"cross");
-        fs::set_permissions(&cross, fs::Permissions::from_mode(0o400)).unwrap();
-        let local = root.path().join("Local/local.bin");
-        plant_device_envelope(&local, &device_key, b"local");
-        let identity_dev = fs::metadata(root.path()).unwrap().dev();
-        let hits = std::sync::Arc::new(AtomicUsize::new(0));
-        let seen = hits.clone();
-        set_localhost_migration_before_rename(Some(Box::new(move |path: &std::path::Path| {
-            if path.file_name().and_then(|name| name.to_str()) != Some("cross.bin") {
-                return;
-            }
-            seen.fetch_add(1, Ordering::Relaxed);
-            let parent = path.parent().unwrap();
-            let mut temps = Vec::new();
-            for entry in fs::read_dir(parent).unwrap() {
-                let entry = entry.unwrap();
-                if entry
-                    .file_name()
-                    .to_string_lossy()
-                    .contains("elastos-localhost-file-key-v1.tmp")
-                {
-                    temps.push(entry.path());
-                }
-            }
-            assert_eq!(temps.len(), 1, "the temp is in the target directory");
-            let temp = fs::symlink_metadata(&temps[0]).unwrap();
-            let file = fs::symlink_metadata(path).unwrap();
-            assert_eq!(temp.dev(), file.dev());
-            assert_ne!(file.dev(), identity_dev);
-            assert_eq!(temp.mode() & 0o777, 0o400);
-        })));
-        migrate_again(root.path(), &device_key);
-        assert_eq!(hits.load(Ordering::Relaxed), 1);
-        assert_envelope_opens_with_exactly_one_key(&cross, b"cross", &device_key, &file_key);
-        assert_envelope_opens_with_exactly_one_key(&local, b"local", &device_key, &file_key);
+        prove_temp_on_the_targets_file_system(root.path());
+    }
+
+    #[cfg(target_os = "linux")]
+    fn bind_directory_without_root(
+        source: &std::path::Path,
+        mountpoint: &std::path::Path,
+    ) -> std::io::Result<()> {
+        let uid = unsafe { libc::geteuid() };
+        let gid = unsafe { libc::getegid() };
+        if unsafe { libc::unshare(libc::CLONE_NEWUSER) } != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        std::fs::write("/proc/self/setgroups", "deny")?;
+        std::fs::write("/proc/self/uid_map", format!("0 {uid} 1\n"))?;
+        std::fs::write("/proc/self/gid_map", format!("0 {gid} 1\n"))?;
+        if unsafe { libc::unshare(libc::CLONE_NEWNS) } != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        let src = std::ffi::CString::new(source.to_str().unwrap()).unwrap();
+        let dst = std::ffi::CString::new(mountpoint.to_str().unwrap()).unwrap();
+        let empty = std::ffi::CString::new("").unwrap();
+        if unsafe {
+            libc::mount(
+                src.as_ptr(),
+                dst.as_ptr(),
+                empty.as_ptr(),
+                libc::MS_BIND,
+                std::ptr::null(),
+            )
+        } != 0
+        {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_rewrite_temp_stays_on_the_file_system_of_its_target() {
+        use std::os::unix::fs::MetadataExt;
+
+        let _guard = LocalAppsGuard::lock();
+        let root = TempDir::new().unwrap();
+        fs::create_dir(root.path().join("Users")).unwrap();
+        let shm_dev = fs::metadata("/dev/shm").expect("/dev/shm").dev();
+        let root_dev = fs::metadata(root.path()).unwrap().dev();
+        assert_ne!(shm_dev, root_dev, "/dev/shm is not a second file system");
+        let shm = std::path::PathBuf::from(format!("/dev/shm/p24sL-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&shm);
+        fs::create_dir(&shm).unwrap();
+        let test = format!(
+            "{}::localhost_rewrite_temp_linux_child",
+            module_path!().split_once("::").unwrap().1
+        );
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .env("ELASTOS_P24_REWRITE_ROOT", root.path())
+            .env("ELASTOS_P24_REWRITE_SHM", &shm)
+            .args([
+                "--exact",
+                test.as_str(),
+                "--ignored",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .output()
+            .unwrap();
+        let _ = fs::remove_dir_all(&shm);
+        assert!(
+            output.status.success(),
+            "stdout {}\nstderr {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore]
+    fn localhost_rewrite_temp_linux_child() {
+        let root = std::path::PathBuf::from(std::env::var("ELASTOS_P24_REWRITE_ROOT").unwrap());
+        let shm = std::path::PathBuf::from(std::env::var("ELASTOS_P24_REWRITE_SHM").unwrap());
+        bind_directory_without_root(&shm, &root.join("Users")).unwrap();
+        prove_temp_on_the_targets_file_system(&root);
     }
 
     #[test]
@@ -6559,7 +6648,11 @@ mod tests {
         assert_eq!(take_localhost_migration_bytes_read(), 0);
         assert_eq!(take_localhost_migration_opens(), 0);
         assert_read_refused_by_name(&over, &file_key, "Users/over.bin");
-        assert_read_refused_by_name(&big, &file_key, "Users/big.bin");
+        let big_opened =
+            localhost_provider::read_sealed_localhost_file(&file_key, &big, "Users/big.bin")
+                .unwrap();
+        assert!(big_opened.starts_with(b"plain-video"));
+        assert_eq!(big_opened.len(), 32 * 1024 * 1024 + 1);
         assert_eq!(fs::metadata(&over).unwrap().len(), 32 * 1024 * 1024 + 1);
         let mut prefix = vec![0u8; envelope.len()];
         std::io::Read::read_exact(&mut std::fs::File::open(&over).unwrap(), &mut prefix).unwrap();
@@ -6584,7 +6677,7 @@ mod tests {
         expect_refusal(
             fifo_root.path(),
             &device_key,
-            &sentence("Users/pipe", "not a regular file"),
+            "Users/pipe is a pipe. Remove the pipe, then restart.",
             true,
         );
         assert!(fs::symlink_metadata(&pipe).unwrap().file_type().is_fifo());
@@ -6935,7 +7028,11 @@ mod tests {
         assert_eq!(take_localhost_migration_opens(), 0);
         assert_read_refused_by_name(&brace, &file_key, "Users/brace.bin");
         assert_read_refused_by_name(&over, &file_key, "Users/over.bin");
-        assert_read_refused_by_name(&plain, &file_key, "Users/video.bin");
+        let plain_opened =
+            localhost_provider::read_sealed_localhost_file(&file_key, &plain, "Users/video.bin")
+                .unwrap();
+        assert!(plain_opened.starts_with(b"ftyp"));
+        assert_eq!(plain_opened.len(), 32 * 1024 * 1024 + 1);
         assert_eq!(fs::metadata(&over).unwrap().len(), 32 * 1024 * 1024 + 1);
         let mut prefix = vec![0u8; envelope.len()];
         std::io::Read::read_exact(&mut std::fs::File::open(&over).unwrap(), &mut prefix).unwrap();
@@ -7305,6 +7402,75 @@ mod tests {
             &device_key,
             &expected_localhost_file_key(&device_key),
         );
+    }
+
+    #[test]
+    fn a_pipe_lock_says_remove_the_pipe() {
+        use std::os::unix::fs::FileTypeExt;
+
+        let _guard = LocalAppsGuard::lock();
+        let device_key = [0x45; 32];
+        let file_key = expected_localhost_file_key(&device_key);
+        let root = TempDir::new().unwrap();
+        let note = root.path().join("Users/note.bin");
+        plant_device_envelope(&note, &device_key, b"note");
+        let lock = root.path().join("identity/localhost-file-key.lock");
+        fs::create_dir_all(lock.parent().unwrap()).unwrap();
+        let c_path = CString::new(lock.to_str().unwrap()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(c_path.as_ptr(), 0o600) }, 0);
+        expect_refusal(
+            root.path(),
+            &device_key,
+            "identity/localhost-file-key.lock is a pipe. Remove the pipe, then restart.",
+            true,
+        );
+        assert!(fs::symlink_metadata(&lock).unwrap().file_type().is_fifo());
+        fs::remove_file(&lock).unwrap();
+        migrate_again(root.path(), &device_key);
+        assert_envelope_opens_with_exactly_one_key(&note, b"note", &device_key, &file_key);
+    }
+
+    #[test]
+    fn over_hard_names_stay_inside_one_sentence() {
+        let _guard = LocalAppsGuard::lock();
+        let device_key = [0x46; 32];
+        let file_key = expected_localhost_file_key(&device_key);
+        let root = TempDir::new().unwrap();
+        fs::create_dir_all(root.path().join("Users")).unwrap();
+        for index in 0..6 {
+            let path = root.path().join(format!("Users/h{index}.bin"));
+            fs::write(&path, b"{over").unwrap();
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open(&path)
+                .unwrap()
+                .set_len(localhost_provider::SEALED_READ_HARD_LIMIT + 1)
+                .unwrap();
+        }
+        let note = root.path().join("Users/note.bin");
+        plant_device_envelope(&note, &device_key, b"note");
+        let got = match localhost_bringup(root.path(), &device_key) {
+            LocalhostBringup::Refuse(got) => got,
+            LocalhostBringup::Start(_) => panic!("six unreadable files started local apps"),
+        };
+        assert!(got.len() <= 512, "sentence is {} bytes: {got}", got.len());
+        assert!(got.contains("Users/h0.bin"), "{got}");
+        assert!(got.contains("Users/h3.bin"), "{got}");
+        assert!(!got.contains("Users/h4.bin"), "{got}");
+        assert!(!got.contains("Users/h5.bin"), "{got}");
+        assert!(
+            got.contains(
+                "2 more files are larger than this process can read. Move them out of the folder, then restart."
+            ),
+            "{got}"
+        );
+        assert!(got.contains("then restart."), "{got}");
+        for index in 0..6 {
+            fs::remove_file(root.path().join(format!("Users/h{index}.bin"))).unwrap();
+        }
+        migrate_again(root.path(), &device_key);
+        home_is_up(root.path());
+        assert_envelope_opens_with_exactly_one_key(&note, b"note", &device_key, &file_key);
     }
 
     #[test]

@@ -627,20 +627,19 @@ pub(crate) mod tests {
         pending_store: Arc<PendingRequestStore>,
         data_dir: Option<PathBuf>,
     ) -> Router {
-        build_test_router(
+        build_test_router(TestRouterConfig {
             runtime,
             session_registry,
             capability_manager,
             capability_store,
             pending_store,
-            data_dir.clone(),
+            local_apps_dir: data_dir.clone(),
             data_dir,
-            None,
-        )
+            provider_registry: None,
+        })
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn build_test_router(
+    struct TestRouterConfig {
         runtime: Arc<Runtime>,
         session_registry: Arc<SessionRegistry>,
         capability_manager: Arc<CapabilityManager>,
@@ -649,22 +648,24 @@ pub(crate) mod tests {
         local_apps_dir: Option<PathBuf>,
         data_dir: Option<PathBuf>,
         provider_registry: Option<Arc<ProviderRegistry>>,
-    ) -> Router {
+    }
+
+    fn build_test_router(config: TestRouterConfig) -> Router {
         build_router(ServerConfig {
-            runtime,
-            session_registry,
-            capability_manager,
-            capability_store,
-            pending_store,
+            runtime: config.runtime,
+            session_registry: config.session_registry,
+            capability_manager: config.capability_manager,
+            capability_store: config.capability_store,
+            pending_store: config.pending_store,
             namespace_store: None,
-            provider_registry,
+            provider_registry: config.provider_registry,
             audit_log: None,
             identity_state: None,
             docs_dir: None,
             addr: "127.0.0.1:0".to_string(),
             capsule_dir: None,
-            local_apps_dir,
-            data_dir,
+            local_apps_dir: config.local_apps_dir,
+            data_dir: config.data_dir,
             tls_config: None,
             supervisor: None,
             ready_tx: None,
@@ -751,16 +752,16 @@ pub(crate) mod tests {
             metrics,
         ));
         let pending = Arc::new(PendingRequestStore::new(audit));
-        let app = build_test_router(
-            Arc::new(runtime),
-            sessions,
-            manager,
-            store,
-            pending,
-            Some(home.path().to_path_buf()),
-            Some(public.path().to_path_buf()),
-            Some(Arc::new(ProviderRegistry::new())),
-        );
+        let app = build_test_router(TestRouterConfig {
+            runtime: Arc::new(runtime),
+            session_registry: sessions,
+            capability_manager: manager,
+            capability_store: store,
+            pending_store: pending,
+            local_apps_dir: Some(home.path().to_path_buf()),
+            data_dir: Some(public.path().to_path_buf()),
+            provider_registry: Some(Arc::new(ProviderRegistry::new())),
+        });
         let response = app
             .oneshot(
                 Request::builder()

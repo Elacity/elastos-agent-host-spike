@@ -2467,7 +2467,7 @@ function showTechnicalApprovalStatus(section, message, tone) {
 
 function technicalStateText(state) {
   const text = readText(state);
-  return text.includes(". ") ? text : humanizeName(text);
+  return text.endsWith(".") || text.includes(". ") ? text : humanizeName(text);
 }
 
 function humanizeName(value) {

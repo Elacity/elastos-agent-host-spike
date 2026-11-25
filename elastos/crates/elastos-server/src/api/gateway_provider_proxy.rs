@@ -1609,6 +1609,7 @@ pub(super) async fn gateway_provider_proxy(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
+    let scheme = crate::api::handlers::provider::inspect_name(scheme);
     let allowed_apps: &[&str] = match scheme.as_str() {
         "documents" => match op.as_str() {
             "summary" | "get" => &[DOCUMENTS_CAPSULE_ID, LIBRARY_CAPSULE_ID],

@@ -115,7 +115,7 @@ fn owner_shell(session: &Session, headers: &HeaderMap) -> bool {
 }
 
 /// A caller who would be refused anyway gets that 403 first. The owner's
-/// shell sees the file sentence. Every other granted caller sees one plain line.
+/// shell sees the file sentence. A guest shell is ambient and sees one plain line.
 async fn refuse_local_apps(
     state: &ProviderStorageState,
     session: &Session,

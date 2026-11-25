@@ -325,6 +325,10 @@ fn localhost_refused(path: &Path, why: &str) -> anyhow::Error {
             "not a directory",
             "Replace it with a directory, then restart.",
         )
+    } else if why.contains("pipe") {
+        ("a pipe", "Remove the pipe, then restart.")
+    } else if why.contains("locked") {
+        ("locked", "Stop the other Home, then restart.")
     } else if why.contains("not a file") {
         ("not a file", "Remove the directory, then restart.")
     } else if why.contains("not a regular") {
@@ -462,6 +466,7 @@ fn is_owned_rewrite_temp(name: &std::ffi::OsStr) -> bool {
     hex_name.len() == 64 && hex_name.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
+#[cfg(unix)]
 fn rewrite_temp_path(path: &Path) -> std::io::Result<std::path::PathBuf> {
     use sha2::Digest;
 
@@ -709,15 +714,36 @@ fn write_seen(
 
 #[cfg(unix)]
 fn over_hard_sentence(names: &[String]) -> String {
-    names
-        .iter()
-        .map(|name| {
-            format!(
-                "{name} is larger than this process can read. Move it out of the folder, then restart."
-            )
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
+    let mut text = String::new();
+    let mut put = |line: String| -> bool {
+        let extra = usize::from(!text.is_empty());
+        if text.len() + extra + line.len() > 512 {
+            return false;
+        }
+        if extra == 1 {
+            text.push(' ');
+        }
+        text.push_str(&line);
+        true
+    };
+    let mut named = 0;
+    for name in names.iter().take(4) {
+        let line = format!(
+            "{name} is larger than this process can read. Move it out of the folder, then restart."
+        );
+        if !put(line) {
+            break;
+        }
+        named += 1;
+    }
+    let rest = names.len().saturating_sub(named);
+    if rest > 0 {
+        let more = format!(
+            "{rest} more files are larger than this process can read. Move them out of the folder, then restart."
+        );
+        let _ = put(more);
+    }
+    text
 }
 
 #[cfg(unix)]
@@ -846,6 +872,7 @@ fn sweep_rewrite_temps(dir: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
+#[cfg(unix)]
 fn migrate_localhost_tree(
     dir: &Path,
     device_key: &[u8; 32],
@@ -854,7 +881,7 @@ fn migrate_localhost_tree(
     next: &mut std::collections::HashMap<String, SeenFile>,
     over_hard: &mut Vec<String>,
 ) -> anyhow::Result<()> {
-    use std::os::unix::fs::MetadataExt;
+    use std::os::unix::fs::{FileTypeExt, MetadataExt};
 
     sweep_rewrite_temps(dir)?;
     let names = directory_names(dir)?;
@@ -870,6 +897,9 @@ fn migrate_localhost_tree(
                 "is a link"
             };
             return Err(localhost_refused(&path, why));
+        }
+        if file_type.is_fifo() {
+            return Err(localhost_refused(&path, "is a pipe"));
         }
         if file_type.is_dir() {
             migrate_localhost_tree(&path, device_key, file_key, seen, next, over_hard)?;
@@ -1056,7 +1086,7 @@ fn ensure_identity_dir(identity: &Path) -> anyhow::Result<()> {
 
 #[cfg(unix)]
 fn acquire_migration_lock(data_dir: &Path) -> anyhow::Result<LocalhostMigrationLock> {
-    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+    use std::os::unix::fs::{FileTypeExt, MetadataExt, OpenOptionsExt};
 
     let identity = data_dir.join("identity");
     ensure_identity_dir(&identity)?;
@@ -1064,6 +1094,9 @@ fn acquire_migration_lock(data_dir: &Path) -> anyhow::Result<LocalhostMigrationL
     if let Ok(meta) = std::fs::symlink_metadata(&lock_path) {
         if meta.file_type().is_symlink() {
             return Err(localhost_refused(&lock_path, "is a link"));
+        }
+        if meta.file_type().is_fifo() {
+            return Err(localhost_refused(&lock_path, "is a pipe"));
         }
         if !meta.is_file() {
             return Err(localhost_refused(&lock_path, "is not a file"));

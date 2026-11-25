@@ -48,16 +48,14 @@ pub fn header_rules_out_envelope(header: &[u8]) -> bool {
 fn over_cap_refusal(name: &str) -> io::Error {
     io::Error::new(
         io::ErrorKind::InvalidData,
-        format!("{name} is larger than 32 MiB. Move it out of the folder, then restart."),
+        format!("{name} is larger than 32 MiB. Move it out of the folder."),
     )
 }
 
 fn hard_limit_refusal(name: &str) -> io::Error {
     io::Error::new(
         io::ErrorKind::InvalidData,
-        format!(
-            "{name} is larger than this process can read. Move it out of the folder, then restart."
-        ),
+        format!("{name} is larger than this process can read. Move it out of the folder."),
     )
 }
 
@@ -77,7 +75,7 @@ fn open_new_format(key: &[u8; 32], bytes: &[u8], name: &str) -> io::Result<Vec<u
     };
     Err(io::Error::new(
         io::ErrorKind::InvalidData,
-        format!("{name} is {cause}. Remove it, then restart."),
+        format!("{name} is {cause}. Remove it."),
     ))
 }
 
@@ -119,17 +117,95 @@ fn read_body_within_hard_limit(
     Ok(bytes)
 }
 
-pub fn read_sealed_localhost_file(key: &[u8; 32], path: &Path, name: &str) -> io::Result<Vec<u8>> {
-    // Open first, then fstat that descriptor, so a later growth cannot make
-    // the read use a size observed on a different inode.
+const VERSION_ONE_ENVELOPE_PREFIX: &[u8] = br#"{"version":1,"nonce":""#;
+
+pub fn reads_as_plain_bytes(header: &[u8], len: u64) -> bool {
+    if header_rules_out_envelope(header) {
+        return true;
+    }
+    len > ENVELOPE_BYTE_LIMIT
+        && header.starts_with(b"{\"")
+        && !header.starts_with(VERSION_ONE_ENVELOPE_PREFIX)
+        && !header_is_file_key_envelope(header)
+}
+
+pub fn is_plain_localhost_file(path: &Path) -> io::Result<bool> {
     let mut file = std::fs::File::open(path)?;
     let len = file.metadata()?.len();
+    let mut header = [0u8; ENVELOPE_HEADER];
+    let n = file.read(&mut header)?;
+    note_sealed_bytes(n as u64);
+    Ok(reads_as_plain_bytes(&header[..n], len))
+}
+
+pub fn read_plain_localhost_range(
+    path: &Path,
+    name: &str,
+    offset: u64,
+    length: Option<u64>,
+) -> io::Result<Vec<u8>> {
+    use std::io::{Seek, SeekFrom};
+    let mut file = std::fs::File::open(path)?;
+    let len = file.metadata()?.len();
+    if offset >= len {
+        return Ok(Vec::new());
+    }
+    let available = len - offset;
+    let want = usize::try_from(length.unwrap_or(available).min(available)).unwrap_or(usize::MAX);
+    file.seek(SeekFrom::Start(offset))?;
+    let mut buffer = Vec::new();
+    if buffer.try_reserve_exact(want).is_err() {
+        return Err(hard_limit_refusal(name));
+    }
+    buffer.resize(want, 0);
+    let mut filled = 0;
+    while filled < want {
+        let n = file.read(&mut buffer[filled..])?;
+        if n == 0 {
+            break;
+        }
+        note_sealed_bytes(n as u64);
+        filled += n;
+    }
+    buffer.truncate(filled);
+    Ok(buffer)
+}
+
+pub fn stream_plain_localhost_file(
+    path: &Path,
+    chunk: usize,
+    mut each: impl FnMut(&[u8]) -> io::Result<()>,
+) -> io::Result<u64> {
+    let mut file = std::fs::File::open(path)?;
+    let mut buffer = vec![0u8; chunk.max(1)];
+    let mut total = 0u64;
+    loop {
+        let n = file.read(&mut buffer)?;
+        if n == 0 {
+            return Ok(total);
+        }
+        note_sealed_bytes(n as u64);
+        each(&buffer[..n])?;
+        total += n as u64;
+    }
+}
+
+pub fn read_sealed_localhost_file(key: &[u8; 32], path: &Path, name: &str) -> io::Result<Vec<u8>> {
+    let mut file = std::fs::File::open(path)?;
+    let len = file.metadata()?.len();
+    let mut header_buf = [0u8; ENVELOPE_HEADER];
+    let read = file.read(&mut header_buf)?;
+    note_sealed_bytes(read as u64);
+    let header = &header_buf[..read];
+    if reads_as_plain_bytes(header, len) {
+        drop(file);
+        return read_plain_localhost_range(path, name, 0, None);
+    }
     if len <= ENVELOPE_BYTE_LIMIT {
-        let mut raw = Vec::new();
-        file.by_ref()
-            .take(ENVELOPE_BYTE_LIMIT + 1)
-            .read_to_end(&mut raw)?;
-        note_sealed_bytes(raw.len() as u64);
+        let mut raw = header.to_vec();
+        let room = (ENVELOPE_BYTE_LIMIT + 1).saturating_sub(read as u64);
+        file.by_ref().take(room).read_to_end(&mut raw)?;
+        note_sealed_bytes(raw.len() as u64 - read as u64);
         if raw.len() as u64 > ENVELOPE_BYTE_LIMIT {
             return Err(over_cap_refusal(name));
         }
@@ -138,10 +214,6 @@ pub fn read_sealed_localhost_file(key: &[u8; 32], path: &Path, name: &str) -> io
         }
         return decrypt_bytes(key, &raw);
     }
-    let mut header = [0u8; ENVELOPE_HEADER];
-    let read = file.read(&mut header)?;
-    note_sealed_bytes(read as u64);
-    let header = &header[..read];
     if header_is_file_key_envelope(header) {
         if len > SEALED_READ_HARD_LIMIT {
             return Err(hard_limit_refusal(name));
@@ -151,9 +223,6 @@ pub fn read_sealed_localhost_file(key: &[u8; 32], path: &Path, name: &str) -> io
             &read_body_within_hard_limit(&mut file, header, len, name)?,
             name,
         );
-    }
-    if header_rules_out_envelope(header) {
-        return Err(over_cap_refusal(name));
     }
     let bytes = read_body_within_hard_limit(&mut file, header, len, name)?;
     match decrypt_bytes(key, &bytes) {
@@ -438,20 +507,17 @@ mod tests {
             .set_len(ENVELOPE_BYTE_LIMIT + 1)
             .unwrap();
         let _ = take_sealed_read_bytes();
-        let err = read_sealed_localhost_file(&key, &plain, "Users/video.bin").unwrap_err();
-        let text = err.to_string();
-        assert!(text.contains("Users/video.bin"), "{text}");
-        assert!(text.contains("larger than 32 MiB"), "{text}");
+        let opened = read_sealed_localhost_file(&key, &plain, "Users/video.bin").unwrap();
+        assert!(opened.starts_with(b"ftyp"), "{:?}", &opened[..4]);
+        assert_eq!(opened.len() as u64, ENVELOPE_BYTE_LIMIT + 1);
         assert!(
-            text.contains("Move it out of the folder, then restart."),
-            "{text}"
+            opened.capacity() <= opened.len() + 8,
+            "capacity {}",
+            opened.capacity()
         );
-        assert!(!text.contains("Make it readable or"), "{text}");
-        let read = take_sealed_read_bytes();
-        assert!(
-            read <= ENVELOPE_HEADER as u64,
-            "read the plain body: {read}"
-        );
+        let slice = read_plain_localhost_range(&plain, "Users/video.bin", 0, Some(4)).unwrap();
+        assert_eq!(slice, b"ftyp");
+        assert!(slice.capacity() <= 8);
 
         let brace = dir.path().join("brace.bin");
         std::fs::write(&brace, b"{not-an-envelope").unwrap();
@@ -462,8 +528,12 @@ mod tests {
             .set_len(ENVELOPE_BYTE_LIMIT + 1)
             .unwrap();
         let err = read_sealed_localhost_file(&key, &brace, "Users/brace.bin").unwrap_err();
-        assert!(err.to_string().contains("Users/brace.bin"), "{err}");
-        assert!(err.to_string().contains("larger than 32 MiB"), "{err}");
+        let text = err.to_string();
+        assert_eq!(
+            text,
+            "Users/brace.bin is larger than 32 MiB. Move it out of the folder."
+        );
+        assert!(!text.contains("then restart"), "{text}");
 
         let small = dir.path().join("small.bin");
         let sealed = encrypt_bytes(&key, b"small").unwrap();
@@ -490,13 +560,97 @@ mod tests {
         let text = err.to_string();
         assert!(text.contains("Users/huge.bin"), "{text}");
         assert!(text.contains("larger than this process can read"), "{text}");
-        assert!(
-            text.contains("Move it out of the folder, then restart."),
-            "{text}"
-        );
+        assert!(text.contains("Move it out of the folder."), "{text}");
+        assert!(!text.contains("then restart"), "{text}");
         assert!(take_sealed_read_bytes() <= ENVELOPE_HEADER as u64);
         assert!(header_is_file_key_envelope(
             &encrypt_file_key_bytes(&[3u8; 32], b"mark").unwrap()
         ));
+    }
+
+    #[test]
+    fn a_40_mib_plain_file_is_one_buffer_a_slice_and_a_stream() {
+        const SIZE: u64 = 40 * 1024 * 1024;
+        assert!(reads_as_plain_bytes(b"ftyp", SIZE));
+        assert!(reads_as_plain_bytes(br#"{"note":"plain"#, SIZE));
+        assert!(!reads_as_plain_bytes(br#"{"version":1,"nonce":"abc"#, SIZE));
+        assert!(!reads_as_plain_bytes(br#"{"version":2,"nonce":"abc"#, SIZE));
+        assert!(!reads_as_plain_bytes(br#"{"note":"plain"#, 32));
+
+        let dir = tempfile::tempdir().unwrap();
+        let key = [9u8; 32];
+        let video = dir.path().join("video.bin");
+        std::fs::write(&video, b"ftyp").unwrap();
+        let marker_at = 20 * 1024 * 1024;
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&video)
+            .unwrap();
+        use std::io::{Seek, Write};
+        file.seek(std::io::SeekFrom::Start(marker_at)).unwrap();
+        file.write_all(b"MARK").unwrap();
+        file.set_len(SIZE).unwrap();
+        drop(file);
+
+        let _ = take_sealed_read_bytes();
+        assert!(is_plain_localhost_file(&video).unwrap());
+        let slice =
+            read_plain_localhost_range(&video, "Users/video.bin", marker_at, Some(4)).unwrap();
+        assert_eq!(slice, b"MARK");
+        assert!(slice.capacity() <= 8);
+        let peeked = take_sealed_read_bytes();
+        assert!(peeked <= 4 + 64, "a slice read the body: {peeked}");
+
+        let _ = take_sealed_read_bytes();
+        let mut digest = 0u64;
+        let mut widest = 0usize;
+        let streamed = stream_plain_localhost_file(&video, 64 * 1024, |chunk| {
+            widest = widest.max(chunk.len());
+            for byte in chunk {
+                digest = digest.wrapping_add(*byte as u64);
+            }
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(streamed, SIZE);
+        assert_eq!(digest, 750);
+        assert!(widest <= 64 * 1024);
+        assert!(take_sealed_read_bytes() <= SIZE + 64);
+
+        let _ = take_sealed_read_bytes();
+        let whole = read_sealed_localhost_file(&key, &video, "Users/video.bin").unwrap();
+        assert_eq!(whole.len() as u64, SIZE);
+        assert!(whole.starts_with(b"ftyp"));
+        assert_eq!(&whole[marker_at as usize..marker_at as usize + 4], b"MARK");
+        assert!(whole.capacity() <= SIZE as usize + 8);
+        assert!(take_sealed_read_bytes() <= SIZE + 64);
+        drop(whole);
+
+        let json_path = dir.path().join("note.json");
+        std::fs::write(&json_path, br#"{"note":"plain"#).unwrap();
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&json_path)
+            .unwrap()
+            .set_len(SIZE)
+            .unwrap();
+        let _ = take_sealed_read_bytes();
+        assert!(is_plain_localhost_file(&json_path).unwrap());
+        let json_slice =
+            read_plain_localhost_range(&json_path, "Users/note.json", 0, Some(7)).unwrap();
+        assert_eq!(json_slice, br#"{"note""#);
+        assert!(take_sealed_read_bytes() <= 7 + 64);
+        let json_whole = read_sealed_localhost_file(&key, &json_path, "Users/note.json").unwrap();
+        assert_eq!(json_whole.len() as u64, SIZE);
+        assert!(json_whole.starts_with(br#"{"note":"plain"#));
+        assert!(json_whole.capacity() <= SIZE as usize + 8);
+
+        let small = dir.path().join("small.json");
+        std::fs::write(&small, br#"{"note":"plain"}"#).unwrap();
+        let err = read_sealed_localhost_file(&key, &small, "Users/small.json").unwrap_err();
+        assert!(
+            err.to_string().contains("not an encrypted envelope"),
+            "{err}"
+        );
     }
 }

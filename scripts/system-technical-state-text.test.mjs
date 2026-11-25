@@ -45,3 +45,7 @@ test("a refusal sentence stays the System state text", () => {
 test("a short state name is still a label", () => {
   assert.equal(shown("running"), "Running");
 });
+
+test("Local apps are off. stays as it is", () => {
+  assert.equal(shown("Local apps are off."), "Local apps are off.");
+});
