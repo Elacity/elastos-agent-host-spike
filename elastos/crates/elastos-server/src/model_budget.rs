@@ -15,13 +15,39 @@
 //! one block under the agent lock. `held` can lag other Runtimes; the store refuses.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Mutex, PoisonError};
 
 use elastos_model_contract::{model_run_id, RuntimeCreateBinding};
 
 use crate::agent_admission::AdmissionContext;
-use crate::agents::{charge_model_spend, model_spend, SpendRefusal, NO_OWNER};
+use crate::agents::{charge_model_spend, model_spend, SpendRefusal, CANNOT_READ, NO_OWNER};
+
+/// The spent total named by this agent's signed spend events.
+pub(crate) fn signed_spend_floor(data_dir: &Path, agent_id: &str) -> Result<u64, &'static str> {
+    let state = crate::auth::load_auth_state(data_dir).map_err(|_| CANNOT_READ)?;
+    let mut floor = 0u64;
+    for event in &state.audit {
+        if event.event_type != "agent.record.spend"
+            || event.principal_id.as_deref() != Some(agent_id)
+        {
+            continue;
+        }
+        if crate::auth::verify_signed_full_recovery_outcome_audit_event(data_dir, event).is_err() {
+            continue;
+        }
+        if let Some(spent) = spent_amount(&event.reason) {
+            floor = floor.max(spent);
+        }
+    }
+    Ok(floor)
+}
+
+fn spent_amount(reason: &str) -> Option<u64> {
+    reason
+        .split_whitespace()
+        .find_map(|word| word.strip_prefix("spent=")?.parse().ok())
+}
 
 /// The one identity that may hold model tokens: the principal admission minted.
 ///

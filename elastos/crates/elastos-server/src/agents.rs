@@ -658,28 +658,8 @@ pub(crate) fn model_spend(data_dir: &Path, agent_id: &str) -> Result<(String, u6
     let opened = open(data_dir, true).map_err(|err| reason_of(&err))?;
     let agent = agent_of(&opened.file, agent_id, None)?;
     let owner = agent.record.owner.clone().ok_or(NO_OWNER)?;
-    let floor = signed_spend_floor(data_dir, agent_id)?;
+    let floor = crate::model_budget::signed_spend_floor(data_dir, agent_id)?;
     Ok((owner, agent.model_tokens_spent.max(floor)))
-}
-
-/// The spent total named by this agent's signed spend events.
-fn signed_spend_floor(data_dir: &Path, agent_id: &str) -> Result<u64, &'static str> {
-    let state = crate::auth::load_auth_state(data_dir).map_err(|_| CANNOT_READ)?;
-    let mut floor = 0u64;
-    for event in &state.audit {
-        if event.event_type != "agent.record.spend"
-            || event.principal_id.as_deref() != Some(agent_id)
-        {
-            continue;
-        }
-        if crate::auth::verify_signed_full_recovery_outcome_audit_event(data_dir, event).is_err() {
-            continue;
-        }
-        if let Some(spent) = spent_amount(&event.reason) {
-            floor = floor.max(spent);
-        }
-    }
-    Ok(floor)
 }
 
 fn hosted_owner_still_approved(data_dir: &Path, agent_id: &str, offer_id: Option<&str>) -> bool {
@@ -689,12 +669,6 @@ fn hosted_owner_still_approved(data_dir: &Path, agent_id: &str, offer_id: Option
         }
         None => true,
     }
-}
-
-fn spent_amount(reason: &str) -> Option<u64> {
-    reason
-        .split_whitespace()
-        .find_map(|word| word.strip_prefix("spent=")?.parse().ok())
 }
 
 pub(crate) fn charge_model_spend(
@@ -708,7 +682,8 @@ pub(crate) fn charge_model_spend(
 ) -> Result<(u64, u64), SpendRefusal> {
     let opened = open(data_dir, true).map_err(|err| SpendRefusal::Name(reason_of(&err)))?;
     let agent = agent_of(&opened.file, agent_id, Some(owner)).map_err(SpendRefusal::Name)?;
-    let floor = signed_spend_floor(data_dir, agent_id).map_err(SpendRefusal::Name)?;
+    let floor =
+        crate::model_budget::signed_spend_floor(data_dir, agent_id).map_err(SpendRefusal::Name)?;
     let stored = agent.model_tokens_spent.max(floor);
     let is_owner = |record: &&PrincipalRecord| record.principal_id == owner;
     let person = opened.owner_file.iter().find(is_owner);
