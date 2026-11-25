@@ -646,7 +646,11 @@ async fn fenced_object_library_list_gets_viewers_from_the_runtime() {
         std::fs::create_dir(&root).unwrap();
         std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
     }
-    std::fs::write(data.join("config.toml"), "protected_content = true\n").unwrap();
+    std::fs::write(
+        data.join("config.toml"),
+        format!("{} = true\n", crate::library::PROTECT_HOST_CONFIG_KEY),
+    )
+    .unwrap();
     let capsule = data.join("capsules/documents");
     std::fs::create_dir_all(&capsule).unwrap();
     std::fs::write(

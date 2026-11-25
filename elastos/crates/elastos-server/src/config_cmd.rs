@@ -2,6 +2,7 @@ use std::path::Path;
 
 use anyhow::Context as _;
 
+use elastos_server::protected_content_runtime::ENABLED_CONFIG_KEY;
 use elastos_server::sources::default_data_dir;
 
 pub fn run_config(cmd: crate::ConfigCommand) -> anyhow::Result<()> {
@@ -33,7 +34,7 @@ pub fn run_config(cmd: crate::ConfigCommand) -> anyhow::Result<()> {
 }
 
 fn updated_config(contents: &str, key: &str, value: &str) -> anyhow::Result<String> {
-    if key == "developer_mode" || key == "protected_content" {
+    if key == "developer_mode" || key == ENABLED_CONFIG_KEY {
         value
             .parse::<bool>()
             .with_context(|| format!("{key} requires true or false"))?;
@@ -97,6 +98,14 @@ fn render_config_show(path: &Path, contents: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_exported_host_key_requires_a_boolean() {
+        assert!(super::updated_config("", super::ENABLED_CONFIG_KEY, "yes").is_err());
+        let updated = super::updated_config("", super::ENABLED_CONFIG_KEY, "true").unwrap();
+        let table: toml::Table = updated.parse().unwrap();
+        assert_eq!(table[super::ENABLED_CONFIG_KEY].as_bool(), Some(true));
+    }
+
     #[test]
     fn developer_mode_update_requires_a_boolean_and_preserves_settings() {
         for enabled in [true, false] {

@@ -8925,6 +8925,10 @@ fn viewer_options_for_name(data_dir: &Path, name: &str) -> Vec<LibraryViewerOpti
         .collect()
 }
 
+/// The fence test writes this key. That file does not spell the product name.
+#[cfg(test)]
+pub(crate) use crate::protected_content_runtime::ENABLED_CONFIG_KEY as PROTECT_HOST_CONFIG_KEY;
+
 /// Fill `viewer`, `viewers`, and the `protect` capability on library objects
 /// the fenced object helper returned.
 ///

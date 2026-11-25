@@ -240,12 +240,10 @@ pub(super) unsafe fn install(
                 if executable >= 0 {
                     keep_fds.push(executable);
                 }
-                for slot in &prepared.plan.held {
-                    if let Some(fd) = slot {
-                        let raw = fd.as_raw_fd();
-                        if raw >= 3 {
-                            keep_fds.push(raw);
-                        }
+                for fd in prepared.plan.held.iter().flatten() {
+                    let raw = fd.as_raw_fd();
+                    if raw >= 3 {
+                        keep_fds.push(raw);
                     }
                 }
                 keep_fds.sort_unstable();
