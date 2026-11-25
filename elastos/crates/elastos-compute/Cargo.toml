@@ -10,7 +10,7 @@ elastos-common = { path = "../elastos-common" }
 elastos-guest = { path = "../elastos-guest" }
 async-trait = "0.1"
 serde_json = "1"
-tokio = { version = "1.0", features = ["sync", "rt-multi-thread", "time", "fs", "io-util"] }
+tokio = { version = "1.0", features = ["macros", "sync", "rt-multi-thread", "time", "fs", "io-util"] }
 # RA2 compiles async support for the separate Bus v2 engine. The v1 engine stays
 # synchronous. `gc`, `threads`, `stack-switching`, `parallel-compilation` and
 # `cache` remain outside this feature set.
