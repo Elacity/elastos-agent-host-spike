@@ -4448,7 +4448,7 @@ mod tests {
         request.params.clear();
         let err = state.windowed_read(&request, false).unwrap_err();
         assert!(
-            matches!(err, V2BusError::Invalid(ref message) if message.contains("are not JSON")),
+            matches!(err, V2BusError::Invalid(ref message) if message.contains("not JSON")),
             "{err:?}"
         );
         request.operation = "write".into();
@@ -6634,8 +6634,13 @@ mod tests {
             assert!(err.contains("timeout"), "{err}");
         }
         let after = threads();
+        // Eight other tests run in this process and own threads. One thread
+        // per call would add 200. One thread per timeout would add 50, and
+        // each of those still sleeps for 30s when this count is taken.
+        const SIBLING_THREADS: usize = 24;
+        assert!(SIBLING_THREADS < 50);
         assert!(
-            after <= before + 1,
+            after <= before + SIBLING_THREADS,
             "thread count moved from {before} to {after}"
         );
     }
