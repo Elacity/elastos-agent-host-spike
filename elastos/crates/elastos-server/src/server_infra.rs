@@ -584,9 +584,10 @@ async fn spawn_allow_listed_provider(
 }
 
 /// Windows fences are P2-11, parked. This arm keeps `ProviderBridge::spawn`,
-/// the call Home used before the Unix fence and the call Windows still
-/// compiles. On Windows that spawn refuses before a process
-/// (`bridge_windows`), so the helper does not start.
+/// the call Home used before the Unix fence. On Windows that spawn refuses
+/// before a process (`bridge_windows`). Home itself does not start on Windows
+/// today: localhost's refusal is fatal in `setup_server_infrastructure_impl`,
+/// and this arm is what that call returns. The refusal is pre-existing.
 #[cfg(not(unix))]
 async fn spawn_allow_listed_provider(
     _component_key: &str,
@@ -2702,6 +2703,14 @@ mod tests {
         assert!(
             production.contains("Windows fences are P2-11, parked"),
             "Windows fences stay parked"
+        );
+        assert!(
+            production.contains("Home itself does not start on Windows"),
+            "localhost's refusal is fatal, so Home does not start"
+        );
+        assert!(
+            production.contains("localhost's refusal is fatal"),
+            "the Windows sentence names the fatal localhost refusal"
         );
         let first = production
             .find("async fn spawn_allow_listed_provider(")
