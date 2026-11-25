@@ -557,6 +557,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@035fceb3c12fb0c6a9461b52775e16473133e591 # 1.95.0
         with:
           targets: wasm32-unknown-unknown
+      - name: gba-viewer gate
+        run: bash examples/gba-viewer/verify.sh
       - name: stand-in contract journeys
         working-directory: lab/agent-conformance
         run: |
