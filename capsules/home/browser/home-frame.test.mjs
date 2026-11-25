@@ -100,3 +100,20 @@ test("two failed polls clear the panel and the first failure keeps it", async ()
   assert.ok(calls >= 3);
   assert.equal(panel.children.length, 0);
 });
+
+test("a deadline aborts the fetch", async () => {
+  const panel = root();
+  let signal;
+  const timer = startHomeFrame(
+    panel,
+    (abort) => {
+      signal = abort;
+      return new Promise(() => {});
+    },
+    1000,
+    { deadlineMs: 30 },
+  );
+  await new Promise((resolve) => setTimeout(resolve, 80));
+  clearInterval(timer);
+  assert.equal(signal.aborted, true);
+});

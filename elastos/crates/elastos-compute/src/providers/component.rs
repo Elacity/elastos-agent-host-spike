@@ -74,9 +74,6 @@ const V2_STOP_GRACE: Duration = Duration::from_millis(200);
 const V2_STOP_GRACE: Duration = Duration::from_millis(20);
 /// Every blocking bridge call and the invoke trailer. The guest thread waits
 /// this long, then the call is named a timeout. A stop joins within this too.
-#[cfg(not(test))]
-const V2_HOST_DEADLINE: Duration = Duration::from_secs(2);
-#[cfg(test)]
 const V2_HOST_DEADLINE: Duration = Duration::from_secs(2);
 #[cfg(not(test))]
 const V2_EPOCH_TICKS: u64 = 1_000;
@@ -1828,11 +1825,21 @@ impl ComponentState {
         if self.sealed {
             return Err(V2BusError::Denied(SEALED_BRIDGE.into()));
         }
+        if self.stop_requested.load(Ordering::Acquire)
+            || self.cancel_requested.load(Ordering::Acquire)
+        {
+            return Err(V2BusError::Denied("the grant book is closed".into()));
+        }
         let frame = {
             let book = self.grants.lock().expect("grant book");
             crate::providers::bus2_ui::present_frame(media, document, &book)
                 .map_err(present_error)?
         };
+        if self.stop_requested.load(Ordering::Acquire)
+            || self.cancel_requested.load(Ordering::Acquire)
+        {
+            return Err(V2BusError::Denied("the grant book is closed".into()));
+        }
         self.frames.lock().expect("frames").insert(
             self.capsule_id.clone(),
             StoredFrame {
@@ -3967,6 +3974,30 @@ mod tests {
             3,
             "present does not call the bridge"
         );
+    }
+
+    #[test]
+    fn a_stop_during_present_stores_nothing() {
+        let mut state = ComponentState::new(None, "capsule-1".into(), None);
+        state.stop_requested.store(true, Ordering::Release);
+        let err = state
+            .present_document(
+                crate::providers::bus2_ui::UI_MEDIA_TYPE,
+                br#"{"frame":[{"text":"late"}]}"#,
+            )
+            .expect_err("a stop denies present");
+        assert!(matches!(err, V2BusError::Denied(_)), "{err:?}");
+        assert!(state.frames.lock().expect("frames").is_empty());
+        state.stop_requested.store(false, Ordering::Release);
+        state.cancel_requested.store(true, Ordering::Release);
+        let err = state
+            .present_document(
+                crate::providers::bus2_ui::UI_MEDIA_TYPE,
+                br#"{"frame":[{"text":"late"}]}"#,
+            )
+            .expect_err("a cancel denies present");
+        assert!(matches!(err, V2BusError::Denied(_)), "{err:?}");
+        assert!(state.frames.lock().expect("frames").is_empty());
     }
 
     /// A v2 guest calls `providers.invoke`, reads the stream four bytes at a

@@ -29,12 +29,16 @@ export function startHomeFrame(root, readFrame, intervalMs = 2000, options = {})
   const tick = async () => {
     if (hidden() || busy) return;
     busy = true;
+    const controller = typeof AbortController === "undefined" ? null : new AbortController();
     let timer = 0;
     try {
       const frame = await Promise.race([
-        Promise.resolve(readFrame()),
+        Promise.resolve(readFrame(controller ? controller.signal : undefined)),
         new Promise((_, reject) => {
-          timer = setTimeout(() => reject(new Error("deadline")), deadlineMs);
+          timer = setTimeout(() => {
+            if (controller) controller.abort();
+            reject(new Error("deadline"));
+          }, deadlineMs);
         }),
       ]);
       failures = 0;

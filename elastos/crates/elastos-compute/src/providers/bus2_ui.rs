@@ -324,7 +324,7 @@ const MAX_HELD_GRANTS: usize = 32;
 pub struct GrantBook {
     grants: Vec<HeldGrant>,
     revoked: Vec<String>,
-    /// Ids pushed out of `revoked`. An id that was never revoked is not here.
+    /// Ids no longer held: pushed out of `revoked`, or evicted from `grants`.
     dropped: Vec<String>,
     /// Set by [`GrantBook::clear`]. A later read or present stays denied.
     closed: bool,
@@ -345,7 +345,11 @@ impl GrantBook {
             return;
         }
         if self.grants.len() == MAX_HELD_GRANTS {
-            self.grants.remove(0);
+            let old = self.grants.remove(0);
+            if self.dropped.len() == MAX_REVOKED_GRANTS {
+                self.dropped.remove(0);
+            }
+            self.dropped.push(old.id);
         }
         self.grants.push(HeldGrant {
             id: id.to_string(),
@@ -585,6 +589,33 @@ mod tests {
         assert!(
             matches!(never, PresentError::Denied(ref message) if message.contains("not a grant") && !message.contains("not among the 32")),
             "an id that was never revoked must not claim the revoke list, got {never:?}"
+        );
+    }
+
+    #[test]
+    fn an_evicted_grant_blocks_a_read() {
+        let mut book = GrantBook::default();
+        book.hold("old", "localhost://Users/self/Pictures/a.png", "read");
+        for n in 0..MAX_HELD_GRANTS {
+            book.hold(
+                &format!("g{n}"),
+                "localhost://Users/self/Pictures/a.png",
+                "read",
+            );
+        }
+        assert!(
+            book.blocks_read("old"),
+            "evicting a grant must block a later read"
+        );
+        let err = present_frame(
+            UI_MEDIA_TYPE,
+            br#"{"frame":[{"image":{"grant":"old"}}]}"#,
+            &book,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, PresentError::Denied(ref message) if message.contains("old")),
+            "{err:?}"
         );
     }
 

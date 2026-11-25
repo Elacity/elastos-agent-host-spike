@@ -20,7 +20,7 @@ import {
   createHomeBackgroundImageReader,
   targetById,
 } from "./shell-core.js?v=home-wallpaper-20261030b";
-import { startHomeFrame } from "./home-frame.js?v=home-frame-20261125b";
+import { startHomeFrame } from "./home-frame.js?v=home-frame-20261125c";
 import {
   addAccountPasskey,
   bindHomeUnlock,
@@ -2941,10 +2941,10 @@ function scheduleHomeEventPoll(delayMs) {
 
 const homeV2Frame = document.getElementById("home-v2-frame");
 if (homeV2Frame) {
-  startHomeFrame(homeV2Frame, () => {
+  startHomeFrame(homeV2Frame, (signal) => {
     const app = homeV2Frame.dataset.app || "";
     if (!app) return Promise.resolve({ nodes: [] });
-    return fetchJson("/api/apps/home/frame?app=" + encodeURIComponent(app));
+    return fetchJson("/api/apps/home/frame?app=" + encodeURIComponent(app), { signal });
   });
 }
 
