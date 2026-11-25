@@ -1248,7 +1248,9 @@ fn review_failures_name_each_unbound_review() {
         [
             "review names another commit: prefix",
             "review names another commit: upper",
-            "reviews need two reviewer families"
+            "reviews need two reviewer families",
+            "unknown reviewer: prefix",
+            "unknown reviewer: upper",
         ]
     );
     let worded = [
@@ -1380,6 +1382,111 @@ fn one_reviewer_family_is_refused() {
         serde_json::json!(["reviews name one reviewer family: codex"])
     );
     assert!(report.passed, "{:?}", report.failures);
+}
+
+#[test]
+fn reviewer_families_come_from_a_closed_table() {
+    use agent_conformance::report::review_failures;
+    let (_, git) = synthetic(1, false);
+    let failures = |left: &str, right: &str| {
+        review_failures(
+            Some(&[
+                review(left, "pass", &git.commit),
+                review(right, "pass", &git.commit),
+            ]),
+            Some(&git),
+        )
+    };
+    // Each alias maps to one canonical family, and that family can bind with
+    // a different one. A prefix form such as GeminiNeon is gemini.
+    for (name, family) in [
+        ("grok", "grok"),
+        ("gemini", "gemini"),
+        ("neon", "gemini"),
+        ("carbon", "gemini"),
+        ("deepseek", "deepseek"),
+        ("claude", "claude"),
+        ("opus", "claude"),
+        ("sonnet", "claude"),
+        ("haiku", "claude"),
+        ("codex", "codex"),
+        ("gpt", "codex"),
+        ("glm", "glm"),
+        ("kimi", "kimi"),
+        ("GeminiNeon", "gemini"),
+        ("ClaudeOpus", "claude"),
+        ("ClaudeSonnet", "claude"),
+    ] {
+        let other = if family == "codex" { "claude" } else { "codex" };
+        assert!(
+            failures(name, other).is_empty(),
+            "{name} should be {family} and bind with {other}, got {:?}",
+            failures(name, other)
+        );
+        assert_eq!(
+            review_failures(Some(&[review(name, "pass", &git.commit)]), Some(&git)),
+            [format!("reviews name one reviewer family: {family}")],
+            "{name}"
+        );
+    }
+    // The pairs from the review. A name cut to nothing is refused by that
+    // name and does not count as a second family. Two aliases of one row,
+    // including a family name used as a prefix, are one family.
+    assert_eq!(
+        failures("claude", "_claude"),
+        [
+            "reviews name one reviewer family: claude",
+            "unknown reviewer: _claude",
+        ]
+    );
+    assert_eq!(
+        failures("claude", ":claude"),
+        [
+            "reviews name one reviewer family: claude",
+            "unknown reviewer: :claude",
+        ]
+    );
+    assert_eq!(
+        failures("claude", "1_claude"),
+        [
+            "reviews name one reviewer family: claude",
+            "unknown reviewer: 1_claude",
+        ]
+    );
+    assert_eq!(
+        failures("GeminiNeon", "GeminiCarbon"),
+        ["reviews name one reviewer family: gemini"]
+    );
+    assert_eq!(
+        failures("ClaudeOpus", "ClaudeSonnet"),
+        ["reviews name one reviewer family: claude"]
+    );
+    assert_eq!(
+        failures("neon", "carbon"),
+        ["reviews name one reviewer family: gemini"]
+    );
+    assert_eq!(
+        failures("opus", "claude"),
+        ["reviews name one reviewer family: claude"]
+    );
+    assert_eq!(
+        failures("gpt", "codex"),
+        ["reviews name one reviewer family: codex"]
+    );
+    assert_eq!(
+        failures("haiku", "sonnet"),
+        ["reviews name one reviewer family: claude"]
+    );
+    // Two names that are not in the table are refused by those names. They
+    // are not two families.
+    assert_eq!(
+        failures("llama", "mistral"),
+        [
+            "reviews need two reviewer families",
+            "unknown reviewer: llama",
+            "unknown reviewer: mistral",
+        ]
+    );
 }
 
 #[test]
@@ -1609,11 +1716,12 @@ fn reviews_file_inside_the_repository_cannot_bind() {
         Some("could not resolve the reviews file against the repository")
     );
 
-    // The row: reviews that would bind do not when their file is refused.
+    // The row: reviews from two families that would bind do not when their
+    // file is refused.
     let (observations, git) = synthetic(1, false);
     let reviews = [
-        review("first", "pass", &git.commit),
-        review("second", "pass", &git.commit),
+        review("codex", "pass", &git.commit),
+        review("claude", "pass", &git.commit),
     ];
     let row = |reviews_file_failure: Option<String>| {
         let report = agent_conformance::report::render_bound_run(

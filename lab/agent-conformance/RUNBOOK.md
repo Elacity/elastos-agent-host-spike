@@ -286,8 +286,13 @@ retains its build output; the command cannot issue a receipt without its writer.
 
 `review_binding (A14)` passes only when `AGENT_CONFORMANCE_REVIEWS` names a
 JSON list of `{reviewer, verdict, commit}` entries, at least two, from two
-different reviewer families. A family is the leading letters of the reviewer
-name, in lower case, so `claude` and `claude_opus` are one family. Each entry
+different reviewer families. A family is one row of a closed table. The
+name is cut at the first character that is not a letter, then lower-cased.
+It matches a row when that stem equals a name in the row or starts with one,
+so `GeminiNeon` is gemini, and `claude` and `claude_opus` are claude. The
+rows are grok; gemini, neon and carbon; deepseek; claude, opus, sonnet and
+haiku; codex and gpt; glm; kimi. A name that matches no row is refused by
+that name. Each entry
 has verdict `pass` and the exact commit the receipt's `repository` names, and the
 tree is clean at every check: before the suite, after it, and when the report
 is written. `run.sh` performs the first two checks and passes their result to
@@ -308,7 +313,8 @@ unreadable or malformed reviews file fails the command; an unbound review
 leaves this row FAIL without changing `command_success`, so CI still reports
 unreviewed candidates. A14 needs every A14 row to pass. One passing review, or
 two from the same family, leaves this row FAIL with
-`reviews name one reviewer family`.
+`reviews name one reviewer family`. An unknown reviewer name fails with
+`unknown reviewer` and that name.
 
 **A14 threat model.** The code at the reviewed commit — the suite, its tests,
 `run.sh` and the report — is trusted, because each review names that exact
@@ -569,8 +575,9 @@ Ready before typing it:
   `AGENT_CONFORMANCE_INSTALLED_DATA` name other places;
 - a reviews file outside the repository: a JSON list of at least two
   `{"reviewer": "...", "verdict": "pass", "commit": "<the 40-character commit checked out>"}`
-  entries from two different reviewer families (the leading letters of the
-  reviewer name, in lower case);
+  entries from two different reviewer families (the closed table in the
+  review_binding paragraph: the name is cut at the first non-letter and
+  matched in lower case, and a family name may be a prefix of that stem);
 - this checkout at that commit with nothing changed or untracked;
 - everything `run.sh` needs: cached dependencies, the pinned Rust toolchain
   with its `wasm32-unknown-unknown` target, `sha256sum` or `shasum`, the build
@@ -615,7 +622,7 @@ What the receipt does not prove:
   staged from this checkout, as are the localhost provider
   (`localhost_provider_sha256`) and the probe. The installed data folder is
   read for the hash chain and is not what the suite runs on;
-- that the reviews carry a signature: the row checks the commit, the verdict, and that two reviewer families passed. A family is the leading letters of the reviewer name, in lower case;
+- that the reviews carry a signature: the row checks the commit, the verdict, and that two reviewer families passed. A family comes from the closed table: the name is cut at the first non-letter, lower-cased, and matched, including when a family name is a prefix of that stem. A name that matches nothing is refused by that name;
 - that the rows came from the reviewed tree: the tree is checked clean before
   the suite, after it, and when the report is written; a change made and undone
   between two checks is not seen;
