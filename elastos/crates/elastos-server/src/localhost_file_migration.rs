@@ -83,7 +83,7 @@ fn charge_migration_write() -> anyhow::Result<()> {
         };
         if left == 0 {
             return Err(anyhow::anyhow!(
-                "localhost file migration stopped at a write; local apps were not started"
+                "localhost file migration stopped at a write; local apps stayed off"
             ));
         }
         budget.set(Some(left - 1));
@@ -314,7 +314,7 @@ fn io_error(err: anyhow::Error) -> std::io::Error {
 #[cfg(unix)]
 fn migration_io(path: &Path, why: &str, err: std::io::Error) -> anyhow::Error {
     let text = err.to_string();
-    if text.contains("local apps were not started") {
+    if text.contains("local apps stayed off") {
         anyhow::anyhow!(text)
     } else {
         localhost_refused(path, why)

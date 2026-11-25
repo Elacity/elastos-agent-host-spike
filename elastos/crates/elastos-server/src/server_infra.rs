@@ -4994,7 +4994,7 @@ mod tests {
             if let Err(err) = first {
                 saw_fault = true;
                 assert!(
-                    err.to_string().contains("local apps were not started"),
+                    err.to_string().contains("local apps stayed off"),
                     "{err}"
                 );
                 assert_envelope_opens_with_exactly_one_key(
