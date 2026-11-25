@@ -27,12 +27,9 @@ const NUMBERS: &str = concat!(
 // An absent cell excludes that call by policy on this architecture. An absent
 // row is not admitted: the caller drops it, and the filter's default is deny.
 pub(super) fn number(name: &str, arch: AuditArch) -> Option<u32> {
-    let Some(row) = NUMBERS
+    let row = NUMBERS
         .split_whitespace()
-        .find(|row| row.split(':').next() == Some(name))
-    else {
-        return None;
-    };
+        .find(|row| row.split(':').next() == Some(name))?;
     let cell = row
         .split(':')
         .nth(match arch {
