@@ -140,6 +140,24 @@ pub(super) fn set_loader_fixture(root: Option<(PathBuf, u32)>) {
     LOADER_FIXTURE.with(|slot| *slot.borrow_mut() = root);
 }
 
+/// The test fixture, when a row planted a loader tree. Production has none.
+#[cfg(test)]
+fn planned_from_loader_fixture(
+    provider: RuntimeProviderId,
+    arch: LoaderArch,
+) -> Option<Result<PlannedLoaders, String>> {
+    let (root, uid) = LOADER_FIXTURE.with(|slot| slot.borrow().clone())?;
+    Some(resolve_loader_paths(provider, arch, &root, None, uid))
+}
+
+#[cfg(not(test))]
+fn planned_from_loader_fixture(
+    _provider: RuntimeProviderId,
+    _arch: LoaderArch,
+) -> Option<Result<PlannedLoaders, String>> {
+    None
+}
+
 fn plan_loaders(provider: RuntimeProviderId, arch: LoaderArch) -> Result<PlannedLoaders, String> {
     // The host arch is the machine that will open the files. The other arch
     // stays the Debian row: one machine does not hold both sysroots. That
@@ -152,9 +170,8 @@ fn plan_loaders(provider: RuntimeProviderId, arch: LoaderArch) -> Result<Planned
     // one of them, so the start refuses by the glibc loader's name and the
     // directory list. The musl tree in `loader_paths_follow_the_fixed_directory_list`
     // pins that.
-    #[cfg(test)]
-    if let Some((root, uid)) = LOADER_FIXTURE.with(|slot| slot.borrow().clone()) {
-        return resolve_loader_paths(provider, arch, &root, None, uid);
+    if let Some(planned) = planned_from_loader_fixture(provider, arch) {
+        return planned;
     }
     #[cfg(target_os = "linux")]
     if arch == LoaderArch::host() {
