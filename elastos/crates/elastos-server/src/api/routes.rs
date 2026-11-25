@@ -422,34 +422,42 @@ pub async fn stop_capsule(
         .unwrap_or_else(|| "user".to_string());
     match runtime.stop_capsule_with_reason(&id, &reason).await {
         Ok(Some(info)) => {
-            // An effect already begun keeps this answer at stopping. The row's
-            // own end is not said while that effect can still land. A record
-            // of unknown resolves that effect: the answer is stopped and names
-            // the step. The record itself stays unknown.
-            let unknown_steps = runtime.take_unknown_plan_steps_for_session(&id);
-            let effect_open = runtime.plan_effect_inflight(&id);
-            let status = if effect_open || (info.ended_at.is_none() && unknown_steps.is_empty()) {
-                StatusCode::ACCEPTED
-            } else {
-                StatusCode::OK
-            };
-            let answer = CapsuleInfoResponse {
-                id: info.id,
-                name: info.name,
-                status: if effect_open {
-                    "stopping".to_string()
-                } else if !unknown_steps.is_empty() {
-                    "stopped".to_string()
-                } else {
-                    info.status
-                },
-                session_id: info.session_id,
-                cause: info.cause,
-                unknown_steps,
-            };
-            (status, Json(answer)).into_response()
+            // One hold of the plan lock. A live row, or an effect that can
+            // still land, is stopping: the names are copied and stay in the
+            // book. Stopped is said only once the row has ended and nothing
+            // is in flight, and that answer is the one that removes the names.
+            capsule_stop_response(
+                info.id,
+                info.name,
+                info.status,
+                info.session_id,
+                info.cause,
+                runtime.plan_stop_decision(&id, info.ended_at.is_some()),
+            )
         }
-        Ok(None) => (StatusCode::NOT_FOUND, format!("Capsule {} not found", id)).into_response(),
+        Ok(None) => {
+            // The registry row can be gone after its retention while an
+            // effect is still landing, or while a step resolved as unknown
+            // after that row left. That Stop still names the outcome. A row
+            // that left with nothing in the plan book is not found.
+            let decision = runtime.plan_stop_decision(&id, true);
+            if !decision.stopping && decision.unknown_steps.is_empty() {
+                (StatusCode::NOT_FOUND, format!("Capsule {} not found", id)).into_response()
+            } else {
+                capsule_stop_response(
+                    id.clone(),
+                    id.clone(),
+                    if decision.stopping {
+                        "stopping".to_string()
+                    } else {
+                        "stopped".to_string()
+                    },
+                    id,
+                    None,
+                    decision,
+                )
+            }
+        }
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("Failed to stop capsule: {}", e),
@@ -497,9 +505,51 @@ struct StopAgentResponse {
     already: Option<String>,
 }
 
+fn capsule_stop_response(
+    body_id: String,
+    name: String,
+    status_text: String,
+    session_id: String,
+    cause: Option<String>,
+    decision: crate::runtime::PlanStopDecision,
+) -> axum::response::Response {
+    let status = if decision.stopping {
+        StatusCode::ACCEPTED
+    } else {
+        StatusCode::OK
+    };
+    let answer = CapsuleInfoResponse {
+        id: body_id,
+        name,
+        status: if decision.stopping {
+            "stopping".to_string()
+        } else if !decision.unknown_steps.is_empty() {
+            "stopped".to_string()
+        } else {
+            status_text
+        },
+        session_id,
+        cause,
+        unknown_steps: decision.unknown_steps,
+    };
+    (status, Json(answer)).into_response()
+}
+
 fn unknown_step_bodies(runtime: &Runtime, agent_id: &str) -> Vec<UnknownPlanStepBody> {
     runtime
         .take_unknown_plan_steps(agent_id)
+        .into_iter()
+        .map(|step| UnknownPlanStepBody {
+            session_id: step.session_id,
+            request_id: step.request_id,
+            outcome: "unknown".to_string(),
+        })
+        .collect()
+}
+
+fn copy_unknown_step_bodies(runtime: &Runtime, agent_id: &str) -> Vec<UnknownPlanStepBody> {
+    runtime
+        .copy_unknown_plan_steps(agent_id)
         .into_iter()
         .map(|step| UnknownPlanStepBody {
             session_id: step.session_id,
@@ -565,7 +615,13 @@ pub async fn stop_agent_session(
 /// `stopped` is not said for that session.
 fn plan_write_still_open(runtime: &Runtime, agent_id: &str) -> Option<axum::response::Response> {
     let sessions = runtime.inflight_plan_sessions(agent_id);
-    let unknown = unknown_step_bodies(runtime, agent_id);
+    // A landing effect keeps the names in the book. Only a stopped answer
+    // removes them.
+    let unknown = if sessions.is_empty() {
+        unknown_step_bodies(runtime, agent_id)
+    } else {
+        copy_unknown_step_bodies(runtime, agent_id)
+    };
     if sessions.is_empty() && unknown.is_empty() {
         return None;
     }
@@ -636,11 +692,13 @@ async fn stop_collected_agent_rows(runtime: &Runtime, agent_id: &str) -> axum::r
         }
     }
     if ready.is_empty() {
-        if let Some(response) = plan_write_still_open(runtime, agent_id) {
-            return response;
-        }
+        // A 409 is this call's answer. An earlier unknown step does not
+        // replace it, and this call does not take those names.
         if let Some(reason) = refusal {
             return (StatusCode::CONFLICT, reason.to_string()).into_response();
+        }
+        if let Some(response) = plan_write_still_open(runtime, agent_id) {
+            return response;
         }
         return (
             StatusCode::OK,
@@ -708,8 +766,20 @@ async fn stop_collected_agent_rows(runtime: &Runtime, agent_id: &str) -> axum::r
             status: "stopping".to_string(),
         });
     }
-    let unknown = unknown_step_bodies(runtime, agent_id);
-    if stopped.is_empty() {
+    // A session named in stopping is not also named in stopped.
+    stopped.retain(|row| {
+        !stopping
+            .iter()
+            .any(|stopping_row| stopping_row.session_id == row.session_id)
+    });
+    // While anything is still stopping, the names stay in the book for the
+    // Stop that later says stopped.
+    let unknown = if stopping.is_empty() {
+        unknown_step_bodies(runtime, agent_id)
+    } else {
+        copy_unknown_step_bodies(runtime, agent_id)
+    };
+    if stopped.is_empty() && stopping.is_empty() {
         stopped = stopped_rows_for_unknown(&unknown);
     }
     let already = (stopped.is_empty() && stopping.is_empty() && unknown.is_empty())
@@ -3898,8 +3968,8 @@ pub(crate) mod tests {
     /// while that call is still up. Its refusal is read after `end_instance`
     /// marks the instance and before `release` drops the admission: a dispatch
     /// after that drop is `admission_missing` and cannot see the mark.
-    /// Deleting the hostcall's plan book, the bind in `start_agent_once`, or
-    /// `mark_stopping` in `end_instance` fails this row.
+    /// Deleting the hostcall's plan book, the bind in `start_loaded` (before
+    /// `watch_activation`), or `mark_stopping` in `end_instance` fails this row.
     #[cfg(unix)]
     #[tokio::test]
     async fn a_launched_run_stops_through_the_product_route() {
@@ -4114,7 +4184,11 @@ pub(crate) mod tests {
             &home.context,
         )
         .unwrap();
-        assert_already_running(launch_grant(&home, &home.capsule_dir, &agent, &grant).await);
+        assert_stopping(launch_grant(&home, &home.capsule_dir, &agent, &grant).await);
+        assert!(
+            home.runtime.stop_requested_for_test(&agent).await,
+            "Start cleared the stop mark while an effect was in flight"
+        );
 
         pause.release.notify_one();
         tokio::time::timeout(std::time::Duration::from_secs(20), task)
@@ -4131,6 +4205,148 @@ pub(crate) mod tests {
             .expect("the settled effect allows Start");
         let _ = stop_launched_agent(&home, &agent).await;
         assert_ne!(again.0.id, session);
+    }
+
+    /// A timeout resolves the flight. Start is refused while it is landing
+    /// and allowed once the record is unknown.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_start_is_allowed_after_the_effect_is_unknown() {
+        if crate::agents::require_build().is_err() {
+            return;
+        }
+        let home = std::sync::Arc::new(ProbeLaunch::new(&["unknown-start"]).await);
+        let agent = home.agents[0].clone();
+        let launched = home.launch(&agent).await.expect("launch").0;
+        let session = launched.id.clone();
+        home.wait_pending(&session).await;
+        let root = home.root(&agent);
+        let target = format!("{root}/Documents/plan.md");
+        let path =
+            elastos_common::localhost::rooted_localhost_fs_path(&home.data_dir, &target).unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        crate::auth::write_principal_root_object(
+            &home.data_dir,
+            &agent,
+            &root,
+            &target,
+            &path,
+            b"before",
+        )
+        .unwrap();
+        let first = submit_launched_plan(&home, &session, &agent, &target, vec![1]).await;
+        approve_launched_plan(&home.data_dir, &first);
+        gateway::set_plan_dispatch_wait_for_test(&first, std::time::Duration::from_secs(2));
+        let pause = crate::resource_bridge::arm_plan_dispatch_hold(
+            &first,
+            crate::resource_bridge::PlanDispatchPoint::InEffect,
+        );
+        let state = launched_plan_state(&home);
+        let owner = home.owner.clone();
+        let request = first.clone();
+        let task = tokio::spawn(async move {
+            gateway::dispatch_approved_agent_plan(
+                &state,
+                &gateway::HomeLaunchTokenContext::for_test(
+                    owner,
+                    "session:owner",
+                    None,
+                    "grant:owner",
+                    crate::auth::PrincipalKind::Human,
+                ),
+                &request,
+            )
+            .await
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(20), pause.entered.notified())
+            .await
+            .expect("the effect did not start");
+        let (status, body) = stop_launched_agent(&home, &agent).await;
+        assert_eq!(status, StatusCode::ACCEPTED, "{body}");
+        let grant = gateway::issue_home_agent_launch_token_with_context(
+            &home.data_dir,
+            &agent,
+            PROBE_HOST,
+            &home.context,
+        )
+        .unwrap();
+        assert_stopping(launch_grant(&home, &home.capsule_dir, &agent, &grant).await);
+        tokio::time::timeout(std::time::Duration::from_secs(20), task)
+            .await
+            .expect("the timeout did not settle")
+            .expect("dispatch task")
+            .expect("dispatch");
+        gateway::clear_plan_dispatch_wait_for_test(&first);
+        let stored = std::fs::read(
+            home.data_dir
+                .join("inspect-actions")
+                .join(format!("{first}.json")),
+        )
+        .unwrap();
+        let record: serde_json::Value = serde_json::from_slice(&stored).unwrap();
+        assert_eq!(record["status"], "unknown", "{record}");
+        let again = launch_grant(&home, &home.capsule_dir, &agent, &grant)
+            .await
+            .expect("an unknown record left Start refused");
+        assert_ne!(again.0.id, session);
+    }
+
+    /// The plan instance is bound before the guest's first line.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_guest_that_dispatches_at_once_sees_the_instance() {
+        if crate::agents::require_build().is_err() {
+            return;
+        }
+        let home = std::sync::Arc::new(ProbeLaunch::new(&["dispatch-at-once"]).await);
+        let agent = home.agents[0].clone();
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        crate::runtime::arm_guest_opening(&agent, crate::runtime::GuestOpening::Dispatch(sender));
+        let launched = home.launch(&agent).await.expect("launch").0;
+        let open = tokio::time::timeout(std::time::Duration::from_secs(10), receiver)
+            .await
+            .expect("the guest did not start")
+            .expect("the guest dropped the answer");
+        assert!(
+            open,
+            "the instance was not bound before the guest ran: {}",
+            crate::runtime::Runtime::plan_book_view(&home.runtime.plan_book(), &launched.id)
+        );
+        let _ = stop_launched_agent(&home, &agent).await;
+    }
+
+    /// A guest that ends at once does not leave a plan instance behind.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_guest_that_exits_at_once_does_not_leave_an_instance() {
+        if crate::agents::require_build().is_err() {
+            return;
+        }
+        let home = std::sync::Arc::new(ProbeLaunch::new(&["exit-at-once"]).await);
+        let agent = home.agents[0].clone();
+        crate::runtime::arm_guest_opening(&agent, crate::runtime::GuestOpening::Exit);
+        let launched = home.launch(&agent).await.expect("launch").0;
+        let session = launched.id.clone();
+        let ended = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                match home.runtime.get_capsule(&session).await {
+                    Some(info) if info.ended_at.is_some() => break,
+                    None => break,
+                    Some(_) => tokio::task::yield_now().await,
+                }
+            }
+        })
+        .await;
+        assert!(ended.is_ok(), "the guest did not end");
+        assert!(
+            !crate::runtime::Runtime::plan_instance_is_open(
+                &home.runtime.plan_book(),
+                &session,
+                &agent
+            ),
+            "an instance remained: {}",
+            crate::runtime::Runtime::plan_book_view(&home.runtime.plan_book(), &session)
+        );
     }
 
     /// Releases a plan-end pause if the row fails before it does.
@@ -9127,6 +9343,20 @@ pub(crate) mod tests {
             .into_iter()
             .filter(|info| info.ended_at.is_none() && info.principal.as_deref() == Some(agent))
             .count()
+    }
+
+    #[cfg(unix)]
+    fn assert_stopping(result: Result<Json<LaunchResponse>, (StatusCode, String)>) {
+        match result {
+            Err((status, body)) => {
+                assert_eq!(status, StatusCode::CONFLICT);
+                assert_eq!(body, crate::runtime::Runtime::AGENT_STOPPING);
+            }
+            Ok(answer) => panic!(
+                "a start during a landing effect was accepted: {}",
+                answer.0.id
+            ),
+        }
     }
 
     #[cfg(unix)]

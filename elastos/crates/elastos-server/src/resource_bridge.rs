@@ -376,6 +376,30 @@ pub(crate) async fn own_root_token_replay_refused_for_test(request_id: &str) -> 
             .is_err()
 }
 
+/// The one-use grant was not counted. A later revoke of a refused effect
+/// still leaves no successful use of that token.
+#[cfg(unix)]
+#[cfg(test)]
+pub(crate) async fn own_root_token_is_unused_for_test(request_id: &str) -> bool {
+    let held = AGENT_PLAN_ONE_USE_TOKENS
+        .get()
+        .and_then(|tokens| tokens.lock().unwrap().get(request_id).cloned());
+    let Some((manager, token)) = held else {
+        return false;
+    };
+    let token_id = token.id().to_string();
+    !manager.audit_log().recent_events(400).iter().any(|event| {
+        matches!(
+            event,
+            elastos_runtime::primitives::audit::AuditEvent::CapabilityUse {
+                token_id: id,
+                success: true,
+                ..
+            } if id == &token_id
+        )
+    })
+}
+
 #[cfg(unix)]
 #[cfg(test)]
 pub(crate) async fn own_root_token_revoked_for_test(request_id: &str) -> bool {
@@ -429,7 +453,7 @@ pub(crate) fn retain_agent_plan_dispatch_authority(
 /// What the retained hostcall context can see for this step. A row uses it
 /// to tell a missing book from a closed instance. Anything other than `open`
 /// names the two books.
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub(crate) fn retained_plan_instance_is_open(
     request_id: &str,
     session_id: &str,
@@ -579,7 +603,7 @@ struct PlanHold {
 #[cfg(test)]
 static PLAN_HOLDS: Mutex<Vec<PlanHold>> = Mutex::new(Vec::new());
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub(crate) struct PlanDispatchPause {
     pub entered: Arc<tokio::sync::Notify>,
     pub release: Arc<tokio::sync::Notify>,
@@ -587,7 +611,7 @@ pub(crate) struct PlanDispatchPause {
 
 /// Hold the dispatch at `point` until the test releases it. The mutex is
 /// dropped before the wait.
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub(crate) fn arm_plan_dispatch_hold(
     request_id: &str,
     point: PlanDispatchPoint,
@@ -860,7 +884,7 @@ async fn admit_plan_effect(
 #[cfg(test)]
 static PLAN_PANIC: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub(crate) fn arm_plan_dispatch_panic(request_id: &str) {
     PLAN_PANIC
         .lock()
@@ -1052,14 +1076,31 @@ pub(crate) async fn dispatch_agent_plan_step(
         .scope(step, authorize_and_dispatch_resource_invoke(&request, &ctx))
         .await;
     if let Some(mut held) = held {
-        if !plan_effect_succeeded(&response) {
-            if let Some(grant) = held.grant.take() {
+        if let Some(grant) = held.grant.take() {
+            if plan_effect_succeeded(&response) {
+                // The token was counted by validate. The pending record must
+                // leave Granted: Stop's settle writes every still-granted
+                // token into a list of 256, and a longer run fills it.
+                grant
+                    .store
+                    .revoke_request_by(
+                        &grant.pending_id,
+                        "one-use plan grant spent",
+                        elastos_runtime::capability::pending::Settler::Runtime,
+                    )
+                    .await;
+            } else {
+                let reason = response
+                    .get("code")
+                    .and_then(|value| value.as_str())
+                    .filter(|code| !code.is_empty())
+                    .unwrap_or("plan effect did not succeed");
                 revoke_plan_grant(
                     &grant.manager,
                     &grant.store,
                     &grant.token,
                     &grant.pending_id,
-                    PLAN_INSTANCE_ENDED,
+                    reason,
                 )
                 .await;
             }
@@ -1489,8 +1530,8 @@ struct CheckedInvoke {
     token: CapabilityToken,
 }
 
-/// The checks before the plan admit. An effect does not run here: the only
-/// await is the capability check. A new effect belongs in
+/// The checks before the plan admit. An effect does not run here, and the
+/// one-use grant is not counted here. A new effect belongs in
 /// [`dispatch_admitted_effect`], after [`admit_plan_effect`].
 async fn checks_before_plan_admit(
     request: &serde_json::Value,
@@ -1570,33 +1611,9 @@ async fn checks_before_plan_admit(
             ))
         }
     };
-    let resource_id = ResourceId::new(&dispatch.resource);
-    if bridge_ctx
-        .capability_manager
-        .validate(
-            &token,
-            &bridge_ctx.capsule_id,
-            dispatch.required_action,
-            &resource_id,
-            None,
-        )
-        .await
-        .is_err()
-    {
-        return Err(finish_component_invoke(
-            bridge_ctx,
-            &audit_id,
-            &dispatch,
-            "denied",
-            resource_error_response("capability_denied", "Capability validation failed"),
-        ));
-    }
-
-    if let Some(refusal) = agents_area_dispatch_refusal(&dispatch) {
-        return Err(finish_component_invoke(
-            bridge_ctx, &audit_id, &dispatch, "denied", refusal,
-        ));
-    }
+    // The token is parsed here and not used. `validate` consumes a one-use
+    // grant, so it runs after the plan admit: a refusal there leaves the
+    // grant unused.
     Ok(CheckedInvoke {
         dispatch,
         audit_id,
@@ -1626,6 +1643,32 @@ async fn authorize_and_dispatch_resource_invoke(
             return finish_component_invoke(bridge_ctx, &audit_id, &dispatch, "denied", refusal);
         }
     };
+    let resource_id = ResourceId::new(&dispatch.resource);
+    if bridge_ctx
+        .capability_manager
+        .validate(
+            &token,
+            &bridge_ctx.capsule_id,
+            dispatch.required_action,
+            &resource_id,
+            None,
+        )
+        .await
+        .is_err()
+    {
+        guard.release();
+        return finish_component_invoke(
+            bridge_ctx,
+            &audit_id,
+            &dispatch,
+            "denied",
+            resource_error_response("capability_denied", "Capability validation failed"),
+        );
+    }
+    if let Some(refusal) = agents_area_dispatch_refusal(&dispatch) {
+        guard.release();
+        return finish_component_invoke(bridge_ctx, &audit_id, &dispatch, "denied", refusal);
+    }
     let response =
         dispatch_admitted_effect(&effect, request, bridge_ctx, dispatch, &audit_id, &token).await;
     if let Some(step) = current_plan_step() {
@@ -9923,8 +9966,18 @@ pub async fn production_after() {
         assert_eq!(authorize.matches("dispatch_admitted_effect(").count(), 1);
         assert_eq!(
             checks.matches(".await").count(),
-            1,
-            "the checks before the plan admit run one capability check and no effect"
+            0,
+            "the checks before the plan admit do not count the one-use grant"
+        );
+        assert!(
+            !checks.contains(".validate("),
+            "validate consumes a one-use grant and stays after admit"
+        );
+        let admit_at = authorize.find("admit_plan_effect(").expect("admit");
+        let validate_at = authorize.find(".validate(").expect("validate");
+        assert!(
+            admit_at < validate_at,
+            "admit runs before the one-use grant is counted"
         );
         assert!(!checks.contains("admit_plan_effect("));
         assert!(!checks.contains("dispatch_admitted_effect("));

@@ -39,6 +39,10 @@ pub const CAUSE_COMPLETED: &str = "completed";
 /// listing also prunes an entry this old.
 pub const ENDED_CAPSULE_RETENTION: std::time::Duration = std::time::Duration::from_secs(60);
 
+/// Unknown steps kept for one agent. Older names are dropped past this.
+/// Evicting the session row drops that session's names as well.
+pub(crate) const MAX_UNKNOWN_STEPS_PER_AGENT: usize = 32;
+
 /// The registry map the Runtime and every activation's end share.
 type CapsuleRegistry = RwLock<HashMap<String, RunningCapsuleInfo>>;
 
@@ -49,6 +53,9 @@ struct DueRemoval {
     registry: std::sync::Weak<CapsuleRegistry>,
     id: String,
     ended_at: std::time::Instant,
+    /// The plan book that names this session's unknown steps. The removal
+    /// drops those names once the row is gone.
+    plan_book: Arc<StdMutex<PlanBook>>,
 }
 
 /// The sweeper's deadline queue, ordered by deadline and then by arrival.
@@ -89,6 +96,7 @@ impl RetentionSweeper {
         id: &str,
         ended_at: std::time::Instant,
         deadline: std::time::Instant,
+        plan_book: &Arc<StdMutex<PlanBook>>,
     ) {
         let mut queue = self.queue.lock().unwrap_or_else(|err| err.into_inner());
         let arrival = queue.arrivals;
@@ -99,6 +107,7 @@ impl RetentionSweeper {
                 registry: Arc::downgrade(registry),
                 id: id.to_string(),
                 ended_at,
+                plan_book: Arc::clone(plan_book),
             },
         );
         if !queue.sweeping {
@@ -121,8 +130,13 @@ impl RetentionSweeper {
         loop {
             let due = self.next_due();
             if let Some(registry) = due.registry.upgrade() {
-                let mut capsules = registry.blocking_write();
-                remove_ended_entry(&mut capsules, &due.id, due.ended_at);
+                let removed = {
+                    let mut capsules = registry.blocking_write();
+                    remove_ended_entry(&mut capsules, &due.id, due.ended_at)
+                };
+                if removed {
+                    purge_unknown_session(&mut plan_book(due.plan_book.as_ref()), &due.id);
+                }
             }
         }
     }
@@ -364,6 +378,15 @@ pub(crate) struct NamedUnknownStep {
     pub(crate) request_id: String,
 }
 
+/// What one Stop of a session says, read under one hold of the plan lock.
+pub(crate) struct PlanStopDecision {
+    /// The session is still live, or an effect of it can still land.
+    pub(crate) stopping: bool,
+    /// Request ids whose record is unknown. Copied while `stopping`, removed
+    /// when this Stop is the one that says stopped.
+    pub(crate) unknown_steps: Vec<String>,
+}
+
 pub(crate) struct PlanEffectGuard {
     book: Option<Arc<StdMutex<PlanBook>>>,
     id: u64,
@@ -445,14 +468,44 @@ fn finish_flight(book: &mut PlanBook, id: u64, as_unknown: bool) {
     forget_open_effect(&flight.request_id);
     let session_id = flight.session_id.clone();
     if as_unknown {
-        book.unknown.push(UnknownPlanStep {
-            session_id: flight.session_id,
-            agent_id: flight.agent_id,
-            request_id: flight.request_id,
-        });
+        push_unknown(
+            book,
+            UnknownPlanStep {
+                session_id: flight.session_id,
+                agent_id: flight.agent_id,
+                request_id: flight.request_id,
+            },
+        );
     }
     reap(book, &session_id);
     release_held_live_run(book, &session_id);
+}
+
+/// Keeps at most [`MAX_UNKNOWN_STEPS_PER_AGENT`] names for one agent.
+/// The oldest name for that agent is the one that goes.
+fn push_unknown(book: &mut PlanBook, step: UnknownPlanStep) {
+    let agent_id = step.agent_id.clone();
+    book.unknown.push(step);
+    let over = book
+        .unknown
+        .iter()
+        .filter(|step| step.agent_id == agent_id)
+        .count()
+        .saturating_sub(MAX_UNKNOWN_STEPS_PER_AGENT);
+    for _ in 0..over {
+        if let Some(pos) = book
+            .unknown
+            .iter()
+            .position(|step| step.agent_id == agent_id)
+        {
+            book.unknown.remove(pos);
+        }
+    }
+}
+
+/// Drops unknown names for a session whose row has left the registry.
+fn purge_unknown_session(book: &mut PlanBook, session_id: &str) {
+    book.unknown.retain(|step| step.session_id != session_id);
 }
 
 /// The last effect of a session drops the live-run token the end parked.
@@ -545,7 +598,7 @@ static PLAN_DECISION_HOOK: std::sync::LazyLock<StdMutex<HashMap<String, PlanDeci
 /// keeps its own hook: one test cannot replace another's. The hook is given
 /// `&mut PlanBook` while the caller still holds the lock, so it cannot drop
 /// that lock.
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub(crate) fn arm_plan_decision_hook(
     session_id: &str,
     hook: impl Fn(&mut PlanBook) + Send + 'static,
@@ -556,7 +609,7 @@ pub(crate) fn arm_plan_decision_hook(
         .insert(session_id.to_string(), Box::new(hook));
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub(crate) fn disarm_plan_decision_hook(session_id: &str) {
     PLAN_DECISION_HOOK
         .lock()
@@ -574,7 +627,7 @@ fn take_plan_decision_hook(session_id: &str) -> Option<PlanDecisionHook> {
 
 /// Held after the end marks the instance and before `release` drops the
 /// step's admission. A dispatch after that drop cannot see the mark.
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub(crate) struct PlanEndPause {
     pub entered: Arc<tokio::sync::Notify>,
     pub release: Arc<tokio::sync::Notify>,
@@ -590,7 +643,7 @@ struct PlanEndGate {
 #[cfg(test)]
 static PLAN_END_GATES: StdMutex<Vec<PlanEndGate>> = StdMutex::new(Vec::new());
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub(crate) fn arm_after_plan_end_mark(session_id: &str) -> PlanEndPause {
     let entered = Arc::new(tokio::sync::Notify::new());
     let release = Arc::new(tokio::sync::Notify::new());
@@ -718,6 +771,13 @@ impl ActivationStop {
         self.flag.requested.store(true, Ordering::Release);
     }
 
+    /// The provider stop failed. The flag comes back down and the cause is
+    /// forgotten, so the live run is not cut off by a stop that did not happen.
+    fn withdraw(&self) {
+        self.flag.requested.store(false, Ordering::Release);
+        *self.cause.lock().unwrap_or_else(|err| err.into_inner()) = None;
+    }
+
     /// The reason this stop was requested with, if any.
     fn cause(&self) -> Option<String> {
         self.cause
@@ -800,6 +860,48 @@ static STOP_PANIC_AFTER_MARK: StdMutex<Vec<(usize, String)>> = StdMutex::new(Vec
 /// A capsule stop that fails before the row ends. Keyed by the launch gate.
 #[cfg(test)]
 static FAIL_CAPSULE_STOP: StdMutex<Vec<(usize, String)>> = StdMutex::new(Vec::new());
+
+/// Provider `stop` calls observed by a test, keyed by the launch gate.
+#[cfg(test)]
+static PROVIDER_STOP_CALLS: StdMutex<Vec<usize>> = StdMutex::new(Vec::new());
+
+/// What a guest does at the first line of its watcher, before it runs.
+/// Keyed by agent id. The launch turn is still held, so the guest's end
+/// cannot pass `hold_launch_turn` until the start returns.
+#[cfg(test)]
+pub(crate) enum GuestOpening {
+    /// Tell the test whether the plan instance is open, then run the guest.
+    Dispatch(tokio::sync::oneshot::Sender<bool>),
+    /// End the activation at once, before guest code.
+    Exit,
+}
+
+#[cfg(test)]
+static GUEST_OPENING: StdMutex<Vec<(String, GuestOpening)>> = StdMutex::new(Vec::new());
+
+#[cfg(all(test, unix))]
+pub(crate) fn arm_guest_opening(agent_id: &str, opening: GuestOpening) {
+    GUEST_OPENING
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+        .push((agent_id.to_string(), opening));
+}
+
+#[cfg(test)]
+fn guest_opening_is_armed(agent_id: &str) -> bool {
+    GUEST_OPENING
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+        .iter()
+        .any(|(id, _)| id == agent_id)
+}
+
+#[cfg(test)]
+fn take_guest_opening(agent_id: &str) -> Option<GuestOpening> {
+    let mut armed = GUEST_OPENING.lock().unwrap_or_else(|err| err.into_inner());
+    let pos = armed.iter().rposition(|(id, _)| id == agent_id)?;
+    Some(armed.swap_remove(pos).1)
+}
 
 #[cfg(test)]
 pub(crate) struct StopRowsPause {
@@ -1242,6 +1344,7 @@ impl ActivationContextHeld {
                 &self.id.0,
                 ended_at,
                 ended_at + self.retention,
+                &self.plan_book,
             );
         }
     }
@@ -1906,9 +2009,18 @@ impl Runtime {
         let capsules = &self.running_capsules;
         let turn = self.launch_turn(facts.agent_id);
         let _turn = turn.lock().await;
+        // Read the plan book before `agent_launches`. The plan lock is not
+        // taken while that gate is held.
+        let effect_landing = !self.inflight_plan_sessions(facts.agent_id).is_empty();
         let live_run = {
             let mut state = self.agent_launches.lock().await;
-            if Self::refuse_start_for_stop(&self.stop_marks, capsules, &mut state, facts.agent_id) {
+            if Self::refuse_start_for_stop(
+                &self.stop_marks,
+                capsules,
+                &mut state,
+                facts.agent_id,
+                effect_landing,
+            ) {
                 return Err(ElastosError::InvalidManifest(Self::AGENT_STOPPING.into()));
             }
             let now = std::time::SystemTime::now()
@@ -1955,17 +2067,26 @@ impl Runtime {
             .await?;
         let session_id = started.0.id.0.clone();
         let agent_id = facts.agent_id.to_string();
-        self.agent_launches.lock().await.sessions.insert(
-            session_id.clone(),
-            AgentSessionRecord {
-                agent_id: agent_id.clone(),
-                owner: facts.owner.to_string(),
-                host_cid: facts.host_cid.to_string(),
-                launch_id: facts.launch_id.to_string(),
-                session_id: session_id.clone(),
-            },
-        );
-        self.bind_plan_instance(&session_id, &agent_id);
+        // The plan instance was bound before the guest was spawned. Binding
+        // again would reopen a session whose end already reaped it.
+        #[cfg(test)]
+        self.yield_until_guest_opening_runs(facts.agent_id).await;
+        let ended = self
+            .get_capsule(&session_id)
+            .await
+            .is_some_and(|info| info.ended_at.is_some());
+        if !ended {
+            self.agent_launches.lock().await.sessions.insert(
+                session_id.clone(),
+                AgentSessionRecord {
+                    agent_id,
+                    owner: facts.owner.to_string(),
+                    host_cid: facts.host_cid.to_string(),
+                    launch_id: facts.launch_id.to_string(),
+                    session_id,
+                },
+            );
+        }
         Ok(started)
     }
 
@@ -1992,7 +2113,18 @@ impl Runtime {
     /// Remember this running instance. An instance that was never bound, or
     /// that was removed after it ended with nothing in flight, is refused.
     pub(crate) fn bind_plan_instance(&self, session_id: &str, agent_id: &str) {
-        plan_book(&self.plan_book).instances.insert(
+        let mut book = plan_book(&self.plan_book);
+        // A session already marked stopping is not reopened. An absent row
+        // is a new instance: the late bind that used to insert one after the
+        // guest had ended is gone.
+        if book
+            .instances
+            .get(session_id)
+            .is_some_and(|inst| inst.stopping)
+        {
+            return;
+        }
+        book.instances.insert(
             session_id.to_string(),
             PlanInstance {
                 agent_id: agent_id.to_string(),
@@ -2081,18 +2213,51 @@ impl Runtime {
         taken
     }
 
-    /// Request ids whose record is unknown, for this session. The book drops them.
-    pub(crate) fn take_unknown_plan_steps_for_session(&self, session_id: &str) -> Vec<String> {
+    /// The same names as [`Self::take_unknown_plan_steps`], still in the book.
+    pub(crate) fn copy_unknown_plan_steps(&self, agent_id: &str) -> Vec<NamedUnknownStep> {
+        plan_book(&self.plan_book)
+            .unknown
+            .iter()
+            .filter(|step| step.agent_id == agent_id)
+            .map(|step| NamedUnknownStep {
+                session_id: step.session_id.clone(),
+                request_id: step.request_id.clone(),
+            })
+            .collect()
+    }
+
+    /// One hold of the plan lock. A live session, or an effect still landing,
+    /// is `stopping` and the names are copied. An ended session with nothing
+    /// in flight is not stopping, and this call removes its names.
+    pub(crate) fn plan_stop_decision(&self, session_id: &str, ended: bool) -> PlanStopDecision {
         let mut book = plan_book(&self.plan_book);
-        let mut taken = Vec::new();
-        book.unknown.retain(|step| {
-            if step.session_id != session_id {
-                return true;
+        let effect_open = book
+            .inflight
+            .values()
+            .any(|flight| flight.session_id == session_id);
+        let stopping = !ended || effect_open;
+        let mut unknown_steps = Vec::new();
+        if stopping {
+            for step in book
+                .unknown
+                .iter()
+                .filter(|step| step.session_id == session_id)
+            {
+                unknown_steps.push(step.request_id.clone());
             }
-            taken.push(step.request_id.clone());
-            false
-        });
-        taken
+        } else {
+            book.unknown.retain(|step| {
+                if step.session_id != session_id {
+                    return true;
+                }
+                unknown_steps.push(step.request_id.clone());
+                false
+            });
+        }
+        PlanStopDecision {
+            stopping,
+            unknown_steps,
+        }
     }
 
     #[cfg(test)]
@@ -2265,17 +2430,25 @@ impl Runtime {
             .holds(agent_id)
     }
 
-    /// While any Stop token is set, Start is refused and the registry is not
-    /// read. The row test applies only to `stop_requested`. No signal does
-    /// not read the registry. No live row clears `stop_requested`. Each Stop
-    /// clears only its own token, in [`AgentStopGuard`].
+    /// While any Stop token is set, or an effect of this agent is still
+    /// landing, Start is refused and `stop_requested` is left set. The row
+    /// test applies only to `stop_requested` once nothing is in flight. No
+    /// signal does not read the registry. No live row, and no landing
+    /// effect, clears `stop_requested`. Each Stop clears only its own token,
+    /// in [`AgentStopGuard`].
     fn refuse_start_for_stop(
         marks: &StdMutex<AgentStopMarks>,
         capsules: &RwLock<HashMap<String, RunningCapsuleInfo>>,
         state: &mut AgentLaunchState,
         agent_id: &str,
+        effect_landing: bool,
     ) -> bool {
         if Self::stop_mark_held(marks, agent_id) {
+            return true;
+        }
+        // Settled or unknown: `effect_landing` is false, and a later Start
+        // is allowed once no live row remains.
+        if effect_landing {
             return true;
         }
         if !state.stop_requested.contains(agent_id) {
@@ -2291,9 +2464,16 @@ impl Runtime {
     }
 
     pub(crate) async fn agent_is_stopping(&self, agent_id: &str) -> bool {
+        let effect_landing = !self.inflight_plan_sessions(agent_id).is_empty();
         let capsules = &self.running_capsules;
         let mut state = self.agent_launches.lock().await;
-        Self::refuse_start_for_stop(&self.stop_marks, capsules, &mut state, agent_id)
+        Self::refuse_start_for_stop(
+            &self.stop_marks,
+            capsules,
+            &mut state,
+            agent_id,
+            effect_landing,
+        )
     }
 
     /// The start record for this session, if Start stored one and the
@@ -2321,6 +2501,12 @@ impl Runtime {
             .await
             .sessions
             .insert(session_id, record);
+    }
+
+    /// Test only: take away a planted start record.
+    #[cfg(all(test, unix))]
+    pub(crate) async fn forget_agent_session_for_test(&self, session_id: &str) {
+        self.agent_launches.lock().await.sessions.remove(session_id);
     }
 
     #[cfg(test)]
@@ -3607,6 +3793,9 @@ impl Runtime {
         } else {
             None
         };
+        // The agent id, copied before the token moves into the watcher.
+        // The instance is bound before that watcher is spawned.
+        let plan_agent = carried.as_ref().map(|run| run.agent_id.clone());
         let held = detached_component.as_ref().map(|component| {
             ActivationContextHeld::new(self, handle, component.clone(), carried.take())
         });
@@ -3632,6 +3821,11 @@ impl Runtime {
                 ended_at: None,
             })
             .await;
+            // Bound before the guest task exists, so a guest that dispatches
+            // or exits at once cannot miss the instance or reopen it later.
+            if let Some(agent_id) = plan_agent {
+                self.bind_plan_instance(&id.0, &agent_id);
+            }
             self.watch_activation(
                 id,
                 handle.clone(),
@@ -3745,6 +3939,117 @@ impl Runtime {
         stops.get(id)?.cause()
     }
 
+    /// The stop flag is up. A failed provider stop brings it back down.
+    #[cfg(all(test, unix))]
+    pub(crate) fn activation_stop_requested_for_test(&self, id: &str) -> bool {
+        self.activation_stops
+            .read()
+            .unwrap_or_else(|err| err.into_inner())
+            .get(id)
+            .is_some_and(|stop| stop.flag.requested.load(Ordering::Acquire))
+    }
+
+    /// Gives this session a stop request, so a later stop takes the watcher path.
+    #[cfg(all(test, unix))]
+    pub(crate) fn plant_activation_stop_for_test(&self, id: &str) {
+        self.activation_stops
+            .write()
+            .unwrap_or_else(|err| err.into_inner())
+            .insert(
+                id.to_string(),
+                Arc::new(ActivationStop {
+                    flag: Arc::new(crate::resource_bridge::ActivationStopFlag::default()),
+                    cause: StdMutex::new(None),
+                }),
+            );
+    }
+
+    #[cfg(test)]
+    fn note_provider_stop_call(&self) {
+        PROVIDER_STOP_CALLS
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .push(self.stop_rows_key());
+    }
+
+    #[cfg(all(test, unix))]
+    pub(crate) fn provider_stop_count_for_test(&self) -> usize {
+        let key = self.stop_rows_key();
+        PROVIDER_STOP_CALLS
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .iter()
+            .filter(|stored| **stored == key)
+            .count()
+    }
+
+    #[cfg(all(test, unix))]
+    pub(crate) fn remember_unknown_for_test(
+        &self,
+        session_id: &str,
+        agent_id: &str,
+        request_id: &str,
+    ) {
+        push_unknown(
+            &mut plan_book(&self.plan_book),
+            UnknownPlanStep {
+                session_id: session_id.to_string(),
+                agent_id: agent_id.to_string(),
+                request_id: request_id.to_string(),
+            },
+        );
+    }
+
+    #[cfg(all(test, unix))]
+    pub(crate) fn unknown_count_for_test(&self, agent_id: &str) -> usize {
+        plan_book(&self.plan_book)
+            .unknown
+            .iter()
+            .filter(|step| step.agent_id == agent_id)
+            .count()
+    }
+
+    /// Ages this row past retention and prunes it, which drops its unknown names.
+    #[cfg(all(test, unix))]
+    pub(crate) async fn evict_ended_session_for_test(&self, id: &str) {
+        {
+            let mut capsules = self.running_capsules.write().await;
+            if let Some(info) = capsules.get_mut(id) {
+                info.ended_at = Some(
+                    std::time::Instant::now()
+                        .checked_sub(ENDED_CAPSULE_RETENTION + std::time::Duration::from_secs(1))
+                        .unwrap_or_else(std::time::Instant::now),
+                );
+            }
+        }
+        let _ = self.get_capsule(id).await;
+    }
+
+    #[cfg(all(test, unix))]
+    pub(crate) async fn stop_requested_for_test(&self, agent_id: &str) -> bool {
+        self.agent_launches
+            .lock()
+            .await
+            .stop_requested
+            .contains(agent_id)
+    }
+
+    /// Lets the guest task run its opening while this start still holds the
+    /// launch turn. The opening is taken by that task.
+    #[cfg(test)]
+    async fn yield_until_guest_opening_runs(&self, agent_id: &str) {
+        let _ = self;
+        if !guest_opening_is_armed(agent_id) {
+            return;
+        }
+        for _ in 0..200 {
+            if !guest_opening_is_armed(agent_id) {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    }
+
     /// Starts this activation and waits for its worker to publish its outcome, then ends it
     /// through [`ActivationContextHeld::end_instance`]: the entry is `stopped`
     /// with cause `completed` on a natural return, or `failed` with the
@@ -3770,6 +4075,25 @@ impl Runtime {
             if let Some(cause) = held.requested_stop() {
                 held.end_instance(CAPSULE_STOPPED, &cause).await;
                 return;
+            }
+            #[cfg(test)]
+            if let Some(agent_id) = held.live_run.as_ref().map(|run| run.agent_id.clone()) {
+                if let Some(opening) = take_guest_opening(&agent_id) {
+                    match opening {
+                        GuestOpening::Exit => {
+                            held.end_instance(CAPSULE_STOPPED, CAUSE_COMPLETED).await;
+                            return;
+                        }
+                        GuestOpening::Dispatch(sender) => {
+                            let open = Runtime::plan_instance_is_open(
+                                &held.plan_book,
+                                &held.id.0,
+                                &agent_id,
+                            );
+                            let _ = sender.send(open);
+                        }
+                    }
+                }
             }
             let (status, cause) = match component.start_resident(&handle).await {
                 Ok(mut activation) => {
@@ -3931,10 +4255,14 @@ impl Runtime {
     pub async fn register_capsule(&self, info: RunningCapsuleInfo) {
         #[cfg(test)]
         self.live_run_await("register").await;
-        let mut capsules = self.running_capsules.write().await;
-        prune_ended(&mut capsules, std::time::Instant::now());
-        tracing::info!("Registered capsule '{}' with ID: {}", info.name, info.id);
-        capsules.insert(info.id.clone(), info);
+        let removed = {
+            let mut capsules = self.running_capsules.write().await;
+            let removed = prune_ended(&mut capsules, std::time::Instant::now());
+            tracing::info!("Registered capsule '{}' with ID: {}", info.name, info.id);
+            capsules.insert(info.id.clone(), info);
+            removed
+        };
+        self.purge_unknown_sessions(&removed);
     }
 
     /// Unregister a capsule from the runtime
@@ -3962,18 +4290,39 @@ impl Runtime {
     }
 
     async fn list_capsules_pruning_at(&self, now: std::time::Instant) -> Vec<RunningCapsuleInfo> {
-        let mut capsules = self.running_capsules.write().await;
-        prune_ended(&mut capsules, now);
-        let mut listed: Vec<RunningCapsuleInfo> = capsules.values().cloned().collect();
-        listed.sort_by(|left, right| left.id.cmp(&right.id));
+        let (listed, removed) = {
+            let mut capsules = self.running_capsules.write().await;
+            let removed = prune_ended(&mut capsules, now);
+            let mut listed: Vec<RunningCapsuleInfo> = capsules.values().cloned().collect();
+            listed.sort_by(|left, right| left.id.cmp(&right.id));
+            (listed, removed)
+        };
+        self.purge_unknown_sessions(&removed);
         listed
     }
 
     /// Get a specific capsule by ID
     pub async fn get_capsule(&self, id: &str) -> Option<RunningCapsuleInfo> {
-        let mut capsules = self.running_capsules.write().await;
-        prune_ended(&mut capsules, std::time::Instant::now());
-        capsules.get(id).cloned()
+        let (info, removed) = {
+            let mut capsules = self.running_capsules.write().await;
+            let removed = prune_ended(&mut capsules, std::time::Instant::now());
+            let info = capsules.get(id).cloned();
+            (info, removed)
+        };
+        self.purge_unknown_sessions(&removed);
+        info
+    }
+
+    /// Drops unknown names for sessions whose registry row has been pruned.
+    /// The registry lock is not held.
+    fn purge_unknown_sessions(&self, session_ids: &[String]) {
+        if session_ids.is_empty() {
+            return;
+        }
+        let mut book = plan_book(&self.plan_book);
+        for session_id in session_ids {
+            purge_unknown_session(&mut book, session_id);
+        }
     }
 
     /// Update a capsule's status
@@ -4064,18 +4413,26 @@ impl Runtime {
         };
 
         // The reason is recorded before the flag is raised, so the end that
-        // sees the flag records this cause. The plan end is `end_instance`,
-        // which runs only when the watcher records the end. A failure here,
-        // or a wait that returns while the row is still running, leaves the
-        // run able to dispatch.
+        // sees the flag records this cause. The provider stop runs after
+        // that. If it fails, the flag and the cause are withdrawn: the run
+        // stays up and can still dispatch. The plan end is `end_instance`,
+        // which runs only when the watcher records the end.
         stop.request(reason);
-        #[cfg(test)]
-        if self.take_failing_capsule_stop(id) {
-            return Err(ElastosError::Compute("capsule stop failed".into()));
-        }
         if let Some((handle, provider)) = provider {
             tracing::info!("Stopping capsule '{}' ({})", info.name, id);
-            provider.stop(handle).await?;
+            #[cfg(test)]
+            self.note_provider_stop_call();
+            let stopped = provider.stop(handle).await;
+            #[cfg(test)]
+            let stopped = if stopped.is_ok() && self.take_failing_capsule_stop(id) {
+                Err(ElastosError::Compute("provider stop failed".into()))
+            } else {
+                stopped
+            };
+            if let Err(error) = stopped {
+                stop.withdraw();
+                return Err(error);
+            }
         }
 
         self.wait_ended(id).await;
@@ -4115,12 +4472,15 @@ fn remove_ended_entry(
     capsules: &mut HashMap<String, RunningCapsuleInfo>,
     id: &str,
     ended_at: std::time::Instant,
-) {
+) -> bool {
     if capsules
         .get(id)
         .is_some_and(|info| info.ended_at == Some(ended_at))
     {
         capsules.remove(id);
+        true
+    } else {
+        false
     }
 }
 
@@ -4129,11 +4489,22 @@ fn remove_ended_entry(
 /// removal with the [`RETENTION_SWEEPER`]; a reader still
 /// prunes, so the boundary can be read at an injected instant and an entry
 /// registered already ended cannot outlive its retention either.
-fn prune_ended(capsules: &mut HashMap<String, RunningCapsuleInfo>, now: std::time::Instant) {
-    capsules.retain(|_, info| match info.ended_at {
-        Some(ended_at) => now.duration_since(ended_at) < ENDED_CAPSULE_RETENTION,
+fn prune_ended(
+    capsules: &mut HashMap<String, RunningCapsuleInfo>,
+    now: std::time::Instant,
+) -> Vec<String> {
+    let mut removed = Vec::new();
+    capsules.retain(|id, info| match info.ended_at {
+        Some(ended_at) => {
+            let keep = now.duration_since(ended_at) < ENDED_CAPSULE_RETENTION;
+            if !keep {
+                removed.push(id.clone());
+            }
+            keep
+        }
         None => true,
     });
+    removed
 }
 
 /// Whether a table still holds this id. A poisoned lock still holds its map,
