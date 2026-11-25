@@ -279,18 +279,65 @@ fn rows_from(
     }
 }
 
+fn shell_cache() -> &'static std::sync::Mutex<std::collections::HashMap<String, String>> {
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, String>>> =
+        std::sync::OnceLock::new();
+    CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+#[cfg(test)]
+pub(in crate::api) static ATTACH_SHELL_CALLS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+async fn cached_shell(
+    client: &reqwest::Client,
+    coords: &crate::runtime_control::RuntimeCoords,
+) -> anyhow::Result<String> {
+    if let Some(token) = shell_cache()
+        .lock()
+        .ok()
+        .and_then(|map| map.get(&coords.api_url).cloned())
+    {
+        return Ok(token);
+    }
+    #[cfg(test)]
+    ATTACH_SHELL_CALLS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let token = home_attach_shell(client, &coords.api_url, &coords.attach_secret).await?;
+    if let Ok(mut map) = shell_cache().lock() {
+        map.insert(coords.api_url.clone(), token.clone());
+    }
+    Ok(token)
+}
+
 async fn read_pending(
     coords: &crate::runtime_control::RuntimeCoords,
 ) -> anyhow::Result<Vec<RuntimeCapabilityPendingRequest>> {
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(2))
         .build()?;
-    let shell = home_attach_shell(&client, &coords.api_url, &coords.attach_secret).await?;
-    Ok(client
+    let mut shell = cached_shell(&client, coords).await?;
+    let mut response = client
         .get(format!("{}/api/capability/pending", coords.api_url))
         .header(AUTHORIZATION, format!("Bearer {shell}"))
         .send()
-        .await?
+        .await?;
+    if response.status() == StatusCode::UNAUTHORIZED {
+        if let Ok(mut map) = shell_cache().lock() {
+            map.remove(&coords.api_url);
+        }
+        #[cfg(test)]
+        ATTACH_SHELL_CALLS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        shell = home_attach_shell(&client, &coords.api_url, &coords.attach_secret).await?;
+        if let Ok(mut map) = shell_cache().lock() {
+            map.insert(coords.api_url.clone(), shell.clone());
+        }
+        response = client
+            .get(format!("{}/api/capability/pending", coords.api_url))
+            .header(AUTHORIZATION, format!("Bearer {shell}"))
+            .send()
+            .await?;
+    }
+    Ok(response
         .error_for_status()?
         .json::<PendingBody>()
         .await?
@@ -338,6 +385,7 @@ fn owned_agents(data_dir: &std::path::Path) -> Vec<OwnedAgent> {
                 owner,
             })
         })
+        .filter(|agent| crate::agents::stored_agent(data_dir, &agent.owner, &agent.id).is_ok())
         .collect()
 }
 
@@ -971,13 +1019,13 @@ async fn decide_capability(
                 "duration": "session",
                 "rationale": "Approved in Inbox",
             }),
-            "Approved capsule request.",
+            "Approved.",
         )
     } else {
         (
             "deny",
             serde_json::json!({"request_id": request_id, "reason": "Denied in Inbox"}),
-            "Denied capsule request.",
+            "Denied.",
         )
     };
     client
@@ -1034,11 +1082,28 @@ async fn answer_agent_ask(
     if agent.owner != caller {
         anyhow::bail!("{}", not_owner(caller, &agent.name));
     }
+    if let Err(error) = crate::agents::stored_agent(data_dir, caller, &ask.agent_id) {
+        let _ = sign_agent_grant(data_dir, caller, ask, request_id, false);
+        let _ = decide_capability(&coords, request_id, false).await;
+        return Err(error);
+    }
     if ask.resource.starts_with("localhost://") && own_rest(&ask.resource, &agent.root).is_none() {
+        sign_agent_grant(data_dir, caller, ask, request_id, false)?;
         decide_capability(&coords, request_id, false).await?;
         anyhow::bail!("a path outside the agent's own folder is not pending");
     }
+    sign_agent_grant(data_dir, caller, ask, request_id, approve)?;
     let answered = decide_capability(&coords, request_id, approve).await?;
+    Ok(answered)
+}
+
+fn sign_agent_grant(
+    data_dir: &std::path::Path,
+    caller: &str,
+    ask: &RuntimeCapabilityPendingRequest,
+    request_id: &str,
+    approve: bool,
+) -> anyhow::Result<()> {
     let event_type = if approve {
         "agent.grant.approved"
     } else {
@@ -1062,8 +1127,7 @@ async fn answer_agent_ask(
             signer_did: None,
             signature: None,
         },
-    )?;
-    Ok(answered)
+    )
 }
 
 #[cfg(test)]
@@ -1087,6 +1151,39 @@ mod tests {
             action: action.into(),
             requested_at: 1,
         }
+    }
+
+    #[tokio::test]
+    async fn a_second_inbox_poll_does_not_attach_again() {
+        let url = "http://127.0.0.1:9/planted-inbox-poll";
+        let coords = crate::runtime_control::RuntimeCoords {
+            api_url: url.to_string(),
+            attach_secret: "secret".to_string(),
+            pid: 1,
+            runtime_kind: "agent".to_string(),
+            binary_sha256: String::new(),
+            policy_sha256: String::new(),
+            dependency_sha256: String::new(),
+            generation: String::new(),
+            process_start: String::new(),
+            home_url: String::new(),
+        };
+        shell_cache()
+            .lock()
+            .unwrap()
+            .insert(url.to_string(), "bearer-once".to_string());
+        let before = ATTACH_SHELL_CALLS.load(std::sync::atomic::Ordering::SeqCst);
+        let client = reqwest::Client::new();
+        let first = cached_shell(&client, &coords).await.unwrap();
+        let second = cached_shell(&client, &coords).await.unwrap();
+        assert_eq!(first, "bearer-once");
+        assert_eq!(second, "bearer-once");
+        assert_eq!(
+            ATTACH_SHELL_CALLS.load(std::sync::atomic::Ordering::SeqCst),
+            before,
+            "a cached shell is not another attach"
+        );
+        shell_cache().lock().unwrap().remove(url);
     }
 
     #[test]

@@ -3,8 +3,8 @@
 # until that change is in the gateway. Full mode refuses to run until it
 # detects that route.
 # `--only u3-create` is the create proof. It does not start a guest.
-# This installed journey runs on Mac only. The Home data directory is
-# Library/Application Support/elastos.
+# Darwin keeps the Home data directory at Library/Application Support/elastos.
+# Linux keeps it at .local/share/elastos.
 # Carrier is not disabled. config.toml sets carrier_bind_addr to 127.0.0.1:0,
 # a free loopback port, so Carrier does not bind UDP 4433.
 set -u
@@ -34,8 +34,13 @@ rm -f "$OUT/receipt.json"
 SCRATCH="${A15R_SCRATCH:-$ROOT/target/a15r-homes}"
 export A15R_SCRATCH="$SCRATCH"
 HOME_ROOT="$SCRATCH/$(basename "$OUT")"
-# Mac only. On Darwin the runtime data dir is ~/Library/Application Support.
-DATA="$HOME_ROOT/Library/Application Support/elastos"
+# The runtime data directory follows the host. Darwin uses Application
+# Support. Linux uses the XDG data home.
+if [[ "$(uname -s)" == "Darwin" ]]; then
+  DATA="$HOME_ROOT/Library/Application Support/elastos"
+else
+  DATA="$HOME_ROOT/.local/share/elastos"
+fi
 PID_FILE="$OUT/serve.pid"
 LOG="$OUT/serve.log"
 STATUS=1
@@ -70,8 +75,8 @@ fail() {
   exit 1
 }
 
-if [[ "$(uname -s)" != "Darwin" ]]; then
-  fail release_signed "This installed journey runs on Mac only. The Home data directory is Library/Application Support/elastos."
+if [[ "$(uname -s)" != "Darwin" && "$(uname -s)" != "Linux" ]]; then
+  fail release_signed "This installed journey runs on Darwin or Linux."
 fi
 
 if [[ -z "$ONLY" ]]; then
@@ -144,7 +149,11 @@ done
 # gets the same line. Otherwise that process would bind 0.0.0.0:4433.
 printf '%s\n' 'carrier_bind_addr = "127.0.0.1:0"' > "$DATA/config.toml"
 for label in home identity chat; do
-  child="$DATA/managed-runtimes/$label/home/Library/Application Support/elastos"
+  if [[ "$(uname -s)" == "Darwin" ]]; then
+    child="$DATA/managed-runtimes/$label/home/Library/Application Support/elastos"
+  else
+    child="$DATA/managed-runtimes/$label/home/.local/share/elastos"
+  fi
   mkdir -p "$child"
   printf '%s\n' 'carrier_bind_addr = "127.0.0.1:0"' > "$child/config.toml"
 done

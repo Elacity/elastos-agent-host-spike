@@ -2136,7 +2136,7 @@ async fn plan_inflight_row(
                     crate::api::handlers::settle::settle_and_revoke(
                         &store,
                         &manager,
-                        dir.path(),
+                        Some(dir.path()),
                         &session,
                         "stopped: owner",
                     )
@@ -2151,7 +2151,7 @@ async fn plan_inflight_row(
                     crate::api::handlers::settle::settle_and_revoke(
                         &store,
                         &manager,
-                        dir.path(),
+                        Some(dir.path()),
                         &session,
                         "completed",
                     )
@@ -3802,7 +3802,7 @@ async fn three_hundred_spent_grants_still_let_stop_settle() {
     let settled = crate::api::handlers::settle::settle_and_revoke(
         &plant.store,
         &plant.manager,
-        plant.dir.path(),
+        Some(plant.dir.path()),
         &plant.session,
         "owner",
     )

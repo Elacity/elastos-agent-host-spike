@@ -1184,7 +1184,7 @@ async fn wallet_chain_test_state_with_shared_wallet_provider(
 include!("support_providers.rs");
 include!("support_runtime.rs");
 
-#[cfg(feature = "prototype-agents")]
+#[cfg(all(unix, feature = "prototype-agents"))]
 mod agent_launch;
 mod agent_plan;
 #[cfg(all(unix, feature = "prototype-agents"))]

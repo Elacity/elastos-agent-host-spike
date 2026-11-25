@@ -3037,6 +3037,21 @@ async fn handle_request(line: &str, ctx: &Option<BridgeContext>) -> Result<serde
                     return Ok(serde_json::json!({"id": id, "response": response}));
                 }
 
+                if let (Some(dir), Some(principal)) =
+                    (ctx.data_dir.as_deref(), ctx.principal_id.as_deref())
+                {
+                    if let Err(error) = crate::agents::refuse_inactive_agent(dir, principal) {
+                        return Ok(serde_json::json!({
+                            "id": id,
+                            "response": {
+                                "type": "error",
+                                "code": "agent_inactive",
+                                "message": error.to_string(),
+                            },
+                        }));
+                    }
+                }
+
                 // Create a pending request — the shell decides whether to grant.
                 let pending = crate::api::handlers::capability::create_request_retiring(
                     &ctx.pending_store,
@@ -3530,6 +3545,19 @@ pub async fn handle_remote_request_with_audit_dir(
                     "id": id,
                     "response": resource_error_response("principal_context_required", &message),
                 }));
+            }
+
+            if let (Some(dir), Some(principal)) = (data_dir, principal_id) {
+                if let Err(error) = crate::agents::refuse_inactive_agent(dir, principal) {
+                    return Ok(serde_json::json!({
+                        "id": id,
+                        "response": {
+                            "type": "error",
+                            "code": "agent_inactive",
+                            "message": error.to_string(),
+                        },
+                    }));
+                }
             }
 
             let resp = client

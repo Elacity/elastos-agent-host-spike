@@ -267,16 +267,17 @@ export function judgeCreatingOwner(input) {
   return { ok: true, reason: "" };
 }
 
-// The launch route is the agents-in-gateway change only when it no longer
-// asks the runtime to start the agent.
+// The launch route is the agents-in-gateway change when the gateway starts
+// the guest through the in-process agent plane.
 export function agentsInGatewayChange(gatewaySource, launchSource) {
   const route = "/api/apps/system/agents/launch";
   const registered = String(gatewaySource || "").includes(`"${route}"`);
-  const asksRuntime = String(launchSource || "").includes("launch_runtime_agent");
-  const ok = registered && !asksRuntime;
+  const text = String(launchSource || "");
+  const asksPlane = text.includes("launch_runtime_agent") && text.includes("agent_plane::");
+  const ok = registered && asksPlane;
   let reason = "";
   if (!registered) reason = "the launch route is not registered";
-  else if (asksRuntime) reason = "the launch route asks the runtime to start the agent";
+  else if (!asksPlane) reason = "the launch route does not start the agent on the in-process plane";
   return { ok, route, reason };
 }
 

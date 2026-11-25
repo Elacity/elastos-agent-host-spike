@@ -542,6 +542,10 @@ function settingsSectionMatches(section, query) {
   if (!section) {
     return false;
   }
+  const hidden = document.querySelector(`.settings-sidebar-item[data-settings="${section}"]`);
+  if (hidden && hidden.hidden) {
+    return false;
+  }
   if (!query) {
     return true;
   }

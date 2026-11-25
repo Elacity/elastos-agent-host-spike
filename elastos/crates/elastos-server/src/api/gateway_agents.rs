@@ -96,6 +96,50 @@ fn append_agent_lifecycle_audit(
     )
 }
 
+/// A `stopping` row is confirmed once. The next list, Stop, or Home start
+/// appends `agent.stopped` with result `ok` for that session when no final
+/// row has followed it.
+pub(in crate::api) fn confirm_stopping_rows(data_dir: &std::path::Path) -> anyhow::Result<()> {
+    crate::agent_record_audit::confirm_stopping_rows(data_dir)
+}
+
+fn record_caller_denial(
+    state: &GatewayState,
+    headers: &HeaderMap,
+    event_type: &str,
+    agent_id: Option<&str>,
+) {
+    let Ok(context) =
+        require_home_launch_token_context(&state.data_dir, headers, SYSTEM_CAPSULE_ID)
+    else {
+        return;
+    };
+    let Some(proof_binding_id) = context.proof_binding_id() else {
+        return;
+    };
+    let Ok(principal) =
+        crate::auth::load_principal_for_proof_binding(&state.data_dir, proof_binding_id)
+    else {
+        return;
+    };
+    let owner = AgentsOwner { context, principal };
+    let _ = append_agent_lifecycle_audit(
+        &state.data_dir,
+        event_type,
+        &owner,
+        AgentAuditIds {
+            challenge_id: None,
+            capsule_id: agent_id,
+            session_id: None,
+        },
+        "denied",
+        serde_json::json!({
+            "agent_id": agent_id.unwrap_or(""),
+            "cause": "not the owner",
+        }),
+    );
+}
+
 /// The sha256 that names the host package's bytes: the root digest of the
 /// bundle CID the admission walk produced, read back through the one CID
 /// form the lab defines.
@@ -245,7 +289,26 @@ pub(super) async fn agents_disable(
 ) -> Response {
     let disabled = agents_set_enabled(&state, &headers, false);
     if disabled.is_ok() {
-        crate::api::agent_plane::stop_running(&state.data_dir).await;
+        let ended = crate::api::agent_plane::stop_running(&state.data_dir).await;
+        if let Ok(owner) = agents_owner(&state, &headers) {
+            for (agent_id, session_id) in &ended {
+                if agent_id.is_empty() || session_id.is_empty() {
+                    continue;
+                }
+                let _ = append_agent_lifecycle_audit(
+                    &state.data_dir,
+                    "agent.stopped",
+                    &owner,
+                    AgentAuditIds {
+                        challenge_id: None,
+                        capsule_id: Some(agent_id),
+                        session_id: Some(session_id),
+                    },
+                    "ok",
+                    serde_json::json!({ "agent_id": agent_id, "cause": "agents off" }),
+                );
+            }
+        }
         let _ = crate::api::gateway::close_home_plans(&state.data_dir, "agents off");
         crate::resource_bridge::notify_plan_waiters();
     }
@@ -267,6 +330,7 @@ pub(super) async fn agents_create(
 }
 
 pub(super) async fn agents_list(State(state): State<GatewayState>, headers: HeaderMap) -> Response {
+    let _ = confirm_stopping_rows(&state.data_dir);
     agents_response(
         agents_owner(&state, &headers)
             .and_then(|owner| crate::agents::list(&state.data_dir, &owner.caller()))
@@ -299,19 +363,30 @@ pub(super) async fn agents_retire(
         //
         // The record write stores the tombstone and then appends
         // `agent.record.retire` (`agents.rs` `write`). A failed append leaves
-        // the agent retired and the chain without that row. The next call is
-        // refused "agent is already retired" before `write` runs again.
-        // The row id is that file's sequence and the sha256 of the bytes just
-        // stored. A retry here would append without the agent lock, so it
-        // can sign a file a later write already replaced, or sign the row
-        // twice. Adding the missing row on retry is an agents.rs change.
+        // the agent retired. The next open under the agent lock finds that
+        // sequence without its audit event and appends the retire row once.
+        // This route still answers "agent is already retired" on that call.
         crate::agents::list(&state.data_dir, &owner.caller())?;
         crate::agents::stored_agent_for_stop(
             &state.data_dir,
             &owner.principal.principal_id,
             &request.agent_id,
         )?;
-        end_live_agent(&state.data_dir, &request.agent_id).await?;
+        let ended = end_live_agent(&state.data_dir, &request.agent_id).await?;
+        for (session_id, result) in &ended {
+            let _ = append_agent_lifecycle_audit(
+                &state.data_dir,
+                "agent.stopped",
+                &owner,
+                AgentAuditIds {
+                    challenge_id: None,
+                    capsule_id: Some(&request.agent_id),
+                    session_id: Some(session_id),
+                },
+                result,
+                serde_json::json!({ "agent_id": request.agent_id, "cause": "retire" }),
+            );
+        }
         let _ = crate::api::gateway::close_agent_plans(
             &state.data_dir,
             &request.agent_id,
@@ -336,7 +411,7 @@ pub(super) async fn agents_retire(
 pub(super) async fn end_live_agent(
     data_dir: &std::path::Path,
     agent_id: &str,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<Vec<(String, &'static str)>> {
     let agent_path = crate::api::agent_plane::coords_path(data_dir);
     let home_path = crate::runtime_control::home_runtime_coord_path(data_dir);
     let present = |path: &std::path::Path| match std::fs::symlink_metadata(path) {
@@ -345,14 +420,29 @@ pub(super) async fn end_live_agent(
         Ok(_) => Ok(true),
     };
     if !present(&agent_path)? && !present(&home_path)? {
-        return Ok(());
+        return Ok(Vec::new());
     }
     match super::gateway_home_runtime::stop_runtime_agent(data_dir, agent_id).await {
-        Ok(_) => Ok(()),
+        Ok(outcome) => {
+            let mut sessions = Vec::new();
+            for session in outcome.stopped {
+                let result = if session_ended(&session.status, session.ended) {
+                    "ok"
+                } else {
+                    "stopping"
+                };
+                sessions.push((session.session_id, result));
+            }
+            for session in outcome.stopping {
+                sessions.push((session.session_id, "stopping"));
+            }
+            Ok(sessions)
+        }
         // A runtime that has no row, or that already refused the stop, still
         // leaves the record write to retire. A stop that failed for another
-        // reason does not.
-        Err(error) if stop_found_no_live_guest(&error) => Ok(()),
+        // reason does not. A plane task that has ended is already ended.
+        Err(error) if stop_found_no_live_guest(&error) => Ok(Vec::new()),
+        Err(error) if error.to_string() == crate::api::agent_plane::TASK_ENDED => Ok(Vec::new()),
         Err(error) => Err(error),
     }
 }
@@ -399,9 +489,77 @@ pub(super) async fn agents_activate(
             now_ts(),
         )?;
         if !request.active {
-            // The guest stays up so the owner's Stop can still reach it.
-            // Grants on the agent Runtime end now; plans close as `agent off`.
+            // Turning this agent off ends its run: grants in this process,
+            // then the guest, then the signed stop row. Plans close as
+            // `agent off`.
             crate::api::agent_plane::revoke_agent_grants(&state.data_dir, &request.agent_id).await;
+            match super::gateway_home_runtime::stop_runtime_agent(
+                &state.data_dir,
+                &request.agent_id,
+            )
+            .await
+            {
+                Ok(outcome) => {
+                    for session in &outcome.stopped {
+                        let result = if session_ended(&session.status, session.ended) {
+                            "ok"
+                        } else {
+                            "stopping"
+                        };
+                        let _ = append_agent_lifecycle_audit(
+                            &state.data_dir,
+                            "agent.stopped",
+                            &owner,
+                            AgentAuditIds {
+                                challenge_id: None,
+                                capsule_id: Some(&request.agent_id),
+                                session_id: Some(&session.session_id),
+                            },
+                            result,
+                            serde_json::json!({
+                                "agent_id": request.agent_id,
+                                "cause": "agent off",
+                            }),
+                        );
+                    }
+                    for session in &outcome.stopping {
+                        let _ = append_agent_lifecycle_audit(
+                            &state.data_dir,
+                            "agent.stopped",
+                            &owner,
+                            AgentAuditIds {
+                                challenge_id: None,
+                                capsule_id: Some(&request.agent_id),
+                                session_id: Some(&session.session_id),
+                            },
+                            "stopping",
+                            serde_json::json!({
+                                "agent_id": request.agent_id,
+                                "cause": "agent off",
+                            }),
+                        );
+                    }
+                }
+                Err(error) if error.to_string() == crate::api::agent_plane::TASK_ENDED => {}
+                Err(error) => {
+                    let _ = append_agent_lifecycle_audit(
+                        &state.data_dir,
+                        "agent.stopped",
+                        &owner,
+                        AgentAuditIds {
+                            challenge_id: None,
+                            capsule_id: Some(&request.agent_id),
+                            session_id: None,
+                        },
+                        "failed",
+                        serde_json::json!({
+                            "agent_id": request.agent_id,
+                            "cause": "agent off",
+                        }),
+                    );
+                    return Err(error);
+                }
+            }
             let _ = crate::api::gateway::close_agent_plans(
                 &state.data_dir,
                 &request.agent_id,
@@ -471,7 +629,7 @@ async fn start_agent(
     // the refusal. Spending after a launch that has started the guest would
     // run the guest before the passkey is consumed. The identity comes back
     // so the signed start rows can name this challenge.
-    let step_up = consume_passkey_step_up_for_effect(
+    let step_up = match consume_passkey_step_up_for_effect(
         &state.data_dir,
         request.step_up_token.trim(),
         &launch,
@@ -479,7 +637,27 @@ async fn start_agent(
         AGENT_START_OPERATION,
         &serde_json::json!({ "agent_id": request.agent_id }),
         (false, |_| Ok(())),
-    )?;
+    ) {
+        Ok(step_up) => step_up,
+        Err(error) => {
+            let _ = append_agent_lifecycle_audit(
+                &state.data_dir,
+                "agent.start.denied",
+                &owner,
+                AgentAuditIds {
+                    challenge_id: None,
+                    capsule_id: Some(&request.agent_id),
+                    session_id: None,
+                },
+                "denied",
+                serde_json::json!({
+                    "agent_id": request.agent_id,
+                    "cause": "step-up failed",
+                }),
+            );
+            return Err(error);
+        }
+    };
     let stored = crate::agents::stored_agent(
         &state.data_dir,
         &owner.principal.principal_id,
@@ -761,9 +939,36 @@ async fn stop_agent(
     headers: &HeaderMap,
     body: &Bytes,
 ) -> anyhow::Result<AgentStopResponse> {
-    owner_may_stop(state, headers, None)?;
+    let _ = confirm_stopping_rows(&state.data_dir);
+    let caller = match owner_may_stop(state, headers, None) {
+        Ok(owner) => owner,
+        Err(error) => {
+            record_caller_denial(state, headers, "agent.stop.denied", None);
+            return Err(error);
+        }
+    };
     let request: AgentStopRequest = agents_request(body)?;
-    let owner = owner_may_stop(state, headers, Some(&request.agent_id))?;
+    let owner = match owner_may_stop(state, headers, Some(&request.agent_id)) {
+        Ok(owner) => owner,
+        Err(error) => {
+            let _ = append_agent_lifecycle_audit(
+                &state.data_dir,
+                "agent.stop.denied",
+                &caller,
+                AgentAuditIds {
+                    challenge_id: None,
+                    capsule_id: Some(&request.agent_id),
+                    session_id: None,
+                },
+                "denied",
+                serde_json::json!({
+                    "agent_id": request.agent_id,
+                    "cause": "not the owner",
+                }),
+            );
+            return Err(error);
+        }
+    };
     let host = crate::agents::stored_agent_for_stop(
         &state.data_dir,
         &owner.principal.principal_id,
@@ -801,8 +1006,33 @@ async fn stop_agent(
         ))
         .into());
     }
-    let outcome = stop_runtime_agent(&state.data_dir, &request.agent_id).await?;
+    let outcome = match stop_runtime_agent(&state.data_dir, &request.agent_id).await {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            let _ = append_agent_lifecycle_audit(
+                &state.data_dir,
+                "agent.stopped",
+                &owner,
+                AgentAuditIds {
+                    challenge_id: None,
+                    capsule_id,
+                    session_id: None,
+                },
+                "failed",
+                serde_json::json!({ "agent_id": request.agent_id, "cause": "owner" }),
+            );
+            return Err(error);
+        }
+    };
     if outcome.stopped.is_empty() && outcome.stopping.is_empty() && outcome.unknown.is_empty() {
+        if outcome.already.as_deref() == Some("ended") {
+            return Ok(AgentStopResponse {
+                agent_id: request.agent_id,
+                stopped: Vec::new(),
+                stopping: Vec::new(),
+                unknown: Vec::new(),
+            });
+        }
         return Err(match outcome.already.as_deref() {
             Some("stopped") => CodedRefusal {
                 code: "agent_already_stopped",

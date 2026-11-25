@@ -5848,7 +5848,7 @@ mod tests {
         let settled = settle::settle_and_revoke(
             &pending,
             &manager,
-            data_dir.path(),
+            Some(data_dir.path()),
             "ended-capsule",
             "trapped",
         )

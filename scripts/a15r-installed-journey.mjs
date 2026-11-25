@@ -63,6 +63,10 @@ const names = [
   "step_up_approve", "one_authorised_write", "owner_document_unchanged",
   "one_result_and_receipt", "signed_start_audit", "signed_completion_audit",
   "card_removed", "replay_zero", "restart_zero",
+  "install_with_hashes_key_deleted", "u4_unknown_agent_refused", "u4_two_agents_one_host",
+  "card_step_up_approve_one_write_one_receipt", "owner_denial_signed_row",
+  "stop_during_step", "agents_off_during_run", "panic_in_host_call",
+  "home_restart_history",
 ];
 
 // Create only. The full journey's names stay the list above.
@@ -1258,13 +1262,15 @@ function gitFields() {
 function writeReceipt() {
   if (process.env.A15R_ONLY === "u3-create") return writeU3Receipt();
   const assertions = names.map((name) => marks.get(name) || { name, status: "not reached", detail: "" });
+  const proved = assertions.every((item) => item.status === "pass");
   const install = fs.existsSync(path.join(out, "install.json"))
     ? redactInstall(readJson(path.join(out, "install.json")))
     : {};
   const receipt = {
     mode: "full",
-    proof: false,
-    notice: FULL_MODE_NOTICE,
+    proof: proved,
+    notice: proved ? "" : FULL_MODE_NOTICE,
+    model: "offer:fixture",
     route: "POST /api/apps/system/agents/launch",
     step_up_operation: "agent.start",
     plan_step_up_operation: "agent_plan.approve",
@@ -1297,6 +1303,15 @@ async function main() {
   } else halt("release_signed", "install.json is missing a signed release");
   if (install.key_deleted && keyGone) pass("signing_key_deleted");
   else halt("signing_key_deleted", "disposable key is still present");
+  if (install.runtime_sha256 && install.wasm_sha256 && install.key_deleted && keyGone) {
+    pass("install_with_hashes_key_deleted", {
+      runtime_sha256: install.runtime_sha256,
+      wasm_sha256: install.wasm_sha256,
+      components_sha256: install.components_sha256 || "",
+      key_deleted: true,
+      source_commit: process.env.A15R_SOURCE_COMMIT || "",
+    });
+  } else halt("install_with_hashes_key_deleted", "install hashes or the deleted key are missing");
   if (install.runtime_sha256 && install.wasm_sha256 && install.components_sha256 && install.bundle_cid) {
     pass("installed_identity_recorded", {
       runtime_sha256: install.runtime_sha256,
@@ -1457,6 +1472,11 @@ async function main() {
     });
   }
   pass("u3_unknown_id_refused", noSuchAgent);
+  pass("u4_unknown_agent_refused", {
+    sentence: noSuchAgent,
+    source_commit: process.env.A15R_SOURCE_COMMIT || "",
+    host: "signed package",
+  });
 
   const activatedA = await call("POST", "/api/apps/system/agents/activate", state.systemToken, {
     agent_id: state.agentA, active: true,
@@ -1517,6 +1537,28 @@ async function main() {
     && state.rootA !== state.rootB;
   if (!distinct) halt("u4_distinct_roots", { a: state.rootA, b: state.rootB });
   pass("u4_distinct_roots", { a: state.rootA, b: state.rootB });
+  const secondStart = await (async () => {
+    const step = await stepUp(state.systemToken, "agent.start", { agent_id: state.agentA });
+    return call("POST", "/api/apps/system/agents/launch", state.systemToken, {
+      agent_id: state.agentA, step_up_token: step,
+    });
+  })();
+  const already = secondStart.status === 409 && String(secondStart.text).includes("already running");
+  if (!already || state.rootA === state.rootB) {
+    halt("u4_two_agents_one_host", {
+      status: secondStart.status,
+      body: String(secondStart.text).slice(0, 240),
+      roots: [state.rootA, state.rootB],
+    });
+  }
+  pass("u4_two_agents_one_host", {
+    source_commit: process.env.A15R_SOURCE_COMMIT || "",
+    host: "signed package",
+    a: state.agentA,
+    b: state.agentB,
+    roots: [state.rootA, state.rootB],
+    second_start: "already running",
+  });
 
   const routeReads = await attemptUserAreaRoute();
   if (!userAreaRouteRefused(routeReads)) {
@@ -1596,6 +1638,34 @@ async function main() {
   }
   pass("one_pending_record", state.requestId);
 
+  const stopping = await call("POST", "/api/apps/system/agents/stop", state.systemToken, {
+    agent_id: state.agentB,
+  });
+  let stopNamed = stopping.status === 200 || stopping.status === 202;
+  let stopFinal = null;
+  const stopDeadline = Date.now() + 20000;
+  while (Date.now() < stopDeadline) {
+    const rows = auditEvents().filter((event) => (
+      event.event_type === "agent.stopped" && String(event.reason || "").includes(state.agentB)
+    ));
+    const stoppingRow = rows.find((event) => event.result === "stopping");
+    stopFinal = rows.find((event) => (
+      (event.result === "ok" || event.result === "failed")
+      && (!stoppingRow || event.session_id === stoppingRow.session_id)
+    )) || null;
+    if (stopFinal) break;
+    await sleep(300);
+  }
+  if (stopNamed && stopFinal) {
+    pass("stop_during_step", {
+      http: stopping.status,
+      result: stopFinal.result,
+      session_id: stopFinal.session_id || "",
+    });
+  } else {
+    mark("stop_during_step", "fail", { status: stopping.status, body: stopping.text.slice(0, 240), final: Boolean(stopFinal) });
+  }
+
   const refused = await call("POST", "/api/apps/inbox/actions", state.inboxToken, {
     action_id: state.card.action_id,
     request_binding: state.card.request_binding,
@@ -1669,6 +1739,22 @@ async function main() {
     && settled.result
     && settled.status === "completed"
     && inspectRecords().length === 1);
+  const planeCoords = path.join(data, "agent-runtime-coords.json");
+  const planePid = fs.existsSync(planeCoords) ? Number(readJson(planeCoords).pid) : 0;
+  const gatewayPid = fs.existsSync(pidFile) ? Number(String(fs.readFileSync(pidFile, "utf8")).trim()) : 0;
+  const sameProcess = planePid > 0 && planePid === gatewayPid;
+  if (authorised && receiptOk && marks.get("step_up_approve")?.status === "pass" && sameProcess) {
+    pass("card_step_up_approve_one_write_one_receipt", {
+      admission_pid: planePid,
+      dispatch_pid: gatewayPid,
+      pids_equal: true,
+      source_commit: process.env.A15R_SOURCE_COMMIT || "",
+    });
+  } else {
+    halt("card_step_up_approve_one_write_one_receipt", {
+      authorised, receiptOk, admission_pid: planePid, dispatch_pid: gatewayPid,
+    });
+  }
   keep("one_result_and_receipt", receiptOk, {
     schema: "elastos.agent-plan.result/v1",
     count: inspectRecords().length,
@@ -1720,9 +1806,50 @@ async function main() {
       && JSON.stringify(auditEvents().map((event) => event.event_type)) === auditsBeforeRestart
       && JSON.stringify(interestingFiles()) === filesBeforeRestart;
     keep("restart_zero", restartClean, { status: restart.status, body: restart.text.slice(0, 240) });
+    const chain = auditEvents();
+    const finished = chain.some((event) => String(event.event_type).includes("completed") && event.result === "ok");
+    const unfinished = chain.some((event) => event.result === "stopping" || String(event.event_type).endsWith(".requested"));
+    if (restartClean && finished && unfinished) {
+      pass("home_restart_history", {
+        finished: "completed",
+        unfinished: "requested or stopping",
+        replay: restart.status,
+      });
+    } else {
+      mark("home_restart_history", "fail", { finished, unfinished, restart: restart.status });
+    }
   } catch (error) {
     mark("restart_zero", "fail", String(error.message || error));
   }
+
+  const guestAgain = await launchApp(state.guestToken, "system");
+  state.guestSystemToken = guestAgain.token;
+  const guestStop = await call("POST", "/api/apps/system/agents/stop", state.guestSystemToken, {
+    agent_id: state.agentA,
+  });
+  const denial = auditEvents().some((event) => event.event_type === "agent.stop.denied" && event.result === "denied");
+  if (guestStop.status !== 200 && denial) pass("owner_denial_signed_row", { status: guestStop.status });
+  else mark("owner_denial_signed_row", "fail", { status: guestStop.status, denial });
+
+  const off = await call("POST", "/api/apps/system/agents/disable", state.systemToken);
+  let again = { status: 0, text: "" };
+  try {
+    const step = await stepUp(state.systemToken, "agent.start", { agent_id: state.agentA });
+    again = await call("POST", "/api/apps/system/agents/launch", state.systemToken, {
+      agent_id: state.agentA, step_up_token: step,
+    });
+  } catch (error) {
+    again = { status: 0, text: String(error.message || error) };
+  }
+  const agentsOffRefused = off.status === 200
+    && again.status !== 200
+    && again.text.includes("not turned on");
+  if (agentsOffRefused) {
+    pass("agents_off_during_run", { off: off.status, start: again.status, body: again.text.slice(0, 180) });
+  } else {
+    mark("agents_off_during_run", "fail", { off: off.status, start: again.status, body: again.text.slice(0, 180) });
+  }
+  mark("panic_in_host_call", "fail", "the signed host has no panic switch; the unit row is a_panicking_host_call_leaves_the_session_and_home_up");
 }
 
 function loadInstall() {

@@ -411,7 +411,7 @@ the bytes that effect had already begun. That store is the same effect, not a
 new action, and the record is not changed to done or refused. A journal write
 still has to pass its revision check.
 
-Stop says stopped only when that session has ended and nothing of it is still landing. A refusal (409) stays a refusal when an earlier step is unknown, and a session that is stopping is not also listed as stopped. A Start during a landing effect answers "this agent is stopping", and that mark stays until the effect is settled or its record is unknown. The plan instance is bound before the guest runs. Unknown steps are capped per agent and dropped when that session's row is evicted. A provider stop that fails leaves the run able to act. Unknown steps are carried through the Runtime hop to the owner. A one-use grant is counted only after the plan admit. A one-use grant the effect spent is settled in the pending store, so a later Stop can still save that session's revocations. A settlement record write is retried a bounded number of times; if it still fails, the flight resolves as unknown and the stored record is not updated to a stronger status. Plans approved in the gateway process while the guest runs in a separate managed Runtime process are outside this branch.
+Stop says stopped only when that session has ended and nothing of it is still landing. A refusal (409) stays a refusal when an earlier step is unknown, and a session that is stopping is not also listed as stopped. A Start during a landing effect answers "this agent is stopping", and that mark stays until the effect is settled or its record is unknown. The plan instance is bound before the guest runs. Unknown steps are capped per agent and dropped when that session's row is evicted. A provider stop that fails leaves the run able to act. Unknown steps are carried through the Runtime hop to the owner. A one-use grant is counted only after the plan admit. A one-use grant the effect spent is settled in the pending store, so a later Stop can still save that session's revocations. A settlement record write is retried a bounded number of times; if it still fails, the flight resolves as unknown and the stored record is not updated to a stronger status. The agent plane runs inside the gateway process. An approved step is admitted and dispatched in that same process.
 
 This document does not freeze the exact path layout below `Users/...` or
 `UsersAI/...`. Those paths require their own versioned object contract before
@@ -432,6 +432,10 @@ an attach secret, and does not write the agent coordinates file. A build with
 the prototype feature still leaves the listener down until the owner allows
 agents on this Home. Allow starts that listener on loopback, on the Home data
 folder, without a second Home start. Off stops it. It serves only a stored agent.
+
+A15-R needs the owner to approve the exact plan an agent proposes, and the Runtime — not the agent — to decide which plan it is. The first clause rests on the plan card: the owner approves or denies that card, and the approval is bound to the agent, the running instance, and the exact step. The second clause rests on the Runtime choosing the stored plan by its request id and refusing a plan the agent names for itself.
+
+The plane writes two things in the Home data folder: `agent-runtime-coords.json`, and an empty `agent-runtime-storage/` folder. It writes nothing else of Home's. Its grants, asks, and revocations stay in memory. Home's own writer still appends the signed history and still writes the agent file.
 
 When a run ends, its asks are settled, its grants are revoked on the agent
 Runtime's own store, its plan admission is dropped, and each pending plan is

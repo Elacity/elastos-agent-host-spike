@@ -499,11 +499,16 @@ test("full mode notice names the missing agents-in-gateway route", () => {
   const gateway = fs.readFileSync(new URL("../elastos/crates/elastos-server/src/api/gateway.rs", import.meta.url), "utf8");
   const launch = fs.readFileSync(new URL("../elastos/crates/elastos-server/src/api/gateway_agents.rs", import.meta.url), "utf8");
   const detected = agentsInGatewayChange(gateway, launch);
-  assert.equal(detected.ok, false);
+  assert.equal(detected.ok, true, detected.reason);
   assert.equal(detected.route, "/api/apps/system/agents/launch");
+  const child = agentsInGatewayChange(
+    'route("/api/apps/system/agents/launch", post(agents_launch))',
+    "launch_runtime_agent();",
+  );
+  assert.equal(child.ok, false);
   const ready = agentsInGatewayChange(
     'route("/api/apps/system/agents/launch", post(agents_launch))',
-    "async fn start_agent() { start_in_gateway(); }",
+    "agent_plane::ensure_running(); launch_runtime_agent();",
   );
   assert.equal(ready.ok, true);
 });

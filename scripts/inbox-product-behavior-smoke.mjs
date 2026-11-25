@@ -376,7 +376,7 @@ async function runInboxHomeChromeSmoke() {
     const facts = descendants(detail).find(node => String(node.className || "").split(/\s+/).includes("entry-facts"));
     assert(Boolean(facts), "Agent plan card is not rendered as facts");
     const buttons = descendants(detail).filter(node => node.tagName === "BUTTON");
-    assert.deepEqual(buttons.map(button => button.textContent), ["Approve"], "Agent plan card offers exactly the approve action");
+    assert.deepEqual(buttons.map(button => button.textContent), ["Approve", "Deny"], "Agent plan card offers approve and deny");
     assert.equal(buttons[0].dataset.actionId, entry.action_ref.action_id);
     assert(!buttons.some(button => String(button.dataset.actionId || "").startsWith("notification-dismiss:")));
   }

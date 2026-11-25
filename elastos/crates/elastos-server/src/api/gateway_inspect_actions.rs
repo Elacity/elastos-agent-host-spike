@@ -489,15 +489,18 @@ fn append_agent_plan_decision_audit(
     )
 }
 
-fn finish_closed_plans(records: Vec<InspectActionRequestRecord>, data_dir: &FsPath) {
+fn finish_closed_plans(
+    records: Vec<InspectActionRequestRecord>,
+    data_dir: &FsPath,
+) -> anyhow::Result<()> {
     for record in &records {
         crate::resource_bridge::forget_one_agent_plan_authority(&record.request_id);
-        let _ =
-            append_agent_plan_decision_audit(data_dir, record, "agent.plan.closed", &record.status);
+        append_agent_plan_decision_audit(data_dir, record, "agent.plan.closed", &record.status)?;
     }
     if !records.is_empty() {
         crate::resource_bridge::notify_plan_waiters();
     }
+    Ok(())
 }
 
 /// Close this instance's pending plans as `outcome` in the same step that
@@ -511,7 +514,7 @@ pub(crate) fn close_instance_plans(
         record.id == capsule_id
     })?;
     let count = closed.len();
-    finish_closed_plans(closed, data_dir);
+    finish_closed_plans(closed, data_dir)?;
     Ok(count)
 }
 
@@ -524,14 +527,14 @@ pub(crate) fn close_agent_plans(
         record.requester_id.as_deref() == Some(agent_id)
     })?;
     let count = closed.len();
-    finish_closed_plans(closed, data_dir);
+    finish_closed_plans(closed, data_dir)?;
     Ok(count)
 }
 
 pub(crate) fn close_home_plans(data_dir: &FsPath, outcome: &str) -> anyhow::Result<usize> {
     let closed = store::close_pending_agent_plans(data_dir, outcome, now_ts(), |_| true)?;
     let count = closed.len();
-    finish_closed_plans(closed, data_dir);
+    finish_closed_plans(closed, data_dir)?;
     Ok(count)
 }
 
@@ -546,7 +549,7 @@ pub(crate) fn deny_agent_plan_request(
     if closed.is_empty() {
         anyhow::bail!("agent plan is not pending");
     }
-    finish_closed_plans(closed, data_dir);
+    finish_closed_plans(closed, data_dir)?;
     Ok("Denied agent plan.".to_string())
 }
 
@@ -557,7 +560,7 @@ pub(crate) fn expire_pending_agent_plans(data_dir: &FsPath) -> anyhow::Result<us
         now.saturating_sub(record.created_at) >= PLAN_DECISION_SECS
     })?;
     let count = closed.len();
-    finish_closed_plans(closed, data_dir);
+    finish_closed_plans(closed, data_dir)?;
     Ok(count)
 }
 
@@ -566,7 +569,7 @@ pub(crate) fn expire_pending_agent_plans(data_dir: &FsPath) -> anyhow::Result<us
 /// provider can answer "did this step happen" today, so a step the test
 /// provider does not name is `unresolved` and is not dispatched again.
 pub(crate) fn reconcile_lost_plan_receipts(data_dir: &FsPath) -> anyhow::Result<usize> {
-    let _ = expire_pending_agent_plans(data_dir);
+    expire_pending_agent_plans(data_dir)?;
     let records = store::load_agent_plan_records(data_dir)?;
     let mut settled = 0;
     for record in records {
@@ -650,7 +653,6 @@ impl Drop for UnsettledDispatch {
         });
     }
 }
-
 
 /// Claim the stored step, audit the claim, then let its settlement outlive the
 /// Inbox request. A stopped process still leaves a one-way claim.

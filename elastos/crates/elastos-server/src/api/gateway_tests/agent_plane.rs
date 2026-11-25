@@ -1137,6 +1137,7 @@ async fn a_panicking_agent_runtime_task_is_named_and_home_keeps_serving() {
         crate::api::agent_plane::TASK_ENDED,
         "{value}"
     );
+    assert_eq!(value["stop_already"], "ended", "{value}");
 }
 
 async fn host_panic_child() {
@@ -1236,6 +1237,8 @@ async fn task_panic_child() {
         "grant",
     )
     .await;
+    let stop =
+        super::super::gateway_home_runtime::stop_runtime_agent(&home.data, "agent:absent").await;
     let home_status = http_status(&format!("http://{}/healthz", gateway.addr)).await;
     println!(
         "MEASURE {}",
@@ -1243,6 +1246,7 @@ async fn task_panic_child() {
             "kind": "task",
             "fault": fault,
             "launch": launch.err().map(|error| error.to_string()),
+            "stop_already": stop.ok().and_then(|outcome| outcome.already),
             "home": home_status,
         })
     );
@@ -1393,9 +1397,15 @@ async fn a_used_storage_grant_is_refused_after_stop_on_the_plane() {
         .await
         .unwrap();
     assert!(manager.can_still_validate(&token).await);
-    crate::api::handlers::settle::settle_and_revoke(&store, &manager, &dir, session, "stopped")
-        .await
-        .unwrap();
+    crate::api::handlers::settle::settle_and_revoke(
+        &store,
+        &manager,
+        Some(&dir),
+        session,
+        "stopped",
+    )
+    .await
+    .unwrap();
     assert!(
         !manager.can_still_validate(&token).await,
         "a used storage grant still validated after stop on the plane"

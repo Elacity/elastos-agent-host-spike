@@ -63,6 +63,9 @@ export function bindAgents(doc, request, confirmStepUp) {
 
   function paint() {
     const banner = failure || (pendingId === "create" || pendingId === "allow" ? pendingLabel : "");
+    for (const node of doc.querySelectorAll('[data-settings="agents"]')) {
+      node.hidden = gate === "missing";
+    }
     statusNode.textContent = banner || (gate === "missing" ? "Agents are not built into this Runtime" : gate === "off" ? HOME_OFF : "");
     formNode.hidden = gate !== "ready";
     allowButton.hidden = gate !== "off";
@@ -142,9 +145,13 @@ export function bindAgents(doc, request, confirmStepUp) {
     agents = body.agents;
     gate = "ready";
     // The list is this Home's agent file. It does not read the Runtime's
-    // stopping mark, so a reload shows the stored on/off state.
+    // stopping mark, so a reload shows the stored on/off state. An agent
+    // that is no longer on leaves the running set, so Start is offered again.
     stopping.clear();
     running.clear();
+    for (const agent of agents) {
+      if (agent.active !== true) running.delete(agent.agent_id);
+    }
   }
 
   function post(id, label, path, body, accept) {

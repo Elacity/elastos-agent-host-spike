@@ -425,22 +425,25 @@ fn write_inspect_action_at_path(
     Ok(())
 }
 
-/// The store lock is per process, so an update successor can mark a plan
-/// unknown after the draining process completed it. Between this read and
-/// this write, another process can change the same file, and this write
-/// then replaces that change. A write that fails is skipped, and that
-/// record stays `dispatching`.
+/// One startup pass. An `approved` or `dispatching` plan did not finish in
+/// the process that admitted it. It becomes `unresolved` and one signed
+/// `agent_plan.dispatch.unresolved` row is appended. It is not dispatched
+/// again. A write that fails is skipped, and that record stays as it was.
 pub(super) fn settle_agent_plans_lost_before_start(
     data_dir: &Path,
     updated_at: u64,
 ) -> anyhow::Result<()> {
     let _guard = inspect_action_store_lock()?;
     let records = load_inspect_action_records_skipping_unreadable(data_dir)?;
-    settle_records_in_place(records, updated_at);
+    settle_records_in_place(data_dir, records, updated_at);
     Ok(())
 }
 
-fn settle_records_in_place(records: Vec<(PathBuf, InspectActionRequestRecord)>, updated_at: u64) {
+fn settle_records_in_place(
+    data_dir: &Path,
+    records: Vec<(PathBuf, InspectActionRequestRecord)>,
+    updated_at: u64,
+) {
     let reason = "a dispatch cannot survive a restart";
     for (path, mut record) in records {
         if record.kind != AGENT_PLAN_KIND
@@ -448,14 +451,26 @@ fn settle_records_in_place(records: Vec<(PathBuf, InspectActionRequestRecord)>, 
         {
             continue;
         }
-        record.status = "unknown".into();
+        record.status = "unresolved".into();
         record.error = Some(reason.into());
-        record.result = Some(serde_json::json!({ "status": "unknown", "reason": reason }));
+        record.result = Some(serde_json::json!({ "status": "unresolved", "reason": reason }));
         record.updated_at = updated_at;
         if let Err(error) = write_inspect_action_at_path(&path, &record) {
             eprintln!(
                 "[gateway] skipped inspect action record {}: {error}",
                 path.display()
+            );
+            continue;
+        }
+        if let Err(error) = super::append_agent_plan_decision_audit(
+            data_dir,
+            &record,
+            "agent_plan.dispatch.unresolved",
+            "unresolved",
+        ) {
+            eprintln!(
+                "[gateway] unresolved plan {} has no signed row: {error}",
+                record.request_id
             );
         }
     }
@@ -588,7 +603,7 @@ mod tests {
         );
         settle_agent_plans_lost_before_start(dir.path(), 9).unwrap();
         let stored = read_inspect_action_record(dir.path(), "agent-plan-good").unwrap();
-        assert_eq!(stored.status, "unknown");
+        assert_eq!(stored.status, "unresolved");
         assert_eq!(
             stored.error.as_deref(),
             Some("a dispatch cannot survive a restart")
@@ -621,8 +636,8 @@ mod tests {
             serde_json::from_slice(&std::fs::read(&kept_path).unwrap()).unwrap();
         let dotted_stored: InspectActionRequestRecord =
             serde_json::from_slice(&std::fs::read(&dotted_path).unwrap()).unwrap();
-        assert_eq!(kept_stored.status, "unknown");
-        assert_eq!(dotted_stored.status, "unknown");
+        assert_eq!(kept_stored.status, "unresolved");
+        assert_eq!(dotted_stored.status, "unresolved");
         assert!(
             !root.join("other-id.json").exists(),
             "a mismatched request id was settled into a new file"
@@ -664,7 +679,7 @@ mod tests {
             read_inspect_action_record(dir.path(), "agent-plan-good")
                 .unwrap()
                 .status,
-            "unknown"
+            "unresolved"
         );
         let stuck_text = std::fs::read_to_string(&stuck_path).unwrap();
         assert!(
@@ -706,12 +721,67 @@ mod tests {
             .path()
             .join("no-such-dir")
             .join("agent-plan-missing-dir.json");
-        settle_records_in_place(vec![(missing, stuck), (good_path, good)], 9);
+        settle_records_in_place(dir.path(), vec![(missing, stuck), (good_path, good)], 9);
         assert_eq!(
             read_inspect_action_record(dir.path(), "agent-plan-good")
                 .unwrap()
                 .status,
-            "unknown"
+            "unresolved"
         );
+    }
+
+    /// The startup pass sees a record the real claim moved to `dispatching`,
+    /// writes `unresolved`, and appends that signed row once.
+    #[test]
+    fn a_claimed_dispatch_is_unresolved_on_the_next_start() {
+        let dir = tempfile::tempdir().unwrap();
+        let owner = "person:owner";
+        let plan = serde_json::json!({
+            "steps": [{ "scheme": "availability", "operation": "status", "request": {} }]
+        });
+        let created = super::super::submit_pending_agent_plan(
+            dir.path(),
+            owner,
+            "agent:v2:0123456789abcdef0123456789abcdef",
+            "capsule:agent-host",
+            "session:agent-1",
+            &plan,
+            1,
+        )
+        .unwrap();
+        let request_id = created["request_id"].as_str().unwrap().to_string();
+        let binding = created["request_binding"].clone();
+        super::claim_pending_agent_plan_for_owner(
+            dir.path(),
+            &request_id,
+            owner,
+            true,
+            &binding,
+            2,
+            |_| Ok(()),
+        )
+        .unwrap();
+        let claimed =
+            super::claim_approved_agent_plan_for_dispatch(dir.path(), &request_id, owner, 3)
+                .unwrap();
+        assert_eq!(claimed.status, "dispatching");
+        super::settle_agent_plans_lost_before_start(dir.path(), 4).unwrap();
+        assert_eq!(
+            super::read_inspect_action_record(dir.path(), &request_id)
+                .unwrap()
+                .status,
+            "unresolved"
+        );
+        let unresolved = |path: &std::path::Path| {
+            crate::auth::load_auth_state(path)
+                .unwrap()
+                .audit
+                .into_iter()
+                .filter(|event| event.event_type == "agent_plan.dispatch.unresolved")
+                .count()
+        };
+        assert_eq!(unresolved(dir.path()), 1);
+        super::settle_agent_plans_lost_before_start(dir.path(), 5).unwrap();
+        assert_eq!(unresolved(dir.path()), 1, "the row is appended once");
     }
 }

@@ -104,13 +104,16 @@ function mount(request, confirmStepUp) {
     "#agent-retry": Object.assign(element("button"), { hidden: true }),
   };
   for (const [id, node] of Object.entries(nodes)) node.id = id.slice(1);
+  const agentsNav = element("a");
   const doc = {
     defaultView: { crypto: { randomUUID: () => "11111111-1111-4111-8111-111111111111" } },
     createElement: element,
     querySelector: (selector) => nodes[selector] || query({ children: Object.values(nodes) }, selector),
+    querySelectorAll: (selector) => (selector === '[data-settings="agents"]' ? [agentsNav] : []),
   };
   const bound = bindAgents(doc, request, confirmStepUp);
   return {
+    nav: agentsNav,
     status: nodes["#agents-status"],
     name: nodes["#agent-name"],
     host: nodes["#agent-host"],
@@ -269,6 +272,7 @@ test("a Runtime without agents says so and offers no create or retry", async () 
   });
   await ui.load();
   assert.equal(ui.status.textContent, "Agents are not built into this Runtime");
+  assert.equal(ui.nav.hidden, true, "a default build hides the Agents entry");
   assert.equal(ui.form.hidden, true);
   assert.equal(ui.allow.hidden, true);
   assert.equal(ui.retry.hidden, true);
@@ -648,6 +652,28 @@ test("a refused Start with the already-running code stays Running and does not o
   await ui.load();
   assert.equal(ui.state(AGENT_ID), "On");
   assert.equal(ui.button("Start").disabled, false);
+});
+
+test("a refresh drops a running id when the row is not active", async () => {
+  let active = true;
+  const ui = mount((path, init = {}) => {
+    if ((init.method || "GET") === "GET") {
+      return Promise.resolve({
+        agents: [{ agent_id: AGENT_ID, display_name: "Helper", active }],
+      });
+    }
+    return refusal("agent_already_running", "this agent is already running");
+  }, () => Promise.resolve("step-token"));
+  await ui.load();
+  ui.button("Start").click();
+  await flush();
+  await flush();
+  await flush();
+  assert.equal(ui.state(AGENT_ID), "Running");
+  active = false;
+  await ui.load();
+  assert.equal(ui.state(AGENT_ID), OFF);
+  assert.equal(ui.button("Start"), null);
 });
 
 test("a refused Start with the stopping code stays Stopping", async () => {

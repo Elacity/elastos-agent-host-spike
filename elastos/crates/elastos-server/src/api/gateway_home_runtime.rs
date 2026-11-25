@@ -655,12 +655,10 @@ struct RuntimeAgentLaunchResponse {
     status: String,
 }
 
-/// The runtime that runs the agent. The agent plane's coordinates win when
-/// they are live: that is the runtime the plane started. When they are not,
-/// the Home runtime's coordinates are the hop the signed lifecycle used, so
-/// a Home that has not started the plane, and a test stub of that hop, still
-/// start and stop the guest. A plane task that has ended is named and is not
-/// hidden by the Home file.
+/// The runtime that runs the agent. That is the agent plane in this process.
+/// When the plane is down, Start is refused by name and no plan is created.
+/// A plane task that has ended is named, and Stop and retire treat the guest
+/// as already ended.
 async fn live_agent_coords(
     data_dir: &FsPath,
 ) -> anyhow::Result<crate::runtime_control::RuntimeCoords> {
@@ -670,9 +668,7 @@ async fn live_agent_coords(
     if let Some(coords) = crate::api::agent_plane::live_coords(data_dir).await {
         return Ok(coords);
     }
-    load_live_runtime_coords(data_dir)
-        .await
-        .ok_or_else(|| anyhow::anyhow!("agent runtime is not running"))
+    anyhow::bail!("agent runtime is not running")
 }
 
 /// The short cause a failed launch carries in the signed row and the
@@ -680,13 +676,23 @@ async fn live_agent_coords(
 /// the log and never travels into the signed chain or the response.
 const RUNTIME_LAUNCH_FAILURE_CAUSE: &str = "the runtime did not start the agent host";
 
-/// A launch body that names a filesystem path. A 409 sentence such as
-/// "this agent is already running" has neither separator.
-fn text_has_host_path(text: &str) -> bool {
-    text.contains('/') || text.contains('\\')
+/// A 409 body is returned only when it is one of the Runtime's own refusal
+/// sentences. Any other body, including one that names a path, becomes the
+/// short cause.
+fn launch_conflict_sentence(body: &str) -> &'static str {
+    if body == crate::runtime::Runtime::AGENT_STOPPING {
+        return crate::runtime::Runtime::AGENT_STOPPING;
+    }
+    if body == crate::runtime::Runtime::AGENT_ALREADY_RUNNING {
+        return crate::runtime::Runtime::AGENT_ALREADY_RUNNING;
+    }
+    if body == crate::resource_bridge::PLAN_WAIT_FULL {
+        return crate::resource_bridge::PLAN_WAIT_FULL;
+    }
+    RUNTIME_LAUNCH_FAILURE_CAUSE
 }
 
-/// Ask the live Home Runtime to start one agent. `capsule_dir` is the
+/// Ask the live agent plane to start one agent. `capsule_dir` is the
 /// directory `verify_agent_host` already checked. The grant was minted by the
 /// caller after the passkey step-up was consumed.
 pub(super) async fn launch_runtime_agent(
@@ -695,7 +701,17 @@ pub(super) async fn launch_runtime_agent(
     agent_id: &str,
     launch_grant: &str,
 ) -> anyhow::Result<StartedRuntimeAgent> {
-    let coords = live_agent_coords(data_dir).await?;
+    let coords = match live_agent_coords(data_dir).await {
+        Ok(coords) => coords,
+        Err(error) => {
+            let text = error.to_string();
+            if text == "agent runtime is not running" || text == crate::api::agent_plane::TASK_ENDED
+            {
+                return Err(crate::agents::Refused(text).into());
+            }
+            return Err(error);
+        }
+    };
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(60))
         .build()?;
@@ -716,34 +732,31 @@ pub(super) async fn launch_runtime_agent(
     if status == StatusCode::CONFLICT {
         let text = response.text().await.unwrap_or_default();
         let trimmed = text.trim();
-        if trimmed == crate::runtime::Runtime::AGENT_STOPPING {
+        let sentence = launch_conflict_sentence(trimmed);
+        if sentence == crate::runtime::Runtime::AGENT_STOPPING {
             return Err(crate::agents::CodedRefusal {
                 code: "agent_stopping",
                 reason: "this agent is stopping",
             }
             .into());
         }
-        if trimmed == crate::runtime::Runtime::AGENT_ALREADY_RUNNING {
+        if sentence == crate::runtime::Runtime::AGENT_ALREADY_RUNNING {
             return Err(crate::agents::CodedRefusal {
                 code: "agent_already_running",
                 reason: "this agent is already running",
             }
             .into());
         }
-        return Err(crate::agents::Refused(trimmed.to_string()).into());
+        if sentence != RUNTIME_LAUNCH_FAILURE_CAUSE {
+            return Err(crate::agents::Refused(sentence.to_string()).into());
+        }
+        tracing::warn!("runtime launch refused ({status}): {trimmed}");
+        return Err(crate::agents::Refused(RUNTIME_LAUNCH_FAILURE_CAUSE.to_string()).into());
     }
     if !status.is_success() {
         let detail = response.text().await.unwrap_or_default();
         // The body can name a bundle root. It stays in this log.
         tracing::warn!("runtime launch failed ({status}): {detail}");
-        let trimmed = detail.trim();
-        // A 409 with no host path is a named refusal ("this agent is
-        // stopping", "this agent is already running"). The sentence stays
-        // so that answer can keep its code. Any other body is stored and
-        // returned as the short cause below.
-        if status == StatusCode::CONFLICT && !trimmed.is_empty() && !text_has_host_path(trimmed) {
-            return Err(crate::agents::Refused(trimmed.to_string()).into());
-        }
         anyhow::bail!("runtime launch failed ({status}): {RUNTIME_LAUNCH_FAILURE_CAUSE}");
     }
     let payload = response.json::<RuntimeAgentLaunchResponse>().await?;
@@ -856,7 +869,18 @@ async fn stop_runtime_agent_rows(
     agent_id: &str,
     session_id: Option<&str>,
 ) -> anyhow::Result<RuntimeAgentStop> {
-    let coords = live_agent_coords(data_dir).await?;
+    let coords = match live_agent_coords(data_dir).await {
+        Ok(coords) => coords,
+        Err(error) if error.to_string() == crate::api::agent_plane::TASK_ENDED => {
+            return Ok(RuntimeAgentStop {
+                stopped: Vec::new(),
+                stopping: Vec::new(),
+                unknown: Vec::new(),
+                already: Some("ended".to_string()),
+            });
+        }
+        Err(error) => return Err(error),
+    };
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(60))
         .build()?;
@@ -2226,6 +2250,26 @@ async fn home_list_runtime_capsules(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_launch_conflict_passes_only_the_known_sentences() {
+        assert_eq!(
+            launch_conflict_sentence("this agent is already running"),
+            "this agent is already running"
+        );
+        assert_eq!(
+            launch_conflict_sentence("this agent is stopping"),
+            "this agent is stopping"
+        );
+        assert_eq!(
+            launch_conflict_sentence(crate::resource_bridge::PLAN_WAIT_FULL),
+            crate::resource_bridge::PLAN_WAIT_FULL
+        );
+        assert_eq!(
+            launch_conflict_sentence("refused /tmp/home/agent"),
+            RUNTIME_LAUNCH_FAILURE_CAUSE
+        );
+    }
 
     #[cfg(unix)]
     #[test]

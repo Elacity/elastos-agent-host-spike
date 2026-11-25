@@ -1620,6 +1620,63 @@ fn retire_happens_once_and_only_for_the_owner() {
     );
 }
 
+/// The tombstone is stored and the audit append fails. The next open under
+/// the agent lock appends that retire row once, and the second retire is
+/// already retired.
+#[test]
+fn a_lost_retire_row_is_appended_once_on_the_next_open() {
+    if crate::agents::require_build().is_err() {
+        return;
+    }
+    let home = Home::new();
+    turn_on(&home);
+    let agent = create_one(&home, "request-lost-retire");
+    crate::agents::FAIL_RECORD_AUDIT.store(true, std::sync::atomic::Ordering::SeqCst);
+    let failed = retire_in_any_build(home.path(), &home.caller(), &agent.agent_id, 11);
+    assert!(failed.is_err(), "the injected append failure must surface");
+    assert!(
+        home.agent_events()
+            .iter()
+            .all(|event| event.event_type != "agent.record.retire"),
+        "the failed append left no retire row"
+    );
+    let again = retire_in_any_build(home.path(), &home.caller(), &agent.agent_id, 12);
+    assert_eq!(refusal_of(again), ALREADY_RETIRED);
+    let retires: Vec<_> = home
+        .agent_events()
+        .into_iter()
+        .filter(|event| event.event_type == "agent.record.retire")
+        .collect();
+    assert_eq!(retires.len(), 1, "the repair appends the retire row once");
+}
+
+#[test]
+fn an_off_agent_is_not_stored_for_its_root() {
+    if crate::agents::require_build().is_err() {
+        return;
+    }
+    let home = Home::new();
+    turn_on(&home);
+    let agent = create_one(&home, "request-off");
+    let _ =
+        crate::agents::set_active(home.path(), &home.caller(), &agent.agent_id, true, 10).unwrap();
+    let root =
+        crate::auth::principal_stored_localhost_root(Some(home.path()), &agent.agent_id).unwrap();
+    assert!(
+        crate::agents::stored_agent_for_root(home.path(), &agent.agent_id, &root)
+            .unwrap()
+            .is_some()
+    );
+    crate::agents::set_active(home.path(), &home.caller(), &agent.agent_id, false, 11).unwrap();
+    assert!(
+        crate::agents::stored_agent_for_root(home.path(), &agent.agent_id, &root)
+            .unwrap()
+            .is_none(),
+        "an off agent is not stored for its root"
+    );
+    assert!(crate::agents::refuse_inactive_agent(home.path(), &agent.agent_id).is_err());
+}
+
 #[test]
 fn rename_changes_display_name_only() {
     let home = Home::new();

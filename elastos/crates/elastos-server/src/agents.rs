@@ -534,6 +534,12 @@ struct Opened {
 
 /// Loads both files, under the agent lock when the operation will write.
 /// Refuses when the agent file fails a rule.
+/// Test seam: the next agent-file write stores the bytes and returns before
+/// the audit row. The following open under the agent lock appends that row.
+#[cfg(test)]
+pub(crate) static FAIL_RECORD_AUDIT: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
 fn open(data_dir: &Path, for_write: bool) -> anyhow::Result<Opened> {
     let lock = match for_write {
         true => Some(lock_for_write(data_dir)?),
@@ -556,6 +562,33 @@ fn open(data_dir: &Path, for_write: bool) -> anyhow::Result<Opened> {
             return refused(format!("agents are unavailable: {reason}"))
         }
     };
+    if for_write {
+        if let Some(agent) = file
+            .agents
+            .iter()
+            .find(|agent| agent.record.retired_at.is_some())
+        {
+            let bytes = std::fs::read(agent_file_path(data_dir)?)?;
+            let Some(owner_id) = agent.record.owner.as_deref() else {
+                anyhow::bail!("retired agent names no owner");
+            };
+            let proof = owner_file
+                .iter()
+                .find(|record| record.principal_id == owner_id)
+                .map(|record| record.proof_binding_id.as_str());
+            if proof.is_none() {
+                anyhow::bail!("retired agent's owner is not in the sign-in file");
+            }
+            crate::agent_record_audit::repair_missing_retire(
+                data_dir,
+                file.sequence,
+                &agent.record.principal_id,
+                agent.record.retired_at,
+                proof,
+                &bytes,
+            )?;
+        }
+    }
     Ok(Opened {
         lock,
         owner_file,
@@ -585,6 +618,10 @@ fn write(
     }
     let bytes = serde_json::to_vec_pretty(after)?;
     crate::auth::atomic_write(&agent_file_path(data_dir)?, &bytes)?;
+    #[cfg(test)]
+    if FAIL_RECORD_AUDIT.swap(false, std::sync::atomic::Ordering::SeqCst) {
+        anyhow::bail!("injected agent record audit failure");
+    }
     let digest = hex::encode(Sha256::digest(&bytes));
     crate::auth::append_audit_event(
         data_dir,
@@ -604,6 +641,34 @@ fn write(
             signature: None,
         },
     )
+}
+
+/// An agent that is off, retired, or on a Home with agents off cannot ask,
+/// be granted, or use its storage. A principal that is not an agent is left
+/// alone, so a person's capsule is unchanged.
+pub(crate) fn refuse_inactive_agent(data_dir: &Path, principal_id: &str) -> anyhow::Result<()> {
+    if principal_id.is_empty() || !build_allows_for_home(data_dir) {
+        return Ok(());
+    }
+    let opened = open(data_dir, false)?;
+    let Some(agent) = opened
+        .file
+        .agents
+        .iter()
+        .find(|agent| agent.record.principal_id == principal_id)
+    else {
+        return Ok(());
+    };
+    if opened.file.enabled.is_none() {
+        return refused(NOT_ENABLED);
+    }
+    if agent.record.retired_at.is_some() {
+        return refused(ALREADY_RETIRED);
+    }
+    if !agent.active {
+        return refused(NOT_ACTIVE);
+    }
+    Ok(())
 }
 
 /// Wraps an agent's data key under the key `auth` derived for it. The nonce
@@ -1192,6 +1257,8 @@ pub(crate) fn stored_agent_for_root(
         .find(|agent| {
             agent.record.principal_id == principal_id
                 && agent.record.localhost_root == localhost_root
+                && agent.active
+                && agent.record.retired_at.is_none()
         })
         .cloned())
 }

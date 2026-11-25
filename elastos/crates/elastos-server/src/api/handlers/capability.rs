@@ -30,6 +30,10 @@ pub struct CapabilityState {
     /// The same store `capability_manager` holds: revocations, use counts, epoch.
     pub capability_store: Arc<CapabilityStore>,
     pub policy_evaluator: Arc<PolicyEvaluator>,
+    /// The agent plane sets this to the Home folder. An inactive agent is
+    /// refused before a pending request is created. Other callers leave it
+    /// unset, and a person is never an agent principal.
+    pub agent_home: Option<std::path::PathBuf>,
 }
 
 // === Request Capability ===
@@ -141,6 +145,18 @@ pub async fn request_capability(
             token: None,
             reason: Some(reason),
         }));
+    }
+
+    if let Some(dir) = state.agent_home.as_deref() {
+        let principal = session.vm_id.as_deref().unwrap_or("");
+        if let Err(error) = crate::agents::refuse_inactive_agent(dir, principal) {
+            return Ok(Json(RequestCapabilityOutput {
+                status: "denied".to_string(),
+                request_id: None,
+                token: None,
+                reason: Some(error.to_string()),
+            }));
+        }
     }
 
     let resource = ResourceId::new(&input.resource);
@@ -1113,6 +1129,7 @@ mod tests {
                 Box::new(elastos_runtime::capability::evaluator::ShellPassthroughVerifier),
                 audit_log,
             )),
+            agent_home: None,
         }
     }
 
@@ -1715,6 +1732,7 @@ mod tests {
                 Box::new(elastos_runtime::capability::evaluator::ShellPassthroughVerifier),
                 audit_log,
             )),
+            agent_home: None,
         };
         (state, key)
     }

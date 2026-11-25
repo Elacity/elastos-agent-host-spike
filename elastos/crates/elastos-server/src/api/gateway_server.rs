@@ -147,6 +147,7 @@ pub(super) async fn start_gateway_server_with_shutdown(
         );
     } else if let Err(error) =
         super::gateway_inspect_actions::settle_agent_plans_lost_before_start(&data_dir)
+            .and_then(|_| super::gateway_agents::confirm_stopping_rows(&data_dir))
     {
         browser_lifecycle_reconciler.cancel();
         let _ = browser_lifecycle_reconciler.join().await;
@@ -1314,7 +1315,7 @@ mod trusted_gateway_tests {
                     value["status"].as_str().unwrap().to_string()
                 })
                 .collect();
-            if statuses == ["unknown", "unknown", "pending"]
+            if statuses == ["unresolved", "unresolved", "pending"]
                 || server.is_finished()
                 || tokio::time::Instant::now() >= read_deadline
             {
@@ -1367,14 +1368,14 @@ mod trusted_gateway_tests {
         };
         assert!(
             listened
-                && statuses == ["unknown", "unknown", "pending"]
+                && statuses == ["unresolved", "unresolved", "pending"]
                 && result.as_ref().is_ok_and(|value| {
-                    value["status"] == "unknown"
+                    value["status"] == "unresolved"
                         && value["dispatch_result"]["reason"]
                             == "a dispatch cannot survive a restart"
                 })
                 && dispatch_text.contains("not approved")
-                && after == "unknown",
+                && after == "unresolved",
             "stranded plans stayed {statuses:?}; result {result_text}; dispatch {dispatch_text}; after {after}; listened {listened}; server {joined:?}"
         );
     }

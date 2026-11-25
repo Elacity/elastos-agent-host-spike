@@ -790,6 +790,16 @@ struct InstanceAuthority {
     pending_store: Arc<elastos_runtime::capability::pending::PendingRequestStore>,
     capability_manager: Arc<elastos_runtime::capability::CapabilityManager>,
     data_dir: std::path::PathBuf,
+    /// Home writes `capability_store/pending_revocations`. The plane does not.
+    persist_revocations: bool,
+}
+
+impl InstanceAuthority {
+    /// `Some` for Home's runtime. `None` for the agent plane, whose
+    /// revocations stay in the memory store this authority already holds.
+    fn revocation_dir(&self) -> Option<&std::path::Path> {
+        self.persist_revocations.then_some(self.data_dir.as_path())
+    }
 }
 
 /// Settle one instance. `None` revokes nothing and reports success. `Some`
@@ -816,7 +826,7 @@ async fn settle_instance_authority(
             crate::api::handlers::settle::settle_and_revoke(
                 &authority.pending_store,
                 &authority.capability_manager,
-                &authority.data_dir,
+                authority.revocation_dir(),
                 capsule_id,
                 cause,
             )
@@ -1721,6 +1731,21 @@ impl Runtime {
     ///
     /// Also configures the component hostcall so component capsules can
     /// communicate with providers through Runtime-controlled authority.
+    /// The plane's grants live in its memory store. An end does not write
+    /// Home's pending revocation list. The plane's listener is Unix-only, so
+    /// this setter is too.
+    #[cfg(unix)]
+    pub(crate) fn keep_revocations_in_memory(&self) {
+        if let Some(authority) = self
+            .instance_authority
+            .write()
+            .unwrap_or_else(|err| err.into_inner())
+            .as_mut()
+        {
+            authority.persist_revocations = false;
+        }
+    }
+
     pub async fn set_provider_registry(
         &self,
         registry: Arc<ProviderRegistry>,
@@ -1737,6 +1762,7 @@ impl Runtime {
             pending_store: pending_store.clone(),
             capability_manager: capability_manager.clone(),
             data_dir: data_dir.clone(),
+            persist_revocations: true,
         });
         if let Some(ref component) = self.component_provider {
             let host_reg = registry.clone();
@@ -2434,26 +2460,9 @@ impl Runtime {
         })
     }
 
-    fn park_live_run(&self, live_run: AgentLiveRun) -> LiveRunSlot {
-        *self
-            .live_run_slot
-            .lock()
-            .unwrap_or_else(|err| err.into_inner()) = Some(live_run);
-        LiveRunSlot {
-            slot: Arc::clone(&self.live_run_slot),
-        }
-    }
-
-    fn take_parked_live_run(&self) -> Option<AgentLiveRun> {
-        self.live_run_slot
-            .lock()
-            .unwrap_or_else(|err| err.into_inner())
-            .take()
-    }
-
-    /// Revoke this agent's grants on this Runtime's own store and leave the
-    /// guest running. Agent off uses this so Stop can still reach the guest.
-    /// `None` authority revokes nothing.
+    /// Revoke this agent's grants on this Runtime's own store. The guest is
+    /// still running after this returns; the caller that turns the agent off
+    /// stops it next. `None` authority revokes nothing.
     pub(crate) async fn revoke_live_agent_grants(&self, agent_id: &str, cause: &str) {
         let sessions: Vec<String> = {
             let capsules = self.running_capsules.read().await;
@@ -2477,7 +2486,7 @@ impl Runtime {
             let _ = crate::api::handlers::settle::settle_and_revoke(
                 &authority.pending_store,
                 &authority.capability_manager,
-                &authority.data_dir,
+                authority.revocation_dir(),
                 &session,
                 cause,
             )
@@ -4804,6 +4813,7 @@ pub(crate) mod tests {
             pending_store: pending,
             capability_manager: std::sync::Arc::clone(&manager),
             data_dir: dir.path().to_path_buf(),
+            persist_revocations: true,
         };
         let set = super::settle_instance_authority(Some(&authority), session, "stopped").await;
         assert!(set.is_ok(), "{set:?}");
@@ -4843,6 +4853,45 @@ pub(crate) mod tests {
             if let Ok(mut guard) = self.bridge_manifest_capabilities.write() {
                 guard.insert(planted_id.to_string(), bounds);
             }
+        }
+
+        /// What a spend by `other_principal` does on the model account this
+        /// session holds. No account is `UnknownAgent`. An account whose key
+        /// is a different agent is `RunForOtherAgent`. The caller is a Unix
+        /// launch test.
+        #[cfg(unix)]
+        pub(crate) fn other_agent_model_spend(
+            &self,
+            session_id: &str,
+            other_principal: &str,
+        ) -> std::result::Result<(), crate::model_budget::Refusal> {
+            use crate::model_budget::{Refusal, RunKey};
+            use elastos_model_contract::RuntimeCreateBinding;
+            let held = self
+                .bridge_model_token_ceilings
+                .read()
+                .unwrap_or_else(|err| err.into_inner())
+                .get(session_id)
+                .cloned();
+            let Some(admission) = held else {
+                return Err(Refusal::UnknownAgent);
+            };
+            let binding = RuntimeCreateBinding {
+                schema: elastos_model_contract::RUNTIME_CREATE_BINDING_SCHEMA.to_string(),
+                principal_id: other_principal.to_string(),
+                session_id: session_id.to_string(),
+                capsule_id: "capsule:probe".to_string(),
+                grant_id: "grant:cross".to_string(),
+                request_id: format!("request:{other_principal}"),
+                offer_id: "offer:fixture".to_string(),
+                operation: "text.generate".to_string(),
+                input_hash: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+                    .to_string(),
+            };
+            let run = RunKey::of(&binding, "rev-test");
+            self.model_budget
+                .reserve(&admission.key, &run, 1)
+                .map(|_| ())
         }
 
         /// The account [`Self::model_dispatch_budget`] would hand this capsule.

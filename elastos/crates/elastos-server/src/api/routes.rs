@@ -245,7 +245,8 @@ pub async fn launch_capsule(
         }
         Err(elastos_common::ElastosError::InvalidManifest(message))
             if message == crate::runtime::Runtime::AGENT_STOPPING
-                || message == crate::runtime::Runtime::AGENT_ALREADY_RUNNING =>
+                || message == crate::runtime::Runtime::AGENT_ALREADY_RUNNING
+                || message == crate::resource_bridge::PLAN_WAIT_FULL =>
         {
             Err((StatusCode::CONFLICT, message))
         }
@@ -584,6 +585,7 @@ fn stopped_rows_for_unknown(unknown: &[UnknownPlanStepBody]) -> Vec<StoppedAgent
         .map(|session_id| StoppedAgentBody {
             session_id,
             status: "stopped".to_string(),
+            ended: true,
         })
         .collect()
 }
@@ -669,6 +671,7 @@ fn plan_write_still_open(runtime: &Runtime, agent_id: &str) -> Option<axum::resp
                     .map(|session_id| StoppedAgentBody {
                         session_id,
                         status: "stopping".to_string(),
+                        ended: false,
                     })
                     .collect(),
                 unknown,
@@ -797,6 +800,7 @@ async fn stop_collected_agent_rows(
         stopping.push(StoppedAgentBody {
             session_id,
             status: "stopping".to_string(),
+            ended: false,
         });
     }
     // A session named in stopping is not also named in stopped.
@@ -2086,6 +2090,7 @@ pub(crate) mod tests {
                     Box::new(ShellPassthroughVerifier),
                     self.audit_log.clone(),
                 )),
+                agent_home: None,
             }
         }
 
@@ -2768,6 +2773,60 @@ pub(crate) mod tests {
         assert_eq!(a_now.principal.as_deref(), Some(a.as_str()));
         assert_eq!(b_now.principal.as_deref(), Some(b.as_str()));
         assert_ne!(a_now.principal, b_now.principal, "two principals");
+        let grant_a = gateway::issue_home_agent_launch_token_with_context(
+            &home.data_dir,
+            a,
+            PROBE_HOST,
+            &home.context,
+        )
+        .expect("A's launch grant");
+        let grant_b = gateway::issue_home_agent_launch_token_with_context(
+            &home.data_dir,
+            b,
+            PROBE_HOST,
+            &home.context,
+        )
+        .expect("B's launch grant");
+        assert_ne!(grant_a, grant_b, "one host mints two launch grants");
+        assert!(
+            agent_launch_grant(&home.data_dir, PROBE_HOST, b, Some(grant_a.clone())).is_err(),
+            "A's grant is refused as B's launch"
+        );
+        assert!(
+            agent_launch_grant(&home.data_dir, PROBE_HOST, a, Some(grant_b.clone())).is_err(),
+            "B's grant is refused as A's launch"
+        );
+        assert!(agent_launch_grant(&home.data_dir, PROBE_HOST, a, Some(grant_a)).is_ok());
+        assert!(
+            crate::agents::stored_agent_for_root(&home.data_dir, a, &home.root(b))
+                .unwrap()
+                .is_none(),
+            "A is refused on B's storage"
+        );
+        assert!(
+            crate::agents::stored_agent_for_root(&home.data_dir, b, &home.root(a))
+                .unwrap()
+                .is_none(),
+            "B is refused on A's storage"
+        );
+        let spent_on_a = home.runtime.other_agent_model_spend(&a_launch.id, b);
+        let spent_on_b = home.runtime.other_agent_model_spend(&b_launch.id, a);
+        assert!(
+            matches!(
+                spent_on_a,
+                Err(crate::model_budget::Refusal::UnknownAgent)
+                    | Err(crate::model_budget::Refusal::RunForOtherAgent)
+            ),
+            "B is refused on A's model account: {spent_on_a:?}"
+        );
+        assert!(
+            matches!(
+                spent_on_b,
+                Err(crate::model_budget::Refusal::UnknownAgent)
+                    | Err(crate::model_budget::Refusal::RunForOtherAgent)
+            ),
+            "A is refused on B's model account: {spent_on_b:?}"
+        );
 
         // Release both guests: each is granted its own call, and both run to
         // an end with a cause.
@@ -10266,9 +10325,6 @@ pub(crate) mod tests {
             "a panic in Stop left Start refused"
         );
     }
-
-    mod instance_storage_rows;
-    mod instance_storage_rows_feature_off;
 }
 
 /// `POST /api/launch/open` (shell only), `{cid}`: start the content at `cid`

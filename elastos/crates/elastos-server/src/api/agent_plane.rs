@@ -44,6 +44,7 @@ pub(crate) fn task_fault(data_dir: &Path) -> Option<&'static str> {
     map.get(data_dir).copied()
 }
 
+#[cfg(unix)]
 fn note_fault(data_dir: &Path, name: &'static str) {
     if let Ok(mut map) = faults().lock() {
         map.insert(data_dir.to_path_buf(), name);
@@ -66,18 +67,18 @@ pub(crate) fn dirs_lock_works() -> bool {
     dirs().lock().is_ok()
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 static REGISTRIES: OnceLock<
     Mutex<HashMap<PathBuf, std::sync::Arc<elastos_runtime::provider::ProviderRegistry>>>,
 > = OnceLock::new();
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 fn registries(
 ) -> &'static Mutex<HashMap<PathBuf, std::sync::Arc<elastos_runtime::provider::ProviderRegistry>>> {
     REGISTRIES.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 fn note_registry(
     data_dir: &Path,
     registry: std::sync::Arc<elastos_runtime::provider::ProviderRegistry>,
@@ -87,7 +88,7 @@ fn note_registry(
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 fn clear_registry(data_dir: &Path) {
     if let Ok(mut map) = registries().lock() {
         map.remove(data_dir);
@@ -95,7 +96,7 @@ fn clear_registry(data_dir: &Path) {
 }
 
 /// The provider registry this process installed for the agent Runtime.
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub(crate) fn installed_provider_registry(
     data_dir: &Path,
 ) -> Option<std::sync::Arc<elastos_runtime::provider::ProviderRegistry>> {
@@ -147,7 +148,7 @@ impl std::fmt::Debug for AgentPlane {
 impl AgentPlane {
     /// Stop every live guest first, so each end revokes that guest's grants
     /// and closes its pending plans, then stop the listener.
-    pub(crate) async fn shutdown(mut self) {
+    pub(crate) async fn shutdown(mut self) -> Vec<(String, String)> {
         let live: Vec<String> = self
             .runtime
             .list_capsules()
@@ -156,7 +157,15 @@ impl AgentPlane {
             .filter(|info| info.ended_at.is_none())
             .map(|info| info.id)
             .collect();
+        let mut ended = Vec::new();
         for id in live {
+            let agent_id = self
+                .runtime
+                .agent_session(&id)
+                .await
+                .map(|record| record.agent_id)
+                .unwrap_or_default();
+            ended.push((agent_id, id.clone()));
             let _ = self
                 .runtime
                 .stop_capsule_with_reason(&id, "agents off")
@@ -164,6 +173,7 @@ impl AgentPlane {
         }
         self.server.abort();
         let _ = tokio::time::timeout(Duration::from_secs(2), &mut self.watcher).await;
+        ended
     }
 }
 
@@ -173,7 +183,7 @@ impl Drop for AgentPlane {
         self.watcher.abort();
         let _ = std::fs::remove_file(&self.coords_path);
         clear_fault(&self.data_dir);
-        #[cfg(test)]
+        #[cfg(all(test, unix))]
         clear_registry(&self.data_dir);
         if let Ok(mut set) = dirs().lock() {
             set.remove(&self.data_dir);
@@ -258,17 +268,19 @@ pub(crate) async fn revoke_agent_grants(data_dir: &Path, agent_id: &str) {
 
 /// Stop the agent Runtime for this Home. Live guests end first, inside
 /// [`AgentPlane::shutdown`], so their grants and pending plans end with them.
-pub(crate) async fn stop_running(data_dir: &Path) {
+pub(crate) async fn stop_running(data_dir: &Path) -> Vec<(String, String)> {
     let plane = planes()
         .lock()
         .ok()
         .and_then(|mut held| held.remove(data_dir));
     if let Some(plane) = plane {
         let dir = plane.data_dir.clone();
-        plane.shutdown().await;
+        let ended = plane.shutdown().await;
         let _ = crate::api::gateway::close_home_plans(&dir, "agents off");
         crate::resource_bridge::notify_plan_waiters();
+        return ended;
     }
+    Vec::new()
 }
 
 /// A grant whose asker has no live capsule is refused. The shell session is
@@ -277,6 +289,7 @@ async fn grant_if_asker_is_live(
     State(state): State<crate::api::handlers::CapabilityState>,
     Extension(session): Extension<Session>,
     Extension(runtime): Extension<Arc<crate::runtime::Runtime>>,
+    Extension(data_dir): Extension<Option<PathBuf>>,
     Json(input): Json<crate::api::handlers::GrantRequestInput>,
 ) -> Response {
     if let Some(request) = state.pending_store.get_request(&input.request_id).await {
@@ -286,6 +299,13 @@ async fn grant_if_asker_is_live(
             .is_some_and(|info| info.ended_at.is_none());
         if !live {
             return (StatusCode::CONFLICT, "the asking session has ended").into_response();
+        }
+        if let Some(dir) = data_dir.as_deref() {
+            if let Some(record) = runtime.agent_session(request.session_id.as_str()).await {
+                if let Err(error) = crate::agents::refuse_inactive_agent(dir, &record.agent_id) {
+                    return (StatusCode::CONFLICT, error.to_string()).into_response();
+                }
+            }
         }
     }
     match crate::api::handlers::grant_request(State(state), Extension(session), Json(input)).await {
@@ -316,6 +336,7 @@ pub(crate) fn router(config: ServerConfig) -> anyhow::Result<Router> {
             Box::new(elastos_runtime::capability::evaluator::ShellPassthroughVerifier),
             config.capability_manager.audit_log().clone(),
         )),
+        agent_home: data_dir.clone(),
     };
     let mut capsules = Router::new()
         .route("/api/capsules", get(crate::api::routes::list_capsules))
@@ -326,7 +347,7 @@ pub(crate) fn router(config: ServerConfig) -> anyhow::Result<Router> {
     let capsules = capsules
         .layer(from_fn(shell_only_middleware))
         .layer(from_fn_with_state(api_state.clone(), auth_middleware))
-        .layer(Extension(data_dir))
+        .layer(Extension(data_dir.clone()))
         .layer(Extension(audit))
         .layer(Extension(pending))
         .layer(Extension(runtime.clone()));
@@ -337,6 +358,7 @@ pub(crate) fn router(config: ServerConfig) -> anyhow::Result<Router> {
             "/api/capability/deny",
             post(crate::api::handlers::deny_request),
         )
+        .layer(Extension(data_dir.clone()))
         .layer(Extension(runtime))
         .layer(from_fn(attach_shell_only))
         .layer(from_fn_with_state(api_state, auth_middleware))
@@ -416,25 +438,25 @@ async fn list_owner_pending(
     Json(serde_json::json!({ "requests": requests }))
 }
 
+#[derive(serde::Deserialize)]
+struct PlaneStopBody {
+    agent_id: String,
+}
+
 async fn stop_and_settle(
     Extension(runtime): Extension<Arc<crate::runtime::Runtime>>,
     Extension(audit): Extension<Arc<AuditLog>>,
     Extension(pending): Extension<Arc<PendingRequestStore>>,
     body: axum::body::Bytes,
 ) -> Response {
-    if let Some(agent_id) = serde_json::from_slice::<serde_json::Value>(&body)
-        .ok()
-        .and_then(|value| {
-            value
-                .get("agent_id")?
-                .as_str()
-                .map(str::trim)
-                .map(str::to_string)
-        })
-        .filter(|id| !id.is_empty())
-    {
-        let ids = runtime.live_sessions_for_agent(&agent_id).await;
-        deny_waiting_asks(&pending, &ids, &agent_id).await;
+    // The same fields Stop accepts. A body Stop will refuse does not deny
+    // the waiting asks.
+    if let Ok(request) = serde_json::from_slice::<PlaneStopBody>(&body) {
+        let agent_id = request.agent_id.trim();
+        if !agent_id.is_empty() {
+            let ids = runtime.live_sessions_for_agent(agent_id).await;
+            deny_waiting_asks(&pending, &ids, agent_id).await;
+        }
     }
     crate::api::routes::stop_agent_session(Extension(runtime), Extension(audit), body).await
 }
@@ -458,6 +480,26 @@ pub(crate) async fn deny_waiting_asks(
     }
 }
 
+/// A crashed write leaves `.{coords}.{nonce}.tmp` beside the coordinates,
+/// and that file holds the attach secret. Start removes those siblings
+/// before it writes a new file.
+#[cfg(unix)]
+fn sweep_coord_temps(data_dir: &Path) {
+    let Ok(entries) = std::fs::read_dir(data_dir) else {
+        return;
+    };
+    let prefix = format!(".{COORDS_FILE}.");
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        if name.starts_with(&prefix) && name.ends_with(".tmp") {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+}
+
 #[cfg(unix)]
 async fn start_owned(
     data_dir: PathBuf,
@@ -467,6 +509,7 @@ async fn start_owned(
     if owner.as_ref().map(|info| info.pid) != Some(std::process::id()) {
         anyhow::bail!("agent runtime starts for the owner of this data folder");
     }
+    sweep_coord_temps(&data_dir);
     let path = coords_path(&data_dir);
     match std::fs::symlink_metadata(&path) {
         Ok(meta) if meta.file_type().is_symlink() => {
@@ -536,6 +579,7 @@ async fn listen(
     runtime
         .set_provider_registry(registry, manager.clone(), pending.clone(), data_dir.clone())
         .await;
+    runtime.keep_revocations_in_memory();
     let mut secret = [0u8; 32];
     getrandom::getrandom(&mut secret)
         .map_err(|error| anyhow::anyhow!("OS randomness unavailable: {error}"))?;
@@ -792,11 +836,27 @@ mod tests {
     use elastos_runtime::session::{Session, SessionId, SessionType};
     use std::sync::Arc;
 
+    #[cfg(unix)]
+    #[test]
+    fn start_sweeps_a_planted_coordinates_temp_that_holds_a_secret() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let planted = dir
+            .path()
+            .join(format!(".{}.deadbeef.tmp", super::COORDS_FILE));
+        std::fs::write(&planted, b"attach-secret-plant").unwrap();
+        assert!(planted.is_file());
+        super::sweep_coord_temps(dir.path());
+        assert!(!planted.exists(), "start removes the planted secret file");
+    }
+
     #[test]
     fn the_plane_helpers_start_disarmed_and_a_fresh_folder_has_no_registry() {
         assert!(super::dirs_lock_works());
-        let dir = tempfile::tempdir().expect("temp dir");
-        assert!(super::installed_provider_registry(dir.path()).is_none());
+        #[cfg(unix)]
+        {
+            let dir = tempfile::tempdir().expect("temp dir");
+            assert!(super::installed_provider_registry(dir.path()).is_none());
+        }
         assert!(!super::PLANT_TASK_PANIC.load(std::sync::atomic::Ordering::Acquire));
         // The planter stays uncalled. Calling it here would arm a listener
         // that shares this process. A default test build still names it.

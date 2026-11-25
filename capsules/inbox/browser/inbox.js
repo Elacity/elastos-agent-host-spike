@@ -126,7 +126,8 @@
         || entry.kind === "service_access_grant"
         || entry.kind === "hosted_route_decision"
         || entry.kind === "hosted_route_history"
-        || entry.kind === "agent_plan";
+        || entry.kind === "agent_plan"
+        || entry.kind === "capability_request";
       return namedRequest ? text || fallback : publicInboxText(text, fallback);
     }
 
@@ -586,6 +587,7 @@
         ), "primary");
         approveButton.dataset.actionId = actionId;
         actions.appendChild(approveButton);
+        actions.appendChild(createActionButton("Deny", "agent-plan-deny-request:" + requestId, "danger"));
       } else if (typeof actionId === "string" && actionId.startsWith("inspect-approve-request:")) {
         const requestId = actionId.slice("inspect-approve-request:".length);
         const approveButton = createButton("Approve", (button) => approveInspectRequest(button, requestId), "primary");
