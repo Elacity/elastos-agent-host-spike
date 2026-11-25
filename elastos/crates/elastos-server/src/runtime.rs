@@ -2121,6 +2121,15 @@ impl Runtime {
         .await
     }
 
+    async fn reconcile_admitted_home(&self) {
+        match &*self.unsigned_capsules.read().await {
+            UnsignedCapsules::InstalledRelease(dir) | UnsignedCapsules::Refused(Some(dir)) => {
+                crate::setup::reconcile_capsule_start(dir);
+            }
+            _ => {}
+        }
+    }
+
     /// Load one local start. `admitted` is the walked manifest and entrypoint
     /// when this start may hand the bridge a stored agent's id; nothing is read
     /// again for them. A start with no record reads the folder and refuses an
@@ -2142,6 +2151,7 @@ impl Runtime {
             impl FnOnce(&CheckedBundle) + Send,
         ),
     ) -> Result<(CapsuleHandle, Signer)> {
+        self.reconcile_admitted_home().await;
         let (principal_id, grant_name) = launch;
         let (before_folder_walk, after_folder_walk) = walk_hooks;
         let admitted_launch = admitted.is_some();
@@ -2582,6 +2592,7 @@ impl Runtime {
         budget: Budget,
         mut after_walk: impl FnMut(&LabCid),
     ) -> std::result::Result<crate::page_launch::Started, BundleRefusal> {
+        crate::setup::reconcile_capsule_start(data_dir);
         // A start by CID names no stored agent, so an agent's own principal
         // is refused here before the walk begins.
         crate::agent_admission::refuse_unadmitted_agent_principal(principal_id.as_deref())
@@ -7244,5 +7255,61 @@ pub(crate) mod tests {
                 "{stops:?}"
             );
         });
+    }
+
+    #[cfg(unix)]
+    fn leave_unrecorded_swap(data: &std::path::Path) -> (std::path::PathBuf, String) {
+        let dest = data.join("capsules/chat-room");
+        std::fs::create_dir_all(dest.join("browser")).unwrap();
+        std::fs::write(
+            dest.join("capsule.json"),
+            include_bytes!("../../../../capsules/chat-room/capsule.json"),
+        )
+        .unwrap();
+        std::fs::write(dest.join("browser/index.html"), b"new page").unwrap();
+        let new_cid = crate::setup::walked_install_cid(&dest).unwrap();
+        let staged = dest.parent().unwrap().join(".capsule-stage-left");
+        std::fs::create_dir(&staged).unwrap();
+        crate::setup::write_capsule_install_intent(data, &dest, &new_cid, None, &staged).unwrap();
+        (dest, new_cid)
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_folder_start_finishes_an_unrecorded_swap() {
+        let (runtime, temp) = test_runtime().await;
+        runtime
+            .configure_capsule_admission(temp.path(), &[], false)
+            .await
+            .unwrap();
+        let (dest, new_cid) = leave_unrecorded_swap(temp.path());
+        let _ = runtime
+            .run_local(&temp.path().join("missing"), Vec::new())
+            .await;
+        assert_eq!(
+            crate::setup::recorded_install_cid(temp.path(), &dest).as_deref(),
+            Some(new_cid.as_str())
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_bundle_start_finishes_an_unrecorded_swap() {
+        let (runtime, temp) = test_runtime().await;
+        let (dest, new_cid) = leave_unrecorded_swap(temp.path());
+        let _ = runtime
+            .start_by_bundle(
+                temp.path(),
+                "not-a-cid",
+                Vec::new(),
+                None,
+                crate::bundle_admission::BUNDLE_WALK_BUDGET,
+                |_| {},
+            )
+            .await;
+        assert_eq!(
+            crate::setup::recorded_install_cid(temp.path(), &dest).as_deref(),
+            Some(new_cid.as_str())
+        );
     }
 }

@@ -152,6 +152,7 @@ async fn run_component_capsule(
     manifest: &elastos_common::CapsuleManifest,
     interactive: bool,
 ) -> anyhow::Result<()> {
+    crate::setup::reconcile_capsule_start(&default_data_dir());
     let runtime = crate::create_runtime(default_data_dir().join("storage")).await?;
     let api_url = coords.api_url.clone();
     let manifest_capabilities = manifest.resource_authority_bounds();

@@ -29,7 +29,8 @@ pub struct Supervisor {
 }
 
 impl Supervisor {
-    pub fn new(_data_dir: PathBuf, _registry: ComponentsManifest) -> Self {
+    pub fn new(data_dir: PathBuf, _registry: ComponentsManifest) -> Self {
+        crate::setup::reconcile_capsule_start(&data_dir);
         Self {
             #[cfg(test)]
             collaboration_chat_product_port: None,

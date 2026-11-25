@@ -51,6 +51,7 @@ pub async fn run_capsule(
     dev_unsigned_component: bool,
     capsule_args: Vec<String>,
 ) -> anyhow::Result<()> {
+    crate::setup::reconcile_capsule_start(&crate::default_data_dir());
     if dev_unsigned_component && (!with.is_empty() || carrier_addr.is_some() || cid.is_some()) {
         anyhow::bail!("--dev-unsigned-component takes only a local Component folder");
     }

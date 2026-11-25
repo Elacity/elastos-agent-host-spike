@@ -1944,6 +1944,7 @@ async fn serve_web_capsule(
     auto_open_browser: bool,
     public_preview_timeout_secs: Option<u64>,
 ) -> anyhow::Result<()> {
+    crate::setup::reconcile_capsule_start(&crate::sources::default_data_dir());
     // Read manifest if present (may have viewer field)
     let manifest_path = capsule_dir.join("capsule.json");
     let manifest: Option<elastos_common::CapsuleManifest> = if manifest_path.exists() {

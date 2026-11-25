@@ -68,6 +68,7 @@ where
     eprintln!("[gateway] ElastOS {} starting on {}", ELASTOS_VERSION, addr);
 
     let data_dir = default_data_dir();
+    crate::setup::reconcile_capsule_start(&data_dir);
     let _host_guard = crate::host_lock::acquire_host_process_lock(&data_dir, "gateway", &addr)?;
     crate::host_lock::spawn_installed_binary_supersession_watch(&data_dir, "gateway");
     crate::auth::verify_auth_audit_chain_ready(&data_dir)?;
@@ -114,6 +115,7 @@ where
     );
 
     let data_dir = default_data_dir();
+    crate::setup::reconcile_capsule_start(&data_dir);
     let _host_guard =
         crate::host_lock::acquire_host_process_lock(&data_dir, "gateway-public", &addr)?;
     crate::host_lock::spawn_installed_binary_supersession_watch(&data_dir, "gateway-public");

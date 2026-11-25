@@ -104,6 +104,9 @@ pub async fn launch_capsule(
     Extension(data_dir): Extension<Option<std::path::PathBuf>>,
     Json(req): Json<LaunchRequest>,
 ) -> Result<Json<LaunchResponse>, (StatusCode, String)> {
+    if let Some(dir) = data_dir.as_deref() {
+        crate::setup::reconcile_capsule_start(dir);
+    }
     if let Some(agent_id) = req.agent_id.as_deref() {
         if runtime.agent_is_stopping(agent_id).await {
             return Err((
@@ -619,6 +622,41 @@ pub(crate) mod tests {
             }
         }
         crate::auth::save_auth_state(data_dir, &state, None).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_launch_route_finishes_an_unrecorded_swap() {
+        let (runtime, temp) = crate::runtime::tests::test_runtime().await;
+        let dest = temp.path().join("capsules/chat-room");
+        std::fs::create_dir_all(dest.join("browser")).unwrap();
+        std::fs::write(
+            dest.join("capsule.json"),
+            include_bytes!("../../../../../capsules/chat-room/capsule.json"),
+        )
+        .unwrap();
+        std::fs::write(dest.join("browser/index.html"), b"new page").unwrap();
+        let new_cid = crate::setup::walked_install_cid(&dest).unwrap();
+        let staged = dest.parent().unwrap().join(".capsule-stage-left");
+        std::fs::create_dir(&staged).unwrap();
+        crate::setup::write_capsule_install_intent(temp.path(), &dest, &new_cid, None, &staged)
+            .unwrap();
+        let _ = launch_capsule(
+            Extension(std::sync::Arc::new(runtime)),
+            Extension(std::sync::Arc::new(AuditLog::new())),
+            Extension(Some(temp.path().to_path_buf())),
+            Json(LaunchRequest {
+                path: temp.path().join("missing").to_string_lossy().into_owned(),
+                principal_id: None,
+                launch_grant: None,
+                agent_id: None,
+            }),
+        )
+        .await;
+        assert_eq!(
+            crate::setup::recorded_install_cid(temp.path(), &dest).as_deref(),
+            Some(new_cid.as_str())
+        );
     }
 
     fn write_test_capsule(dir: &std::path::Path, name: &str) -> std::path::PathBuf {

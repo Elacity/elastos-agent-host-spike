@@ -3247,8 +3247,8 @@ fn read_capsule_install_intent(data_dir: &Path) -> IntentFile {
         return IntentFile::Unreadable;
     }
     let mut text = String::new();
-    let mut file = file;
-    if file.read_to_string(&mut text).is_err() {
+    let mut file = file.take(65_536);
+    if file.read_to_string(&mut text).is_err() || text.len() == 65_536 {
         return IntentFile::Unreadable;
     }
     match serde_json::from_str::<CapsuleInstallIntent>(&text) {
@@ -3346,6 +3346,12 @@ pub(crate) fn clear_install_cid(data_dir: &Path, dir: &Path) -> anyhow::Result<(
     write_install_cid_ledger(data_dir, dir, None)
 }
 
+pub fn reconcile_capsule_start(data_dir: &Path) {
+    if let Err(err) = reconcile_capsule_install(data_dir) {
+        eprintln!("  Capsule install reconcile failed ({err:#})");
+    }
+}
+
 /// Finish an install whose intent is still here. With no intent, this changes
 /// no record and deletes no tree: a CID enters the record only from an install
 /// this Home performed, and start does not compute one from a folder in place.
@@ -3401,11 +3407,17 @@ fn finish_capsule_install_intent(
         remove_finished_leftover(capsules, Path::new(&intent.staged))?;
         return Ok(());
     }
-    if intent
+    let previous_still_here = intent
         .previous_cid
         .as_deref()
-        .is_some_and(|cid| walked.as_deref() == Some(cid))
-    {
+        .is_some_and(|cid| walked.as_deref() == Some(cid));
+    let unused_first_stage = intent.previous_cid.is_none() && !real_directory(&dest);
+    if previous_still_here || unused_first_stage {
+        let staged = Path::new(&intent.staged);
+        let same = fs::canonicalize(staged).ok() == fs::canonicalize(&dest).ok();
+        if direct_leaf(capsules, staged, ".capsule-stage-") && !same {
+            fs::remove_dir_all(staged)?;
+        }
         remove_capsule_install_intent(data_dir)?;
         return Ok(());
     }
@@ -5917,13 +5929,25 @@ pub(crate) fn replace_directory(staged: &Path, dest: &Path) -> anyhow::Result<()
             )
         };
         if result != 0 {
-            return Err(std::io::Error::last_os_error())
-                .context("atomic replacement failed; previous files preserved");
+            return Err(atomic_exchange_error(std::io::Error::last_os_error()));
         }
         Ok(())
     }
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     anyhow::bail!("atomic replacement is unsupported on this host")
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn atomic_exchange_error(error: std::io::Error) -> anyhow::Error {
+    let unsupported = matches!(
+        error.raw_os_error(),
+        Some(libc::ENOSYS | libc::ENOTSUP | libc::EINVAL | libc::EOPNOTSUPP)
+    );
+    if unsupported {
+        anyhow::anyhow!("this file system does not support an atomic directory exchange ({error})")
+    } else {
+        anyhow::Error::from(error).context("atomic replacement failed; previous files preserved")
+    }
 }
 
 #[cfg(unix)]
@@ -5983,6 +6007,25 @@ fn copy_dir_recursive(src: &Path, dest: &Path) -> anyhow::Result<()> {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[test]
+    fn an_unsupported_directory_exchange_names_the_file_system() {
+        let named = super::atomic_exchange_error(std::io::Error::from_raw_os_error(libc::ENOTSUP));
+        let text = named.to_string();
+        assert!(
+            text.contains("does not support an atomic directory exchange"),
+            "{text}"
+        );
+        let other = super::atomic_exchange_error(std::io::Error::from_raw_os_error(libc::EIO));
+        let other = format!("{other:#}");
+        assert!(other.contains("previous files preserved"), "{other}");
+        assert!(
+            !other.contains("does not support an atomic directory exchange"),
+            "{other}"
+        );
+    }
+
     use crate::sources::{save_trusted_sources, TrustedSource, TrustedSourcesConfig};
     use elastos_common::{CapsuleManifest, CapsuleRole};
     use elastos_compute::providers::ComponentProvider;

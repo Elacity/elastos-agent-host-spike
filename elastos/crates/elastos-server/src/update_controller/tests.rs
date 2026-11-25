@@ -4097,11 +4097,10 @@ async fn restart_home_fixture() {
     let mut term =
         tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).unwrap();
     child::watch_parent().unwrap();
-    // The wrapper is the program the controller started. After it execs this
-    // harness, current_exe is the harness, whose bytes are not the wrapper.
-    // Authorize the path that wrapper was started as. On macOS that path is
-    // the private copy. A descriptor path that is already gone falls back to
-    // the installed file, which is the inode the controller checked.
+    // The wrapper's argv0 is the installed path, so `$0` is that file. This
+    // fixture authorizes the installed runtime. It does not exercise the macOS
+    // private copy; `a_private_copy_lists_the_installed_path` and the exec-copy
+    // release rows do. A missing `$0` falls back to the installed file.
     let started = std::env::var("ELASTOS_RESTART_STARTED_EXE")
         .ok()
         .map(std::path::PathBuf::from)

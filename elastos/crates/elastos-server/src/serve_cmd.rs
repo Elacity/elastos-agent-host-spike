@@ -31,6 +31,7 @@ pub async fn run_serve(
     capsule: Option<PathBuf>,
     cid: Option<String>,
 ) -> anyhow::Result<()> {
+    crate::setup::reconcile_capsule_start(&crate::default_data_dir());
     // The private-copy lock is the one in `main::run`, held for the process life.
     crate::runtime_control::watch_gateway_owner()?;
     let data_dir = crate::default_data_dir();

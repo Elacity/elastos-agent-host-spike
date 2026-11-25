@@ -42,6 +42,7 @@ enum CapsuleCommitStop {
     AfterRecordBeforeCleanup,
     AfterIntentBeforeLeftover,
     FailSecondRename,
+    FailRestore,
 }
 
 #[cfg(test)]
@@ -320,9 +321,7 @@ impl Supervisor {
     }
 
     pub fn new(data_dir: PathBuf, registry: ComponentsManifest) -> Self {
-        if let Err(err) = crate::setup::reconcile_capsule_install(&data_dir) {
-            eprintln!("  Capsule install reconcile failed ({err:#})");
-        }
+        crate::setup::reconcile_capsule_start(&data_dir);
         let capsules_dir = data_dir.join("capsules");
         let crosvm_bin =
             Self::resolve_external_install_path(&registry, &data_dir, "crosvm", "bin/crosvm");
@@ -924,6 +923,7 @@ impl Supervisor {
         capsule_args: Vec<String>,
         principal_id: Option<crate::resource_bridge::BridgePrincipal>,
     ) -> Result<(String, u32)> {
+        crate::setup::reconcile_capsule_start(&self.data_dir);
         // An agent's own principal reaches no VM: a stored agent launches
         // through the component admission, never here.
         crate::agent_admission::refuse_unadmitted_agent_principal(
@@ -1605,11 +1605,23 @@ fn commit_recorded_capsule(data_dir: &Path, dir: &Path, dest: &Path) -> Result<(
         bail!("stopped after the capsule exchange");
     }
     // The CID is the one walked from the staged tree, not a new walk of dest.
-    // A record path that cannot be replaced (a directory left in its place)
-    // leaves the install with no new row. The bytes stay.
+    // If it cannot be recorded, the previous tree comes back and this fails.
+    // If it cannot come back, both trees and the intent stay.
     if let Err(error) = crate::setup::record_prepared_install_cid(data_dir, dest, &new_cid) {
-        eprintln!("  No install CID record for {} ({error:#})", dest.display());
-        let _ = crate::setup::clear_install_cid(data_dir, dest);
+        if let Err(restore) = put_previous_capsule_back(dir, dest) {
+            bail!(
+                "the install CID was not recorded for {} ({error:#}); putting {} back failed ({restore:#}); both {} and {} stay",
+                dest.display(),
+                dir.display(),
+                dest.display(),
+                dir.display()
+            );
+        }
+        let _ = crate::setup::remove_capsule_install_intent(data_dir);
+        if dir.exists() {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+        return Err(error.context("the install CID was not recorded; the previous capsule is back"));
     }
     #[cfg(test)]
     if capsule_commit_stopped(CapsuleCommitStop::AfterRecordBeforeCleanup) {
@@ -1630,6 +1642,7 @@ fn commit_recorded_capsule(data_dir: &Path, dir: &Path, dest: &Path) -> Result<(
 /// record. There is no intent, so a crash does not teach start a CID.
 #[cfg(unix)]
 fn commit_unnamed_capsule(data_dir: &Path, dir: &Path, dest: &Path) -> Result<()> {
+    let _lock = crate::setup::lock_install_cids(data_dir)?;
     if let Err(error) = exchange_capsule_directory(dir, dest) {
         #[cfg(test)]
         if capsule_commit_stopped(CapsuleCommitStop::BetweenRenames) {
@@ -1650,6 +1663,20 @@ fn commit_unnamed_capsule(data_dir: &Path, dir: &Path, dest: &Path) -> Result<()
 #[cfg(test)]
 fn capsule_commit_stopped(stop: CapsuleCommitStop) -> bool {
     CAPSULE_COMMIT_STOP.with(|flag| flag.get() == stop)
+}
+
+fn put_previous_capsule_back(staged: &Path, dest: &Path) -> Result<()> {
+    #[cfg(test)]
+    if capsule_commit_stopped(CapsuleCommitStop::FailRestore) {
+        bail!("the file system refused to put the previous capsule back");
+    }
+    if staged.exists() {
+        exchange_capsule_directory(staged, dest)
+    } else if dest.exists() {
+        std::fs::rename(dest, staged).map_err(Into::into)
+    } else {
+        Ok(())
+    }
 }
 
 fn exchange_capsule_directory(staged: &Path, dest: &Path) -> Result<()> {
@@ -2387,7 +2414,8 @@ mod tests {
 
     /// After an install over `plant`, only one entry with the record's name is
     /// beside `dir`. A link kept its sentinel's bytes and is now a regular
-    /// record of the walk; a folder is unchanged, so the install has no record.
+    /// record of the walk. A folder cannot be replaced, so that install fails
+    /// and the previous tree is back; the folder itself is unchanged.
     #[cfg(unix)]
     fn assert_install_over(data: &Path, dir: &Path, plant: RecordPlant, files: &[&str]) {
         let record = crate::setup::install_cid_record(dir).unwrap();
@@ -2462,12 +2490,26 @@ mod tests {
             if let Some(plant) = plant {
                 plant_at_record(data.path(), &cache, plant);
             }
-            assert_eq!(supervisor.ensure_capsule("chat-room").await.unwrap(), cache);
+            let files = ["browser/index.html", "capsule.json"];
+            let installed = supervisor.ensure_capsule("chat-room").await;
+            if matches!(plant, Some(RecordPlant::Folder)) {
+                let error = installed.unwrap_err();
+                assert!(
+                    error.to_string().contains("previous capsule is back"),
+                    "{error}"
+                );
+                assert_eq!(
+                    std::fs::read(cache.join("browser/index.html")).unwrap(),
+                    b"third"
+                );
+                assert_install_over(data.path(), &cache, RecordPlant::Folder, &files);
+                continue;
+            }
+            assert_eq!(installed.unwrap(), cache);
             assert_eq!(
                 std::fs::read(cache.join("browser/index.html")).unwrap(),
                 page
             );
-            let files = ["browser/index.html", "capsule.json"];
             match plant {
                 Some(plant) => assert_install_over(data.path(), &cache, plant, &files),
                 None => recorded.push(assert_install_cid_names(&cache, &files)),
@@ -3454,14 +3496,14 @@ mod tests {
         assert!(
             std::fs::read_dir(dest.parent().unwrap())
                 .unwrap()
-                .any(|entry| {
-                    entry
+                .all(|entry| {
+                    !entry
                         .unwrap()
                         .file_name()
                         .to_string_lossy()
                         .starts_with(".capsule-stage-")
                 }),
-            "start does not delete a stage tree it cannot show belongs to a finished install"
+            "start removes the unused stage tree the intent names"
         );
         assert_eq!(
             std::fs::read(dest.join("browser/index.html")).unwrap(),
@@ -3471,19 +3513,6 @@ mod tests {
             crate::setup::recorded_install_cid(data, &dest).unwrap(),
             old_cid
         );
-        // The product leaves that stage tree. The rest of this test removes
-        // it so the next crash is the only leftover.
-        for entry in std::fs::read_dir(dest.parent().unwrap()).unwrap() {
-            let path = entry.unwrap().path();
-            if path
-                .file_name()
-                .and_then(|name| name.to_str())
-                .is_some_and(|name| name.starts_with(".capsule-stage-"))
-            {
-                std::fs::remove_dir_all(path).unwrap();
-            }
-        }
-
         CAPSULE_COMMIT_STOP.with(|flag| flag.set(CapsuleCommitStop::FailSwap));
         let error = commit_staged_capsule(data, stage(dest.parent().unwrap(), b"new page"), &dest)
             .unwrap_err();
@@ -3943,6 +3972,404 @@ mod tests {
             std::fs::read(dropped.join("browser/index.html")).unwrap(),
             b"nobody installed this"
         );
+    }
+
+    #[cfg(unix)]
+    fn plant_page(dir: &std::path::Path, page: &[u8]) {
+        std::fs::create_dir_all(dir.join("browser")).unwrap();
+        std::fs::write(
+            dir.join("capsule.json"),
+            include_bytes!("../../../../capsules/chat-room/capsule.json"),
+        )
+        .unwrap();
+        std::fs::write(dir.join("browser/index.html"), page).unwrap();
+    }
+
+    /// Destination holds the new bytes. The ledger does not. The intent names them.
+    #[cfg(unix)]
+    fn leave_unrecorded_swap(data: &std::path::Path) -> (std::path::PathBuf, String) {
+        let dest = data.join("capsules/chat-room");
+        plant_page(&dest, b"new page");
+        let new_cid = crate::setup::walked_install_cid(&dest).unwrap();
+        let staged = dest.parent().unwrap().join(".capsule-stage-left");
+        std::fs::create_dir(&staged).unwrap();
+        crate::setup::write_capsule_install_intent(data, &dest, &new_cid, None, &staged).unwrap();
+        assert!(crate::setup::recorded_install_cid(data, &dest).is_none());
+        (dest, new_cid)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn supervisor_start_finishes_an_unrecorded_swap() {
+        let root = tempfile::tempdir().unwrap();
+        let (dest, new_cid) = leave_unrecorded_swap(root.path());
+        let _ = Supervisor::new(root.path().to_path_buf(), empty_capsule_manifest());
+        assert_eq!(
+            crate::setup::recorded_install_cid(root.path(), &dest).as_deref(),
+            Some(new_cid.as_str())
+        );
+        assert!(!crate::setup::capsule_install_intent_path(root.path()).exists());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_supervisor_launch_finishes_an_unrecorded_swap() {
+        let root = tempfile::tempdir().unwrap();
+        let supervisor = Supervisor::new(root.path().to_path_buf(), empty_capsule_manifest());
+        let (dest, new_cid) = leave_unrecorded_swap(root.path());
+        let error = supervisor
+            .launch_capsule(
+                "not-a-capsule",
+                serde_json::json!({}),
+                false,
+                Vec::new(),
+                None,
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("not in registry")
+                || error.to_string().contains("not-a-capsule"),
+            "{error}"
+        );
+        assert_eq!(
+            crate::setup::recorded_install_cid(root.path(), &dest).as_deref(),
+            Some(new_cid.as_str())
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_cid_record_puts_the_previous_capsule_back() {
+        let root = tempfile::tempdir().unwrap();
+        let data = root.path();
+        let dest = data.join("capsules/chat-room");
+        plant_page(&dest, b"old page");
+        crate::setup::record_install_cid(data, &dest, &dest);
+        let old_cid = crate::setup::recorded_install_cid(data, &dest).unwrap();
+        let record = crate::setup::install_cid_record(&dest).unwrap();
+        std::fs::remove_file(&record).unwrap();
+        std::fs::create_dir(&record).unwrap();
+        let staged = tempfile::Builder::new()
+            .prefix(".capsule-stage-")
+            .tempdir_in(dest.parent().unwrap())
+            .unwrap();
+        plant_page(staged.path(), b"new page");
+        let error = commit_staged_capsule(data, staged, &dest).unwrap_err();
+        assert!(
+            error.to_string().contains("previous capsule is back"),
+            "{error}"
+        );
+        assert_eq!(
+            std::fs::read(dest.join("browser/index.html")).unwrap(),
+            b"old page"
+        );
+        assert_eq!(
+            crate::setup::recorded_install_cid(data, &dest).as_deref(),
+            Some(old_cid.as_str())
+        );
+        assert!(!crate::setup::capsule_install_intent_path(data).exists());
+        assert!(std::fs::read_dir(dest.parent().unwrap())
+            .unwrap()
+            .all(|entry| {
+                !entry
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".capsule-stage-")
+            }));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_restore_keeps_both_capsule_trees_and_the_intent() {
+        struct Reset;
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                CAPSULE_COMMIT_STOP.with(|flag| flag.set(CapsuleCommitStop::Run));
+            }
+        }
+        let _reset = Reset;
+        let root = tempfile::tempdir().unwrap();
+        let data = root.path();
+        let dest = data.join("capsules/chat-room");
+        plant_page(&dest, b"old page");
+        crate::setup::record_install_cid(data, &dest, &dest);
+        let old_cid = crate::setup::recorded_install_cid(data, &dest).unwrap();
+        let record = crate::setup::install_cid_record(&dest).unwrap();
+        std::fs::remove_file(&record).unwrap();
+        std::fs::create_dir(&record).unwrap();
+        let staged = tempfile::Builder::new()
+            .prefix(".capsule-stage-")
+            .tempdir_in(dest.parent().unwrap())
+            .unwrap();
+        plant_page(staged.path(), b"new page");
+        let staged_path = staged.path().to_path_buf();
+        CAPSULE_COMMIT_STOP.with(|flag| flag.set(CapsuleCommitStop::FailRestore));
+        let error = commit_staged_capsule(data, staged, &dest).unwrap_err();
+        let text = error.to_string();
+        assert!(text.contains("both"), "{text}");
+        assert!(text.contains(&dest.display().to_string()), "{text}");
+        assert!(text.contains(&staged_path.display().to_string()), "{text}");
+        assert!(crate::setup::capsule_install_intent_path(data).exists());
+        assert_eq!(
+            std::fs::read(dest.join("browser/index.html")).unwrap(),
+            b"new page"
+        );
+        assert_eq!(
+            std::fs::read(staged_path.join("browser/index.html")).unwrap(),
+            b"old page"
+        );
+        assert_eq!(
+            crate::setup::recorded_install_cid(data, &dest).as_deref(),
+            Some(old_cid.as_str())
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_before_swap_crash_removes_the_unused_stage_tree() {
+        let root = tempfile::tempdir().unwrap();
+        let data = root.path();
+        let dest = data.join("capsules/chat-room");
+        plant_page(&dest, b"old page");
+        crate::setup::record_install_cid(data, &dest, &dest);
+        let old = crate::setup::recorded_install_cid(data, &dest).unwrap();
+        let staged = tempfile::Builder::new()
+            .prefix(".capsule-stage-")
+            .tempdir_in(dest.parent().unwrap())
+            .unwrap();
+        plant_page(staged.path(), b"new page");
+        CAPSULE_COMMIT_STOP.with(|flag| flag.set(CapsuleCommitStop::BeforeSwap));
+        commit_staged_capsule(data, staged, &dest).unwrap_err();
+        CAPSULE_COMMIT_STOP.with(|flag| flag.set(CapsuleCommitStop::Run));
+        crate::setup::reconcile_capsule_install(data).unwrap();
+        assert!(!crate::setup::capsule_install_intent_path(data).exists());
+        assert!(std::fs::read_dir(dest.parent().unwrap())
+            .unwrap()
+            .all(|entry| {
+                !entry
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".capsule-stage-")
+            }));
+        assert_eq!(
+            std::fs::read(dest.join("browser/index.html")).unwrap(),
+            b"old page"
+        );
+        assert_eq!(
+            crate::setup::recorded_install_cid(data, &dest).as_deref(),
+            Some(old.as_str())
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_oversized_install_intent_changes_no_record() {
+        let root = tempfile::tempdir().unwrap();
+        let data = root.path();
+        let dest = data.join("capsules/chat-room");
+        plant_page(&dest, b"kept page");
+        crate::setup::record_install_cid(data, &dest, &dest);
+        let old = crate::setup::recorded_install_cid(data, &dest).unwrap();
+        let canonical = std::fs::canonicalize(&dest).unwrap();
+        let pad = "x".repeat(70_000);
+        let body = format!(
+            "{{\"destination\":\"{}\",\"new_cid\":\"{}\",\"previous_cid\":\"{}\",\"staged\":\"{}\"}}",
+            canonical.display(),
+            old,
+            old,
+            pad
+        );
+        assert!(body.len() > 65_536);
+        let intent = crate::setup::capsule_install_intent_path(data);
+        std::fs::write(&intent, body).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&intent, std::fs::Permissions::from_mode(0o600)).unwrap();
+        crate::setup::reconcile_capsule_install(data).unwrap();
+        assert_eq!(
+            crate::setup::recorded_install_cid(data, &dest).as_deref(),
+            Some(old.as_str())
+        );
+        assert!(intent.exists(), "an oversized intent is left unread");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn commit_unnamed_capsule_takes_the_install_lock() {
+        if std::env::var_os("ELASTOS_P28_UNNAMED_LOCK").is_some() {
+            let data = std::path::PathBuf::from(std::env::var("ELASTOS_P28_UNNAMED_DATA").unwrap());
+            let _lock = crate::setup::lock_install_cids(&data).unwrap();
+            std::fs::write(
+                std::env::var("ELASTOS_P28_UNNAMED_READY").unwrap(),
+                b"ready",
+            )
+            .unwrap();
+            let release = std::env::var("ELASTOS_P28_UNNAMED_RELEASE").unwrap();
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+            while !std::path::Path::new(&release).exists() {
+                if std::time::Instant::now() > deadline {
+                    std::process::exit(4);
+                }
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            std::process::exit(0);
+        }
+        let root = tempfile::tempdir().unwrap();
+        let data = root.path();
+        std::fs::create_dir_all(data.join("capsules")).unwrap();
+        let dest = data.join("capsules/loose");
+        let staged = tempfile::Builder::new()
+            .prefix(".capsule-stage-")
+            .tempdir_in(dest.parent().unwrap())
+            .unwrap();
+        std::fs::write(staged.path().join("note.txt"), b"loose").unwrap();
+        let ready = root.path().join("ready");
+        let release = root.path().join("release");
+        struct Release(std::path::PathBuf);
+        impl Drop for Release {
+            fn drop(&mut self) {
+                let _ = std::fs::write(&self.0, b"go");
+            }
+        }
+        let _release_on_drop = Release(release.clone());
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .arg("--exact")
+            .arg("supervisor::tests::commit_unnamed_capsule_takes_the_install_lock")
+            .env("ELASTOS_P28_UNNAMED_LOCK", "1")
+            .env("ELASTOS_P28_UNNAMED_DATA", data)
+            .env("ELASTOS_P28_UNNAMED_READY", &ready)
+            .env("ELASTOS_P28_UNNAMED_RELEASE", &release)
+            .spawn()
+            .unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while !ready.exists() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "child did not take the lock"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let data_owned = data.to_path_buf();
+        let dest_seen = dest.clone();
+        let started = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let entered = started.clone();
+        let worker = std::thread::spawn(move || {
+            entered.store(true, std::sync::atomic::Ordering::SeqCst);
+            commit_staged_capsule(&data_owned, staged, &dest)
+        });
+        let start_deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !started.load(std::sync::atomic::Ordering::SeqCst) {
+            assert!(
+                std::time::Instant::now() < start_deadline,
+                "unnamed commit did not start"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        assert!(
+            !dest_seen.exists(),
+            "the exchange ran before the install lock"
+        );
+        assert!(
+            !worker.is_finished(),
+            "unnamed commit did not take the install lock"
+        );
+        std::fs::write(&release, b"go").unwrap();
+        worker.join().unwrap().unwrap();
+        assert!(
+            dest_seen.exists(),
+            "the exchange did not land after the lock"
+        );
+        assert!(child.wait().unwrap().success());
+    }
+
+    fn call_follows(text: &str, marker: &str, call: &str, window: usize) -> bool {
+        let lines: Vec<&str> = text.lines().map(str::trim_start).collect();
+        lines.iter().enumerate().any(|(index, line)| {
+            line.contains(marker)
+                && lines
+                    .iter()
+                    .skip(index + 1)
+                    .take(window)
+                    .any(|next| next.contains(call))
+        })
+    }
+
+    #[test]
+    fn every_capsule_start_path_reconciles() {
+        let src = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
+        let read = |file: &str| std::fs::read_to_string(src.join(file)).unwrap();
+        let supervisor = read("supervisor.rs");
+        let supervisor = supervisor.split("\nmod tests {").next().unwrap();
+        assert!(
+            call_follows(
+                supervisor,
+                "pub fn new(data_dir: PathBuf, registry: ComponentsManifest)",
+                "reconcile_capsule_start(&data_dir)",
+                4
+            ),
+            "Supervisor::new does not reconcile"
+        );
+        assert!(
+            call_follows(
+                supervisor,
+                "async fn launch_capsule(",
+                "reconcile_capsule_start(&self.data_dir)",
+                12
+            ),
+            "Supervisor::launch_capsule does not reconcile"
+        );
+        let snippets = [
+            (
+                "supervisor_windows.rs",
+                "reconcile_capsule_start(&data_dir);",
+            ),
+            (
+                "runtime.rs",
+                "reconcile_capsule_start(data_dir);",
+            ),
+            (
+                "runtime.rs",
+                "self.reconcile_admitted_home().await;",
+            ),
+            (
+                "api/routes.rs",
+                "reconcile_capsule_start(dir);",
+            ),
+            (
+                "run_cmd.rs",
+                "reconcile_capsule_start(&crate::default_data_dir());",
+            ),
+            (
+                "serve_cmd.rs",
+                "reconcile_capsule_start(&crate::default_data_dir());",
+            ),
+            (
+                "gateway_cmd.rs",
+                "reconcile_capsule_start(&data_dir);\n    let _host_guard = crate::host_lock::acquire_host_process_lock(&data_dir, \"gateway\", &addr)?;",
+            ),
+            (
+                "gateway_cmd.rs",
+                "reconcile_capsule_start(&data_dir);\n    let _host_guard =\n        crate::host_lock::acquire_host_process_lock(&data_dir, \"gateway-public\", &addr)?;",
+            ),
+            (
+                "main.rs",
+                "reconcile_capsule_start(&crate::sources::default_data_dir());",
+            ),
+            (
+                "capsule_cmd.rs",
+                "reconcile_capsule_start(&default_data_dir());",
+            ),
+        ];
+        for (file, snippet) in snippets {
+            let text = std::fs::read_to_string(src.join(file)).unwrap();
+            assert!(
+                text.contains(snippet),
+                "{file} does not reconcile on its capsule start ({snippet})"
+            );
+        }
     }
 
     fn empty_capsule_manifest() -> crate::setup::ComponentsManifest {
