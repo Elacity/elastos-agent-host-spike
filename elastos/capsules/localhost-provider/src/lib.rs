@@ -16,10 +16,7 @@ use std::path::Path;
 pub const ENVELOPE_BYTE_LIMIT: u64 = 32 * 1024 * 1024;
 /// Largest envelope [`read_sealed_localhost_file`] loads.
 ///
-/// The read stores the file in one `Vec<u8>` (`Read::read_to_end`) and
-/// [`decrypt_bytes`] hex-decodes the ciphertext into a second `Vec`. A longer
-/// file is not loaded. A 100 MiB plaintext envelope is about 200 MiB on disk
-/// and still loads.
+/// Ciphertext is decoded in the file `Vec` and decryption allocates the plaintext.
 pub const SEALED_READ_HARD_LIMIT: u64 = 1024 * 1024 * 1024;
 const ENVELOPE_HEADER: usize = 64;
 const FILE_KEY_ENVELOPE_VERSION: u8 = 2;
@@ -65,13 +62,13 @@ pub fn header_is_file_key_envelope(header: &[u8]) -> bool {
     header.starts_with(FILE_KEY_ENVELOPE_PREFIX)
 }
 
-fn open_new_format(key: &[u8; 32], bytes: &[u8], name: &str) -> io::Result<Vec<u8>> {
-    let cause = if !is_encrypted_envelope(bytes) {
-        "cut off"
-    } else if let Ok(plain) = decrypt_bytes(key, bytes) {
-        return Ok(plain);
-    } else {
-        "not decryptable"
+fn open_new_format(key: &[u8; 32], bytes: Vec<u8>, name: &str) -> io::Result<Vec<u8>> {
+    let cause = match ciphertext_in_place(bytes) {
+        None => "cut off",
+        Some((ciphertext, nonce)) => match decrypt_parts(key, &nonce, &ciphertext) {
+            Ok(plain) => return Ok(plain),
+            Err(_) => "not decryptable",
+        },
     };
     Err(io::Error::new(
         io::ErrorKind::InvalidData,
@@ -117,16 +114,34 @@ fn read_body_within_hard_limit(
     Ok(bytes)
 }
 
-const VERSION_ONE_ENVELOPE_PREFIX: &[u8] = br#"{"version":1,"nonce":""#;
+const PLAIN_JSON_LOOK: usize = 32;
 
 pub fn reads_as_plain_bytes(header: &[u8], len: u64) -> bool {
     if header_rules_out_envelope(header) {
         return true;
     }
-    len > ENVELOPE_BYTE_LIMIT
-        && header.starts_with(b"{\"")
-        && !header.starts_with(VERSION_ONE_ENVELOPE_PREFIX)
-        && !header_is_file_key_envelope(header)
+    len > ENVELOPE_BYTE_LIMIT && quoted_json_in_look(header)
+}
+
+fn quoted_json_in_look(header: &[u8]) -> bool {
+    let Some(at) = header.iter().position(|b| !b.is_ascii_whitespace()) else {
+        return false;
+    };
+    if header[at] != b'{' {
+        return false;
+    }
+    let end = (at + 1 + PLAIN_JSON_LOOK).min(header.len());
+    let body = header[at + 1..end].trim_ascii_start();
+    if body.first() != Some(&b'"') {
+        return false;
+    }
+    let Some(rest) = body.strip_prefix(br#""version""#) else {
+        return true;
+    };
+    let Some(rest) = rest.trim_ascii_start().strip_prefix(b":") else {
+        return true;
+    };
+    !matches!(rest.trim_ascii_start().first(), Some(b'1' | b'2'))
 }
 
 pub fn is_plain_localhost_file(path: &Path) -> io::Result<bool> {
@@ -210,7 +225,7 @@ pub fn read_sealed_localhost_file(key: &[u8; 32], path: &Path, name: &str) -> io
             return Err(over_cap_refusal(name));
         }
         if header_is_file_key_envelope(&raw) {
-            return open_new_format(key, &raw, name);
+            return open_new_format(key, raw, name);
         }
         return decrypt_bytes(key, &raw);
     }
@@ -220,7 +235,7 @@ pub fn read_sealed_localhost_file(key: &[u8; 32], path: &Path, name: &str) -> io
         }
         return open_new_format(
             key,
-            &read_body_within_hard_limit(&mut file, header, len, name)?,
+            read_body_within_hard_limit(&mut file, header, len, name)?,
             name,
         );
     }
@@ -573,9 +588,26 @@ mod tests {
         const SIZE: u64 = 40 * 1024 * 1024;
         assert!(reads_as_plain_bytes(b"ftyp", SIZE));
         assert!(reads_as_plain_bytes(br#"{"note":"plain"#, SIZE));
+        assert!(reads_as_plain_bytes(b"{\n  \"records\":[", SIZE));
+        assert!(reads_as_plain_bytes(b"{ \"records\":[", SIZE));
         assert!(!reads_as_plain_bytes(br#"{"version":1,"nonce":"abc"#, SIZE));
         assert!(!reads_as_plain_bytes(br#"{"version":2,"nonce":"abc"#, SIZE));
+        assert!(!reads_as_plain_bytes(
+            b"{\n\"version\":2,\"nonce\":\"abc",
+            SIZE
+        ));
+        assert!(!reads_as_plain_bytes(
+            b"{ \"version\": 2,\"nonce\":\"abc",
+            SIZE
+        ));
         assert!(!reads_as_plain_bytes(br#"{"note":"plain"#, 32));
+        let mut spaced = vec![b'{'];
+        spaced.extend(std::iter::repeat_n(b' ', PLAIN_JSON_LOOK));
+        spaced.extend(br#""records":["#);
+        assert!(
+            !reads_as_plain_bytes(&spaced, SIZE),
+            "the plain decision looked past {PLAIN_JSON_LOOK} bytes"
+        );
 
         let dir = tempfile::tempdir().unwrap();
         let key = [9u8; 32];
@@ -651,6 +683,27 @@ mod tests {
         assert!(
             err.to_string().contains("not an encrypted envelope"),
             "{err}"
+        );
+
+        let sealed_compact = encrypt_file_key_bytes(&key, b"secret-envelope").unwrap();
+        let compact_path = dir.path().join("compact.bin");
+        std::fs::write(&compact_path, &sealed_compact).unwrap();
+        assert_eq!(
+            read_sealed_localhost_file(&key, &compact_path, "Users/compact.bin").unwrap(),
+            b"secret-envelope"
+        );
+        let mut sealed = sealed_compact;
+        sealed.insert(1, b'\n');
+        assert!(
+            !reads_as_plain_bytes(&sealed[..sealed.len().min(64)], SIZE),
+            "a version envelope with white space was plain"
+        );
+        assert_eq!(decrypt_bytes(&key, &sealed).unwrap(), b"secret-envelope");
+        let spaced_path = dir.path().join("spaced.bin");
+        std::fs::write(&spaced_path, &sealed).unwrap();
+        assert_eq!(
+            read_sealed_localhost_file(&key, &spaced_path, "Users/spaced.bin").unwrap(),
+            b"secret-envelope"
         );
     }
 }

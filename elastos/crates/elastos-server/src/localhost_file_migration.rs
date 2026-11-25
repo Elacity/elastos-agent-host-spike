@@ -301,6 +301,9 @@ fn localhost_refused(path: &Path, why: &str) -> anyhow::Error {
     if why == "forged" {
         return anyhow::anyhow!("{rel} is not the migration record. Delete {rel}, then restart.");
     }
+    if why == "cannot be sealed" {
+        return anyhow::anyhow!("{rel} cannot be sealed. Remove it, then restart.");
+    }
     if why == "mismatch" {
         return anyhow::anyhow!(
             "{rel} does not match this Home (restored or copied folder, changed device key). Restore the matching identity/device.key, or move AppCapsules, ElastOS, Local, Users, and UsersAI aside to start empty, then restart."
@@ -663,12 +666,7 @@ fn read_seen(path: &Path) -> anyhow::Result<std::collections::HashMap<String, Se
         Err(_) => return Err(localhost_refused(path, "cannot be read")),
         Ok(meta) => meta,
     };
-    if meta.file_type().is_symlink() {
-        return Err(localhost_refused(path, "is a link"));
-    }
-    if !meta.is_file() {
-        return Err(localhost_refused(path, "is not a file"));
-    }
+    refuse_special(path, &meta, "is a link")?;
     if meta.len() > localhost_provider::ENVELOPE_BYTE_LIMIT {
         return Ok(std::collections::HashMap::new());
     }
@@ -732,9 +730,18 @@ fn short_middle(name: &str, max: usize) -> String {
 #[cfg(unix)]
 fn over_hard_sentence(names: &[String]) -> String {
     let mut text = String::new();
-    let mut put = |line: String| -> bool {
+    let more = " more files are larger than this process can read. Move them out of the folder, then restart.";
+    let hold_for = |after: usize| {
+        let rest = names.len().saturating_sub(after);
+        if rest == 0 {
+            0
+        } else {
+            format!(" {rest}{more}").len()
+        }
+    };
+    let mut put = |line: String, hold: usize| -> bool {
         let extra = usize::from(!text.is_empty());
-        if text.len() + extra + line.len() > 512 {
+        if text.len() + extra + line.len() + hold > 512 {
             return false;
         }
         if extra == 1 {
@@ -748,11 +755,12 @@ fn over_hard_sentence(names: &[String]) -> String {
         let line = format!(
             "{name} is larger than this process can read. Move it out of the folder, then restart."
         );
-        if !put(line) {
+        let hold = hold_for(named + 1);
+        if !put(line, hold) {
             if named == 0 {
                 let fixed = " is larger than this process can read. Move it out of the folder, then restart.";
-                let short = short_middle(name, 512usize.saturating_sub(fixed.len()));
-                if put(format!("{short}{fixed}")) {
+                let short = short_middle(name, 512usize.saturating_sub(fixed.len() + hold));
+                if put(format!("{short}{fixed}"), hold) {
                     named = 1;
                 }
             }
@@ -765,7 +773,7 @@ fn over_hard_sentence(names: &[String]) -> String {
         let more = format!(
             "{rest} more files are larger than this process can read. Move them out of the folder, then restart."
         );
-        let _ = put(more);
+        let _ = put(more, 0);
     }
     text
 }
@@ -988,12 +996,7 @@ fn read_marker_plan(marker: &Path, file_key: &[u8; 32]) -> anyhow::Result<Marker
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(MarkerPlan::Write),
         Err(_) => return Err(localhost_refused(marker, "cannot be read")),
     };
-    if meta.file_type().is_symlink() {
-        return Err(localhost_refused(marker, "is a marker link"));
-    }
-    if !meta.is_file() {
-        return Err(localhost_refused(marker, "is not a file"));
-    }
+    refuse_special(marker, &meta, "is a marker link")?;
     if meta.len() > 256 {
         return Err(localhost_refused(marker, "forged"));
     }
@@ -1318,10 +1321,13 @@ pub(crate) fn localhost_bringup(data_dir: &Path, device_key: &[u8; 32]) -> Local
 /// When all five are absent, this rewrites the marker for this device key
 /// before gateway creates `ElastOS/System/Auth` or serve creates the roots.
 /// An empty root the person left in place is still present. A refusal is
-/// returned and kept, so startup does not create the roots after it.
+/// kept and this returns Ok, so Home starts and the roots stay absent.
+#[rustfmt::skip]
 pub(crate) fn prepare_localhost_files(data_dir: &Path) -> anyhow::Result<()> {
     #[cfg(unix)]
     {
+        set_migration_root(data_dir);
+        if let Err(err) = (|| -> anyhow::Result<()> {
         if !encrypted_roots_absent(data_dir)? {
             return Ok(());
         }
@@ -1329,10 +1335,34 @@ pub(crate) fn prepare_localhost_files(data_dir: &Path) -> anyhow::Result<()> {
         if let LocalhostBringup::Refuse(sentence) = localhost_bringup(data_dir, &device_key) {
             return Err(anyhow::anyhow!(sentence));
         }
+        Ok(())
+        })() {
+            if elastos_server::local_apps::local_apps_refusal(data_dir).is_none() {
+                elastos_server::local_apps::set_local_apps_refusal(data_dir, Some(err.to_string()));
+            }
+        }
     }
     #[cfg(not(unix))]
     {
         let _ = data_dir;
     }
     Ok(())
+}
+
+#[cfg(unix)]
+fn refuse_special(path: &Path, meta: &std::fs::Metadata, link: &str) -> anyhow::Result<()> {
+    use std::os::unix::fs::FileTypeExt;
+    let kind = meta.file_type();
+    let why = if kind.is_symlink() {
+        link
+    } else if kind.is_fifo() || kind.is_socket() {
+        "is a pipe"
+    } else if kind.is_dir() {
+        "is not a file"
+    } else if kind.is_file() {
+        return Ok(());
+    } else {
+        "is not a regular file"
+    };
+    Err(localhost_refused(path, why))
 }

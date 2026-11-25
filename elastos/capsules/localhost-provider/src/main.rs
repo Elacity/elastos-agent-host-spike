@@ -429,6 +429,9 @@ impl LocalProvider {
                 Some(len) => (off + len as usize).min(plaintext.len()),
                 None => plaintext.len(),
             };
+            if off == 0 && end == plaintext.len() {
+                return Ok(plaintext);
+            }
             return Ok(plaintext[off..end].to_vec());
         }
 

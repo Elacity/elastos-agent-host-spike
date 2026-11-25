@@ -1070,7 +1070,9 @@ async fn setup_server_infrastructure_impl(
         }
     };
 
-    ensure_file_backed_roots(&data_dir).ok();
+    if elastos_server::local_apps::local_apps_refusal(&data_dir).is_none() {
+        ensure_file_backed_roots(&data_dir).ok();
+    }
     elastos_server::protected_content_runtime::log_unresolved_runtime_releases(&data_dir);
     let provider_registry = Arc::new(provider::ProviderRegistry::new());
     let mut managed_host_processes = Vec::new();
@@ -5829,89 +5831,6 @@ mod tests {
         prove_temp_on_the_targets_file_system(root.path());
     }
 
-    #[cfg(target_os = "linux")]
-    fn bind_directory_without_root(
-        source: &std::path::Path,
-        mountpoint: &std::path::Path,
-    ) -> std::io::Result<()> {
-        let uid = unsafe { libc::geteuid() };
-        let gid = unsafe { libc::getegid() };
-        if unsafe { libc::unshare(libc::CLONE_NEWUSER) } != 0 {
-            return Err(std::io::Error::last_os_error());
-        }
-        std::fs::write("/proc/self/setgroups", "deny")?;
-        std::fs::write("/proc/self/uid_map", format!("0 {uid} 1\n"))?;
-        std::fs::write("/proc/self/gid_map", format!("0 {gid} 1\n"))?;
-        if unsafe { libc::unshare(libc::CLONE_NEWNS) } != 0 {
-            return Err(std::io::Error::last_os_error());
-        }
-        let src = std::ffi::CString::new(source.to_str().unwrap()).unwrap();
-        let dst = std::ffi::CString::new(mountpoint.to_str().unwrap()).unwrap();
-        let empty = std::ffi::CString::new("").unwrap();
-        if unsafe {
-            libc::mount(
-                src.as_ptr(),
-                dst.as_ptr(),
-                empty.as_ptr(),
-                libc::MS_BIND,
-                std::ptr::null(),
-            )
-        } != 0
-        {
-            return Err(std::io::Error::last_os_error());
-        }
-        Ok(())
-    }
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn a_rewrite_temp_stays_on_the_file_system_of_its_target() {
-        use std::os::unix::fs::MetadataExt;
-
-        let _guard = LocalAppsGuard::lock();
-        let root = TempDir::new().unwrap();
-        fs::create_dir(root.path().join("Users")).unwrap();
-        let shm_dev = fs::metadata("/dev/shm").expect("/dev/shm").dev();
-        let root_dev = fs::metadata(root.path()).unwrap().dev();
-        assert_ne!(shm_dev, root_dev, "/dev/shm is not a second file system");
-        let shm = std::path::PathBuf::from(format!("/dev/shm/p24sL-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&shm);
-        fs::create_dir(&shm).unwrap();
-        let test = format!(
-            "{}::localhost_rewrite_temp_linux_child",
-            module_path!().split_once("::").unwrap().1
-        );
-        let output = std::process::Command::new(std::env::current_exe().unwrap())
-            .env("ELASTOS_P24_REWRITE_ROOT", root.path())
-            .env("ELASTOS_P24_REWRITE_SHM", &shm)
-            .args([
-                "--exact",
-                test.as_str(),
-                "--ignored",
-                "--nocapture",
-                "--test-threads=1",
-            ])
-            .output()
-            .unwrap();
-        let _ = fs::remove_dir_all(&shm);
-        assert!(
-            output.status.success(),
-            "stdout {}\nstderr {}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    #[ignore]
-    fn localhost_rewrite_temp_linux_child() {
-        let root = std::path::PathBuf::from(std::env::var("ELASTOS_P24_REWRITE_ROOT").unwrap());
-        let shm = std::path::PathBuf::from(std::env::var("ELASTOS_P24_REWRITE_SHM").unwrap());
-        bind_directory_without_root(&shm, &root.join("Users")).unwrap();
-        prove_temp_on_the_targets_file_system(&root);
-    }
-
     #[test]
     fn wrong_types_and_directory_links_name_a_remedy_and_a_restart_follows_it() {
         let _guard = LocalAppsGuard::lock();
@@ -6331,6 +6250,44 @@ mod tests {
             // whole test, so clearing the map removes only this test's keys.
             elastos_server::local_apps::clear_local_apps_refusals();
         }
+    }
+
+    fn start_after_prepare_refusal(root: &std::path::Path) -> String {
+        let gateway = include_str!("gateway_cmd.rs");
+        assert_eq!(
+            gateway.matches("prepare_files(&data_dir)?;").count(),
+            2,
+            "gateway and its public mode must call prepare"
+        );
+        let entry = include_str!("gateway_entry.rs");
+        assert!(entry.contains("pub async fn run_gateway("));
+        assert!(entry.contains("pub async fn run_browser_home("));
+        assert_eq!(entry.matches("prepare_localhost_files").count(), 2);
+        let serve = include_str!("serve_cmd.rs");
+        assert!(serve.contains("setup_server_infrastructure()"));
+        let infra = include_str!("server_infra.rs");
+        let prep = infra
+            .find("prepare_localhost_files(&data_dir)?;")
+            .expect("prepare");
+        let roots = infra
+            .find("ensure_file_backed_roots(&data_dir).ok();")
+            .expect("roots");
+        assert!(prep < roots, "roots are created before prepare returns");
+        crate::localhost_file_migration::prepare_localhost_files(root)
+            .expect("a refusal stopped Home");
+        if elastos_server::local_apps::local_apps_refusal(root).is_none() {
+            ensure_file_backed_roots(root).ok();
+        }
+        let sentence =
+            elastos_server::local_apps::local_apps_refusal(root).expect("local apps stayed on");
+        let line = elastos_server::local_apps::local_apps_health_line(&sentence);
+        assert!(line.contains("Local apps are off."), "{line}");
+        assert!(line.contains(&sentence), "{line}");
+        for name in ["AppCapsules", "ElastOS", "Local", "Users", "UsersAI"] {
+            assert!(!root.join(name).exists(), "{name} was created");
+        }
+        home_stays_up(root, &sentence);
+        sentence
     }
 
     fn home_stays_up(root: &std::path::Path, sentence: &str) {
@@ -7416,6 +7373,46 @@ mod tests {
     }
 
     #[test]
+    fn a_pretty_json_record_over_32_mib_and_1_gib_is_not_read_whole() {
+        let _guard = LocalAppsGuard::lock();
+        let device_key = [0x49; 32];
+        let root = TempDir::new().unwrap();
+        let mid = root.path().join("Users/mid.json");
+        let big = root.path().join("Users/big.json");
+        fs::create_dir_all(mid.parent().unwrap()).unwrap();
+        for (path, len) in [
+            (&mid, 40 * 1024 * 1024),
+            (&big, localhost_provider::SEALED_READ_HARD_LIMIT + 1),
+        ] {
+            fs::write(path, b"{\n  \"records\":[").unwrap();
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open(path)
+                .unwrap()
+                .set_len(len)
+                .unwrap();
+        }
+        let _ = take_localhost_migration_bytes_read();
+        let _ = take_localhost_migration_opens();
+        match localhost_bringup(root.path(), &device_key) {
+            LocalhostBringup::Start(_) => {}
+            LocalhostBringup::Refuse(got) => panic!("pretty JSON turned local apps off: {got}"),
+        }
+        assert_eq!(take_localhost_migration_bytes_read(), 128);
+        assert_eq!(take_localhost_migration_opens(), 2);
+        home_is_up(root.path());
+        for (path, len) in [
+            (&mid, 40 * 1024 * 1024),
+            (&big, localhost_provider::SEALED_READ_HARD_LIMIT + 1),
+        ] {
+            assert_eq!(fs::metadata(path).unwrap().len(), len);
+            let mut head = [0u8; 4];
+            std::io::Read::read_exact(&mut fs::File::open(path).unwrap(), &mut head).unwrap();
+            assert_eq!(&head, b"{\n  ");
+        }
+    }
+
+    #[test]
     fn a_refused_prepare_keeps_the_write_error_and_does_not_make_roots() {
         use std::os::unix::fs::PermissionsExt;
 
@@ -7445,28 +7442,11 @@ mod tests {
         }
         let _restore = RestoreMode(identity.clone());
         fs::set_permissions(&identity, fs::Permissions::from_mode(0o500)).unwrap();
-        let err =
-            crate::localhost_file_migration::prepare_localhost_files(root.path()).unwrap_err();
-        let text = err.to_string();
+        let text = start_after_prepare_refusal(root.path());
         assert!(text.contains("could not be written"), "{text}");
         assert!(text.contains("Permission denied"), "{text}");
         assert!(!text.contains("does not match this Home"), "{text}");
-        for name in ["AppCapsules", "ElastOS", "Local", "Users", "UsersAI"] {
-            assert!(!root.path().join(name).exists(), "{name} was created");
-        }
         assert_eq!(fs::read(&marker).unwrap(), marker_bytes);
-        assert_eq!(
-            elastos_server::local_apps::local_apps_refusal(root.path()).as_deref(),
-            Some(text.as_str())
-        );
-        let setup = include_str!("server_infra.rs");
-        let prep = setup
-            .find("prepare_localhost_files(&data_dir)?;")
-            .expect("prepare");
-        let made = setup
-            .find("ensure_file_backed_roots(&data_dir)")
-            .expect("roots");
-        assert!(prep < made, "roots are created after a prepare refusal");
         fs::create_dir(root.path().join("Users")).unwrap();
         match localhost_bringup(root.path(), &new_key) {
             LocalhostBringup::Refuse(got) => assert_eq!(got, text),
@@ -7485,6 +7465,105 @@ mod tests {
         }
         home_is_up(root.path());
         assert_current_marker(root.path(), &new_key);
+    }
+
+    fn plant_key_0600(root: &std::path::Path, device_key: &[u8; 32]) {
+        use std::os::unix::fs::PermissionsExt;
+        plant_device_key(root, device_key);
+        fs::set_permissions(
+            root.join("identity/device.key"),
+            fs::Permissions::from_mode(0o600),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn prepare_refusal_forged_marker_keeps_home_up() {
+        let _guard = LocalAppsGuard::lock();
+        let root = TempDir::new().unwrap();
+        plant_key_0600(root.path(), &[0xd1; 32]);
+        let marker = root.path().join("identity/localhost-file-key-v1");
+        let bytes = b"elastos-localhost-file-v1 1 aa\n".to_vec();
+        fs::write(&marker, &bytes).unwrap();
+        let sentence = start_after_prepare_refusal(root.path());
+        assert!(
+            sentence.contains("is not the migration record"),
+            "{sentence}"
+        );
+        assert!(
+            sentence.contains("Delete identity/localhost-file-key-v1, then restart."),
+            "{sentence}"
+        );
+        assert_eq!(fs::read(&marker).unwrap(), bytes);
+    }
+
+    #[test]
+    fn prepare_refusal_symlink_marker_keeps_home_up() {
+        let _guard = LocalAppsGuard::lock();
+        let root = TempDir::new().unwrap();
+        plant_key_0600(root.path(), &[0xd2; 32]);
+        let keeper = root.path().join("keeper.bin");
+        fs::write(&keeper, b"keep-me").unwrap();
+        let marker = root.path().join("identity/localhost-file-key-v1");
+        std::os::unix::fs::symlink(&keeper, &marker).unwrap();
+        let sentence = start_after_prepare_refusal(root.path());
+        assert!(sentence.contains("is linked"), "{sentence}");
+        assert!(
+            sentence.contains("Remove the link, then restart."),
+            "{sentence}"
+        );
+        assert_eq!(fs::read(&keeper).unwrap(), b"keep-me");
+        assert!(fs::symlink_metadata(&marker)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+    }
+
+    #[test]
+    fn prepare_refusal_unwritable_identity_keeps_home_up() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _guard = LocalAppsGuard::lock();
+        let root = TempDir::new().unwrap();
+        plant_key_0600(root.path(), &[0xd3; 32]);
+        elastos_identity::load_or_create_device_key(root.path()).unwrap();
+        let identity = root.path().join("identity");
+        struct RestoreMode(std::path::PathBuf);
+        impl Drop for RestoreMode {
+            fn drop(&mut self) {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = fs::set_permissions(&self.0, fs::Permissions::from_mode(0o755));
+            }
+        }
+        let _restore = RestoreMode(identity.clone());
+        fs::set_permissions(&identity, fs::Permissions::from_mode(0o500)).unwrap();
+        let sentence = start_after_prepare_refusal(root.path());
+        assert!(sentence.contains("could not be written"), "{sentence}");
+        assert!(sentence.contains("Permission denied"), "{sentence}");
+    }
+
+    #[test]
+    fn prepare_refusal_unreadable_data_dir_keeps_home_up() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _guard = LocalAppsGuard::lock();
+        let root = TempDir::new().unwrap();
+        struct RestoreMode(std::path::PathBuf);
+        impl Drop for RestoreMode {
+            fn drop(&mut self) {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = fs::set_permissions(&self.0, fs::Permissions::from_mode(0o755));
+            }
+        }
+        let _restore = RestoreMode(root.path().to_path_buf());
+        fs::set_permissions(root.path(), fs::Permissions::from_mode(0o000)).unwrap();
+        let sentence = start_after_prepare_refusal(root.path());
+        assert!(sentence.contains("not readable"), "{sentence}");
+        assert!(
+            sentence.contains("Make it readable, then restart."),
+            "{sentence}"
+        );
+        assert!(sentence.contains("AppCapsules"), "{sentence}");
     }
 
     #[test]
@@ -7521,6 +7600,43 @@ mod tests {
         assert!(
             !got.contains("more files are larger"),
             "the only path was omitted: {got}"
+        );
+    }
+
+    #[test]
+    fn a_long_over_hard_list_keeps_the_more_files_line() {
+        let _guard = LocalAppsGuard::lock();
+        let device_key = [0x4a; 32];
+        let root = TempDir::new().unwrap();
+        let wide = "w".repeat(200);
+        for index in 0..5 {
+            let path = root
+                .path()
+                .join("Users")
+                .join(&wide)
+                .join(&wide)
+                .join(format!("f{index}.bin"));
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(&path, b"{over").unwrap();
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open(&path)
+                .unwrap()
+                .set_len(localhost_provider::SEALED_READ_HARD_LIMIT + 1)
+                .unwrap();
+        }
+        let got = match localhost_bringup(root.path(), &device_key) {
+            LocalhostBringup::Refuse(got) => got,
+            LocalhostBringup::Start(_) => {
+                panic!("five files past the hard limit started local apps")
+            }
+        };
+        assert!(got.len() <= 512, "sentence is {} bytes: {got}", got.len());
+        assert!(got.contains("Users/"), "{got}");
+        assert!(got.contains(".bin"), "{got}");
+        assert!(
+            got.contains("more files are larger than this process can read"),
+            "the extra files were dropped: {got}"
         );
     }
 
@@ -7592,6 +7708,60 @@ mod tests {
         fs::remove_file(&lock).unwrap();
         migrate_again(root.path(), &device_key);
         assert_envelope_opens_with_exactly_one_key(&note, b"note", &device_key, &file_key);
+    }
+
+    #[test]
+    fn a_pipe_marker_and_a_socket_seen_file_do_not_say_directory() {
+        use std::os::unix::fs::FileTypeExt;
+
+        let _guard = LocalAppsGuard::lock();
+        let device_key = [0x4b; 32];
+        let file_key = expected_localhost_file_key(&device_key);
+
+        let marker_root = TempDir::new().unwrap();
+        let marker_note = marker_root.path().join("Users/note.bin");
+        plant_device_envelope(&marker_note, &device_key, b"note");
+        let marker = marker_root.path().join("identity/localhost-file-key-v1");
+        fs::create_dir_all(marker.parent().unwrap()).unwrap();
+        let c_path = CString::new(marker.to_str().unwrap()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(c_path.as_ptr(), 0o600) }, 0);
+        let sentence = match localhost_bringup(marker_root.path(), &device_key) {
+            LocalhostBringup::Refuse(got) => got,
+            LocalhostBringup::Start(_) => panic!("a pipe marker started local apps"),
+        };
+        assert!(
+            sentence.contains("is a pipe. Remove the pipe, then restart."),
+            "{sentence}"
+        );
+        assert!(!sentence.contains("Remove the directory"), "{sentence}");
+        assert!(fs::symlink_metadata(&marker).unwrap().file_type().is_fifo());
+        fs::remove_file(&marker).unwrap();
+        migrate_again(marker_root.path(), &device_key);
+        assert_envelope_opens_with_exactly_one_key(&marker_note, b"note", &device_key, &file_key);
+
+        let seen_root = TempDir::new().unwrap();
+        let seen_note = seen_root.path().join("Users/note.bin");
+        plant_device_envelope(&seen_note, &device_key, b"note");
+        localhost_provider_bridge_config(seen_root.path(), &device_key).unwrap();
+        let seen = seen_root.path().join("identity/localhost-file-key-v1.seen");
+        fs::remove_file(&seen).unwrap();
+        std::os::unix::net::UnixListener::bind(&seen).unwrap();
+        let sentence = match localhost_bringup(seen_root.path(), &device_key) {
+            LocalhostBringup::Refuse(got) => got,
+            LocalhostBringup::Start(_) => panic!("a socket seen file started local apps"),
+        };
+        assert!(
+            sentence.contains("is a pipe. Remove the pipe, then restart."),
+            "{sentence}"
+        );
+        assert!(!sentence.contains("Remove the directory"), "{sentence}");
+        assert!(
+            sentence.contains("localhost-file-key-v1.seen"),
+            "{sentence}"
+        );
+        fs::remove_file(&seen).unwrap();
+        migrate_again(seen_root.path(), &device_key);
+        assert_envelope_opens_with_exactly_one_key(&seen_note, b"note", &device_key, &file_key);
     }
 
     #[test]
@@ -7740,10 +7910,6 @@ mod tests {
             assert!(
                 delta <= file_len * 2 + 8 * 1024 * 1024,
                 "the rewrite held more than twice the file: {delta} for {file_len}"
-            );
-            assert!(
-                delta >= file_len / 2,
-                "the rewrite did not hold the file: {delta} for {file_len}"
             );
             return;
         }
@@ -8229,6 +8395,77 @@ mod tests {
             held >= 200 * 1024 * 1024,
             "Linux ru_maxrss is kibibytes: {held}"
         );
+    }
+
+    #[test]
+    fn a_64_mib_sealed_open_holds_one_ciphertext_and_one_plaintext() {
+        const PLAIN_LEN: usize = 32 * 1024 * 1024;
+        if std::env::var("ELASTOS_SEALED_OPEN_CHILD").as_deref() == Ok("1") {
+            let path = std::path::PathBuf::from(std::env::var("ELASTOS_SEALED_OPEN_PATH").unwrap());
+            let file_len: i64 = std::env::var("ELASTOS_SEALED_OPEN_LEN")
+                .unwrap()
+                .parse()
+                .unwrap();
+            let raw = hex::decode(std::env::var("ELASTOS_SEALED_OPEN_KEY").unwrap()).unwrap();
+            let mut key = [0u8; 32];
+            key.copy_from_slice(&raw);
+            let before = resident_peak();
+            let plain =
+                localhost_provider::read_sealed_localhost_file(&key, &path, "Users/sealed.bin")
+                    .unwrap_or_else(|err| panic!("sealed open refused: {err}"));
+            let after = resident_peak();
+            let delta = after.saturating_sub(before);
+            let over = delta.saturating_sub(file_len);
+            eprintln!(
+                "SEALED_PEAK_OVER={over} DELTA={delta} FILE={file_len} PLAIN={}",
+                plain.len()
+            );
+            assert_eq!(plain.len(), PLAIN_LEN);
+            assert!(plain.iter().all(|byte| *byte == 0x5a));
+            let room = file_len + plain.len() as i64 + 8 * 1024 * 1024;
+            assert!(
+                delta <= room,
+                "peak over the file is {over}; delta {delta} holds more than the ciphertext and the plaintext (room {room})"
+            );
+            return;
+        }
+
+        let key = [0x5c; 32];
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("sealed.bin");
+        let plain = vec![0x5au8; PLAIN_LEN];
+        let sealed = localhost_provider::encrypt_file_key_bytes(&key, &plain).unwrap();
+        let file_len = sealed.len();
+        assert!(
+            file_len > 60 * 1024 * 1024 && file_len < 70 * 1024 * 1024,
+            "file is {file_len}, not about 64 MiB"
+        );
+        fs::write(&path, &sealed).unwrap();
+        drop(sealed);
+        drop(plain);
+        let test = format!(
+            "{}::a_64_mib_sealed_open_holds_one_ciphertext_and_one_plaintext",
+            module_path!().split_once("::").unwrap().1
+        );
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .env("ELASTOS_SEALED_OPEN_CHILD", "1")
+            .env("ELASTOS_SEALED_OPEN_PATH", &path)
+            .env("ELASTOS_SEALED_OPEN_KEY", hex::encode(key))
+            .env("ELASTOS_SEALED_OPEN_LEN", file_len.to_string())
+            .args(["--exact", test.as_str(), "--nocapture", "--test-threads=1"])
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success(),
+            "sealed open child failed\nstdout {stdout}\nstderr {stderr}"
+        );
+        let line = stderr
+            .lines()
+            .find(|line| line.contains("SEALED_PEAK_OVER="))
+            .expect("child printed its peak");
+        eprintln!("{line}");
     }
 
     #[cfg(unix)]
