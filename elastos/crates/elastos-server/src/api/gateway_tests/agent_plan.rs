@@ -2955,3 +2955,117 @@ async fn an_effect_in_flight_at_the_end_is_recorded_failed() {
     );
     assert!(!plant.runtime.plan_effect_inflight(&plant.session));
 }
+
+async fn assert_the_run_can_still_dispatch(plant: &PlantedEffect) {
+    dispatch_planted(plant)
+        .await
+        .expect("the run can still dispatch");
+    let record = read_record(plant.dir.path(), &plant.id);
+    assert_ne!(record["status"], "refused", "{record}");
+    assert_ne!(record["result"]["code"], "instance ended", "{record}");
+    assert_eq!(record["status"], "completed", "{record}");
+    assert_ne!(std::fs::read(&plant.path).unwrap(), plant.before);
+}
+
+/// A Stop that does not end the row leaves that run able to dispatch.
+/// The end is per session, when the row ends, not at the start of the request.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_conflict_stop_leaves_the_run_able_to_dispatch() {
+    let plant = plant_approved(43, false, |_, target| {
+        json!({"steps": [{"scheme": "localhost", "operation": "write", "request": {
+            "path": target, "content": [112, 108, 97, 110]
+        }}]})
+    })
+    .await;
+    plant
+        .runtime
+        .insert_agent_session_for_test(crate::runtime::AgentSessionRecord {
+            agent_id: format!("{}-other", plant.agent),
+            owner: plant.owner.clone(),
+            host_cid: "cid".to_string(),
+            launch_id: "launch:other".to_string(),
+            session_id: plant.session.clone(),
+        })
+        .await;
+    let (status, body) = stop_plan_agent(plant.runtime.clone(), &plant.agent).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert!(crate::runtime::Runtime::plan_instance_is_open(
+        &plant.runtime.plan_book(),
+        &plant.session,
+        &plant.agent
+    ));
+    assert_the_run_can_still_dispatch(&plant).await;
+}
+
+/// A Stop that finds no running row does not close a bound instance.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_missing_stop_leaves_the_run_able_to_dispatch() {
+    let plant = plant_approved(44, false, |_, target| {
+        json!({"steps": [{"scheme": "localhost", "operation": "write", "request": {
+            "path": target, "content": [112, 108, 97, 110]
+        }}]})
+    })
+    .await;
+    plant
+        .runtime
+        .end_planted_session_for_test(&plant.session)
+        .await;
+    let (status, body) = stop_plan_agent(plant.runtime.clone(), &plant.agent).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(crate::runtime::Runtime::plan_instance_is_open(
+        &plant.runtime.plan_book(),
+        &plant.session,
+        &plant.agent
+    ));
+    assert_the_run_can_still_dispatch(&plant).await;
+}
+
+/// A stop that fails before the row ends does not close the instance.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_failed_stop_leaves_the_run_able_to_dispatch() {
+    let plant = plant_approved(45, false, |_, target| {
+        json!({"steps": [{"scheme": "localhost", "operation": "write", "request": {
+            "path": target, "content": [112, 108, 97, 110]
+        }}]})
+    })
+    .await;
+    plant.runtime.arm_failing_capsule_stop(&plant.session);
+    let (status, body) = stop_plan_agent(plant.runtime.clone(), &plant.agent).await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{body}");
+    assert!(crate::runtime::Runtime::plan_instance_is_open(
+        &plant.runtime.plan_book(),
+        &plant.session,
+        &plant.agent
+    ));
+    assert_the_run_can_still_dispatch(&plant).await;
+}
+
+/// Dropping the Stop request before it ends the row leaves the run able to dispatch.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_dropped_stop_leaves_the_run_able_to_dispatch() {
+    let plant = plant_approved(46, false, |_, target| {
+        json!({"steps": [{"scheme": "localhost", "operation": "write", "request": {
+            "path": target, "content": [112, 108, 97, 110]
+        }}]})
+    })
+    .await;
+    let pause = plant.runtime.arm_stop_before_rows(&plant.agent);
+    let runtime = plant.runtime.clone();
+    let agent = plant.agent.clone();
+    let task = tokio::spawn(async move { stop_plan_agent(runtime, &agent).await });
+    tokio::time::timeout(std::time::Duration::from_secs(15), pause.entered.notified())
+        .await
+        .expect("the stop did not reach its pause");
+    task.abort();
+    let _ = task.await;
+    assert!(crate::runtime::Runtime::plan_instance_is_open(
+        &plant.runtime.plan_book(),
+        &plant.session,
+        &plant.agent
+    ));
+    assert_the_run_can_still_dispatch(&plant).await;
+}

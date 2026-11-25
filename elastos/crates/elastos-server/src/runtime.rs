@@ -496,18 +496,6 @@ impl PlanBook {
         reap(self, session_id);
     }
 
-    fn mark_agent_stopping(&mut self, agent_id: &str) {
-        let sessions: Vec<String> = self
-            .instances
-            .iter()
-            .filter(|(_, inst)| inst.agent_id == agent_id)
-            .map(|(session, _)| session.clone())
-            .collect();
-        for session in sessions {
-            self.mark_stopping(&session);
-        }
-    }
-
     #[cfg(test)]
     pub(crate) fn close_for_test(&mut self, session_id: &str) {
         self.mark_stopping(session_id);
@@ -695,6 +683,10 @@ static STOP_ROWS_GATES: StdMutex<Vec<(usize, String, StopRowsGate)>> = StdMutex:
 #[cfg(test)]
 static STOP_PANIC_AFTER_MARK: StdMutex<Vec<(usize, String)>> = StdMutex::new(Vec::new());
 
+/// A capsule stop that fails before the row ends. Keyed by the launch gate.
+#[cfg(test)]
+static FAIL_CAPSULE_STOP: StdMutex<Vec<(usize, String)>> = StdMutex::new(Vec::new());
+
 #[cfg(test)]
 pub(crate) struct StopRowsPause {
     pub(crate) entered: Arc<tokio::sync::Notify>,
@@ -871,6 +863,8 @@ impl ActivationContextHeld {
     /// here, so it happens at its 60 s even if nothing lists or registers
     /// again and every tokio runtime has shut down.
     async fn end_instance(mut self, status: &str, cause: &str) {
+        // The end of this session is decided here, under the plan lock, before
+        // the entry records `ended_at`. `begin_agent_stop` does not decide it.
         plan_book(&self.plan_book).mark_stopping(&self.id.0);
         let (status, cause) = match self.settled.clone() {
             Some(settled) => settled,
@@ -1804,6 +1798,12 @@ impl Runtime {
 
     /// Marks the agent with this Stop's token. The guard clears that token
     /// when Stop returns or the future is dropped, including a panic.
+    ///
+    /// This token is not the end of a session. The end is decided per session,
+    /// under the plan lock, in `end_instance` and in `stop_capsule_with_reason`
+    /// when that call itself removes the row. A Stop that answers 409, 404, or
+    /// 500, or whose request is dropped, has not decided the end, and the run
+    /// can still dispatch.
     pub(crate) async fn begin_agent_stop(self: &Arc<Self>, agent_id: &str) -> AgentStopGuard {
         let token = {
             // A Start that already passed its check still holds this lock
@@ -1822,7 +1822,6 @@ impl Runtime {
                 .insert(token);
             token
         };
-        plan_book(&self.plan_book).mark_agent_stopping(agent_id);
         AgentStopGuard {
             marks: Arc::clone(&self.stop_marks),
             agent_id: agent_id.to_string(),
@@ -2022,6 +2021,31 @@ impl Runtime {
         let Some(pos) = armed
             .iter()
             .rposition(|(stored, id)| *stored == key && id == agent_id)
+        else {
+            return false;
+        };
+        armed.swap_remove(pos);
+        true
+    }
+
+    /// The next stop of this session fails before the row ends.
+    #[cfg(test)]
+    pub(crate) fn arm_failing_capsule_stop(&self, session_id: &str) {
+        FAIL_CAPSULE_STOP
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .push((self.stop_rows_key(), session_id.to_string()));
+    }
+
+    #[cfg(test)]
+    fn take_failing_capsule_stop(&self, session_id: &str) -> bool {
+        let key = self.stop_rows_key();
+        let mut armed = FAIL_CAPSULE_STOP
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        let Some(pos) = armed
+            .iter()
+            .rposition(|(stored, id)| *stored == key && id == session_id)
         else {
             return false;
         };
@@ -3438,11 +3462,10 @@ impl Runtime {
                 .unwrap_or_else(|err| err.into_inner());
             (info, stops.get(id).cloned())
         };
-        // The end takes the plan lock before this Stop can answer. A new
-        // effect then refuses. One already marked stays, and the route says
-        // stopping while it can still land.
-        plan_book(&self.plan_book).mark_stopping(id);
         if info.ended_at.is_some() {
+            // The row has already ended. Close the plan instance if that end
+            // did not. A running row is not closed on the way into this call.
+            plan_book(&self.plan_book).mark_stopping(id);
             return Ok(Some(info));
         }
 
@@ -3458,11 +3481,18 @@ impl Runtime {
 
         let Some(stop) = stop else {
             // No watcher holds this activation: stop it through its provider
-            // and take its entry away, as before.
+            // and take its entry away, as before. A provider error leaves the
+            // row up, so the plan end is not decided.
+            #[cfg(test)]
+            if self.take_failing_capsule_stop(id) {
+                return Err(ElastosError::Compute("capsule stop failed".into()));
+            }
             if let Some((handle, provider)) = provider {
                 tracing::info!("Stopping capsule '{}' ({})", info.name, id);
                 provider.stop(handle).await?;
             }
+            // This call removes the row. The end is decided here, for this session.
+            plan_book(&self.plan_book).mark_stopping(id);
             self.unregister_capsule(id).await;
             return Ok(Some(RunningCapsuleInfo {
                 status: CAPSULE_STOPPED.to_string(),
@@ -3472,8 +3502,15 @@ impl Runtime {
         };
 
         // The reason is recorded before the flag is raised, so the end that
-        // sees the flag records this cause.
+        // sees the flag records this cause. The plan end is `end_instance`,
+        // which runs only when the watcher records the end. A failure here,
+        // or a wait that returns while the row is still running, leaves the
+        // run able to dispatch.
         stop.request(reason);
+        #[cfg(test)]
+        if self.take_failing_capsule_stop(id) {
+            return Err(ElastosError::Compute("capsule stop failed".into()));
+        }
         if let Some((handle, provider)) = provider {
             tracing::info!("Stopping capsule '{}' ({})", info.name, id);
             provider.stop(handle).await?;
