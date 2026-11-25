@@ -28,6 +28,14 @@ fn own_command_verified_when() -> &'static str {
     }
 }
 
+fn host_start_verified_when(windows: &'static str) -> &'static str {
+    if cfg!(windows) {
+        windows
+    } else {
+        "at-every-start"
+    }
+}
+
 fn own_command_trust_root() -> &'static str {
     #[cfg(windows)]
     {
@@ -1060,7 +1068,9 @@ fn columns() -> Vec<TrustColumn> {
             call: "command",
             class: "other",
             trust_root: own_command_trust_root(),
-            verified_when: own_command_verified_when(),
+            verified_when: host_start_verified_when(
+                "update executable process tree custody is unsupported on Windows",
+            ),
             evidence: ["Command::new(prepared", ".exec_path())"].concat(),
             os_path: "",
         },
@@ -1070,7 +1080,9 @@ fn columns() -> Vec<TrustColumn> {
             call: "spawn()",
             class: "other",
             trust_root: own_command_trust_root(),
-            verified_when: own_command_verified_when(),
+            verified_when: host_start_verified_when(
+                "update executable process tree custody is unsupported on Windows",
+            ),
             evidence: ["prepared.attach", "_tokio("].concat(),
             os_path: "",
         },
@@ -1080,7 +1092,9 @@ fn columns() -> Vec<TrustColumn> {
             call: "command",
             class: "other",
             trust_root: own_command_trust_root(),
-            verified_when: own_command_verified_when(),
+            verified_when: host_start_verified_when(
+                "update controller child launch is unsupported on Windows",
+            ),
             evidence: ["Command::new(prepared", ".exec_path())"].concat(),
             os_path: "",
         },
@@ -1090,17 +1104,21 @@ fn columns() -> Vec<TrustColumn> {
             call: "command",
             class: "other",
             trust_root: own_command_trust_root(),
-            verified_when: own_command_verified_when(),
+            verified_when: host_start_verified_when(
+                "update controller descriptor handoff is unsupported on Windows",
+            ),
             evidence: ["Command::new(prepared", ".exec_path())"].concat(),
             os_path: "",
         },
         TrustColumn {
             file: "elastos-server/src/update_controller/child.rs",
-            function: "spawn_held",
+            function: "launch",
             call: "spawn()",
             class: "other",
             trust_root: own_command_trust_root(),
-            verified_when: own_command_verified_when(),
+            verified_when: host_start_verified_when(
+                "update child process ownership is unsupported on Windows",
+            ),
             evidence: ["prepared.attach", "_tokio("].concat(),
             os_path: "",
         },
@@ -1715,7 +1733,23 @@ fn trust_column_counts_and_chokepoint_queue() {
     #[cfg(windows)]
     {
         assert_eq!(times.get("at-every-start"), Some(&33));
-        assert_eq!(times.get(own_command_verified_when()), Some(&8));
+        assert_eq!(times.get(own_command_verified_when()), Some(&3));
+        assert_eq!(
+            times.get("update executable process tree custody is unsupported on Windows"),
+            Some(&2)
+        );
+        assert_eq!(
+            times.get("update controller child launch is unsupported on Windows"),
+            Some(&1)
+        );
+        assert_eq!(
+            times.get("update controller descriptor handoff is unsupported on Windows"),
+            Some(&1)
+        );
+        assert_eq!(
+            times.get("update child process ownership is unsupported on Windows"),
+            Some(&1)
+        );
         assert_eq!(times.get(managed_runtime_verified_when()), Some(&2));
     }
     assert_eq!(times.get("at-install-only"), Some(&7));

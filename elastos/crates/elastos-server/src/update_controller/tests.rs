@@ -5930,9 +5930,13 @@ fn own_program_starts_hold_signed_bytes_before_exec() {
     );
     assert!(exec.find("attach_std(").unwrap() < exec.find(".exec()").unwrap());
     let spawn = fn_body(controller, "fn spawn(");
-    assert!(spawn.contains("spawn_held(") && spawn.contains("Some(&prepared)"));
+    assert!(spawn.contains("spawn_held(") && spawn.contains("&prepared"));
+    assert!(!spawn.contains("Some(&prepared)"));
     let child = include_str!("child.rs");
-    let held = fn_body(child, "fn spawn_held(");
+    let signature = fn_body(child, "fn spawn_held(");
+    assert!(signature.contains("&crate::setup::verified_executable::VerifiedExecutable"));
+    assert!(!signature.contains("Option<"));
+    let held = fn_body(child, "fn launch(");
     let pipe = held.find("pre_exec(").unwrap();
     let attach = held.find("attach_tokio(").unwrap();
     let start = held.find(".spawn()").unwrap();

@@ -50,6 +50,15 @@ fn own_command_checks() -> &'static str {
     }
 }
 
+/// What that start does on Windows. Unix keeps the signed checksum.
+fn host_start_checks(windows: &'static str) -> &'static str {
+    if cfg!(windows) {
+        windows
+    } else {
+        "checksum"
+    }
+}
+
 fn managed_runtime_checks() -> &'static str {
     #[cfg(windows)]
     {
@@ -951,7 +960,7 @@ fn rows() -> Vec<Row> {
             "verify_installed_binary_version",
             "command",
             "host process",
-            own_command_checks(),
+            host_start_checks("update executable process tree custody is unsupported on Windows"),
             "P2-8",
             1,
         ),
@@ -960,7 +969,7 @@ fn rows() -> Vec<Row> {
             "verify_installed_binary_version",
             "spawn()",
             "host process",
-            own_command_checks(),
+            host_start_checks("update executable process tree custody is unsupported on Windows"),
             "P2-8",
             1,
         ),
@@ -969,7 +978,7 @@ fn rows() -> Vec<Row> {
             "command",
             "command",
             "host process",
-            own_command_checks(),
+            host_start_checks("update controller child launch is unsupported on Windows"),
             "P2-8",
             1,
         ),
@@ -978,16 +987,16 @@ fn rows() -> Vec<Row> {
             "exec_controller",
             "command",
             "host process",
-            own_command_checks(),
+            host_start_checks("update controller descriptor handoff is unsupported on Windows"),
             "P2-8",
             1,
         ),
         row(
             "elastos-server/src/update_controller/child.rs",
-            "spawn_held",
+            "launch",
             "spawn()",
             "host process",
-            own_command_checks(),
+            host_start_checks("update child process ownership is unsupported on Windows"),
             "P2-8",
             1,
         ),
@@ -1084,6 +1093,10 @@ fn every_executable_loader_has_an_authority_row() {
                 | "DID"
                 | "checksum"
                 | "installed release no-follow file admission is unsupported on Windows; No trusted source configured on a source Home"
+                | "update executable process tree custody is unsupported on Windows"
+                | "update controller child launch is unsupported on Windows"
+                | "update controller descriptor handoff is unsupported on Windows"
+                | "update child process ownership is unsupported on Windows"
                 | "managed Runtime process ownership is unsupported on Windows"
                 | "admitted binary+OS gate+confined storage"
                 | "checked storage+Seatbelt profile"

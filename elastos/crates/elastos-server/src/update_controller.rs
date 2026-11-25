@@ -1184,7 +1184,7 @@ impl Controller {
             command.stdout(log.try_clone()?).stderr(log);
             self.child = Some(child::OwnedChild::spawn_held(
                 &mut command,
-                Some(&prepared),
+                &prepared,
                 true,
             )?);
             prepared.persist_private_copy();

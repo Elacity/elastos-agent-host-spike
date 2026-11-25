@@ -25,12 +25,21 @@ pub(crate) struct OwnedChild {
 }
 
 impl OwnedChild {
+    /// A test probe is not the signed Runtime. Production starts use `spawn_held`.
     #[cfg(test)]
     pub(crate) fn spawn(command: &mut Command) -> Result<Self> {
-        Self::spawn_held(command, None, false)
+        Self::launch(command, None, false)
     }
 
     pub(crate) fn spawn_held(
+        command: &mut Command,
+        prepared: &crate::setup::verified_executable::VerifiedExecutable,
+        clear_env: bool,
+    ) -> Result<Self> {
+        Self::launch(command, Some(prepared), clear_env)
+    }
+
+    fn launch(
         command: &mut Command,
         prepared: Option<&crate::setup::verified_executable::VerifiedExecutable>,
         clear_env: bool,

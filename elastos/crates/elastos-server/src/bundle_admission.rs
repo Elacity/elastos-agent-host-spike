@@ -288,7 +288,7 @@ fn read_signature_file(path: &Path) -> Result<Vec<u8>, BundleRefusal> {
     open_signature_file(path)?
         .take(MAX_SIGNATURE_FILE_BYTES + 1)
         .read_to_end(&mut bytes)
-        .map_err(signature_error)?;
+        .map_err(|error| signature_error(path, error))?;
     if bytes.len() as u64 > MAX_SIGNATURE_FILE_BYTES {
         return Err(BundleRefusal::SignatureUnparsed(format!(
             "the signature file is over {MAX_SIGNATURE_FILE_BYTES} bytes"
@@ -301,14 +301,20 @@ fn refused_signature(kind: &str) -> BundleRefusal {
     BundleRefusal::SignatureUnparsed(format!("the signature path is a {kind}"))
 }
 
-fn signature_error(error: std::io::Error) -> BundleRefusal {
+fn signature_error(path: &Path, error: std::io::Error) -> BundleRefusal {
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+    }
     #[cfg(unix)]
     if error.raw_os_error() == Some(libc::ELOOP) {
         return refused_signature("symlink");
     }
     #[cfg(unix)]
     if error.raw_os_error() == Some(libc::ENXIO) {
-        return refused_signature("fifo");
+        // Opening a fifo or a socket with O_NONBLOCK can fail before the type
+        // is visible. Name the node from lstat, which does not open it.
+        return refused_signature(unix_special_kind(path));
     }
     if error.kind() == std::io::ErrorKind::NotFound {
         BundleRefusal::Unsigned
@@ -324,8 +330,10 @@ fn open_signature_file(path: &Path) -> Result<std::fs::File, BundleRefusal> {
         .read(true)
         .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC)
         .open(path)
-        .map_err(signature_error)?;
-    let meta = file.metadata().map_err(signature_error)?;
+        .map_err(|error| signature_error(path, error))?;
+    let meta = file
+        .metadata()
+        .map_err(|error| signature_error(path, error))?;
     if meta.is_file() {
         return Ok(file);
     }
@@ -334,10 +342,32 @@ fn open_signature_file(path: &Path) -> Result<std::fs::File, BundleRefusal> {
         "folder"
     } else if ty.is_fifo() {
         "fifo"
+    } else if ty.is_socket() {
+        "socket"
     } else {
         "special file"
     };
     Err(refused_signature(kind))
+}
+
+#[cfg(unix)]
+fn unix_special_kind(path: &Path) -> &'static str {
+    use std::os::unix::fs::FileTypeExt;
+    let Ok(meta) = std::fs::symlink_metadata(path) else {
+        return "special file";
+    };
+    let ty = meta.file_type();
+    if ty.is_fifo() {
+        "fifo"
+    } else if ty.is_socket() {
+        "socket"
+    } else if ty.is_dir() {
+        "folder"
+    } else if ty.is_symlink() {
+        "symlink"
+    } else {
+        "special file"
+    }
 }
 
 #[cfg(windows)]
@@ -347,8 +377,10 @@ fn open_signature_file(path: &Path) -> Result<std::fs::File, BundleRefusal> {
         .read(true)
         .custom_flags(0x0020_0000 | 0x0200_0000)
         .open(path)
-        .map_err(signature_error)?;
-    let meta = file.metadata().map_err(signature_error)?;
+        .map_err(|error| signature_error(path, error))?;
+    let meta = file
+        .metadata()
+        .map_err(|error| signature_error(path, error))?;
     let attributes = meta.file_attributes();
     if attributes & 0x400 != 0 {
         return Err(refused_signature("reparse point"));
@@ -361,6 +393,13 @@ fn open_signature_file(path: &Path) -> Result<std::fs::File, BundleRefusal> {
     } else {
         "special file"
     }))
+}
+
+#[cfg(not(any(unix, windows)))]
+fn open_signature_file(_path: &Path) -> Result<std::fs::File, BundleRefusal> {
+    Err(BundleRefusal::SignatureUnparsed(
+        "unsupported platform".into(),
+    ))
 }
 
 /// The signature file beside a bundle, exactly: no other key is allowed.
@@ -935,6 +974,16 @@ pub(crate) mod tests {
             "the fifo open blocked"
         );
         assert!(refusal.to_string().contains("fifo"), "{refusal}");
+        let as_folder = folder.path().join("folder.sig.json");
+        std::fs::create_dir(&as_folder).unwrap();
+        let refusal = check_bundle_signature(&as_folder, &cid(CID_A), &verifier)
+            .expect_err("a folder is not a signature file");
+        assert!(refusal.to_string().contains("folder"), "{refusal}");
+        let socket = folder.path().join("sock.sig.json");
+        let _listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        let refusal = check_bundle_signature(&socket, &cid(CID_A), &verifier)
+            .expect_err("a socket is not a signature file");
+        assert!(refusal.to_string().contains("socket"), "{refusal}");
     }
 
     #[test]
