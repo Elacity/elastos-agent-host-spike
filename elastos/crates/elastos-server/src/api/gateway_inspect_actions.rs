@@ -459,19 +459,57 @@ impl Drop for UnsettledDispatch {
         if self.finished {
             return;
         }
+        self.finished = true;
+        let code = if std::thread::panicking() {
+            "dispatch_panic"
+        } else {
+            "dispatch_lost"
+        };
         let record = self.record.clone();
         let _ = settle_agent_plan_dispatch(
             &self.data_dir,
             record,
             "unknown",
-            serde_json::json!({"status": "unknown", "code": "dispatch_lost"}),
+            serde_json::json!({"status": "unknown", "code": code}),
         );
         crate::runtime::resolve_unknown_plan_effect(&self.request_id);
-        let request_id = self.request_id.clone();
-        tokio::spawn(async move {
-            crate::resource_bridge::revoke_abandoned_plan_grant(&request_id).await;
-        });
+        revoke_abandoned_plan_grant_now(&self.request_id);
     }
+}
+
+/// Revokes on this thread when no runtime is current, and on a joined thread when one is.
+fn revoke_abandoned_plan_grant_now(request_id: &str) {
+    let request_id = request_id.to_string();
+    let run = move || {
+        let Ok(runtime) = tokio::runtime::Builder::new_current_thread().build() else {
+            return;
+        };
+        runtime.block_on(crate::resource_bridge::revoke_abandoned_plan_grant(
+            &request_id,
+        ));
+    };
+    if tokio::runtime::Handle::try_current().is_err() {
+        run();
+        return;
+    }
+    if let Ok(worker) = std::thread::Builder::new()
+        .name("plan-grant-revoke".into())
+        .spawn(run)
+    {
+        let _ = worker.join();
+    }
+}
+
+/// Drops an unsettled dispatch. A row calls this on a thread with no runtime.
+#[cfg(all(test, unix))]
+pub(crate) fn drop_unsettled_dispatch_for_test(data_dir: &FsPath, request_id: &str) {
+    let record = read_inspect_action_record(data_dir, request_id).expect("the plan record");
+    let _cleanup = UnsettledDispatch {
+        data_dir: data_dir.to_path_buf(),
+        record,
+        request_id: request_id.to_string(),
+        finished: false,
+    };
 }
 
 /// Claim the stored step, audit the claim, then let its settlement outlive the
@@ -763,7 +801,7 @@ fn settle_agent_plan_dispatch(
     // A late landing does not become a new action. The stored unknown stays
     // unknown: nothing here calls it done, completed, or refused.
     if let Ok(stored) = read_inspect_action_record(data_dir, &record.request_id) {
-        if stored.status == "unknown" && status != "unknown" {
+        if stored.status == "unknown" {
             return Ok("Agent plan dispatch unknown.".to_string());
         }
     }
@@ -801,7 +839,7 @@ fn settle_agent_plan_dispatch(
 }
 
 /// A second settlement after unknown. The stored record stays unknown.
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub(crate) fn resettle_plan_for_test(
     data_dir: &FsPath,
     request_id: &str,

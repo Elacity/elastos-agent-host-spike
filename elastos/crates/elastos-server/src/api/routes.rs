@@ -711,7 +711,6 @@ async fn stop_collected_agent_rows(runtime: &Runtime, agent_id: &str) -> axum::r
         )
             .into_response();
     }
-    runtime.note_agent_stop_requested(agent_id).await;
     let mut stopped = Vec::with_capacity(ready.len());
     let mut stopping = Vec::new();
     for id in ready {
@@ -729,7 +728,10 @@ async fn stop_collected_agent_rows(runtime: &Runtime, agent_id: &str) -> axum::r
             continue;
         }
         let info = match runtime.stop_capsule_with_reason(&id, "owner").await {
-            Ok(Some(info)) => info,
+            Ok(Some(info)) => {
+                runtime.note_agent_stop_requested(agent_id).await;
+                info
+            }
             Ok(None) => continue,
             Err(error) => {
                 return (

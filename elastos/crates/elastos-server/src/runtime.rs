@@ -348,10 +348,15 @@ pub(crate) struct PlanBook {
     /// Effects whose record is unknown. Stop names these and then drops them,
     /// so a run of timeouts does not keep a flight or an instance.
     unknown: Vec<UnknownPlanStep>,
+    /// Sessions whose row left while a flight was still open.
+    row_gone: HashSet<String>,
     /// Live-run tokens kept while an effect of an ended session is still in
     /// flight. The last such effect, settled or unknown, drops the token.
     held_runs: HashMap<String, AgentLiveRun>,
     next: u64,
+    /// A test's instant. Product reads use the real clock.
+    #[cfg(test)]
+    clock: Option<std::time::Instant>,
 }
 
 struct PlanInstance {
@@ -370,6 +375,8 @@ struct UnknownPlanStep {
     session_id: String,
     agent_id: String,
     request_id: String,
+    /// When to drop a name recorded after its row was gone.
+    purge_at: Option<std::time::Instant>,
 }
 
 /// One step Stop can name after its record was stored as unknown.
@@ -428,8 +435,11 @@ fn new_plan_book() -> Arc<StdMutex<PlanBook>> {
         instances: HashMap::new(),
         inflight: HashMap::new(),
         unknown: Vec::new(),
+        row_gone: HashSet::new(),
         held_runs: HashMap::new(),
         next: 1,
+        #[cfg(test)]
+        clock: None,
     }))
 }
 
@@ -468,17 +478,46 @@ fn finish_flight(book: &mut PlanBook, id: u64, as_unknown: bool) {
     forget_open_effect(&flight.request_id);
     let session_id = flight.session_id.clone();
     if as_unknown {
+        // The row is already gone. Keep the name for one retention.
+        let purge_at = book
+            .row_gone
+            .contains(&session_id)
+            .then(|| book_now(book) + ENDED_CAPSULE_RETENTION);
         push_unknown(
             book,
             UnknownPlanStep {
                 session_id: flight.session_id,
                 agent_id: flight.agent_id,
                 request_id: flight.request_id,
+                purge_at,
             },
         );
     }
+    if !book
+        .inflight
+        .values()
+        .any(|flight| flight.session_id == session_id)
+    {
+        book.row_gone.remove(&session_id);
+    }
     reap(book, &session_id);
     release_held_live_run(book, &session_id);
+}
+
+fn book_now(book: &PlanBook) -> std::time::Instant {
+    #[cfg(test)]
+    if let Some(now) = book.clock {
+        return now;
+    }
+    #[cfg(not(test))]
+    let _ = book;
+    std::time::Instant::now()
+}
+
+fn drop_due_unknown(book: &mut PlanBook) {
+    let now = book_now(book);
+    book.unknown
+        .retain(|step| step.purge_at.is_none_or(|due| now < due));
 }
 
 /// Keeps at most [`MAX_UNKNOWN_STEPS_PER_AGENT`] names for one agent.
@@ -506,6 +545,15 @@ fn push_unknown(book: &mut PlanBook, step: UnknownPlanStep) {
 /// Drops unknown names for a session whose row has left the registry.
 fn purge_unknown_session(book: &mut PlanBook, session_id: &str) {
     book.unknown.retain(|step| step.session_id != session_id);
+    if book
+        .inflight
+        .values()
+        .any(|flight| flight.session_id == session_id)
+    {
+        book.row_gone.insert(session_id.to_string());
+    } else {
+        book.row_gone.remove(session_id);
+    }
 }
 
 /// The last effect of a session drops the live-run token the end parked.
@@ -580,7 +628,7 @@ impl PlanBook {
         reap(self, session_id);
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub(crate) fn close_for_test(&mut self, session_id: &str) {
         self.mark_stopping(session_id);
     }
@@ -749,40 +797,76 @@ struct InstanceAuthority {
 /// the guest's outcome was known.
 const CAUSE_TASK_LOST: &str = "activation task ended before its outcome";
 
-/// One detached activation's stop request (M1-R A10-R). `requested` is the
-/// flag the bridge's wait loop reads, so a guest held inside a call leaves it
-/// within one poll; `cause` is the reason the activation's one end records.
-/// The cause is written before the flag is raised, so an end that sees the
-/// flag always sees its reason.
+/// Open and committed stops. The first cause stays while any caller remains.
+struct StopCalls {
+    cause: Option<String>,
+    open: HashSet<u64>,
+    committed: u32,
+    next: u64,
+}
+
+/// One activation's stop. The flag rises only after that caller's provider stop succeeds.
 struct ActivationStop {
     flag: Arc<crate::resource_bridge::ActivationStopFlag>,
-    cause: StdMutex<Option<String>>,
+    calls: StdMutex<StopCalls>,
 }
 
 impl ActivationStop {
-    /// Records this stop's reason (`stopped: <reason>`) and raises the flag.
-    /// The first reason recorded is the one the end records: a later stop
-    /// keeps it.
-    fn request(&self, reason: &str) {
-        self.cause
-            .lock()
-            .unwrap_or_else(|err| err.into_inner())
+    fn new() -> Self {
+        Self {
+            flag: Arc::new(crate::resource_bridge::ActivationStopFlag::default()),
+            calls: StdMutex::new(StopCalls {
+                cause: None,
+                open: HashSet::new(),
+                committed: 0,
+                next: 0,
+            }),
+        }
+    }
+
+    fn stage(&self, reason: &str) -> u64 {
+        let mut calls = self.calls.lock().unwrap_or_else(|err| err.into_inner());
+        calls
+            .cause
             .get_or_insert_with(|| format!("{CAPSULE_STOPPED}: {reason}"));
+        let id = calls.next;
+        calls.next = calls.next.wrapping_add(1);
+        calls.open.insert(id);
+        id
+    }
+
+    fn commit(&self, id: u64) {
+        let mut calls = self.calls.lock().unwrap_or_else(|err| err.into_inner());
+        if !calls.open.remove(&id) {
+            return;
+        }
+        calls.committed = calls.committed.saturating_add(1);
         self.flag.requested.store(true, Ordering::Release);
     }
 
-    /// The provider stop failed. The flag comes back down and the cause is
-    /// forgotten, so the live run is not cut off by a stop that did not happen.
-    fn withdraw(&self) {
-        self.flag.requested.store(false, Ordering::Release);
-        *self.cause.lock().unwrap_or_else(|err| err.into_inner()) = None;
+    fn withdraw(&self, id: u64) {
+        let mut calls = self.calls.lock().unwrap_or_else(|err| err.into_inner());
+        calls.open.remove(&id);
+        if calls.open.is_empty() && calls.committed == 0 {
+            calls.cause = None;
+            self.flag.requested.store(false, Ordering::Release);
+        }
+    }
+
+    /// Records the reason and raises the flag. Tests use this for a stop that
+    /// has no provider call between the two.
+    #[cfg(test)]
+    fn request(&self, reason: &str) {
+        let id = self.stage(reason);
+        self.commit(id);
     }
 
     /// The reason this stop was requested with, if any.
     fn cause(&self) -> Option<String> {
-        self.cause
+        self.calls
             .lock()
             .unwrap_or_else(|err| err.into_inner())
+            .cause
             .clone()
     }
 
@@ -864,6 +948,75 @@ static FAIL_CAPSULE_STOP: StdMutex<Vec<(usize, String)>> = StdMutex::new(Vec::ne
 /// Provider `stop` calls observed by a test, keyed by the launch gate.
 #[cfg(test)]
 static PROVIDER_STOP_CALLS: StdMutex<Vec<usize>> = StdMutex::new(Vec::new());
+
+/// Holds provider stops after the reason is staged and before the flag is raised.
+#[cfg(test)]
+struct ProviderStopHold {
+    entered: Arc<tokio::sync::Notify>,
+    releases: StdMutex<Vec<Arc<tokio::sync::Notify>>>,
+    arrived: std::sync::atomic::AtomicUsize,
+}
+
+#[cfg(test)]
+static PROVIDER_STOP_HOLDS: StdMutex<Vec<(usize, String, Arc<ProviderStopHold>)>> =
+    StdMutex::new(Vec::new());
+
+/// One armed hold. Drop releases any stop still waiting on it.
+#[cfg(all(test, unix))]
+pub(crate) struct ProviderStopPause {
+    key: usize,
+    session: String,
+    hold: Arc<ProviderStopHold>,
+}
+
+#[cfg(all(test, unix))]
+impl ProviderStopPause {
+    pub(crate) fn arrived(&self) -> usize {
+        self.hold.arrived.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    pub(crate) async fn entered(&self) {
+        self.hold.entered.notified().await;
+    }
+
+    /// Lets the next waiting stop continue.
+    pub(crate) fn release_one(&self) {
+        let release = self
+            .hold
+            .releases
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .pop();
+        if let Some(release) = release {
+            release.notify_one();
+        }
+    }
+}
+
+#[cfg(all(test, unix))]
+impl Drop for ProviderStopPause {
+    fn drop(&mut self) {
+        let mut holds = PROVIDER_STOP_HOLDS
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        if let Some(pos) = holds
+            .iter()
+            .rposition(|(key, session, _)| *key == self.key && session == &self.session)
+        {
+            holds.swap_remove(pos);
+        }
+        drop(holds);
+        let releases = self
+            .hold
+            .releases
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .clone();
+        for release in releases {
+            release.notify_one();
+        }
+    }
+}
 
 /// What a guest does at the first line of its watcher, before it runs.
 /// Keyed by agent id. The launch turn is still held, so the guest's end
@@ -1110,10 +1263,7 @@ impl ActivationContextHeld {
             .clone();
         // The stop request lives as long as the activation: the bridge looks
         // it up by capsule id on every call, and the stop route by instance id.
-        let stop = Arc::new(ActivationStop {
-            flag: Arc::new(crate::resource_bridge::ActivationStopFlag::default()),
-            cause: StdMutex::new(None),
-        });
+        let stop = Arc::new(ActivationStop::new());
         runtime
             .activation_stops
             .write()
@@ -2090,14 +2240,14 @@ impl Runtime {
         Ok(started)
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub(crate) fn plan_book(&self) -> Arc<StdMutex<PlanBook>> {
         Arc::clone(&self.plan_book)
     }
 
     /// The component hostcall this Runtime installed. The plan book in that
     /// closure is the one a launched guest dispatches against.
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub(crate) fn call_component_hostcall_for_test(
         &self,
         line: &str,
@@ -2110,8 +2260,8 @@ impl Runtime {
             .call_bus_hostcall_for_test(line, capsule_id, principal_id)
     }
 
-    /// Remember this running instance. An instance that was never bound, or
-    /// that was removed after it ended with nothing in flight, is refused.
+    /// Remember this running instance. A session already marked stopping is
+    /// not reopened. An absent row is a new instance.
     pub(crate) fn bind_plan_instance(&self, session_id: &str, agent_id: &str) {
         let mut book = plan_book(&self.plan_book);
         // A session already marked stopping is not reopened. An absent row
@@ -2135,7 +2285,7 @@ impl Runtime {
 
     /// The end takes the plan lock first and marks the instance stopping.
     /// An effect either already holds its mark, or `try_enter` refuses.
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub(crate) fn note_plan_instance_ended(&self, session_id: &str) {
         plan_book(&self.plan_book).mark_stopping(session_id);
     }
@@ -2149,7 +2299,7 @@ impl Runtime {
     }
 
     /// The bound row for `session_id`, or the keys present when it is absent.
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub(crate) fn plan_book_view(book: &Arc<StdMutex<PlanBook>>, session_id: &str) -> String {
         let locked = plan_book(book);
         match locked.instances.get(session_id) {
@@ -2199,6 +2349,7 @@ impl Runtime {
     /// Steps whose record is unknown, for this agent. The book drops them.
     pub(crate) fn take_unknown_plan_steps(&self, agent_id: &str) -> Vec<NamedUnknownStep> {
         let mut book = plan_book(&self.plan_book);
+        drop_due_unknown(&mut book);
         let mut taken = Vec::new();
         book.unknown.retain(|step| {
             if step.agent_id != agent_id {
@@ -2215,8 +2366,9 @@ impl Runtime {
 
     /// The same names as [`Self::take_unknown_plan_steps`], still in the book.
     pub(crate) fn copy_unknown_plan_steps(&self, agent_id: &str) -> Vec<NamedUnknownStep> {
-        plan_book(&self.plan_book)
-            .unknown
+        let mut book = plan_book(&self.plan_book);
+        drop_due_unknown(&mut book);
+        book.unknown
             .iter()
             .filter(|step| step.agent_id == agent_id)
             .map(|step| NamedUnknownStep {
@@ -2231,6 +2383,7 @@ impl Runtime {
     /// in flight is not stopping, and this call removes its names.
     pub(crate) fn plan_stop_decision(&self, session_id: &str, ended: bool) -> PlanStopDecision {
         let mut book = plan_book(&self.plan_book);
+        drop_due_unknown(&mut book);
         let effect_open = book
             .inflight
             .values()
@@ -2260,12 +2413,13 @@ impl Runtime {
         }
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub(crate) fn plan_book_is_empty(&self) -> bool {
         let book = plan_book(&self.plan_book);
         book.instances.is_empty()
             && book.inflight.is_empty()
             && book.unknown.is_empty()
+            && book.row_gone.is_empty()
             && book.held_runs.is_empty()
     }
 
@@ -2290,7 +2444,7 @@ impl Runtime {
 
     /// A dispatch test that has no running row still has to bind one. The
     /// book is the one on the bridge context, not a second product path.
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub(crate) fn bind_detached_plan_for_test(
         ctx: &mut crate::resource_bridge::BridgeContext,
         session_id: &str,
@@ -2620,7 +2774,7 @@ impl Runtime {
     }
 
     /// The next stop of this session fails before the row ends.
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub(crate) fn arm_failing_capsule_stop(&self, session_id: &str) {
         FAIL_CAPSULE_STOP
             .lock()
@@ -2642,6 +2796,56 @@ impl Runtime {
         };
         armed.swap_remove(pos);
         true
+    }
+
+    /// Pauses this session's provider stop after the reason is staged.
+    #[cfg(all(test, unix))]
+    pub(crate) fn arm_provider_stop_hold(&self, session_id: &str) -> ProviderStopPause {
+        let hold = Arc::new(ProviderStopHold {
+            entered: Arc::new(tokio::sync::Notify::new()),
+            releases: StdMutex::new(Vec::new()),
+            arrived: std::sync::atomic::AtomicUsize::new(0),
+        });
+        PROVIDER_STOP_HOLDS
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .push((
+                self.stop_rows_key(),
+                session_id.to_string(),
+                Arc::clone(&hold),
+            ));
+        ProviderStopPause {
+            key: self.stop_rows_key(),
+            session: session_id.to_string(),
+            hold,
+        }
+    }
+
+    #[cfg(test)]
+    async fn pause_during_provider_stop(&self, id: &str) {
+        let hold = {
+            let holds = PROVIDER_STOP_HOLDS
+                .lock()
+                .unwrap_or_else(|err| err.into_inner());
+            let key = self.stop_rows_key();
+            holds
+                .iter()
+                .rev()
+                .find(|(stored, session, _)| *stored == key && session == id)
+                .map(|(_, _, hold)| Arc::clone(hold))
+        };
+        let Some(hold) = hold else {
+            return;
+        };
+        let release = Arc::new(tokio::sync::Notify::new());
+        hold.releases
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .push(Arc::clone(&release));
+        hold.arrived
+            .fetch_add(1, std::sync::atomic::Ordering::Release);
+        hold.entered.notify_one();
+        release.notified().await;
     }
 
     /// Await points on an admitted Start, after the live run is set and before
@@ -2754,13 +2958,7 @@ impl Runtime {
         self.activation_stops
             .write()
             .unwrap_or_else(|err| err.into_inner())
-            .insert(
-                session_id.to_string(),
-                Arc::new(ActivationStop {
-                    flag: Arc::new(crate::resource_bridge::ActivationStopFlag::default()),
-                    cause: StdMutex::new(None),
-                }),
-            );
+            .insert(session_id.to_string(), Arc::new(ActivationStop::new()));
         self.bind_plan_instance(session_id, agent_id);
         self.note_planted_live_run(agent_id, session_id);
     }
@@ -3949,19 +4147,26 @@ impl Runtime {
             .is_some_and(|stop| stop.flag.requested.load(Ordering::Acquire))
     }
 
+    /// The flag the bridge's capability poll reads.
+    #[cfg(all(test, unix))]
+    pub(crate) fn activation_stop_flag_for_test(
+        &self,
+        id: &str,
+    ) -> Option<Arc<crate::resource_bridge::ActivationStopFlag>> {
+        self.activation_stops
+            .read()
+            .unwrap_or_else(|err| err.into_inner())
+            .get(id)
+            .map(|stop| Arc::clone(&stop.flag))
+    }
+
     /// Gives this session a stop request, so a later stop takes the watcher path.
     #[cfg(all(test, unix))]
     pub(crate) fn plant_activation_stop_for_test(&self, id: &str) {
         self.activation_stops
             .write()
             .unwrap_or_else(|err| err.into_inner())
-            .insert(
-                id.to_string(),
-                Arc::new(ActivationStop {
-                    flag: Arc::new(crate::resource_bridge::ActivationStopFlag::default()),
-                    cause: StdMutex::new(None),
-                }),
-            );
+            .insert(id.to_string(), Arc::new(ActivationStop::new()));
     }
 
     #[cfg(test)]
@@ -3996,14 +4201,21 @@ impl Runtime {
                 session_id: session_id.to_string(),
                 agent_id: agent_id.to_string(),
                 request_id: request_id.to_string(),
+                purge_at: None,
             },
         );
     }
 
     #[cfg(all(test, unix))]
+    pub(crate) fn set_plan_clock_for_test(&self, now: Option<std::time::Instant>) {
+        plan_book(&self.plan_book).clock = now;
+    }
+
+    #[cfg(all(test, unix))]
     pub(crate) fn unknown_count_for_test(&self, agent_id: &str) -> usize {
-        plan_book(&self.plan_book)
-            .unknown
+        let mut book = plan_book(&self.plan_book);
+        drop_due_unknown(&mut book);
+        book.unknown
             .iter()
             .filter(|step| step.agent_id == agent_id)
             .count()
@@ -4412,16 +4624,14 @@ impl Runtime {
             }));
         };
 
-        // The reason is recorded before the flag is raised, so the end that
-        // sees the flag records this cause. The provider stop runs after
-        // that. If it fails, the flag and the cause are withdrawn: the run
-        // stays up and can still dispatch. The plan end is `end_instance`,
-        // which runs only when the watcher records the end.
-        stop.request(reason);
+        // The flag rises only after this caller's provider stop succeeds.
+        let ticket = stop.stage(reason);
         if let Some((handle, provider)) = provider {
             tracing::info!("Stopping capsule '{}' ({})", info.name, id);
             #[cfg(test)]
             self.note_provider_stop_call();
+            #[cfg(test)]
+            self.pause_during_provider_stop(id).await;
             let stopped = provider.stop(handle).await;
             #[cfg(test)]
             let stopped = if stopped.is_ok() && self.take_failing_capsule_stop(id) {
@@ -4430,10 +4640,11 @@ impl Runtime {
                 stopped
             };
             if let Err(error) = stopped {
-                stop.withdraw();
+                stop.withdraw(ticket);
                 return Err(error);
             }
         }
+        stop.commit(ticket);
 
         self.wait_ended(id).await;
         // The end happened, whatever its recorded status and cause: the
@@ -7911,10 +8122,7 @@ pub(crate) mod tests {
     /// records; a later stop raises the same flag and changes nothing else.
     #[test]
     fn a_later_stop_keeps_the_first_cause() {
-        let stop = ActivationStop {
-            flag: Arc::new(crate::resource_bridge::ActivationStopFlag::default()),
-            cause: StdMutex::new(None),
-        };
+        let stop = ActivationStop::new();
         assert_eq!(stop.cause(), None);
         stop.request("first");
         assert!(stop.flag.requested.load(Ordering::Acquire));

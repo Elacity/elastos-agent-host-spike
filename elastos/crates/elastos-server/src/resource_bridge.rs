@@ -289,9 +289,8 @@ impl BridgePrincipal {
 }
 
 /// One activation's stop request, shared by its end and the bridge's wait
-/// loop (M1-R A10-R). `requested` is set by the stop route before it waits;
-/// `cancelled` is set by the wait loop when it leaves the guest's call
-/// because of it, so the end can tell this stop's ending from a trap's.
+/// loop (M1-R A10-R). `requested` is set after that caller's provider stop
+/// succeeds. `cancelled` is set when the wait leaves because of that flag.
 #[derive(Debug, Default)]
 pub struct ActivationStopFlag {
     pub requested: std::sync::atomic::AtomicBool,
@@ -723,6 +722,7 @@ async fn register_one_use_grant(
     token: &CapabilityToken,
     resource: &str,
     action: Action,
+    request_id: &str,
 ) -> Result<String, ()> {
     let pending = ctx
         .pending_store
@@ -733,6 +733,10 @@ async fn register_one_use_grant(
         )
         .await;
     let id = pending.id.as_str().to_string();
+    #[cfg(test)]
+    wait_one_use_grant_race(request_id, &id).await;
+    #[cfg(not(test))]
+    let _ = request_id;
     if ctx
         .pending_store
         .grant_request(
@@ -751,9 +755,103 @@ async fn register_one_use_grant(
                 elastos_runtime::capability::pending::Settler::Runtime,
             )
             .await;
+        ctx.pending_store
+            .revoke_request_by(
+                &id,
+                "grant not registered",
+                elastos_runtime::capability::pending::Settler::Runtime,
+            )
+            .await;
         return Err(());
     }
     Ok(id)
+}
+
+#[cfg(test)]
+struct OneUseGrantRace {
+    request_id: String,
+    entered: Arc<tokio::sync::Notify>,
+    release: Arc<tokio::sync::Notify>,
+    pending_id: Arc<Mutex<Option<String>>>,
+}
+
+#[cfg(test)]
+static ONE_USE_GRANT_RACE: Mutex<Option<OneUseGrantRace>> = Mutex::new(None);
+
+/// Lets a test grant the pending record before this registration does.
+#[cfg(all(test, unix))]
+pub(crate) struct OneUseGrantPause {
+    pub(crate) entered: Arc<tokio::sync::Notify>,
+    pub(crate) release: Arc<tokio::sync::Notify>,
+    pending_id: Arc<Mutex<Option<String>>>,
+}
+
+#[cfg(all(test, unix))]
+impl OneUseGrantPause {
+    pub(crate) fn pending_id(&self) -> Option<String> {
+        self.pending_id
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .clone()
+    }
+}
+
+#[cfg(all(test, unix))]
+impl Drop for OneUseGrantPause {
+    fn drop(&mut self) {
+        self.release.notify_one();
+        let mut slot = ONE_USE_GRANT_RACE
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        if slot
+            .as_ref()
+            .is_some_and(|race| Arc::ptr_eq(&race.pending_id, &self.pending_id))
+        {
+            *slot = None;
+        }
+    }
+}
+
+#[cfg(all(test, unix))]
+pub(crate) fn arm_one_use_grant_race(request_id: &str) -> OneUseGrantPause {
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let pending_id = Arc::new(Mutex::new(None));
+    *ONE_USE_GRANT_RACE
+        .lock()
+        .unwrap_or_else(|err| err.into_inner()) = Some(OneUseGrantRace {
+        request_id: request_id.to_string(),
+        entered: Arc::clone(&entered),
+        release: Arc::clone(&release),
+        pending_id: Arc::clone(&pending_id),
+    });
+    OneUseGrantPause {
+        entered,
+        release,
+        pending_id,
+    }
+}
+
+#[cfg(test)]
+async fn wait_one_use_grant_race(request_id: &str, pending_id: &str) {
+    let race = {
+        let mut slot = ONE_USE_GRANT_RACE
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        match slot.take() {
+            Some(race) if race.request_id == request_id => race,
+            other => {
+                *slot = other;
+                return;
+            }
+        }
+    };
+    *race
+        .pending_id
+        .lock()
+        .unwrap_or_else(|err| err.into_inner()) = Some(pending_id.to_string());
+    race.entered.notify_one();
+    race.release.notified().await;
 }
 
 struct AbandonedPlanGrant {
@@ -814,6 +912,28 @@ async fn revoke_plan_grant(
 
 /// Revoke the grant a dropped or panicked dispatch left behind. A dispatch
 /// that finished revokes its own, or keeps it, and this finds nothing.
+#[cfg(all(test, unix))]
+pub(crate) fn park_abandoned_grant_for_test(
+    request_id: &str,
+    manager: Arc<CapabilityManager>,
+    store: Arc<elastos_runtime::capability::pending::PendingRequestStore>,
+    token: CapabilityToken,
+    pending_id: String,
+) {
+    abandoned_plan_grants()
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+        .insert(
+            request_id.to_string(),
+            AbandonedPlanGrant {
+                manager,
+                store,
+                token,
+                pending_id,
+            },
+        );
+}
+
 pub(crate) async fn revoke_abandoned_plan_grant(request_id: &str) {
     let Some(grant) = abandoned_plan_grants()
         .lock()
@@ -1026,8 +1146,14 @@ pub(crate) async fn dispatch_agent_plan_step(
         token
     };
     let registered = if own_root {
-        match register_one_use_grant(&ctx, &token, &dispatch.resource, dispatch.required_action)
-            .await
+        match register_one_use_grant(
+            &ctx,
+            &token,
+            &dispatch.resource,
+            dispatch.required_action,
+            request_id,
+        )
+        .await
         {
             Ok(pending_id) => Some((token.clone(), pending_id)),
             Err(()) => {

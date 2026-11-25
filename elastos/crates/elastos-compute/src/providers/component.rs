@@ -241,9 +241,10 @@ impl ComponentProvider {
         *self.bus_hostcall.write().unwrap() = Some(hostcall);
     }
 
-    /// The hostcall `set_provider_registry` installed. A row uses it so the
-    /// plan book is the one that closure wires in. Dependency tests do not
-    /// see `cfg(test)` on this crate, so the method stays available.
+    /// The hostcall `set_provider_registry` installed. A dependent's tests call
+    /// it. `cfg(test)` is off on this crate when that dependent builds, so
+    /// debug builds keep the method. Release builds do not.
+    #[cfg(debug_assertions)]
     #[doc(hidden)]
     pub fn call_bus_hostcall_for_test(
         &self,
