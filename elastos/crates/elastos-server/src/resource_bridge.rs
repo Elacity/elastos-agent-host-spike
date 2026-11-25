@@ -1764,34 +1764,45 @@ fn reserve_model_create(
             &RunKey::of(&binding, &bound.revision),
             bound.tokens,
         )
-        .map_err(|refusal| match refusal {
-            BudgetRefusal::ConflictingRetry => resource_error_response(
-                "invalid_resource_invoke",
-                "request_id conflicts with an existing model hold",
-            ),
-            BudgetRefusal::OverCap {
-                asked,
-                held,
-                ceiling,
-            } => resource_error_response(
-                "denied",
-                &format!(
-                    "model_budget_exceeded: run needs {asked} tokens; {held} of {ceiling} held"
-                ),
-            ),
-            BudgetRefusal::Record(name) => {
-                resource_error_response("denied", &format!("model_budget_exceeded: {name}"))
-            }
-            _ => resource_error_response(
-                "denied",
-                "model_budget_exceeded: agent account unavailable",
-            ),
-        })?;
+        .map_err(budget_refusal_response)?;
     Ok(serde_json::json!({
         "op": "runs_create", "offer_id": offer_id, "operation": operation,
         "input": input, "runtime_binding": binding,
         "expected_execution_binding_hash": bound.revision,
     }))
+}
+
+fn budget_refusal_response(refusal: BudgetRefusal) -> serde_json::Value {
+    match refusal {
+        BudgetRefusal::ConflictingRetry => resource_error_response(
+            "invalid_resource_invoke",
+            "request_id conflicts with an existing model hold",
+        ),
+        BudgetRefusal::OverCap {
+            asked,
+            held,
+            ceiling,
+        } => resource_error_response(
+            "denied",
+            &format!("model_budget_exceeded: run needs {asked} tokens; {held} of {ceiling} held"),
+        ),
+        BudgetRefusal::Record(name) => record_refusal_response(name),
+        _ => resource_error_response("denied", "model_budget_exceeded: agent account unavailable"),
+    }
+}
+
+/// A stored-record refusal. `LOCK_ORDER` stays an internal sentence.
+fn record_refusal_response(name: &'static str) -> serde_json::Value {
+    if name == crate::api::gateway::HOSTED_AGENT_RUN_SENTENCE {
+        return resource_error_response(crate::api::gateway::HOSTED_AGENT_RUN_REFUSED, name);
+    }
+    if name == crate::agents::LOCK_ORDER {
+        return resource_error_response(
+            "agent_record_unavailable",
+            "The agent record cannot be charged for this run.",
+        );
+    }
+    resource_error_response("agent_record_unavailable", name)
 }
 
 fn resource_error_response(code: &str, message: &str) -> serde_json::Value {
@@ -9194,6 +9205,28 @@ pub(crate) mod tests {
         let name = format!("{}{}", "hosted_agent_", "rows");
         let line = format!("mod {name};");
         source.lines().any(|item| item.trim() == line)
+    }
+
+    /// A stored-record refusal uses its own code. The lock-order sentence
+    /// stays off that response.
+    #[test]
+    fn a_record_refusal_has_its_own_code_and_the_lock_order_stays_internal() {
+        let record = budget_refusal_response(crate::model_budget::Refusal::Record(
+            crate::agents::CANNOT_READ,
+        ));
+        assert_eq!(record["code"], "agent_record_unavailable");
+        assert_eq!(record["message"], crate::agents::CANNOT_READ);
+        let record_message = record["message"].as_str().unwrap();
+        assert!(!record_message.contains("model_budget_exceeded"));
+        let lock = budget_refusal_response(crate::model_budget::Refusal::Record(
+            crate::agents::LOCK_ORDER,
+        ));
+        assert_eq!(lock["code"], "agent_record_unavailable");
+        let message = lock["message"].as_str().unwrap();
+        assert_eq!(message, "The agent record cannot be charged for this run.");
+        assert!(!message.contains("agent file lock"));
+        assert!(!message.contains("budget mutex"));
+        assert!(!message.contains("model_budget_exceeded"));
     }
 
     /// The gateway walker keeps production code written after a `tests`

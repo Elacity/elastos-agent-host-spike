@@ -1772,8 +1772,12 @@ pub(super) async fn gateway_provider_proxy(
                 Ok(value) => value,
                 Err((status, message)) => return (status, message).into_response(),
             };
-        if op == "runs_create" && !hosted_run_allowed(&state.data_dir, &context, &request, false) {
-            return (StatusCode::FORBIDDEN, HOSTED_RUN_ADMIN_ONLY).into_response();
+        if op == "runs_create" {
+            if let Some((_, message)) =
+                hosted_run_refusal(&state.data_dir, &context, &request, false)
+            {
+                return (StatusCode::FORBIDDEN, message).into_response();
+            }
         }
         // Approved remote model grants route new runs to the granting Runtime.
         // A grant lookup failure keeps the local path; it cannot widen
@@ -3999,6 +4003,13 @@ pub(super) fn provider_proxy_runtime_metadata_field(request: &serde_json::Value)
 const HOSTED_RUN_ADMIN_ONLY: &str =
     "Hosted AI on this Home is for admins. Local models are still available.";
 
+/// Bus code for an agent whose stored owner is not an admin with a current
+/// approval of this offer.
+pub(crate) const HOSTED_AGENT_RUN_REFUSED: &str = "hosted_agent_run_refused";
+
+pub(crate) const HOSTED_AGENT_RUN_SENTENCE: &str =
+    "An agent's hosted run needs its stored owner to be an admin with a current approval of this offer.";
+
 /// An admin's own hosted run is allowed. An admitted agent whose stored
 /// owner is an admin and has approved that offer is allowed only when
 /// `reserving_bus` is the Bus path that reserves the signed ceiling.
@@ -4008,22 +4019,55 @@ pub(super) fn hosted_run_allowed(
     request: &serde_json::Value,
     reserving_bus: bool,
 ) -> bool {
-    let offer_id = request["offer_id"].as_str().unwrap_or_default();
-    if !crate::api::model_provider_config::is_hosted_offer_id(offer_id) {
-        return true;
-    }
-    context
-        .proof_binding_id()
-        .and_then(|proof| crate::auth::load_principal_for_proof_binding(data_dir, proof).ok())
-        .is_some_and(|principal| {
-            crate::auth::ensure_proof_binding_not_revoked(&principal).is_ok()
-                && principal.principal_id == context.principal_id()
-                && (crate::auth::is_admin(&principal)
-                    || (reserving_bus && agent_owner_approved(data_dir, &principal, offer_id)))
-        })
+    hosted_run_refusal(data_dir, context, request, reserving_bus).is_none()
 }
 
-fn agent_owner_approved(
+/// `None` when the hosted run is allowed. An agent principal gets
+/// `HOSTED_AGENT_RUN_REFUSED`. A person who is not an admin keeps
+/// `hosted_run_admin_only`.
+pub(crate) fn hosted_run_refusal(
+    data_dir: &std::path::Path,
+    context: &HomeLaunchTokenContext,
+    request: &serde_json::Value,
+    reserving_bus: bool,
+) -> Option<(&'static str, &'static str)> {
+    let offer_id = request["offer_id"].as_str().unwrap_or_default();
+    if !crate::api::model_provider_config::is_hosted_offer_id(offer_id) {
+        return None;
+    }
+    let Some(principal) = context
+        .proof_binding_id()
+        .and_then(|proof| crate::auth::load_principal_for_proof_binding(data_dir, proof).ok())
+    else {
+        return Some(admin_hosted_refusal());
+    };
+    let refusal = refusal_for_principal(&principal);
+    if crate::auth::ensure_proof_binding_not_revoked(&principal).is_err()
+        || principal.principal_id != context.principal_id()
+    {
+        return Some(refusal);
+    }
+    if crate::auth::is_admin(&principal)
+        || (reserving_bus && agent_owner_approved(data_dir, &principal, offer_id))
+    {
+        return None;
+    }
+    Some(refusal)
+}
+
+fn admin_hosted_refusal() -> (&'static str, &'static str) {
+    ("hosted_run_admin_only", HOSTED_RUN_ADMIN_ONLY)
+}
+
+fn refusal_for_principal(principal: &crate::auth::PrincipalRecord) -> (&'static str, &'static str) {
+    if principal.kind == crate::auth::PrincipalKind::Agent {
+        (HOSTED_AGENT_RUN_REFUSED, HOSTED_AGENT_RUN_SENTENCE)
+    } else {
+        admin_hosted_refusal()
+    }
+}
+
+pub(crate) fn agent_owner_approved(
     data_dir: &std::path::Path,
     agent: &crate::auth::PrincipalRecord,
     offer_id: &str,
@@ -4209,8 +4253,10 @@ pub(crate) fn bus_model_provider_request(
     }
     let request = normalize_model_provider_request(op, &body, &context, capsule_id)
         .map_err(|(_, message)| ("invalid_model_request", message))?;
-    if op == "runs_create" && !hosted_run_allowed(data_dir, &context, &request, true) {
-        return Err(("hosted_run_admin_only", HOSTED_RUN_ADMIN_ONLY.to_string()));
+    if op == "runs_create" {
+        if let Some((code, message)) = hosted_run_refusal(data_dir, &context, &request, true) {
+            return Err((code, message.to_string()));
+        }
     }
     Ok(request)
 }

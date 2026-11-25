@@ -115,6 +115,7 @@ mod gateway_origin;
 mod gateway_passkey_step_up;
 #[path = "gateway_provider_proxy.rs"]
 mod gateway_provider_proxy;
+pub(crate) use gateway_provider_proxy::{HOSTED_AGENT_RUN_REFUSED, HOSTED_AGENT_RUN_SENTENCE};
 #[path = "gateway_room.rs"]
 mod gateway_room;
 #[path = "gateway_server.rs"]

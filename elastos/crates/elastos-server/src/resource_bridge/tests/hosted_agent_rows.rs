@@ -481,7 +481,7 @@ async fn agent_hosted_run_reaches_the_egress_broker_once() {
     .unwrap();
     let inactive = hosted_runs_create(&home.ctx, "model-v1:1700000000000:s8b").await;
     assert_eq!(
-        inactive["response"]["code"], "hosted_run_admin_only",
+        inactive["response"]["code"], "hosted_agent_run_refused",
         "{inactive}"
     );
     crate::agents::set_active(
@@ -500,7 +500,7 @@ async fn agent_hosted_run_reaches_the_egress_broker_once() {
     .unwrap();
     let ended = hosted_runs_create(&home.ctx, "model-v1:1700000000000:s8c").await;
     assert_eq!(
-        ended["response"]["code"], "hosted_run_admin_only",
+        ended["response"]["code"], "hosted_agent_run_refused",
         "{ended}"
     );
     assert_eq!(home.creates.load(std::sync::atomic::Ordering::SeqCst), 1);
@@ -529,7 +529,7 @@ async fn agent_hosted_run_without_admin_owner_is_refused() {
     assert_eq!(listed["response"]["result"]["status"], "ok", "{listed}");
     let refused = hosted_runs_create(&home.ctx, "model-v1:1700000000000:s8").await;
     assert_eq!(
-        refused["response"]["code"], "hosted_run_admin_only",
+        refused["response"]["code"], "hosted_agent_run_refused",
         "{refused}"
     );
     let mut guest = home.ctx.clone();
