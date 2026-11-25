@@ -1203,6 +1203,8 @@ class ReleasePolicyTests(unittest.TestCase):
         source_gate = JOBS["source-gate"]
         self.assertNotRegex(source_gate, r"(?i)sccache|RUSTC_WRAPPER|rust-compile-cache")
         self.assertIn("run: ./scripts/test-source-gate.sh release", source_gate)
+        self.assertIn("run: ./scripts/test-source-gate.sh audit", source_gate)
+        self.assertIn("python3 -I scripts/audit-re-review.py", SOURCE_GATE)
         self.assertNotIn("python3 scripts/install-bootstrap-test.py", SOURCE_GATE)
         self.assertEqual(SOURCE_GATE.count("python3 scripts/release-platform-input-test.py"), 1)
         nested = (WORKFLOW.parents[2] / "scripts/release-platform-input-test.py").read_text()

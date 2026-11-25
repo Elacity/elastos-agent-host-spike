@@ -68,6 +68,10 @@ jobs:
       - name: cargo fmt
         working-directory: elastos
         run: cargo fmt --all -- --check
+      # An expired re-review date in elastos/.cargo/audit.toml fails here and
+      # names the advisory. This step does not fetch.
+      - name: audit re-review dates
+        run: ./scripts/test-source-gate.sh audit
       # scripts/test-source-gate.sh owns the list; the local pre-push gate runs it too.
       - name: product data contracts
         run: ./scripts/test-source-gate.sh product-data
