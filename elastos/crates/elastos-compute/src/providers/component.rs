@@ -987,30 +987,26 @@ impl ComponentProvider {
                 _ => ActivationOutcome::Trapped(ending.clone()),
             };
             let _ = outcome_tx.send(Some(outcome));
-            // A stop owns the join. Otherwise join the worker first: the slot
-            // stays while status is still running, then the entry and frame go.
-            let worker = {
+            // Publish the join under the same lock that takes the worker.
+            // A stop that arrives here waits on that join, so the slot stays
+            // until the worker has been joined.
+            let (join, exit_owns_slot) = {
                 let mut held = instances.write().await;
                 match held.get_mut(&id_for_end) {
-                    Some(instance) if instance.join.is_none() => instance.worker.take(),
-                    _ => None,
+                    Some(instance) if instance.join.is_none() => (begin_v2_join(instance), true),
+                    _ => (None, false),
                 }
             };
-            if let Some(worker) = worker {
-                let _ = tokio::task::spawn_blocking(move || worker.join()).await;
+            if let Some(join) = join {
+                let _ = tokio::task::spawn_blocking(move || join.wait_finished()).await;
             }
-            {
+            if exit_owns_slot {
                 let mut held = instances.write().await;
-                let owned = held
-                    .get(&id_for_end)
-                    .is_some_and(|instance| instance.join.is_some());
-                if !owned {
-                    if let Some(instance) = held.remove(&id_for_end) {
-                        instance.grants.lock().expect("grant book").clear();
-                    }
-                    drop(held);
-                    frames_for_end.lock().expect("frames").remove(&id_for_end.0);
+                if let Some(instance) = held.remove(&id_for_end) {
+                    instance.grants.lock().expect("grant book").clear();
                 }
+                drop(held);
+                frames_for_end.lock().expect("frames").remove(&id_for_end.0);
             }
             #[cfg(test)]
             endings.write().await.insert(id_for_end, ending);
@@ -1561,6 +1557,17 @@ impl V2Join {
         }
         *self.done.lock().expect("join") = true;
         self.cv.notify_all();
+    }
+
+    /// Wait until the worker has been joined. A natural exit uses this so a
+    /// timeout cannot free the slot while the thread is still running.
+    fn wait_finished(&self) {
+        if self.inline.load(Ordering::Acquire) {
+            self.own();
+            return;
+        }
+        let guard = self.done.lock().expect("join");
+        let _guard = self.cv.wait_while(guard, |done| !*done).expect("join");
     }
 
     fn wait(&self, bound: Duration) -> bool {
@@ -7075,6 +7082,74 @@ mod tests {
         assert!(provider.threads_live.load(Ordering::Acquire) >= 1);
         gate.open();
         assert_eq!(v2_ending(&provider, &handle).await, "returned");
+        assert!(provider.instances.read().await.is_empty());
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while provider.threads_live.load(Ordering::Acquire) != 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the worker is joined");
+    }
+
+    /// Stop arrives after the natural-exit task has taken the worker. Both
+    /// wait on the one join, so the slot stays until that worker is joined.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_stop_during_natural_exit_waits_for_the_same_join() {
+        let provider = Arc::new(ComponentProvider::new());
+        let bytes = v2_variant(&[(
+            "call $new global.set $set\n      call $next)",
+            "call $new global.set $set\n      i32.const 0 i32.const 0 i32.const 0 i32.const 0 call $done\n      i32.const 0)",
+        )]);
+        let handle = load_v2_fixture(&provider, bytes).await;
+        let gate = TestGate::new();
+        provider
+            .instances
+            .write()
+            .await
+            .get_mut(&handle.id)
+            .unwrap()
+            .exit_gate = Some(gate.clone());
+        provider.start(&handle).await.expect("start");
+        tokio::task::spawn_blocking({
+            let gate = gate.clone();
+            move || gate.entered()
+        })
+        .await
+        .expect("entered");
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let published = provider
+                    .instances
+                    .read()
+                    .await
+                    .get(&handle.id)
+                    .is_some_and(|instance| instance.join.is_some());
+                if published {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the exit did not publish the join");
+        let stop = tokio::spawn({
+            let provider = provider.clone();
+            let handle = handle.clone();
+            async move { provider.stop(&handle).await }
+        });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(
+            !stop.is_finished(),
+            "stop returned while the worker was still inside the exit gate"
+        );
+        assert!(
+            provider.instances.read().await.contains_key(&handle.id),
+            "the slot was freed before the worker joined"
+        );
+        assert!(provider.threads_live.load(Ordering::Acquire) >= 1);
+        gate.open();
+        stop.await.expect("stop task").expect("stop");
         assert!(provider.instances.read().await.is_empty());
         tokio::time::timeout(Duration::from_secs(2), async {
             while provider.threads_live.load(Ordering::Acquire) != 0 {
