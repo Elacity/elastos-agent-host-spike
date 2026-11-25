@@ -863,6 +863,25 @@ pub(crate) async fn register_availability_provider_plane(
 /// every release through its own `protected_content_rights_evidence` call,
 /// so the configuration is required here (the full Home profile tolerates its
 /// absence because it degrades protected operations, not the whole host).
+/// The startup Init that carries protected-content settings. On Unix a
+/// resolver change between spawn and this Init is tried once more. A second
+/// change is the name `chain_resolver_changed`.
+async fn apply_following_chain_init(
+    bridge: &provider::ProviderBridge,
+    config: provider::BridgeProviderConfig,
+) -> Result<provider::bridge::ProviderResponse, provider::bridge::BridgeError> {
+    #[cfg(unix)]
+    {
+        bridge.accept_following_init(config).await
+    }
+    #[cfg(not(unix))]
+    {
+        bridge
+            .request(provider::bridge::ProviderRequest::Init { config })
+            .await
+    }
+}
+
 #[cfg(unix)]
 pub(crate) async fn register_chain_provider_plane(
     provider_registry: &Arc<provider::ProviderRegistry>,
@@ -916,10 +935,7 @@ pub(crate) async fn register_chain_provider_plane(
     .await
     .map_err(|err| anyhow::anyhow!("failed to spawn chain-provider: {err}"))?;
     let bridge = std::sync::Arc::clone(confined.bridge());
-    match bridge
-        .request(provider::bridge::ProviderRequest::Init { config })
-        .await
-    {
+    match apply_following_chain_init(&bridge, config).await {
         Ok(provider::bridge::ProviderResponse::Ok { .. }) => {}
         Ok(provider::bridge::ProviderResponse::Error { code, message, .. }) => {
             let _ = bridge.shutdown().await;
@@ -929,6 +945,9 @@ pub(crate) async fn register_chain_provider_plane(
         }
         Err(err) => {
             let _ = bridge.shutdown().await;
+            if err.to_string() == "chain_resolver_changed" {
+                anyhow::bail!("chain_resolver_changed");
+            }
             anyhow::bail!("chain-provider transport failed while applying configuration: {err}");
         }
     }
@@ -1582,20 +1601,21 @@ async fn setup_server_infrastructure_impl(
                 Ok(bridge) => {
                     let mut transport_ready = true;
                     if let Some(config) = protected_chain_config {
-                        match bridge
-                            .request(provider::bridge::ProviderRequest::Init { config })
-                            .await
-                        {
+                        match apply_following_chain_init(&bridge, config).await {
                             Ok(provider::bridge::ProviderResponse::Ok { .. }) => {}
                             Ok(provider::bridge::ProviderResponse::Error { .. }) => {
                                 tracing::warn!(
                                     "Protected-content Chain configuration was rejected; protected operations remain unavailable"
                                 );
                             }
-                            Err(_) => {
-                                tracing::warn!(
-                                    "Chain provider transport failed while applying protected-content configuration"
-                                );
+                            Err(err) => {
+                                if err.to_string() == "chain_resolver_changed" {
+                                    tracing::warn!("chain_resolver_changed");
+                                } else {
+                                    tracing::warn!(
+                                        "Chain provider transport failed while applying protected-content configuration"
+                                    );
+                                }
                                 let _ = bridge.shutdown().await;
                                 transport_ready = false;
                             }

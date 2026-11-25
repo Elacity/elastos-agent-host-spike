@@ -236,6 +236,24 @@ fn model_engine_receipt_file_matches(
     Ok(entry["sha256"].as_str() == Some(expected.as_str()))
 }
 
+fn local_llama_ids(offers: &[serde_json::Value]) -> Result<Vec<&str>, BridgeError> {
+    offers
+        .iter()
+        .filter(|offer| {
+            offer
+                .pointer("/adapter/kind")
+                .and_then(serde_json::Value::as_str)
+                == Some("local_llama_cpp_text")
+        })
+        .map(|offer| {
+            offer
+                .get("id")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| BridgeError::InitFailed("local offer id unavailable".into()))
+        })
+        .collect()
+}
+
 #[cfg(target_os = "macos")]
 fn model_file_policy(
     binary_path: &Path,
@@ -447,6 +465,14 @@ pub struct ProviderBridge {
     executable_copy: Arc<Mutex<Option<PreparedExecutable>>>,
     #[cfg(unix)]
     helper_owner: Mutex<Option<elastos_common::process_lifetime::ParentLifetime>>,
+    /// Shutdown, the chain resolver, and the local-model bookkeeping. One
+    /// value so every constructor starts from the same defaults.
+    tail: BridgeTail,
+}
+
+/// Shared defaults behind [`ProviderBridge`]. Field access goes through `Deref`.
+#[derive(Default)]
+pub struct BridgeTail {
     /// True once a shutdown attempt has completed (child reaped, or the
     /// protocol shutdown was delivered on a childless bridge). Later
     /// shutdown() calls are idempotent no-ops.
@@ -470,6 +496,23 @@ pub struct ProviderBridge {
     _local_provider_birth: Arc<AtomicU64>,
     #[cfg(target_os = "macos")]
     hosted_run_bindings: Arc<StdMutex<BTreeMap<String, HostedRunBinding>>>,
+}
+
+impl BridgeTail {
+    fn new(shutdown_timeout: std::time::Duration, omitted: Vec<String>) -> Self {
+        Self {
+            shutdown_timeout,
+            omitted_libraries: std::sync::Mutex::new(omitted),
+            ..Self::default()
+        }
+    }
+}
+
+impl std::ops::Deref for ProviderBridge {
+    type Target = BridgeTail;
+    fn deref(&self) -> &Self::Target {
+        &self.tail
+    }
 }
 
 struct ChainHop {
@@ -1674,6 +1717,11 @@ fn chain_operator_settings_from(lookup: impl Fn(&str) -> Option<String>) -> serd
     serde_json::Value::Object(map)
 }
 
+fn chain_resolver_changed(result: &Result<ProviderResponse, BridgeError>) -> bool {
+    let name = super::chain_resolver::CHAIN_RESOLVER_CHANGED;
+    matches!(result, Err(BridgeError::Refused(message)) if message == name)
+}
+
 fn insert_chain_operator_settings(config: &mut ProviderConfig) {
     let settings = chain_operator_settings_from(|key| std::env::var(key).ok());
     if config.extra.is_null() {
@@ -1760,20 +1808,7 @@ impl ProviderBridge {
             executable_copy: Arc::new(Mutex::new(executable_copy)),
             #[cfg(unix)]
             helper_owner: Mutex::new(None),
-            shutdown_completed: std::sync::atomic::AtomicBool::new(false),
-            shutdown_timeout: SHUTDOWN_TIMEOUT,
-            omitted_libraries: std::sync::Mutex::new(launched.omitted_libraries),
-            chain_resolver: std::sync::Mutex::new(None),
-            #[cfg(any(target_os = "macos", target_os = "linux"))]
-            _local_ipc_dir: Mutex::new(None),
-            #[cfg(any(target_os = "macos", target_os = "linux"))]
-            _local_brokers: Mutex::new(BrokerTasks::default()),
-            #[cfg(any(target_os = "macos", target_os = "linux"))]
-            _local_provider_pid: Arc::new(AtomicU32::new(0)),
-            #[cfg(any(target_os = "macos", target_os = "linux"))]
-            _local_provider_birth: Arc::new(AtomicU64::new(0)),
-            #[cfg(target_os = "macos")]
-            hosted_run_bindings: Arc::new(StdMutex::new(BTreeMap::new())),
+            tail: BridgeTail::new(SHUTDOWN_TIMEOUT, launched.omitted_libraries),
         };
         #[cfg(target_os = "macos")]
         bridge.watch_confined_executable_copy();
@@ -2102,21 +2137,7 @@ impl ProviderBridge {
             &journal,
             pinned_engine_bundle,
         )?;
-        let local_ids = offers
-            .iter()
-            .filter(|offer| {
-                offer
-                    .pointer("/adapter/kind")
-                    .and_then(serde_json::Value::as_str)
-                    == Some("local_llama_cpp_text")
-            })
-            .map(|offer| {
-                offer
-                    .get("id")
-                    .and_then(serde_json::Value::as_str)
-                    .ok_or_else(|| BridgeError::InitFailed("local offer id unavailable".into()))
-            })
-            .collect::<Result<Vec<_>, _>>()?;
+        let local_ids = local_llama_ids(offers)?;
         if local_ids.len() > MAX_LOCAL_MODEL_SLOTS {
             return Err(BridgeError::InitFailed(
                 "too many local model offers".into(),
@@ -2218,8 +2239,8 @@ impl ProviderBridge {
         provider_pid.store(pid, Ordering::Release);
         *bridge._local_ipc_dir.lock().await = Some(ipc_dir);
         *bridge._local_brokers.lock().await = brokers;
-        bridge._local_provider_pid = provider_pid;
-        bridge._local_provider_birth = provider_birth;
+        bridge.tail._local_provider_pid = provider_pid;
+        bridge.tail._local_provider_birth = provider_birth;
         Ok((bridge, sockets, vacant_sockets, config, hosted_listener))
     }
 
@@ -2245,21 +2266,7 @@ impl ProviderBridge {
         let mut brokers = BrokerTasks::default();
         let provider_pid = Arc::new(AtomicU32::new(0));
         let provider_birth = Arc::new(AtomicU64::new(0));
-        let local_ids = offers
-            .iter()
-            .filter(|offer| {
-                offer
-                    .pointer("/adapter/kind")
-                    .and_then(serde_json::Value::as_str)
-                    == Some("local_llama_cpp_text")
-            })
-            .map(|offer| {
-                offer
-                    .get("id")
-                    .and_then(serde_json::Value::as_str)
-                    .ok_or_else(|| BridgeError::InitFailed("local offer id unavailable".into()))
-            })
-            .collect::<Result<Vec<_>, _>>()?;
+        let local_ids = local_llama_ids(offers)?;
         if local_ids.len() > MAX_LOCAL_MODEL_SLOTS {
             return Err(BridgeError::InitFailed(
                 "too many local model offers".into(),
@@ -2328,8 +2335,8 @@ impl ProviderBridge {
         provider_pid.store(pid, Ordering::Release);
         *bridge._local_ipc_dir.lock().await = Some(ipc_dir);
         *bridge._local_brokers.lock().await = brokers;
-        bridge._local_provider_pid = provider_pid;
-        bridge._local_provider_birth = provider_birth;
+        bridge.tail._local_provider_pid = provider_pid;
+        bridge.tail._local_provider_birth = provider_birth;
         Ok((bridge, sockets, vacant_sockets, config))
     }
 
@@ -2738,20 +2745,7 @@ impl ProviderBridge {
             executable_copy: Arc::new(Mutex::new(Some(prepared))),
             #[cfg(unix)]
             helper_owner: Mutex::new(helper_owner),
-            shutdown_completed: std::sync::atomic::AtomicBool::new(false),
-            shutdown_timeout,
-            omitted_libraries: std::sync::Mutex::new(Vec::new()),
-            chain_resolver: std::sync::Mutex::new(None),
-            #[cfg(any(target_os = "macos", target_os = "linux"))]
-            _local_ipc_dir: Mutex::new(None),
-            #[cfg(any(target_os = "macos", target_os = "linux"))]
-            _local_brokers: Mutex::new(BrokerTasks::default()),
-            #[cfg(any(target_os = "macos", target_os = "linux"))]
-            _local_provider_pid: Arc::new(AtomicU32::new(0)),
-            #[cfg(any(target_os = "macos", target_os = "linux"))]
-            _local_provider_birth: Arc::new(AtomicU64::new(0)),
-            #[cfg(target_os = "macos")]
-            hosted_run_bindings: Arc::new(StdMutex::new(BTreeMap::new())),
+            tail: BridgeTail::new(shutdown_timeout, Vec::new()),
         };
 
         #[cfg(target_os = "macos")]
@@ -2911,25 +2905,40 @@ impl ProviderBridge {
             executable_copy: Arc::new(Mutex::new(None)),
             #[cfg(unix)]
             helper_owner: Mutex::new(None),
-            shutdown_completed: std::sync::atomic::AtomicBool::new(false),
-            shutdown_timeout: SHUTDOWN_TIMEOUT,
-            omitted_libraries: std::sync::Mutex::new(Vec::new()),
-            chain_resolver: std::sync::Mutex::new(None),
-            #[cfg(any(target_os = "macos", target_os = "linux"))]
-            _local_ipc_dir: Mutex::new(None),
-            #[cfg(any(target_os = "macos", target_os = "linux"))]
-            _local_brokers: Mutex::new(BrokerTasks::default()),
-            #[cfg(any(target_os = "macos", target_os = "linux"))]
-            _local_provider_pid: Arc::new(AtomicU32::new(0)),
-            #[cfg(any(target_os = "macos", target_os = "linux"))]
-            _local_provider_birth: Arc::new(AtomicU64::new(0)),
-            #[cfg(target_os = "macos")]
-            hosted_run_bindings: Arc::new(StdMutex::new(BTreeMap::new())),
+            tail: BridgeTail::new(SHUTDOWN_TIMEOUT, Vec::new()),
+        }
+    }
+
+    /// Home's second chain Init. A resolver change restarts the helper and
+    /// this sends the same Init once more. A second change is returned by
+    /// the name `chain_resolver_changed`.
+    pub async fn accept_following_init(
+        &self,
+        config: ProviderConfig,
+    ) -> Result<ProviderResponse, BridgeError> {
+        match self
+            .request(ProviderRequest::Init {
+                config: config.clone(),
+            })
+            .await
+        {
+            err if chain_resolver_changed(&err) => {
+                self.request(ProviderRequest::Init { config }).await
+            }
+            other => other,
         }
     }
 
     /// Send a request and receive a response (with timeout).
+    ///
+    /// An Init that returns Ok is the config a chain restart will use. A
+    /// refused Init is not recorded.
     pub async fn request(&self, req: ProviderRequest) -> Result<ProviderResponse, BridgeError> {
+        let accepted = if let ProviderRequest::Init { config } = &req {
+            Some(config.clone())
+        } else {
+            None
+        };
         let hop = self.prepare_chain_dispatch().await?;
         let result = match hop.target.clone() {
             Some(bridge) => tokio::time::timeout(REQUEST_TIMEOUT, bridge.request_raw(req)).await,
@@ -2939,7 +2948,13 @@ impl ProviderBridge {
             Ok(response) => response,
             Err(_) => Err(BridgeError::Timeout),
         };
-        self.finish_chain_dispatch(hop, result)
+        let result = self.finish_chain_dispatch(hop, result);
+        if matches!(result, Ok(ProviderResponse::Ok { .. })) {
+            if let (Some(config), Some(resolver)) = (accepted, self.chain_resolver()) {
+                resolver.record_accepted(config);
+            }
+        }
+        result
     }
 
     /// Send a request and receive a response (no timeout).
@@ -6414,7 +6429,7 @@ int main(void) {
             tokio::io::BufReader::new(tokio::io::empty()),
             tokio::io::sink(),
         );
-        bridge.shutdown_timeout = std::time::Duration::from_millis(40);
+        bridge.tail.shutdown_timeout = std::time::Duration::from_millis(40);
         *bridge.fork.lock().await = Some(fork);
         let releaser = std::thread::spawn(move || {
             std::thread::sleep(std::time::Duration::from_millis(500));

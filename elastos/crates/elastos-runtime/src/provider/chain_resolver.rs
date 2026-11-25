@@ -4,12 +4,13 @@
 //! is the file's device and inode, or absent when the path is missing. A
 //! symlink is followed, which is what macOS's `/etc/resolv.conf` is. When the
 //! identity changed, the running helper is killed and `spawn_path_allow` starts
-//! another with the same component key, authority, binary, data directory, and
-//! config. The new helper is kept beside the bridge the caller already holds.
-//! The fence is that same start. One observed identity restarts at most once.
-//! The dispatch that saw the change, and any call already on the old helper,
-//! ends with `chain_resolver_changed`. The caller retries. A failed start
-//! leaves the helper down, and later dispatches return `chain is off`.
+//! another with the same component key, authority, binary, and data directory.
+//! The config is the last Init the helper accepted. The new helper is kept
+//! beside the bridge the caller already holds. The fence is that same start.
+//! One observed identity restarts at most once. The dispatch that saw the
+//! change, and any call already on the old helper, ends with
+//! `chain_resolver_changed`. The caller retries. A failed start leaves the
+//! helper down, and later dispatches return `chain is off`.
 
 use super::bridge::{BridgeError, ProviderBridge, ProviderConfig};
 use super::CheckedExecutable;
@@ -67,7 +68,8 @@ struct Inputs {
     authority: ProviderAuthority,
     binary: CheckedExecutable,
     data_dir: PathBuf,
-    config: ProviderConfig,
+    /// Last Init the helper accepted. A restart sends this config.
+    config: std::sync::Mutex<ProviderConfig>,
     resolv: PathBuf,
 }
 
@@ -77,7 +79,6 @@ pub(super) struct ChainResolver {
     replacement: std::sync::Mutex<Option<Arc<ProviderBridge>>>,
     restart: AsyncMutex<()>,
     off: AtomicBool,
-    restarting: AtomicBool,
     generation: AtomicU64,
     restarts: AtomicU64,
 }
@@ -98,17 +99,27 @@ impl ChainResolver {
                 authority: authority.clone(),
                 binary: binary.duplicate(),
                 data_dir: data_dir.to_path_buf(),
-                config: config.clone(),
+                config: std::sync::Mutex::new(config.clone()),
                 resolv,
             },
             held: std::sync::Mutex::new(held),
             replacement: std::sync::Mutex::new(None),
             restart: AsyncMutex::new(()),
             off: AtomicBool::new(false),
-            restarting: AtomicBool::new(false),
             generation: AtomicU64::new(0),
             restarts: AtomicU64::new(0),
         })
+    }
+
+    fn accepted(&self) -> std::sync::MutexGuard<'_, ProviderConfig> {
+        let guard = self.inputs.config.lock();
+        guard.unwrap_or_else(|err| err.into_inner())
+    }
+
+    /// The bridge calls this when an Init returns Ok. A refused Init is not
+    /// recorded, so a restart keeps the previous accepted config.
+    pub(super) fn record_accepted(&self, config: ProviderConfig) {
+        *self.accepted() = config;
     }
 
     pub(super) fn generation(&self) -> u64 {
@@ -158,12 +169,15 @@ impl ChainResolver {
     }
 
     async fn restart_once(&self, host: &ProviderBridge, now: ResolverIdentity) -> BridgeError {
-        self.restarting.store(true, Ordering::Release);
+        // Bump before the await so a call already on the old helper sees the
+        // change without a second flag.
+        self.generation.fetch_add(1, Ordering::Release);
         if let Some(current) = self.live() {
             current.abandon_child_for_restart().await;
         } else {
             host.abandon_child_for_restart().await;
         }
+        let config = self.accepted().clone();
         // A replacement does not attach another resolver. The host bridge is
         // the one the caller holds, and this start is the same fence.
         let attach_resolver = false;
@@ -172,34 +186,30 @@ impl ChainResolver {
             &self.inputs.authority,
             &self.inputs.binary,
             &self.inputs.data_dir,
-            self.inputs.config.clone(),
+            config,
             attach_resolver,
         )
         .await;
         self.restarts.fetch_add(1, Ordering::Release);
-        match spawned {
-            Ok(confined) => {
-                *self
-                    .replacement
-                    .lock()
-                    .unwrap_or_else(|err| err.into_inner()) = Some(Arc::clone(confined.bridge()));
-                *self.held.lock().unwrap_or_else(|err| err.into_inner()) = now;
-                self.generation.fetch_add(1, Ordering::Release);
-                self.restarting.store(false, Ordering::Release);
-                BridgeError::Refused(CHAIN_RESOLVER_CHANGED.to_string())
-            }
-            Err(_) => {
-                *self
-                    .replacement
-                    .lock()
-                    .unwrap_or_else(|err| err.into_inner()) = None;
-                *self.held.lock().unwrap_or_else(|err| err.into_inner()) = now;
-                self.off.store(true, Ordering::Release);
-                self.generation.fetch_add(1, Ordering::Release);
-                self.restarting.store(false, Ordering::Release);
-                BridgeError::Refused(CHAIN_IS_OFF.to_string())
-            }
+        let off = spawned.is_err();
+        let replacement = spawned.ok().map(|confined| Arc::clone(confined.bridge()));
+        *self
+            .replacement
+            .lock()
+            .unwrap_or_else(|err| err.into_inner()) = replacement;
+        *self.held.lock().unwrap_or_else(|err| err.into_inner()) = now;
+        // A call that sampled the generation during the spawn has to see a
+        // second change, or it treats this helper as the one it already held.
+        self.generation.fetch_add(1, Ordering::Release);
+        if off {
+            self.off.store(true, Ordering::Release);
         }
+        let name = if off {
+            CHAIN_IS_OFF
+        } else {
+            CHAIN_RESOLVER_CHANGED
+        };
+        BridgeError::Refused(name.to_string())
     }
 
     /// A call that overlapped a change does not keep its answer. The caller
@@ -212,9 +222,7 @@ impl ChainResolver {
         if self.off.load(Ordering::Acquire) {
             return Err(BridgeError::Refused(CHAIN_IS_OFF.to_string()));
         }
-        let changed = self.restarting.load(Ordering::Acquire)
-            || self.generation.load(Ordering::Acquire) != observed;
-        if changed {
+        if self.generation.load(Ordering::Acquire) != observed {
             return Err(BridgeError::Refused(CHAIN_RESOLVER_CHANGED.to_string()));
         }
         result
@@ -255,6 +263,29 @@ mod tests {
         assert!(
             production.contains("let attach_resolver = false;"),
             "the restart must pass attach_resolver false"
+        );
+        assert!(
+            production.contains("fn record_accepted"),
+            "deleting the accepted-Init record turns this red"
+        );
+        assert!(
+            production.contains("self.inputs.config"),
+            "the restart must clone the accepted config"
+        );
+        let bridge = include_str!("bridge.rs");
+        let follow = bridge
+            .split("fn accept_following_init")
+            .nth(1)
+            .expect("accept_following_init");
+        let follow = follow.split("\n    pub async fn request").next().unwrap();
+        assert_eq!(
+            follow.matches("ProviderRequest::Init").count(),
+            2,
+            "the second Init tries once more, then returns the name"
+        );
+        assert!(
+            follow.contains("chain_resolver_changed"),
+            "a second change is refused by name"
         );
         assert!(
             !production.contains("ProviderBridge::spawn("),
@@ -487,6 +518,154 @@ mod tests {
             assert_eq!(still.to_string(), CHAIN_IS_OFF);
             assert_eq!(bridge.chain_resolver_restarts(), 1);
             bridge.shutdown().await.unwrap();
+        }
+
+        fn issuer_hex() -> String {
+            let key = ed25519_dalek::SigningKey::from_bytes(&[0x42; 32]);
+            format!("0x{}", hex::encode(key.verifying_key().to_bytes()))
+        }
+
+        fn protected_config() -> ProviderConfig {
+            ProviderConfig {
+                extra: serde_json::json!({
+                    "protected_content_runtime_issuer": issuer_hex(),
+                    "protected_content_network": {
+                        "id": "esc-mainnet",
+                        "display_name": "Protected ESC",
+                        "kind": "evm_json_rpc",
+                        "chain_id": 20,
+                        "native_symbol": "ELA",
+                        "provider": "operator",
+                        "mainnet": true,
+                        "explorer_url": null,
+                        "rpc_url": "https://primary.example.invalid",
+                        "rights_methods": [{
+                            "id": "has_access_by_content_id",
+                            "contract": "0x0000000000000000000000000000000000000001",
+                            "abi": "has_access_by_content_id_address_bytes16",
+                            "selector": "0x12345678",
+                            "protected_content_policies": [{
+                                "action": "view",
+                                "evidence_rpc_urls": [
+                                    "https://rights-a.example.invalid",
+                                    "https://rights-b.example.invalid"
+                                ]
+                            }]
+                        }],
+                        "protected_content_creator_mint": {
+                            "ledger": "0x0000000000000000000000000000000000000022",
+                            "pay_token": "0x0000000000000000000000000000000000000033",
+                            "asset_created_emitter": "0x0000000000000000000000000000000000000044",
+                            "abi": "elacity_mint_v1"
+                        },
+                        "protected_content_market": {
+                            "authority_gateway_contract": "0x00000000000000000000000000000000000000aa",
+                            "evidence_rpc_urls": [
+                                "https://market-a.example.invalid",
+                                "https://market-b.example.invalid"
+                            ]
+                        }
+                    }
+                }),
+                ..ProviderConfig::default()
+            }
+        }
+
+        fn esc_name(value: &serde_json::Value) -> String {
+            value["data"]["networks"]
+                .as_array()
+                .and_then(|nets| nets.iter().find(|net| net["id"] == "esc-mainnet"))
+                .and_then(|net| net["display_name"].as_str())
+                .unwrap_or("")
+                .to_string()
+        }
+
+        /// The last Ok Init is what the restarted helper receives.
+        #[tokio::test]
+        async fn protected_settings_survive_a_resolv_replacement() {
+            let _lock = tests_lock().lock().await;
+            let started = start(Some(b"nameserver 127.0.0.1\n")).await;
+            let before = networks(&started.bridge).await.unwrap();
+            assert_eq!(esc_name(&before), "Elastos Smart Chain", "{before}");
+            let applied = started
+                .bridge
+                .accept_following_init(protected_config())
+                .await
+                .unwrap();
+            assert!(
+                matches!(
+                    applied,
+                    super::super::super::bridge::ProviderResponse::Ok { .. }
+                ),
+                "{applied:?}"
+            );
+            let armed = networks(&started.bridge).await.unwrap();
+            assert_eq!(esc_name(&armed), "Protected ESC", "{armed}");
+            replace_by_rename(&started.resolv, b"nameserver 127.0.0.2\n");
+            let changed = networks(&started.bridge).await.unwrap_err();
+            assert_eq!(changed.to_string(), CHAIN_RESOLVER_CHANGED);
+            assert_eq!(started.bridge.chain_resolver_restarts(), 1);
+            let after = networks(&started.bridge).await.unwrap();
+            assert_eq!(esc_name(&after), "Protected ESC", "{after}");
+            assert_eq!(started.bridge.chain_resolver_restarts(), 1);
+            started.bridge.shutdown().await.unwrap();
+        }
+
+        /// resolv.conf changes after spawn and before Home's second Init.
+        /// That Init meets `chain_resolver_changed` once, tries again once,
+        /// and the protected settings land on the new helper.
+        #[tokio::test]
+        async fn a_change_between_spawn_and_the_second_init_is_tried_once() {
+            let _lock = tests_lock().lock().await;
+            let started = start(Some(b"nameserver 127.0.0.1\n")).await;
+            replace_by_rename(&started.resolv, b"nameserver 127.0.0.4\n");
+            let applied = started
+                .bridge
+                .accept_following_init(protected_config())
+                .await
+                .unwrap();
+            assert!(
+                matches!(
+                    applied,
+                    super::super::super::bridge::ProviderResponse::Ok { .. }
+                ),
+                "{applied:?}"
+            );
+            assert_eq!(started.bridge.chain_resolver_restarts(), 1);
+            let after = networks(&started.bridge).await.unwrap();
+            assert_eq!(esc_name(&after), "Protected ESC", "{after}");
+            started.bridge.shutdown().await.unwrap();
+        }
+
+        /// An Init the helper refuses does not become the restart config.
+        #[tokio::test]
+        async fn a_refused_init_is_not_recorded() {
+            let _lock = tests_lock().lock().await;
+            let started = start(Some(b"nameserver 127.0.0.1\n")).await;
+            let refused = started
+                .bridge
+                .request(super::super::super::bridge::ProviderRequest::Init {
+                    config: ProviderConfig {
+                        extra: serde_json::json!({"node_supervisor": "operator"}),
+                        ..ProviderConfig::default()
+                    },
+                })
+                .await
+                .unwrap();
+            assert!(
+                matches!(
+                    refused,
+                    super::super::super::bridge::ProviderResponse::Error { .. }
+                ),
+                "{refused:?}"
+            );
+            replace_by_rename(&started.resolv, b"nameserver 127.0.0.5\n");
+            let changed = networks(&started.bridge).await.unwrap_err();
+            assert_eq!(changed.to_string(), CHAIN_RESOLVER_CHANGED);
+            let after = networks(&started.bridge).await.unwrap();
+            assert_eq!(after["status"], "ok", "{after}");
+            assert_eq!(esc_name(&after), "Elastos Smart Chain", "{after}");
+            started.bridge.shutdown().await.unwrap();
         }
     }
 }
