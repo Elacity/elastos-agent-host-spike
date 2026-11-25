@@ -3144,3 +3144,47 @@ async fn a_stop_names_an_inflight_session_that_already_ended() {
         .expect("the effect did not settle");
     finished.expect("dispatch task").expect("dispatch");
 }
+
+/// Stop cannot answer stopped while the stored record still says dispatching.
+/// Settlement writes the record before the flight is released.
+#[cfg(unix)]
+#[tokio::test]
+async fn stop_cannot_say_stopped_while_the_record_is_dispatching() {
+    let plant = plant_approved(48, false, |_, target| {
+        json!({"steps": [{"scheme": "localhost", "operation": "write", "request": {
+            "path": target, "content": [112, 108, 97, 110]
+        }}]})
+    })
+    .await;
+    let pause = crate::resource_bridge::arm_plan_dispatch_hold(
+        &plant.id,
+        crate::resource_bridge::PlanDispatchPoint::BeforeSettle,
+    );
+    let state = plant.state.clone();
+    let owner = plant.owner.clone();
+    let id = plant.id.clone();
+    let task = tokio::spawn(async move {
+        super::gateway_inspect_actions::dispatch_approved_agent_plan(
+            &state,
+            &dispatch_context(&owner),
+            &id,
+        )
+        .await
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(15), pause.entered.notified())
+        .await
+        .expect("dispatch did not reach settlement");
+    let record = read_record(plant.dir.path(), &plant.id);
+    assert_eq!(record["status"], "dispatching", "{record}");
+    let (status, body) = stop_plan_agent(plant.runtime.clone(), &plant.agent).await;
+    assert_eq!(
+        status,
+        StatusCode::ACCEPTED,
+        "stop answered stopped while the record says dispatching: {body}"
+    );
+    pause.release.notify_one();
+    let finished = tokio::time::timeout(std::time::Duration::from_secs(15), task)
+        .await
+        .expect("the effect did not settle");
+    finished.expect("dispatch task").expect("dispatch");
+}

@@ -487,46 +487,73 @@ pub(super) async fn dispatch_approved_agent_plan(
             ),
         )
         .await;
-        let (status, result) = match response {
+        let (status, result, guard) = match response {
             Ok(response)
                 if response["type"] == "resource_result"
                     && response["result"]["status"]
                         .as_str()
                         .is_none_or(|status| status == "ok") =>
             {
-                ("completed", response["result"].clone())
+                (
+                    "completed",
+                    response["result"].clone(),
+                    crate::resource_bridge::take_parked_plan_guard(&request_id),
+                )
             }
             Ok(response) if response["code"] == "provider_error" => (
                 "unknown",
                 serde_json::json!({"status": "unknown", "code": "provider_transport_error"}),
+                crate::resource_bridge::take_parked_plan_guard(&request_id),
             ),
             Ok(response) if response["type"] == "resource_result" => (
                 "failed",
                 serde_json::json!({"status": "error", "code": "provider_result_error"}),
+                crate::resource_bridge::take_parked_plan_guard(&request_id),
             ),
             Ok(response) => (
                 "refused",
                 serde_json::json!({"status": "refused", "code": response["code"].as_str().unwrap_or("authority_refused")}),
+                crate::resource_bridge::take_parked_plan_guard(&request_id),
             ),
             Err(_) => {
                 // The dispatch future is gone. The one-use grant does not stay.
-                // The flight stays until this settlement records unknown.
+                // A guard already parked is dropped here without release, so
+                // the flight stays until this settlement records unknown.
+                drop(crate::resource_bridge::take_parked_plan_guard(&request_id));
                 crate::resource_bridge::revoke_abandoned_plan_grant(&request_id).await;
                 (
                     "unknown",
                     serde_json::json!({"status": "unknown", "code": "provider_timeout"}),
+                    None,
                 )
             }
         };
+        // The effect has returned. The record is still `dispatching` until the
+        // settle below, and this guard still holds the flight. Stop cannot
+        // answer stopped in this window. Release comes after the record write.
+        #[cfg(test)]
+        crate::resource_bridge::pause_plan_dispatch_for_test(
+            &request_id,
+            crate::resource_bridge::PlanDispatchPoint::BeforeSettle,
+        )
+        .await;
         let settled = settle_agent_plan_dispatch(&data_dir, record, status, result);
         if settled.is_ok() && status == "unknown" {
             crate::runtime::resolve_unknown_plan_effect(&request_id);
+        }
+        if settled.is_ok() && status != "unknown" {
+            if let Some(guard) = guard {
+                guard.release();
+            }
         }
         settled
     });
     match task.await {
         Ok(settled) => settled,
         Err(err) => {
+            drop(crate::resource_bridge::take_parked_plan_guard(
+                &record_if_lost.request_id,
+            ));
             crate::resource_bridge::revoke_abandoned_plan_grant(&record_if_lost.request_id).await;
             let code = if err.is_cancelled() {
                 "dispatch_cancelled"

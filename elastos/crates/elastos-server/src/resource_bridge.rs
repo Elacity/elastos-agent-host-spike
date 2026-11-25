@@ -526,6 +526,9 @@ pub(crate) enum PlanDispatchPoint {
     BeforeCheck,
     AfterToken,
     InEffect,
+    /// The effect has returned and the record is still `dispatching`.
+    /// The flight is still held: settlement has not released it.
+    BeforeSettle,
 }
 
 #[cfg(test)]
@@ -579,6 +582,41 @@ async fn pause_plan_dispatch(request_id: &str, point: PlanDispatchPoint) {
         hold.entered.notify_one();
         hold.release.notified().await;
     }
+}
+
+/// The dispatch task waits here, after the effect and before the record is settled.
+#[cfg(test)]
+pub(crate) async fn pause_plan_dispatch_for_test(request_id: &str, point: PlanDispatchPoint) {
+    pause_plan_dispatch(request_id, point).await;
+}
+
+/// The flight of a plan step that has returned and has not been settled.
+/// Settlement takes it and releases it only after the record is written.
+fn parked_plan_guards() -> &'static Mutex<HashMap<String, crate::runtime::PlanEffectGuard>> {
+    static PARKED: OnceLock<Mutex<HashMap<String, crate::runtime::PlanEffectGuard>>> =
+        OnceLock::new();
+    PARKED.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn park_plan_guard(request_id: &str, guard: crate::runtime::PlanEffectGuard) {
+    if request_id.is_empty() {
+        guard.release();
+        return;
+    }
+    parked_plan_guards()
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+        .insert(request_id.to_string(), guard);
+}
+
+/// Takes the flight parked for `request_id`. The caller releases it after the
+/// record is written. Dropping it without [`PlanEffectGuard::release`] keeps
+/// the flight, which is what a failed settle and an unknown outcome do.
+pub(crate) fn take_parked_plan_guard(request_id: &str) -> Option<crate::runtime::PlanEffectGuard> {
+    parked_plan_guards()
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+        .remove(request_id)
 }
 
 fn instance_ended_response() -> serde_json::Value {
@@ -1523,7 +1561,14 @@ async fn authorize_and_dispatch_resource_invoke(
     };
     let response =
         dispatch_admitted_effect(&effect, request, bridge_ctx, dispatch, &audit_id, &token).await;
-    guard.release();
+    if let Some(step) = current_plan_step() {
+        // Settlement holds this flight until the record is written, then
+        // releases it. A timeout drops the future before this park, and the
+        // guard's drop keeps the flight until that record says unknown.
+        park_plan_guard(&step.request_id, guard);
+    } else {
+        guard.release();
+    }
     response
 }
 
