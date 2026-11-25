@@ -127,13 +127,18 @@ pub(crate) struct PreparedRead {
 }
 
 /// The guest's `params`: `{"max_bytes": N}` and nothing else, then the host cap.
+/// Params are a few bytes. A larger document is refused before the scan.
+pub(crate) const READ_PARAMS_MAX: usize = 256;
+
 pub(crate) fn read_cap(params: &[u8]) -> Result<usize, String> {
     let bad = |why: &str| format!("read params {why}; expected {{\"max_bytes\": N}}");
+    if params.len() > READ_PARAMS_MAX {
+        return Err(bad("are over 256 bytes"));
+    }
     // Same depth cap as a UI document, before serde_json parses.
+    // Every scan error is a refusal, including a duplicate or a broken key.
     if let Err(err) = super::bus2_ui::reject_guest_json(params) {
-        if err.contains("depth cap") {
-            return Err(bad("are nested past the depth cap"));
-        }
+        return Err(bad(&err));
     }
     let value: serde_json::Value =
         serde_json::from_slice(params).map_err(|_| bad("are not JSON"))?;
