@@ -5749,11 +5749,10 @@ mod tests {
                 path(),
             )
             .await;
-            match good_route {
-                Err(elastos_server::api::handlers::storage::StorageApiError::LocalApps(got)) => {
-                    panic!("good Home route was turned off: {got}");
-                }
-                Err(_) | Ok(_) => {}
+            if let Err(elastos_server::api::handlers::storage::StorageApiError::LocalApps(got)) =
+                good_route
+            {
+                panic!("good Home route was turned off: {got}");
             }
         });
 
