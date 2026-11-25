@@ -2525,7 +2525,8 @@ mod tests {
     use crate::localhost_file_migration::{
         hold_localhost_migration_lock, localhost_bringup, localhost_file_key,
         localhost_provider_bridge_config, set_localhost_migration_before_replace,
-        set_localhost_migration_write_budget, LocalhostBringup,
+        set_localhost_migration_write_budget, set_localhost_migration_write_error,
+        LocalhostBringup,
     };
     #[cfg(unix)]
     use std::ffi::CString;
@@ -4942,6 +4943,7 @@ mod tests {
     impl Drop for ClearLocalhostMigrationFaults {
         fn drop(&mut self) {
             set_localhost_migration_write_budget(None);
+            set_localhost_migration_write_error(None);
             set_localhost_migration_before_replace(None);
         }
     }
@@ -6083,6 +6085,69 @@ mod tests {
         plant_device_envelope(&small, &device_key, b"small");
         localhost_provider_bridge_config(root, &device_key).unwrap();
         assert_envelope_opens_with_exactly_one_key(&small, b"small", &device_key, &file_key);
+    }
+
+    #[test]
+    fn a_write_failure_names_free_space_or_the_folder() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _clear = ClearLocalhostMigrationFaults;
+        let device_key = [0x93; 32];
+        let file_key = expected_localhost_file_key(&device_key);
+        let full = TempDir::new().unwrap();
+        let full_path = full.path().join("Users/full.bin");
+        let planted = plant_device_envelope(&full_path, &device_key, b"keep");
+        set_localhost_migration_write_error(Some(libc::ENOSPC));
+        let err = localhost_provider_bridge_config(full.path(), &device_key).unwrap_err();
+        let text = err.to_string();
+        assert!(text.contains("Users/full.bin could not be written"), "{text}");
+        assert!(text.contains("No space left on device"), "{text}");
+        assert!(
+            text.contains("Free space, or the folder's permissions, then restart."),
+            "{text}"
+        );
+        assert!(!text.contains("is not readable"), "{text}");
+        assert_eq!(fs::read(&full_path).unwrap(), planted);
+        assert!(!full.path().join("identity/localhost-file-key-v1").exists());
+        assert_no_localhost_rewrite_temps(full.path());
+        set_localhost_migration_write_error(None);
+        localhost_provider_bridge_config(full.path(), &device_key).unwrap();
+        assert_envelope_opens_with_exactly_one_key(&full_path, b"keep", &device_key, &file_key);
+
+        let locked = TempDir::new().unwrap();
+        let locked_path = locked.path().join("Users/locked.bin");
+        let planted = plant_device_envelope(&locked_path, &device_key, b"stay");
+        let users = locked.path().join("Users");
+        fs::set_permissions(&users, fs::Permissions::from_mode(0o555)).unwrap();
+        struct RestoreMode {
+            path: std::path::PathBuf,
+        }
+        impl Drop for RestoreMode {
+            fn drop(&mut self) {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = fs::set_permissions(&self.path, fs::Permissions::from_mode(0o755));
+            }
+        }
+        let _restore = RestoreMode {
+            path: users.clone(),
+        };
+        let err = localhost_provider_bridge_config(locked.path(), &device_key).unwrap_err();
+        let text = err.to_string();
+        assert!(
+            text.contains("Users/locked.bin could not be written"),
+            "{text}"
+        );
+        assert!(text.contains("Permission denied"), "{text}");
+        assert!(
+            text.contains("Free space, or the folder's permissions, then restart."),
+            "{text}"
+        );
+        assert!(!text.contains("is not readable"), "{text}");
+        assert_eq!(fs::read(&locked_path).unwrap(), planted);
+        assert!(!locked
+            .path()
+            .join("identity/localhost-file-key-v1")
+            .exists());
     }
 
     #[test]

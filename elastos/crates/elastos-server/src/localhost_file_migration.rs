@@ -62,6 +62,7 @@ type MigrationReplaceHook = Box<dyn Fn(&Path)>;
 #[cfg(all(unix, test))]
 thread_local! {
     static WRITE_BUDGET: std::cell::Cell<Option<u32>> = const { std::cell::Cell::new(None) };
+    static WRITE_ERROR: std::cell::Cell<Option<i32>> = const { std::cell::Cell::new(None) };
     static BEFORE_REPLACE: std::cell::RefCell<Option<MigrationReplaceHook>> =
         std::cell::RefCell::new(None);
 }
@@ -70,6 +71,13 @@ thread_local! {
 #[cfg(all(unix, test))]
 pub(crate) fn set_localhost_migration_write_budget(budget: Option<u32>) {
     WRITE_BUDGET.with(|slot| slot.set(budget));
+}
+
+/// The next rewrite reports this raw OS code instead of writing. The test
+/// uses it for a full disk. The code stays set until the test clears it.
+#[cfg(all(unix, test))]
+pub(crate) fn set_localhost_migration_write_error(code: Option<i32>) {
+    WRITE_ERROR.with(|slot| slot.set(code));
 }
 
 /// Runs once for each file, after the bytes are read and before they are
@@ -98,6 +106,11 @@ fn charge_migration_write() -> anyhow::Result<()> {
 #[cfg(all(unix, not(test)))]
 fn charge_migration_write() -> anyhow::Result<()> {
     Ok(())
+}
+
+#[cfg(all(unix, test))]
+fn injected_write_error() -> Option<std::io::Error> {
+    WRITE_ERROR.with(|slot| slot.get().map(std::io::Error::from_raw_os_error))
 }
 
 #[cfg(all(unix, test))]
@@ -189,6 +202,14 @@ fn localhost_refused(path: &Path, why: &str) -> anyhow::Error {
         "not readable"
     };
     anyhow::anyhow!("{rel} is {cause}. {RECOVERY}")
+}
+
+#[cfg(unix)]
+fn localhost_write_refused(path: &Path, io_text: &str) -> anyhow::Error {
+    let rel = relative_path(path);
+    anyhow::anyhow!(
+        "{rel} could not be written ({io_text}). Free space, or the folder's permissions, then restart."
+    )
 }
 
 #[cfg(unix)]
@@ -288,6 +309,10 @@ fn replace_file_fsync_rename(path: &Path, bytes: &[u8], mode: u32) -> std::io::R
     file.set_permissions(std::fs::Permissions::from_mode(mode))?;
     if let Err(err) = (|| {
         charge_migration_write().map_err(io_error)?;
+        #[cfg(test)]
+        if let Some(err) = injected_write_error() {
+            return Err(err);
+        }
         file.write_all(bytes)?;
         charge_migration_write().map_err(io_error)?;
         file.sync_all()?;
@@ -319,10 +344,15 @@ fn io_error(err: anyhow::Error) -> std::io::Error {
 fn migration_io(path: &Path, why: &str, err: std::io::Error) -> anyhow::Error {
     let text = err.to_string();
     if text.contains("local apps stayed off") {
-        anyhow::anyhow!(text)
-    } else {
-        localhost_refused(path, why)
+        return anyhow::anyhow!(text);
     }
+    if let Some(sentence) = text.strip_prefix("localhost-refusal\n") {
+        return anyhow::anyhow!(sentence);
+    }
+    if why == "cannot be replaced" {
+        return localhost_write_refused(path, &text);
+    }
+    localhost_refused(path, why)
 }
 
 #[cfg(unix)]
