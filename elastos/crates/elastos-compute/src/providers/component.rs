@@ -2449,7 +2449,7 @@ mod tests {
         let provider = ComponentProvider::new();
         let bytes = v2_variant(&[(
             "local.get $event i32.const 2 i32.eq\n      if",
-            "(loop $ignore i32.const 0 i32.const 0 i32.const 65536 memory.fill br $ignore)\n      local.get $event i32.const 2 i32.eq\n      if",
+            "(loop $ignore br $ignore)\n      local.get $event i32.const 2 i32.eq\n      if",
         )]);
         let handle = load_v2_fixture(&provider, bytes).await;
         provider.start(&handle).await.unwrap();
@@ -2472,7 +2472,7 @@ mod tests {
         let provider = Arc::new(ComponentProvider::new());
         let bytes = v2_variant(&[(
             "local.get $event i32.const 2 i32.eq\n      if",
-            "(loop $ignore i32.const 0 i32.const 0 i32.const 65536 memory.fill br $ignore)\n      local.get $event i32.const 2 i32.eq\n      if",
+            "(loop $ignore br $ignore)\n      local.get $event i32.const 2 i32.eq\n      if",
         )]);
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -3342,6 +3342,19 @@ mod tests {
         )
     }
 
+    /// Printable bytes travel as one JSON string. A number per byte of a
+    /// 16 MiB window blows the v2 host deadline.
+    fn content_value(bytes: &[u8]) -> serde_json::Value {
+        let printable = bytes
+            .iter()
+            .all(|byte| (0x20..0x7f).contains(byte) && *byte != b'"' && *byte != b'\\');
+        if printable {
+            serde_json::Value::String(String::from_utf8(bytes.to_vec()).expect("printable"))
+        } else {
+            serde_json::json!(bytes)
+        }
+    }
+
     fn state_on(
         reads: &Arc<crate::providers::bus2_stream::ReadBudget>,
         object: Vec<u8>,
@@ -3363,7 +3376,7 @@ mod tests {
                         "type": "resource_result",
                         "result": {
                             "status": "ok",
-                            "data": { "content": window, "size": window.len() }
+                            "data": { "content": content_value(&window), "size": window.len() }
                         },
                         "audit": "read-1"
                     }
@@ -3454,7 +3467,7 @@ mod tests {
     async fn v2_exact_cap_object_arrives_in_more_than_one_chunk() {
         let chunk = crate::providers::bus2_stream::READ_CHUNK;
         let cap = chunk * 2;
-        let object = vec![7u8; cap];
+        let object = vec![b'g'; cap];
         let calls = Arc::new(Mutex::new(Vec::new()));
         let mut state = state_for(object.clone(), calls.clone());
         let prepared = state
@@ -3485,7 +3498,7 @@ mod tests {
     #[test]
     fn v2_guest_max_bytes_above_the_host_cap_is_the_host_cap() {
         let host = crate::providers::bus2_stream::HOST_MAX_READ_BYTES;
-        let object = vec![1u8; host + 1];
+        let object = vec![b'a'; host + 1];
         let calls = Arc::new(Mutex::new(Vec::new()));
         let mut state = state_for(object, calls.clone());
         let err = match state.windowed_read(&read_request((host as u64) + 1), false) {
@@ -3512,7 +3525,7 @@ mod tests {
     #[test]
     fn v2_one_bounded_read_and_a_second_guest_at_the_cap_is_refused() {
         let host = crate::providers::bus2_stream::HOST_MAX_READ_BYTES;
-        let object = vec![3u8; host];
+        let object = vec![b'c'; host];
         let calls = Arc::new(Mutex::new(Vec::new()));
         let reads = crate::providers::bus2_stream::ReadBudget::new();
         let mut first = state_on(&reads, object.clone(), calls.clone());
@@ -3559,7 +3572,7 @@ mod tests {
         let calls = Arc::new(Mutex::new(Vec::new()));
         let mut first = state_on(
             &crate::providers::bus2_stream::ReadBudget::new(),
-            vec![3u8; host],
+            vec![b'c'; host],
             calls.clone(),
         );
         let held = first
@@ -3587,7 +3600,7 @@ mod tests {
         let reads = crate::providers::bus2_stream::ReadBudget::new();
         let mut held = Vec::new();
         for _ in 0..8 {
-            let mut guest = state_on(&reads, vec![7u8; each], calls.clone());
+            let mut guest = state_on(&reads, vec![b'g'; each], calls.clone());
             held.push(
                 guest
                     .windowed_read(&read_request(each as u64), false)
@@ -3595,13 +3608,13 @@ mod tests {
             );
         }
         std::thread::sleep(Duration::from_millis(80));
-        let mut ninth = state_on(&reads, vec![7u8; each], calls.clone());
+        let mut ninth = state_on(&reads, vec![b'g'; each], calls.clone());
         let err = ninth
             .windowed_read(&read_request(each as u64), false)
             .expect_err("the ninth fetch is past the cap");
         assert!(matches!(err, V2BusError::Unavailable(_)), "{err:?}");
         drop(held.pop());
-        let mut again = state_on(&reads, vec![7u8; each], calls);
+        let mut again = state_on(&reads, vec![b'g'; each], calls);
         again
             .windowed_read(&read_request(each as u64), false)
             .expect("dropping one live fetch frees its bytes");
@@ -3640,7 +3653,7 @@ mod tests {
                         "type": "resource_result",
                         "result": {
                             "status": "ok",
-                            "data": { "content": window, "size": window.len() }
+                            "data": { "content": content_value(&window), "size": window.len() }
                         },
                         "audit": "read-1"
                     }
@@ -3819,7 +3832,7 @@ mod tests {
                     "type": "resource_result",
                     "result": {
                         "status": "ok",
-                        "data": { "content": window, "size": window.len() }
+                        "data": { "content": content_value(&window), "size": window.len() }
                     },
                     "audit": "read-1"
                 }
