@@ -1447,28 +1447,31 @@ fn protected_principal_root_resource_response(
                 .get("check_revision")
                 .and_then(|value| value.as_bool())
                 == Some(true);
-            // The cap is `length`, which the guest sets to its cap plus one.
-            // The bound comes from the object's head and tail. Over that cap,
-            // the body stays unread.
-            if let Some(length) = length {
-                let bound = match crate::auth::principal_root_object_content_bound(
-                    data_dir,
-                    principal_id,
-                    &localhost_root,
-                    &rooted,
-                    &path,
-                    Some(protection.data_key_id.as_str()),
-                ) {
-                    Ok(bound) => bound,
-                    Err(err) => {
-                        return Some(provider_error_result("read_failed", &err.to_string()))
+            // v2 sets `check_revision`. The cap is `length`, one past the
+            // guest's cap. A v1 window is `length` too, and a larger object
+            // is still read and sliced. The bound comes from the object's
+            // head and tail. Over that cap, the body stays unread.
+            if check_revision {
+                if let Some(length) = length {
+                    let bound = match crate::auth::principal_root_object_content_bound(
+                        data_dir,
+                        principal_id,
+                        &localhost_root,
+                        &rooted,
+                        &path,
+                        Some(protection.data_key_id.as_str()),
+                    ) {
+                        Ok(bound) => bound,
+                        Err(err) => {
+                            return Some(provider_error_result("read_failed", &err.to_string()))
+                        }
+                    };
+                    if bound > offset.unwrap_or(0).saturating_add(length) {
+                        return Some(provider_error_result(
+                            "invalid",
+                            "object is over the read cap",
+                        ));
                     }
-                };
-                if bound > offset.unwrap_or(0).saturating_add(length) {
-                    return Some(provider_error_result(
-                        "invalid",
-                        "object is over the read cap",
-                    ));
                 }
             }
             let bytes = match crate::auth::read_principal_root_object(
@@ -6756,6 +6759,68 @@ pub(crate) mod tests {
             }
         })
         .to_string()
+    }
+
+    #[cfg(unix)]
+    fn journal_window_line(
+        id: u64,
+        uri: &str,
+        token: String,
+        check_revision: bool,
+        length: u64,
+    ) -> String {
+        serde_json::json!({
+            "id": id,
+            "request": {
+                "type": "resource_invoke",
+                "uri": uri,
+                "operation": "read",
+                "token": token,
+                "body": { "check_revision": check_revision, "offset": 0, "length": length },
+            }
+        })
+        .to_string()
+    }
+
+    /// A v1 window slices a larger protected object. The same length with the
+    /// v2 check refuses it before the body is read.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_v1_window_of_a_protected_object_is_not_the_v2_cap() {
+        let (_temp, ctx, object_uri) = journal_context("person:local:journal-owner");
+        let written = journal_write(
+            &ctx,
+            &object_uri,
+            JOURNAL_SELF_URI,
+            b"0123456789abcdefghij",
+            serde_json::json!({ "create_only": true }),
+        )
+        .await;
+        assert_eq!(written["response"]["result"]["status"], "ok");
+        let token = bridge_token(&ctx, &object_uri, Action::Read);
+        let v1 = handle_request(
+            &journal_window_line(80, JOURNAL_SELF_URI, token.clone(), false, 4),
+            &Some(ctx.clone()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(v1["response"]["result"]["status"], "ok", "{v1}");
+        assert_eq!(
+            v1["response"]["result"]["data"]["content"],
+            serde_json::json!([48, 49, 50, 51]),
+            "a v1 window stays a byte array"
+        );
+        let v2 = handle_request(
+            &journal_window_line(81, JOURNAL_SELF_URI, token, true, 4),
+            &Some(ctx),
+        )
+        .await
+        .unwrap();
+        assert_eq!(v2["response"]["result"]["code"], "invalid", "{v2}");
+        assert_eq!(
+            v2["response"]["result"]["message"],
+            "object is over the read cap"
+        );
     }
 
     #[cfg(unix)]
