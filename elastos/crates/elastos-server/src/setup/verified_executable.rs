@@ -19,6 +19,9 @@ pub struct VerifiedExecutable {
     #[cfg(target_os = "macos")]
     _private_dir: Option<tempfile::TempDir>,
     exec_path: PathBuf,
+    /// The path the caller checked. Process listings show this, not the
+    /// private copy or `/proc/self/fd`.
+    installed_path: PathBuf,
     content_sha256: String,
     /// The signed release digest these held bytes matched (none for a source
     /// Home's `dev_mode = true` start). A native provider start pins its
@@ -68,6 +71,7 @@ impl VerifiedExecutable {
             Ok(Self {
                 file: unsafe { File::from_raw_fd(fd) },
                 exec_path: format!("/proc/self/fd/{fd}").into(),
+                installed_path: path.to_path_buf(),
                 content_sha256,
                 checksum: checksum.map(str::to_owned),
             })
@@ -81,6 +85,7 @@ impl VerifiedExecutable {
                     _copy_lock: None,
                     _private_dir: None,
                     exec_path: path.to_path_buf(),
+                    installed_path: path.to_path_buf(),
                     content_sha256,
                     checksum: None,
                 });
@@ -119,6 +124,7 @@ impl VerifiedExecutable {
                 _copy_lock: Some(copy_lock),
                 _private_dir: Some(private_dir),
                 exec_path,
+                installed_path: path.to_path_buf(),
                 content_sha256,
                 checksum: checksum.map(str::to_owned),
             })
@@ -166,7 +172,9 @@ impl VerifiedExecutable {
             use std::os::unix::process::CommandExt;
 
             let mut argv = Vec::new();
-            argv.push(CString::new(command.get_program().as_bytes())?);
+            // The executed bytes are the held descriptor. argv[0] is the
+            // installed path, which is what `ps` and install.sh compare.
+            argv.push(CString::new(self.installed_path.as_os_str().as_bytes())?);
             for arg in command.get_args() {
                 argv.push(CString::new(arg.as_bytes())?);
             }
@@ -215,7 +223,9 @@ impl VerifiedExecutable {
         }
         #[cfg(not(target_os = "linux"))]
         {
-            let _ = (command, clear_env);
+            use std::os::unix::process::CommandExt;
+            let _ = clear_env;
+            command.arg0(&self.installed_path);
         }
         Ok(())
     }
@@ -377,11 +387,21 @@ mod tests {
     fn a_running_private_copy_is_held_through_the_reaper_and_starts_again() {
         const TEST: &str = "setup::verified_executable::tests::a_running_private_copy_is_held_through_the_reaper_and_starts_again";
         if std::env::var_os("ELASTOS_P28_REAP_GRAND").is_some() {
+            let guard = crate::host_lock::hold_running_exec_copy().unwrap();
+            if guard.is_none() {
+                eprintln!("grandchild did not hold its private copy");
+                std::process::exit(7);
+            }
             fs::write(
                 std::env::var("ELASTOS_P28_REAP_MARKER").unwrap(),
                 b"started",
             )
             .unwrap();
+            drop(guard);
+            if !std::env::current_exe().unwrap().exists() {
+                eprintln!("dropping the grandchild deleted the shared copy");
+                std::process::exit(8);
+            }
             std::process::exit(0);
         }
         if std::env::var_os("ELASTOS_P28_REAP_CHILD").is_some() {
@@ -420,6 +440,10 @@ mod tests {
             if !output.status.success() {
                 eprintln!("{}", String::from_utf8_lossy(&output.stderr));
                 std::process::exit(6);
+            }
+            if !exe.exists() {
+                eprintln!("grandchild drop deleted the running copy");
+                std::process::exit(7);
             }
             drop(guard);
             std::process::exit(0);
@@ -460,6 +484,170 @@ mod tests {
             String::from_utf8_lossy(&output.stderr)
         );
         assert_eq!(fs::read(&marker).unwrap(), b"started");
+    }
+
+    /// `ps` shows the installed path. install.sh matches that path, not the
+    /// private copy the process actually executes.
+    #[test]
+    fn a_private_copy_lists_the_installed_path() {
+        const TEST: &str =
+            "setup::verified_executable::tests::a_private_copy_lists_the_installed_path";
+        if std::env::var_os("ELASTOS_P28_ARGV0").is_some() {
+            let argv0 = std::env::args_os().next().unwrap();
+            fs::write(
+                std::env::var("ELASTOS_P28_ARGV0_MARKER").unwrap(),
+                argv0.to_string_lossy().as_bytes(),
+            )
+            .unwrap();
+            fs::write(std::env::var("ELASTOS_P28_ARGV0_READY").unwrap(), b"ready").unwrap();
+            let go = std::env::var("ELASTOS_P28_ARGV0_GO").unwrap();
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+            while !Path::new(&go).exists() {
+                if std::time::Instant::now() > deadline {
+                    std::process::exit(4);
+                }
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            std::process::exit(0);
+        }
+        let root = tempfile::tempdir().unwrap();
+        let installed = root.path().join("elastos");
+        let exe = std::env::current_exe().unwrap();
+        fs::copy(&exe, &installed).unwrap();
+        fs::set_permissions(&installed, fs::Permissions::from_mode(0o755)).unwrap();
+        let mut file = File::open(&installed).unwrap();
+        let digest = super::sha256_hex(&mut file).unwrap();
+        let prepared =
+            VerifiedExecutable::prepare(&installed, &format!("sha256:{digest}")).unwrap();
+        let marker = root.path().join("argv0");
+        let ready = root.path().join("ready");
+        let go = root.path().join("go");
+        let mut command = std::process::Command::new(prepared.exec_path());
+        command
+            .arg("--exact")
+            .arg(TEST)
+            .env("ELASTOS_P28_ARGV0", "1")
+            .env("ELASTOS_P28_ARGV0_MARKER", &marker)
+            .env("ELASTOS_P28_ARGV0_READY", &ready)
+            .env("ELASTOS_P28_ARGV0_GO", &go);
+        prepared.attach_std(&mut command, false).unwrap();
+        let mut child = command.spawn().unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while !ready.exists() {
+            if let Some(status) = child.try_wait().unwrap() {
+                panic!("child exited before ready: {status}");
+            }
+            assert!(std::time::Instant::now() < deadline, "child did not start");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let ps = std::process::Command::new("ps")
+            .args(["-ww", "-p", &child.id().to_string(), "-o", "command="])
+            .output()
+            .unwrap();
+        let command_line = String::from_utf8(ps.stdout).unwrap();
+        let installed_text = installed.to_string_lossy();
+        assert!(
+            command_line
+                .trim_start()
+                .starts_with(installed_text.as_ref()),
+            "ps command {command_line:?}"
+        );
+        assert!(
+            !command_line.contains("elastos-exec-"),
+            "ps shows the private copy: {command_line}"
+        );
+        fs::write(&go, b"go").unwrap();
+        assert!(child.wait().unwrap().success());
+        assert_eq!(
+            fs::read(&marker).unwrap(),
+            installed.to_string_lossy().as_bytes()
+        );
+    }
+
+    /// What serve does with the shell: drop the hold when spawn returns.
+    /// The running copy's path is gone. A second start prepares the installed
+    /// file again and runs. Starting the deleted path fails.
+    #[test]
+    fn a_second_start_prepares_the_installed_file_after_the_first_copy_is_dropped() {
+        const TEST: &str = "setup::verified_executable::tests::a_second_start_prepares_the_installed_file_after_the_first_copy_is_dropped";
+        if std::env::var_os("ELASTOS_P28_SHELL2").is_some() {
+            fs::write(std::env::var("ELASTOS_P28_SHELL2_READY").unwrap(), b"up").unwrap();
+            let go = std::env::var("ELASTOS_P28_SHELL2_GO").unwrap();
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+            while !Path::new(&go).exists() {
+                if std::time::Instant::now() > deadline {
+                    std::process::exit(4);
+                }
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            std::process::exit(0);
+        }
+        let root = tempfile::tempdir().unwrap();
+        let installed = root.path().join("shell");
+        let exe = std::env::current_exe().unwrap();
+        fs::copy(&exe, &installed).unwrap();
+        fs::set_permissions(&installed, fs::Permissions::from_mode(0o755)).unwrap();
+        let mut file = File::open(&installed).unwrap();
+        let digest = super::sha256_hex(&mut file).unwrap();
+        let checksum = format!("sha256:{digest}");
+        let prepared = VerifiedExecutable::prepare(&installed, &checksum).unwrap();
+        let first_path = prepared.exec_path().to_path_buf();
+        let go = root.path().join("go");
+        let ready_first = root.path().join("ready-first");
+        let mut first = std::process::Command::new(prepared.exec_path());
+        first
+            .arg("--exact")
+            .arg(TEST)
+            .env("ELASTOS_P28_SHELL2", "1")
+            .env("ELASTOS_P28_SHELL2_READY", &ready_first)
+            .env("ELASTOS_P28_SHELL2_GO", &go);
+        let mut first_child = first.spawn().unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while !ready_first.exists() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "first shell did not start"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        drop(prepared);
+        assert!(
+            !first_path.exists(),
+            "the private copy is removed when the hold drops"
+        );
+        assert!(
+            first_child.try_wait().unwrap().is_none(),
+            "the running shell died when its path was removed"
+        );
+        let prepared = VerifiedExecutable::prepare(&installed, &checksum).unwrap();
+        let second_path = prepared.exec_path().to_path_buf();
+        assert!(second_path.exists());
+        assert_ne!(second_path, first_path);
+        let ready_second = root.path().join("ready-second");
+        let mut second = std::process::Command::new(prepared.exec_path());
+        second
+            .arg("--exact")
+            .arg(TEST)
+            .env("ELASTOS_P28_SHELL2", "1")
+            .env("ELASTOS_P28_SHELL2_READY", &ready_second)
+            .env("ELASTOS_P28_SHELL2_GO", &go);
+        let mut second_child = second.spawn().unwrap();
+        while !ready_second.exists() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "second shell did not start"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let again = std::process::Command::new(&first_path).spawn();
+        assert!(
+            again.is_err(),
+            "the deleted private-copy path started a process"
+        );
+        fs::write(&go, b"go").unwrap();
+        assert!(first_child.wait().unwrap().success());
+        assert!(second_child.wait().unwrap().success());
+        drop(prepared);
     }
 }
 
@@ -539,7 +727,9 @@ fn open_exec_copy_lock(dir: &Path) -> Result<File> {
     Ok(file)
 }
 
-/// Holds the caller's private exec copy until drop, then removes it.
+/// Holds the caller's private exec copy until drop. The directory is removed
+/// only when this process is the last holder: another process may still be
+/// executing the same copy.
 #[cfg(target_os = "macos")]
 pub struct ExecCopyGuard {
     dir: PathBuf,
@@ -549,7 +739,9 @@ pub struct ExecCopyGuard {
 #[cfg(target_os = "macos")]
 impl Drop for ExecCopyGuard {
     fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.dir);
+        if self._lock.try_lock().is_ok() {
+            let _ = fs::remove_dir_all(&self.dir);
+        }
     }
 }
 
@@ -566,8 +758,9 @@ pub(crate) fn adopt_running_exec_copy() -> Result<Option<ExecCopyGuard>> {
     Ok(Some(ExecCopyGuard { dir, _lock: lock }))
 }
 
-/// Removes this process's private exec copy. `process::exit` skips destructors,
-/// so the supersession watch calls this before it exits.
+/// Removes this process's private exec copy when it is the last holder.
+/// `process::exit` skips destructors, so the supersession watch calls this
+/// before it exits. Another process that still holds the copy keeps the tree.
 #[cfg(target_os = "macos")]
 pub(crate) fn release_running_exec_copy() {
     let Ok(exe) = std::env::current_exe() else {
@@ -576,7 +769,12 @@ pub(crate) fn release_running_exec_copy() {
     let Some(dir) = private_exec_dir(&exe) else {
         return;
     };
-    let _ = fs::remove_dir_all(dir);
+    let Ok(lock) = open_exec_copy_lock(&dir) else {
+        return;
+    };
+    if lock.try_lock().is_ok() {
+        let _ = fs::remove_dir_all(dir);
+    }
 }
 
 #[cfg(target_os = "macos")]

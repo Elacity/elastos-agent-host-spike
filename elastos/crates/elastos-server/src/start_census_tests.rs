@@ -223,7 +223,7 @@ fn places() -> Vec<Place> {
         ),
         place(
             "elastos-server/src/update_controller/child.rs",
-            "spawn_held",
+            "launch",
             "spawn()".to_string(),
             1,
             "held signed-release bytes, then the owned update child starts",
