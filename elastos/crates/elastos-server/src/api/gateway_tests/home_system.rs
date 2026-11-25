@@ -235,7 +235,7 @@ async fn home_frame_comes_from_the_managed_runtime() {
             .as_array()
             .map(Vec::len),
         Some(0),
-        "revoke clears the panel, got {revoked}"
+        "revoke clears the node list, got {revoked}"
     );
 
     provider.testing_store_v2_frame(
@@ -269,7 +269,7 @@ async fn home_frame_comes_from_the_managed_runtime() {
             .as_array()
             .map(Vec::len),
         Some(0),
-        "stop clears the panel, got {stopped}"
+        "stop clears the node list, got {stopped}"
     );
 
     provider.testing_store_v2_frame(
@@ -309,25 +309,29 @@ async fn home_frame_comes_from_the_managed_runtime() {
             .as_array()
             .map(Vec::len),
         Some(0),
-        "a runtime that is down clears the panel, got {down}"
+        "a runtime that is down clears the node list, got {down}"
     );
 }
 
 #[cfg(unix)]
 fn write_frame_coords(dir: &std::path::Path, api_url: &str, secret: &str) {
+    write_frame_coords_at(dir, api_url, secret, std::process::id(), 0o600);
+}
+
+#[cfg(unix)]
+fn write_frame_coords_at(dir: &std::path::Path, api_url: &str, secret: &str, pid: u32, mode: u32) {
     let coords = json!({
         "api_url": api_url,
         "attach_secret": secret,
-        "pid": std::process::id(),
+        "pid": pid,
         "runtime_kind": crate::runtime_control::RUNTIME_KIND_OPERATOR,
         "binary_sha256": "",
         "policy_sha256": "",
     });
-    std::fs::write(
-        crate::runtime_control::home_runtime_coord_path(dir),
-        serde_json::to_vec_pretty(&coords).unwrap(),
-    )
-    .unwrap();
+    let path = crate::runtime_control::home_runtime_coord_path(dir);
+    std::fs::write(&path, serde_json::to_vec_pretty(&coords).unwrap()).unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
 }
 
 #[cfg(unix)]
@@ -575,7 +579,7 @@ async fn a_thousand_frame_polls_keep_one_shell_and_a_restart_mints_once() {
         .send()
         .await
         .unwrap();
-    assert_eq!(refused.status(), StatusCode::FORBIDDEN);
+    assert_eq!(refused.status(), StatusCode::UNAUTHORIZED);
     assert_eq!(refused.text().await.unwrap(), "evicted");
     assert!(evict_shells.held().contains(tokens.last().unwrap()));
     evict_task.abort();
@@ -638,6 +642,135 @@ async fn a_hostile_frame_stops_reading_past_the_bound() {
         Some(0),
         "{body}"
     );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_frame_poll_sends_nothing_to_a_dead_or_open_runtime() {
+    let hits = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let api_url = format!("http://{}", listener.local_addr().unwrap());
+    let count = hits.clone();
+    tokio::spawn(async move {
+        loop {
+            let Ok((mut socket, _)) = listener.accept().await else {
+                break;
+            };
+            count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            tokio::spawn(async move {
+                use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                let mut buf = [0u8; 1024];
+                let _ = socket.read(&mut buf).await;
+                let _ = socket
+                    .write_all(
+                        b"HTTP/1.1 401 Unauthorized\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
+                    )
+                    .await;
+            });
+        }
+    });
+    let dir = tempfile::tempdir().unwrap();
+    let owner = passkey_authority(dir.path());
+    let app = gateway_router(test_state(dir.path()));
+    let empty = |body: &str| {
+        serde_json::from_str::<serde_json::Value>(body).unwrap()["nodes"]
+            .as_array()
+            .map(Vec::len)
+    };
+    write_frame_coords_at(dir.path(), &api_url, "dead-secret", 0, 0o600);
+    let (status, body) = frame_body(&app, &owner.home_token, "app=app-frame").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(empty(&body), Some(0), "{body}");
+    assert_eq!(
+        hits.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "a dead pid is not contacted"
+    );
+
+    write_frame_coords_at(
+        dir.path(),
+        &api_url,
+        "open-secret",
+        std::process::id(),
+        0o644,
+    );
+    let (status, body) = frame_body(&app, &owner.home_token, "app=app-frame").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(empty(&body), Some(0), "{body}");
+    assert_eq!(
+        hits.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "a coords file that is not mode 0600 is not contacted"
+    );
+
+    write_frame_coords_at(
+        dir.path(),
+        &api_url,
+        "live-secret",
+        std::process::id(),
+        0o600,
+    );
+    let (status, body) = frame_body(&app, &owner.home_token, "app=app-frame").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(
+        hits.load(std::sync::atomic::Ordering::SeqCst) >= 1,
+        "a live private file is contacted"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn an_evicted_frame_shell_gets_401_and_the_poll_attaches_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let owner = passkey_authority(dir.path());
+    let storage = elastos_storage::providers::LocalFSProvider::new(dir.path().join("storage"));
+    let runtime = Arc::new(crate::runtime::Runtime::with_providers_and_component(
+        Arc::new(storage.await.unwrap()),
+        Vec::new(),
+        None,
+    ));
+    let secret = "frame-attach-evict-shell";
+    let (api_url, task, shells, audit, _sessions) = spawn_frame_runtime(runtime, secret).await;
+    write_frame_coords(dir.path(), &api_url, secret);
+    let app = gateway_router(test_state(dir.path()));
+    let (status, body) = frame_body(&app, &owner.home_token, "app=kept").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let old = shells.held()[0].clone();
+    let client = reqwest::Client::new();
+    for n in 0..crate::api::handlers::attach::ATTACH_SHELL_CAP {
+        client
+            .post(format!("{api_url}/api/auth/attach"))
+            .json(&json!({
+                "secret": secret,
+                "scope": "shell",
+                "principal": format!("person:local:other-{n}"),
+            }))
+            .send()
+            .await
+            .unwrap();
+    }
+    let refused = client
+        .get(format!(
+            "{api_url}/api/residents/frame?app=kept&principal=person"
+        ))
+        .header(AUTHORIZATION, format!("Bearer {old}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(refused.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(refused.text().await.unwrap(), "evicted");
+    let minted = shell_created(&audit);
+    let (status, body) = frame_body(&app, &owner.home_token, "app=kept").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        shell_created(&audit),
+        minted + 1,
+        "an evicted shell attaches once more"
+    );
+    let (status, body) = frame_body(&app, &owner.home_token, "app=kept").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(shell_created(&audit), minted + 1, "the new shell is reused");
+    task.abort();
 }
 
 #[cfg(unix)]

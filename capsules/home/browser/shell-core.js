@@ -89,8 +89,7 @@ export async function fetchJson(url, init) {
     || url === "/api/home/cli-mint/waiting"
     || url === "/api/home/cli-mint/begin"
     || url === "/api/home/cli-mint/approve"
-    || url === "/api/home/cli-mint/cancel"
-    || String(url).split("?")[0] === "/api/apps/home/frame";
+    || url === "/api/home/cli-mint/cancel";
   const authorityHeaders = requiresHomeAuthority && homeAuthorityToken
     ? { "x-elastos-home-token": homeAuthorityToken }
     : {};

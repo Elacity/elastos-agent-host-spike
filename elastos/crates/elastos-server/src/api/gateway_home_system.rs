@@ -1480,6 +1480,35 @@ fn frame_key(api_url: &str, secret: &str, principal: &str) -> String {
     format!("{}\n{secret}\n{principal}", api_url.trim_end_matches('/'))
 }
 
+#[derive(Deserialize)]
+struct FrameAttachResponse {
+    token: String,
+}
+
+/// Mints one shell for the principal on this verified launch. A caller of
+/// this function cannot name a different principal.
+async fn home_attach_frame_shell(
+    client: &reqwest::Client,
+    api_url: &str,
+    attach_secret: &str,
+    context: &HomeLaunchTokenContext,
+) -> anyhow::Result<String> {
+    let principal = context.principal_id();
+    Ok(client
+        .post(format!("{}/api/auth/attach", api_url))
+        .json(&serde_json::json!({
+            "secret": attach_secret,
+            "scope": "shell",
+            "principal": principal,
+        }))
+        .send()
+        .await?
+        .error_for_status()?
+        .json::<FrameAttachResponse>()
+        .await?
+        .token)
+}
+
 async fn frame_shell(
     api_url: &str,
     secret: &str,
@@ -1528,11 +1557,16 @@ async fn frame_bytes(mut response: reqwest::Response) -> Vec<u8> {
     bytes
 }
 
-/// Coords for a frame poll. The file is read and not checked by attaching.
+/// Coords for a frame poll. The bytes are `read_private_runtime_coord_bytes`
+/// and the pid is `pid_is_alive`, the checks the other readers use. A dead
+/// pid or a file that fails the private read sends nothing.
 fn frame_coords(data_dir: &std::path::Path) -> Option<crate::runtime_control::RuntimeCoords> {
     let path = crate::runtime_control::home_runtime_coord_path(data_dir);
-    let data = std::fs::read(path).ok()?;
+    let data = crate::runtime_control::read_private_runtime_coord_bytes(&path)?;
     let coords: crate::runtime_control::RuntimeCoords = serde_json::from_slice(&data).ok()?;
+    if !crate::runtime_control::pid_is_alive(coords.pid) {
+        return None;
+    }
     crate::local_http::LoopbackHttpBaseUrl::parse(&coords.api_url).ok()?;
     Some(coords)
 }
@@ -1572,9 +1606,10 @@ async fn ask_resident_frame(
 }
 
 /// The managed Runtime's stored nodes for this session's principal. A down
-/// Runtime, a stopped app, or a bad answer is an empty panel. A poll reuses
-/// the shell it already holds. A 401 attaches once more. A connection error
-/// does not attach.
+/// Runtime, a stopped app, or a bad answer is an empty node list. A poll
+/// reuses the shell it already holds. A 401 attaches once more. A connection
+/// error does not attach. A dead pid or a coords file that fails the private
+/// read sends nothing.
 async fn managed_frame_nodes(
     data_dir: &std::path::Path,
     context: &HomeLaunchTokenContext,

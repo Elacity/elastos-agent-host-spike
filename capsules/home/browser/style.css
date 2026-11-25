@@ -853,14 +853,6 @@ img {
   background: #050608;
 }
 
-#home-v2-frame:not([hidden]) {
-  position: fixed;
-  inset: 0;
-  z-index: 200000;
-  overflow: auto;
-  background: #050608;
-}
-
 body[data-home-shell="resolving"] .active-shell-root,
 body[data-home-gui="dormant"] .active-shell-root,
 html[data-home-shell-boot="alternate"] .active-shell-root,

@@ -20,7 +20,6 @@ import {
   createHomeBackgroundImageReader,
   targetById,
 } from "./shell-core.js?v=home-wallpaper-20261030b";
-import { bindV2App, clearV2App, startHomeFrame } from "./home-frame.js?v=home-frame-20261125d";
 import {
   addAccountPasskey,
   bindHomeUnlock,
@@ -226,20 +225,11 @@ async function launchWalletConnectorFromTrustedSource(context, target) {
   }
 }
 
-let shownV2App = "";
-
-function showV2App(id) {
-  shownV2App = typeof id === "string" ? id : "";
-  if (shownV2App) bindV2App(homeV2Frame, shownV2App);
-  else clearV2App(homeV2Frame);
-}
-
 function retireLaunchedAppContext(homeToken) {
   const context = launchedAppContexts.get(homeToken);
   if (!context) {
     return false;
   }
-  if (context.capsuleId && context.capsuleId === shownV2App) showV2App("");
   cancelBrowserAuthorityRenewalsForToken(homeToken);
   cancelFrameRenewal(context);
   cancelLibraryPicker(context);
@@ -258,7 +248,6 @@ function clearLaunchedAppContexts() {
   }
   launchedAppContexts.clear();
   homeExternalLinkPrompt.clear();
-  showV2App("");
 }
 
 function cancelFrameRenewal(context) {
@@ -586,7 +575,6 @@ async function launchHomeTarget(target, query = {}) {
     method: "POST",
     body: JSON.stringify(body),
   });
-  const capsuleId = typeof launched?.capsule_id === "string" ? launched.capsule_id : "";
   if (launched?.attach_kind === "iframe") {
     rememberLaunchedAppContext(launched, readBackgroundImage);
     if (pickerOwner) {
@@ -599,10 +587,6 @@ async function launchHomeTarget(target, query = {}) {
       launchedAppContexts.get(token).pickerOwner = pickerOwner;
     }
   }
-  // A component app draws in the v2 frame. An iframe launch, a renewal, and
-  // a launch with no capsule id leave the frame that is already showing.
-  // Closing that app clears it.
-  if (launched?.attach_kind === "component" && capsuleId) showV2App(capsuleId);
   return launched;
 }
 
@@ -1014,7 +998,6 @@ function rememberLaunchedAppContext(launched, readBackgroundImage) {
       inFlight: false,
       requestIds: new Set(),
     },
-    capsuleId: typeof launched.capsule_id === "string" ? launched.capsule_id : "",
   });
 }
 
@@ -2953,15 +2936,6 @@ function scheduleHomeEventPoll(delayMs) {
     pollHomeEvents,
     Math.max(250, Number(delayMs) || HOME_EVENTS_RETRY_MS),
   );
-}
-
-const homeV2Frame = document.getElementById("home-v2-frame");
-if (homeV2Frame) {
-  startHomeFrame(homeV2Frame, (signal) => {
-    const app = homeV2Frame.dataset.app || "";
-    if (!app) return Promise.resolve({ nodes: [] });
-    return fetchJson("/api/apps/home/frame?app=" + encodeURIComponent(app), { signal });
-  });
 }
 
 function broadcastHomeRuntimeEvents(events) {

@@ -110,7 +110,8 @@ pub(crate) async fn resident_frame(
                 return resident_frame_body(&runtime, &query.app, &principal);
             }
             if shells.evicted(&token) {
-                return (StatusCode::FORBIDDEN, "evicted").into_response();
+                // 401, so the frame poll drops this shell and attaches once more.
+                return (StatusCode::UNAUTHORIZED, "evicted").into_response();
             }
             return (StatusCode::FORBIDDEN, "no session").into_response();
         }

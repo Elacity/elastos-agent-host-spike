@@ -137,7 +137,7 @@ thread_local! {
 }
 
 /// The stored nodes of one resident when `caller` presented that frame.
-/// An image node still carries its grant id. The Home answer leaves that out.
+/// An image node still carries its grant id. The frame route's JSON leaves that out.
 pub fn read_v2_frame_for_home(
     provider: &elastos_compute::providers::ComponentProvider,
     caller: Option<&str>,
