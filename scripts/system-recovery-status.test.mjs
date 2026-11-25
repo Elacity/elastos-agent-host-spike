@@ -125,6 +125,10 @@ test("recovery text says agents stay on the Home where they were created", async
   assert.equal(off.success({}), "Recovery Kit imported.");
   const sentence = "1 agent on this Home would stop opening. Retire that agent first, or import on another Home.";
   assert.equal(on.refusal({ message: `request failed: 409 ${sentence}` }), sentence);
+  const orphan = "1 agent on this Home would belong to nobody. This recovery changes the owner id its record names.";
+  assert.equal(on.refusal({ message: `request failed: 409 ${orphan}` }), orphan);
+  const orphans = "2 agents on this Home would belong to nobody. This recovery changes the owner id their records name.";
+  assert.equal(on.refusal({ message: `request failed: 409 ${orphans}` }), orphans);
   assert.equal(await on.builds(() => Promise.resolve({ agents: [] })), true);
   assert.equal(
     await off.builds(() => Promise.reject(new Error("request failed: 409 agents are not built into this Runtime"))),

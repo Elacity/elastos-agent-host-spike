@@ -3171,10 +3171,17 @@ pub(crate) async fn recovery_kit_import_inner(
     // The agent writer create uses, from this count until the store below
     // returns. The DID provider wait above is finished, so the lock is not
     // held across it.
+    let next_owner_id = if input.reassign_to_current_principal {
+        kit.principal_id.as_str()
+    } else {
+        principal.principal_id.as_str()
+    };
     let _agent_writer = if input.reassign_to_current_principal || replaces_root_key {
         Some(crate::agents::hold_agent_writer_for_root_change(
             &state.data_dir,
             &principal.principal_id,
+            next_owner_id,
+            &kit.data_key_id,
         )?)
     } else {
         None

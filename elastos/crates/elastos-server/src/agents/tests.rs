@@ -1244,6 +1244,14 @@ fn the_refusal_names_the_count_and_what_to_do() {
         agents_would_stop_opening(2),
         "2 agents on this Home would stop opening. Retire them first, or import on another Home."
     );
+    assert_eq!(
+        agents_would_belong_to_nobody(1),
+        "1 agent on this Home would belong to nobody. This recovery changes the owner id its record names."
+    );
+    assert_eq!(
+        agents_would_belong_to_nobody(2),
+        "2 agents on this Home would belong to nobody. This recovery changes the owner id their records name."
+    );
 }
 
 /// One agent whose note opens under the owner's current key. The caller has

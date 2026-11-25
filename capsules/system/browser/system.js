@@ -3106,8 +3106,17 @@ function runtimeBuildsAgents() {
 
 function recoveryRefusal(error) {
   const message = String((error && error.message) || error || "");
-  const found = message.match(/(\d+ agents? on this Home would stop opening\. Retire (?:that agent|them) first, or import on another Home\.)/);
-  return found ? found[1] : message;
+  const patterns = [
+    /(\d+ agents? on this Home would stop opening\. Retire (?:that agent|them) first, or import on another Home\.)/,
+    /(\d+ agents? on this Home would belong to nobody\. This recovery changes the owner id (?:its record names|their records name)\.)/,
+  ];
+  for (const pattern of patterns) {
+    const found = message.match(pattern);
+    if (found) {
+      return found[1];
+    }
+  }
+  return message;
 }
 
 function recoveryImportSuccessMessage(response, agentsBuilt) {

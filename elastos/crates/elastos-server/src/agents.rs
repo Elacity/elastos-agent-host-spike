@@ -1024,6 +1024,17 @@ pub(crate) fn agents_would_stop_opening(count: usize) -> String {
     format!("{count} {word} on this Home would stop opening. {retire}, or import on another Home.")
 }
 
+pub(crate) fn agents_would_belong_to_nobody(count: usize) -> String {
+    let (word, names) = if count == 1 {
+        ("agent", "its record names")
+    } else {
+        ("agents", "their records name")
+    };
+    format!(
+        "{count} {word} on this Home would belong to nobody. This recovery changes the owner id {names}."
+    )
+}
+
 /// Held from the opening count until the caller finishes storing the key.
 pub(crate) struct AgentWriterGuard {
     _lock: WriteLock,
@@ -1031,18 +1042,57 @@ pub(crate) struct AgentWriterGuard {
 
 /// The count and the key store are one decision. The caller stores the key
 /// before dropping the guard. The guard is taken after any provider wait.
+///
+/// A reassignment that changes the owner id a record names refuses: that
+/// agent would belong to nobody. A retired record still names its owner, so
+/// it counts. The same owner id is refused only when the key changes and an
+/// agent's data would stop opening.
 pub(crate) fn hold_agent_writer_for_root_change(
     data_dir: &Path,
-    owner_id: &str,
+    current_owner_id: &str,
+    next_owner_id: &str,
+    next_data_key_id: &str,
 ) -> anyhow::Result<AgentWriterGuard> {
     let lock = lock_for_write(data_dir)?;
-    let count = opening_agent_count(data_dir, owner_id)?;
-    if count > 0 {
-        return Err(Refused(agents_would_stop_opening(count)).into());
+    if current_owner_id != next_owner_id {
+        let named = agents_naming_owner(data_dir, current_owner_id)?;
+        if named > 0 {
+            return Err(Refused(agents_would_belong_to_nobody(named)).into());
+        }
+    } else if owner_key_changes(data_dir, current_owner_id, next_data_key_id)? {
+        let count = opening_agent_count(data_dir, current_owner_id)?;
+        if count > 0 {
+            return Err(Refused(agents_would_stop_opening(count)).into());
+        }
     }
     #[cfg(all(test, feature = "prototype-agents"))]
     pause_agent_writer(data_dir, PAUSE_BEFORE_STORE);
     Ok(AgentWriterGuard { _lock: lock })
+}
+
+/// Records whose owner field is this id, retired records included.
+fn agents_naming_owner(data_dir: &Path, owner_id: &str) -> anyhow::Result<usize> {
+    let Some(opened) = open_for_root_change(data_dir)? else {
+        return Ok(0);
+    };
+    Ok(opened
+        .file
+        .agents
+        .iter()
+        .filter(|agent| agent.record.owner.as_deref() == Some(owner_id))
+        .count())
+}
+
+/// Whether storing `next_data_key_id` replaces the key this owner has now.
+fn owner_key_changes(
+    data_dir: &Path,
+    owner_id: &str,
+    next_data_key_id: &str,
+) -> anyhow::Result<bool> {
+    let root = crate::auth::principal_stored_localhost_root(Some(data_dir), owner_id)
+        .map_err(anyhow::Error::msg)?;
+    let stored = crate::auth::load_principal_root_protection(data_dir, owner_id, &root)?;
+    Ok(stored.is_none_or(|stored| stored.data_key_id != next_data_key_id))
 }
 
 #[cfg(all(test, feature = "prototype-agents"))]
@@ -1096,23 +1146,10 @@ pub(crate) fn arm_agent_writer_pause(
 }
 
 #[cfg(all(test, feature = "prototype-agents"))]
-pub(crate) fn wait_until_agent_writer_paused() -> bool {
-    let mut guard = writer_pause_lock();
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
-    while guard.as_ref().is_none_or(|pause| !pause.arrived) {
-        let now = std::time::Instant::now();
-        if now >= deadline {
-            return false;
-        }
-        let (next, timeout) = WRITER_PAUSE_CV
-            .wait_timeout(guard, deadline - now)
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        guard = next;
-        if timeout.timed_out() && guard.as_ref().is_none_or(|pause| !pause.arrived) {
-            return false;
-        }
-    }
-    true
+pub(crate) fn agent_writer_pause_arrived() -> bool {
+    writer_pause_lock()
+        .as_ref()
+        .is_some_and(|pause| pause.arrived)
 }
 
 #[cfg(all(test, feature = "prototype-agents"))]

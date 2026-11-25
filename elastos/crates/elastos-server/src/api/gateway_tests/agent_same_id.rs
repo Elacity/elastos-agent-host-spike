@@ -419,7 +419,7 @@ async fn reassignment_refuses_when_the_replaced_account_owns_opening_agents() {
         .await
         .expect_err("reassignment must be refused before the commit")
         .to_string();
-    assert_eq!(err, crate::agents::agents_would_stop_opening(1));
+    assert_eq!(err, crate::agents::agents_would_belong_to_nobody(1));
     assert_eq!(auth_bytes(home.temp.path()), auth);
     assert_eq!(agent_bytes(home.temp.path()), agents);
     assert_eq!(
@@ -515,6 +515,36 @@ async fn create_and_a_root_key_import_at_once_do_not_seal_the_new_agent() {
     race_root_key_import(false);
 }
 
+fn wait_for_the_pause(done: &std::sync::mpsc::Receiver<String>) {
+    let started = std::time::Instant::now();
+    while started.elapsed() < std::time::Duration::from_secs(30) {
+        if crate::agents::agent_writer_pause_arrived() {
+            return;
+        }
+        match done.try_recv() {
+            Ok(message) => panic!("finished before the pause: {message}"),
+            Err(std::sync::mpsc::TryRecvError::Empty) => {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                panic!("the pausing side ended before the pause");
+            }
+        }
+    }
+    panic!("agent writer did not pause");
+}
+
+fn still_running<T>(handle: &std::thread::ScopedJoinHandle<'_, T>) -> bool {
+    let started = std::time::Instant::now();
+    while started.elapsed() < std::time::Duration::from_secs(5) {
+        if handle.is_finished() {
+            return false;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    !handle.is_finished()
+}
+
 fn drive<T>(future: impl std::future::Future<Output = T>) -> T {
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -535,21 +565,21 @@ fn race_root_key_import(import_first: bool) {
     } else {
         crate::agents::PAUSE_BEFORE_WRAP
     };
+    let home_ref = &home;
     let (import_result, created) = std::thread::scope(|scope| {
-        let pause = crate::agents::arm_agent_writer_pause(home.temp.path(), point);
+        let pause = crate::agents::arm_agent_writer_pause(home_ref.temp.path(), point);
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
         if import_first {
-            let import = scope.spawn(|| drive(import_kit(&home, kit, false)));
+            let tx = done_tx.clone();
+            let import = scope.spawn(move || {
+                let result = drive(import_kit(home_ref, kit, false));
+                let _ = tx.send(format!("{result:?}"));
+                result
+            });
+            wait_for_the_pause(&done_rx);
+            let create = scope.spawn(move || create_racing_agent(home_ref, "race-import-first"));
             assert!(
-                crate::agents::wait_until_agent_writer_paused(),
-                "agent writer did not pause"
-            );
-            let create = scope.spawn(|| create_racing_agent(&home, "race-import-first"));
-            let started = std::time::Instant::now();
-            while !create.is_finished() && started.elapsed() < std::time::Duration::from_secs(2) {
-                std::thread::sleep(std::time::Duration::from_millis(20));
-            }
-            assert!(
-                !create.is_finished(),
+                still_running(&create),
                 "create sealed an agent before the import stored the key"
             );
             drop(pause);
@@ -557,18 +587,16 @@ fn race_root_key_import(import_first: bool) {
             let created = create.join().unwrap();
             (import_result, created)
         } else {
-            let create = scope.spawn(|| create_racing_agent(&home, "race-create-first"));
+            let tx = done_tx.clone();
+            let create = scope.spawn(move || {
+                let result = create_racing_agent(home_ref, "race-create-first");
+                let _ = tx.send(format!("{result:?}"));
+                result
+            });
+            wait_for_the_pause(&done_rx);
+            let import = scope.spawn(move || drive(import_kit(home_ref, kit, false)));
             assert!(
-                crate::agents::wait_until_agent_writer_paused(),
-                "agent writer did not pause"
-            );
-            let import = scope.spawn(|| drive(import_kit(&home, kit, false)));
-            let started = std::time::Instant::now();
-            while !import.is_finished() && started.elapsed() < std::time::Duration::from_secs(2) {
-                std::thread::sleep(std::time::Duration::from_millis(20));
-            }
-            assert!(
-                !import.is_finished(),
+                still_running(&import),
                 "the import stored the key while create held the writer"
             );
             drop(pause);
@@ -598,4 +626,150 @@ fn race_root_key_import(import_first: bool) {
         );
     }
     note_opens(home.temp.path(), &created.agent_id);
+}
+
+fn agent_owner(dir: &std::path::Path) -> String {
+    let file: Value = serde_json::from_slice(&agent_bytes(dir)).unwrap();
+    file["agents"][0]["record"]["owner"]
+        .as_str()
+        .unwrap()
+        .to_string()
+}
+
+fn kit_holding(
+    dir: &std::path::Path,
+    principal_id: &str,
+    root: &str,
+) -> elastos_runtime::auth::RecoveryKitV1 {
+    let stored = crate::auth::load_principal_root_protection(dir, principal_id, root)
+        .unwrap()
+        .unwrap();
+    let kit =
+        crate::auth::recovery_kit_from_archive(dir, stored.protectors[0].archive.as_ref().unwrap())
+            .unwrap();
+    assert_eq!(kit.principal_id, principal_id);
+    assert_eq!(kit.data_key_id, stored.data_key_id);
+    kit
+}
+
+#[tokio::test]
+async fn reassignment_allows_when_the_owner_id_and_the_key_stay() {
+    let home = imported_home();
+    let planted = crate::agents::tests::plant_opening_agent(
+        home.temp.path(),
+        &home.principal_id,
+        "plant-same-id",
+    );
+    let key_before = stored_key_id(&home);
+    let kit = kit_holding(home.temp.path(), &home.principal_id, &home.localhost_root);
+    let response = import_kit(&home, kit, true)
+        .await
+        .expect("the owner id stays and the key still opens the note");
+    assert_eq!(response.status, "reassigned");
+    assert_eq!(response.principal_id, home.principal_id);
+    assert_eq!(agent_owner(home.temp.path()), home.principal_id);
+    assert_eq!(stored_key_id(&home), key_before);
+    assert_eq!(
+        crate::auth::read_principal_root_object(
+            home.temp.path(),
+            &planted.agent_id,
+            &planted.root,
+            &planted.uri,
+            &planted.path
+        )
+        .unwrap(),
+        planted.note,
+        "the note still opens"
+    );
+}
+
+#[tokio::test]
+async fn reassignment_allows_when_the_recovered_owner_keeps_the_agents() {
+    let home = imported_home();
+    let other = passkey_authority_with_name_role_credential(
+        home.temp.path(),
+        None,
+        crate::auth::RuntimePrincipalRole::Admin,
+        "gateway-test-recovered-owner",
+    );
+    let other_principal =
+        crate::auth::load_principal_for_proof_binding(home.temp.path(), &other.proof_binding_id)
+            .unwrap();
+    let other_protection =
+        crate::auth::store_test_principal_root_protection(home.temp.path(), &other.principal_id);
+    let planted = crate::agents::tests::plant_opening_agent(
+        home.temp.path(),
+        &other.principal_id,
+        "plant-kept",
+    );
+    let kit = crate::auth::recovery_kit_from_archive(
+        home.temp.path(),
+        other_protection.protectors[0].archive.as_ref().unwrap(),
+    )
+    .unwrap();
+    assert_eq!(kit.principal_id, other_principal.principal_id);
+    assert_eq!(kit.data_key_id, other_protection.data_key_id);
+    assert_ne!(kit.principal_id, home.principal_id);
+    let response = import_kit(&home, kit, true)
+        .await
+        .expect("these agents name the recovered owner, and the Kit holds that key");
+    assert_eq!(response.status, "reassigned");
+    assert_eq!(response.principal_id, other.principal_id);
+    assert_eq!(agent_owner(home.temp.path()), other.principal_id);
+    assert_eq!(
+        crate::auth::read_principal_root_object(
+            home.temp.path(),
+            &planted.agent_id,
+            &planted.root,
+            &planted.uri,
+            &planted.path
+        )
+        .unwrap(),
+        planted.note,
+        "the note still opens"
+    );
+}
+
+#[tokio::test]
+async fn reassignment_refuses_a_retired_agent_that_would_belong_to_nobody() {
+    let home = imported_home();
+    let planted = crate::agents::tests::plant_retired_agent(
+        home.temp.path(),
+        &home.principal_id,
+        "plant-retired-owner",
+    );
+    let other = passkey_authority_with_name_role_credential(
+        home.temp.path(),
+        None,
+        crate::auth::RuntimePrincipalRole::Guest,
+        "gateway-test-retired-reassign",
+    );
+    let other_protection =
+        crate::auth::store_test_principal_root_protection(home.temp.path(), &other.principal_id);
+    let kit = crate::auth::recovery_kit_from_archive(
+        home.temp.path(),
+        other_protection.protectors[0].archive.as_ref().unwrap(),
+    )
+    .unwrap();
+    let auth = auth_bytes(home.temp.path());
+    let agents = agent_bytes(home.temp.path());
+    let err = import_kit(&home, kit, true)
+        .await
+        .expect_err("a retired record still names the owner id this recovery changes")
+        .to_string();
+    assert_eq!(err, crate::agents::agents_would_belong_to_nobody(1));
+    assert_eq!(auth_bytes(home.temp.path()), auth);
+    assert_eq!(agent_bytes(home.temp.path()), agents);
+    assert_eq!(
+        crate::auth::read_principal_root_object(
+            home.temp.path(),
+            &planted.agent_id,
+            &planted.root,
+            &planted.uri,
+            &planted.path
+        )
+        .unwrap(),
+        planted.note,
+        "the note still opens"
+    );
 }
