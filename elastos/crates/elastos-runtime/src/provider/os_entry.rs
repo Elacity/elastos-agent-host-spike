@@ -207,11 +207,25 @@ fn start_path_allow_os(
     }
 }
 
-/// Re-open every allow-list root and refuse when the directory changed.
+/// Re-open every allow-list root and refuse when its device or inode changed.
+///
+/// A root swapped before this re-check starts nothing. The check opens the
+/// path, compares the device and inode recorded at render, and drops the
+/// descriptor. `sandbox-exec` then resolves each rule by name. A process of
+/// the same user can still replace a root after this check and before the
+/// child uses it. A symlink at that path does not grant its target. A real
+/// directory swapped onto the path is readable, including a file moved into
+/// it. `identity/device.key` is not under any allowed root, so that path
+/// stays unread. The three helpers do not compare the device and
+/// inode again after the profile is on: the recorded identity has to be
+/// passed into three binaries that do not share a startup crate, and that
+/// hand-off is more than fifteen lines.
 ///
 /// `plan.root_dev` lines up with the storage roots, which are the first rules.
-/// The executable, loader, and resolver paths are not roots. The attribute
-/// keeps each refusal on one line, as `require_real_root` does.
+/// The executable, loader, and resolver paths are not roots. Metadata literals
+/// and `current_dir` are not roots either; the launch comment says why a swap
+/// of those paths does not widen the profile. The attribute keeps each
+/// refusal on one line, as `require_real_root` does.
 #[cfg(all(not(elastos_unsupported_os_check), target_os = "macos"))]
 #[rustfmt::skip]
 fn confirm_allow_list_roots(plan: &super::landlock_plan::Plan) -> Result<(), String> {
@@ -226,7 +240,8 @@ fn confirm_allow_list_roots(plan: &super::landlock_plan::Plan) -> Result<(), Str
 }
 
 /// Build the Seatbelt command and start it. The root check is the last step
-/// before `sandbox-exec`, so a directory swapped after render starts nothing.
+/// before `sandbox-exec`. A root swapped before that check starts nothing.
+/// After it, `sandbox-exec` resolves paths by name.
 #[cfg(all(not(elastos_unsupported_os_check), target_os = "macos"))]
 #[rustfmt::skip]
 fn launch_macos_path_allow(
@@ -247,8 +262,11 @@ fn launch_macos_path_allow(
     confirm_allow_list_roots(plan)?;
     let mut command = macos_sandbox_command(Path::new("/usr/bin/sandbox-exec"), &confinement.seatbelt, &binary, &bound, Some(data_dir))?;
     // localhost stats the working directory before it reads init. That directory
-    // is the data directory, which has a metadata grant. The parent's directory
-    // does not.
+    // is the data directory. Localhost and object have a `file-read-metadata`
+    // literal for it, not a subpath and not a read of `identity/device.key`.
+    // Chain has no metadata literal. `current_dir` adds no Seatbelt rule, and
+    // this launch does not re-stat the directory: a same-user swap of it is
+    // the root gap above, not a second grant.
     command.current_dir(data_dir);
     macos_launch(command, stdio, prepared)
 }
@@ -1832,8 +1850,11 @@ mod tests {
         }
     }
 
-    /// A root swapped after render and before sandbox-exec is refused.
-    /// Removing `confirm_allow_list_roots` makes this start a process.
+    /// A root swapped after render and before the re-check is refused.
+    /// The swap is in place when `launch_macos_path_allow` calls
+    /// `confirm_allow_list_roots`. Removing that call makes this start a
+    /// process. A swap after the re-check is the gap the Seatbelt test shows:
+    /// `sandbox-exec` resolves the path by name.
     #[cfg(all(target_os = "macos", not(elastos_unsupported_os_check)))]
     #[test]
     fn a_root_swapped_between_render_and_sandbox_exec_is_refused_and_starts_nothing() {
@@ -1916,9 +1937,138 @@ fn main() {
                     let mut status = 0;
                     libc::waitpid(launched.pid, &mut status, 0);
                 }
-                panic!("a root swapped between render and sandbox-exec started a process");
+                panic!("a root swapped before the re-check started a process");
             }
         }
+    }
+
+    /// After the re-check, `sandbox-exec` resolves a subpath by name. A symlink
+    /// at that path does not grant its target: the textual child and the
+    /// target's own path both stay denied. A real directory swapped onto the
+    /// same path is readable, including a file placed there. `identity/device.key`
+    /// stays denied at its own path, and the rendered plan does not name it.
+    #[cfg(all(target_os = "macos", not(elastos_unsupported_os_check)))]
+    #[test]
+    fn a_symlink_subpath_resolves_outside_and_the_device_key_stays_unread() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let base = std::fs::canonicalize(temp.path()).unwrap();
+        let data = base.join("data");
+        let outside = base.join("outside");
+        std::fs::create_dir_all(data.join("identity")).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        let key = data.join("identity/device.key");
+        std::fs::write(&key, b"device-key").unwrap();
+        std::fs::write(outside.join("secret"), b"outside-secret").unwrap();
+        let root = data.join("chain-provider");
+        std::fs::create_dir(&root).unwrap();
+        let admitted = super::super::rights::admit_runtime_grant(
+            super::super::rights_table::RuntimeProviderId::Chain,
+        );
+        let (confinement, plan) = super::super::path_allow::render_with_plan(
+            super::super::rights_table::RuntimeProviderId::Chain,
+            &admitted,
+            &data,
+            Path::new("/opt/elastos/chain-provider"),
+            5,
+        )
+        .unwrap_or_else(|err| panic!("render of the real root: {err}"));
+        assert!(
+            plan.rules.iter().all(|rule| !key.starts_with(&rule.1)),
+            "identity/device.key is under an allowed root: {:?}",
+            plan.rules
+        );
+        assert!(!confinement.seatbelt.contains("device.key"));
+        assert!(!confinement.seatbelt.contains("identity"));
+        assert!(confinement
+            .seatbelt
+            .contains("(allow file-read* file-write* (subpath (param \"chain-provider\")))"));
+        std::fs::remove_dir(&root).unwrap();
+        std::os::unix::fs::symlink(&outside, &root).unwrap();
+        assert!(std::fs::symlink_metadata(&root)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        let source = base.join("probe.rs");
+        let probe = base.join("probe");
+        std::fs::write(
+            &source,
+            r#"fn main() {
+    fn one(path: &str) -> String {
+        match std::fs::read(path) {
+            Ok(bytes) => format!("READ:{}", String::from_utf8_lossy(&bytes)),
+            Err(err) => format!("DENY:{:?}", err.kind()),
+        }
+    }
+    for path in std::env::args().skip(1) {
+        println!("{path} {}", one(&path));
+    }
+}
+"#,
+        )
+        .unwrap();
+        let built = std::process::Command::new("rustc")
+            .args(["--edition", "2021", "-o"])
+            .arg(&probe)
+            .arg(&source)
+            .output()
+            .unwrap();
+        assert!(
+            built.status.success(),
+            "probe build failed: {}",
+            String::from_utf8_lossy(&built.stderr)
+        );
+        let probe_text = probe.display().to_string();
+        let root_text = root.display().to_string();
+        assert!(!probe_text.contains('"') && !root_text.contains('"'));
+        // `/usr/lib` lets this probe's dynamic linker start. The product
+        // subpath under test is `root_text` only. The device key is neither.
+        let profile = format!(
+            "(version 1)\n(deny default)\n(deny network*)\n(allow process-exec (literal \"{probe_text}\"))\n(allow file-read* (literal \"{probe_text}\"))\n(allow file-read* (subpath \"/usr/lib\"))\n(allow file-read* (subpath \"/System/Library\"))\n(allow file-read* (literal \"/\"))\n(allow sysctl-read)\n(allow file-read* file-write* (subpath \"{root_text}\"))\n"
+        );
+        let run = |profile: &str, paths: &[std::path::PathBuf]| {
+            let mut command = std::process::Command::new("/usr/bin/sandbox-exec");
+            command.arg("-p").arg(profile).arg(&probe);
+            for path in paths {
+                command.arg(path);
+            }
+            let output = command.output().unwrap();
+            let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+            let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+            assert!(
+                output.status.success(),
+                "sandbox-exec probe failed: {stderr} {stdout}"
+            );
+            (stdout, stderr)
+        };
+        let textual = root.join("secret");
+        let target = outside.join("secret");
+        let (symlink_out, symlink_err) =
+            run(&profile, &[textual.clone(), target.clone(), key.clone()]);
+        assert!(
+            symlink_out.contains(&format!("{textual} DENY:", textual = textual.display()))
+                && symlink_out.contains(&format!("{target} DENY:", target = target.display()))
+                && symlink_out.contains(&format!("{key} DENY:", key = key.display()))
+                && !symlink_out.contains("READ:"),
+            "a symlink subpath granted a path outside the textual directory: {symlink_out} {symlink_err}"
+        );
+        std::fs::remove_file(&root).unwrap();
+        std::fs::create_dir(&root).unwrap();
+        std::fs::write(root.join("secret"), b"replaced-secret").unwrap();
+        std::fs::write(root.join("device.key"), b"moved-key").unwrap();
+        let (dir_out, dir_err) = run(
+            &profile,
+            &[root.join("secret"), root.join("device.key"), key.clone()],
+        );
+        assert!(
+            dir_out.contains("READ:replaced-secret") && dir_out.contains("READ:moved-key"),
+            "a real directory swapped onto the root was not readable: {dir_out} {dir_err}"
+        );
+        assert!(
+            dir_out.contains(&format!("{key} DENY:", key = key.display()))
+                && !dir_out.contains("READ:device-key"),
+            "identity/device.key was readable from its own path: {dir_out} {dir_err}"
+        );
     }
 
     fn reap_probe(pid: libc::pid_t, from_child: &OwnedFd) -> i32 {

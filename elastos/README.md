@@ -20,6 +20,7 @@ When running Cargo from the repository root, pass
   [`rust-toolchain.toml`](../rust-toolchain.toml)
 - Git
 - Linux 6.2 or newer (Landlock ABI 3). Kernels from Linux 5.13 through 6.1 (Landlock ABI 1 and 2), including Debian 12 and Jetson images on those kernels, are refused by name.
+- On macOS, a root swapped before the allow-list re-check starts nothing. After that check, `sandbox-exec` resolves each path by name, so a process of the same user can still replace a root in the gap. A symlink at that path does not grant its target. A real directory swapped onto the path is readable, including a file the same user moved into it. `identity/device.key` is not under any allowed root, and that path stays unread. The metadata literals are `file-read-metadata` on the data directory and its ancestors, and `current_dir` adds no Seatbelt rule; neither is re-opened with the roots.
 - The signed binary is the authority against a file in the data folder (`capsules/<key>/capsule.json`). An owner who installs another signed source is outside this check.
 
 Platform requirements depend on the code path. Linux/crosvm microVM work
