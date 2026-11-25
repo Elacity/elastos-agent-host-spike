@@ -3159,31 +3159,28 @@ pub(crate) async fn recovery_kit_import_inner(
         },
         None => None,
     };
-    // The agent writer create uses, from this count until the store below
+    // The agent writer create uses, from this decision until the store below
     // returns. The DID provider wait above is finished, so the lock is not
-    // held across it.
+    // held across it. Every import takes the writer. Whether the key changes
+    // is read under that lock.
     let next_owner_id = if input.reassign_to_current_principal {
         kit.principal_id.as_str()
     } else {
         principal.principal_id.as_str()
     };
-    let key_changes = principal.principal_id == next_owner_id
-        && crate::auth::load_principal_root_protection(
-            &state.data_dir,
-            &principal.principal_id,
-            &principal.localhost_root,
-        )?
-        .is_some_and(|stored| stored.data_key_id != kit.data_key_id);
-    let _agent_writer = if input.reassign_to_current_principal || key_changes {
-        Some(crate::agents::hold_agent_writer_for_root_change(
-            &state.data_dir,
-            &principal.principal_id,
-            next_owner_id,
-            key_changes,
-        )?)
-    } else {
-        None
-    };
+    let _agent_writer = crate::agents::hold_agent_writer_for_root_change(
+        &state.data_dir,
+        &principal.principal_id,
+        next_owner_id,
+        || {
+            crate::auth::load_principal_root_protection(
+                &state.data_dir,
+                &principal.principal_id,
+                &principal.localhost_root,
+            )
+            .map(|stored| stored.is_some_and(|stored| stored.data_key_id != kit.data_key_id))
+        },
+    )?;
     let protected_object_inventory =
         principal_root_protected_object_inventory(&state.data_dir, &kit.localhost_root);
     let _protection_activation =

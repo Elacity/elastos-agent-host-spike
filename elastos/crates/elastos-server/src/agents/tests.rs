@@ -1239,9 +1239,9 @@ pub(crate) fn plant_enabled_home_with_one_agent(
 fn a_writer_pause_is_armed_until_its_guard_drops() {
     let dir = tempfile::tempdir().unwrap();
     let guard = arm_agent_writer_pause(dir.path(), PAUSE_BEFORE_STORE);
-    assert!(!agent_writer_pause_arrived());
+    assert!(!agent_writer_pause_arrived(dir.path()));
     drop(guard);
-    assert!(!agent_writer_pause_arrived());
+    assert!(!agent_writer_pause_arrived(dir.path()));
 }
 
 #[test]

@@ -215,10 +215,15 @@ mod off {
                 .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound),
             "this owner has no agents file"
         );
+        let before = data_root_entries(home.dir.path());
         let response = import_kit(&home, kit)
             .await
             .expect("an owner with no agents file imports as before");
         assert_eq!(response.status, "imported");
+        assert_person_without_agents_leaves_no_agent_file(
+            &before,
+            &data_root_entries(home.dir.path()),
+        );
         let stored = crate::auth::load_principal_root_protection(
             home.dir.path(),
             &home.principal_id,
@@ -250,6 +255,143 @@ mod off {
             std::fs::read(agent_file(home.dir.path())).unwrap(),
             b"not an agent file"
         );
+    }
+
+    /// The whole data root, before and after. The key store leaves its own
+    /// lifecycle lock. The agents file and its lock stay absent.
+    fn assert_person_without_agents_leaves_no_agent_file(before: &[String], after: &[String]) {
+        let added: Vec<_> = after
+            .iter()
+            .filter(|entry| !before.contains(entry))
+            .cloned()
+            .collect();
+        let removed: Vec<_> = before
+            .iter()
+            .filter(|entry| !after.contains(entry))
+            .cloned()
+            .collect();
+        assert!(removed.is_empty(), "the import removed {removed:?}");
+        assert!(
+            added
+                .iter()
+                .all(|entry| { entry == "ElastOS/System/Auth/principal-root-lifecycle.lock" }),
+            "the whole data root gained {added:?}"
+        );
+        assert!(
+            after.iter().all(|entry| {
+                !entry.ends_with("agent-records.json")
+                    && !entry.ends_with("agent-records.json.lock")
+            }),
+            "a person without agents leaves no agents file"
+        );
+    }
+
+    fn data_root_entries(root: &std::path::Path) -> Vec<String> {
+        let mut entries = Vec::new();
+        let mut stack = vec![root.to_path_buf()];
+        while let Some(dir) = stack.pop() {
+            for entry in std::fs::read_dir(&dir).unwrap() {
+                let entry = entry.unwrap();
+                let path = entry.path();
+                entries.push(
+                    path.strip_prefix(root)
+                        .unwrap()
+                        .to_string_lossy()
+                        .replace('\\', "/"),
+                );
+                if entry.file_type().unwrap().is_dir() {
+                    stack.push(path);
+                }
+            }
+        }
+        entries.sort();
+        entries
+    }
+
+    fn write_0600(path: &std::path::Path, bytes: &[u8]) {
+        std::fs::write(path, bytes).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(
+            std::fs::metadata(path).unwrap().permissions().mode() & 0o777,
+            0o600,
+            "the fixture is mode 0600"
+        );
+    }
+
+    /// A fixed agent file at mode 0600. The default build reads it as plain
+    /// JSON and does not open a key.
+    #[tokio::test]
+    async fn root_key_change_reads_a_0600_fixture_without_a_key() {
+        let home = owner_home();
+        let naming_owner = serde_json::to_vec(&json!({
+            "agents": [{ "record": { "owner": home.principal_id } }]
+        }))
+        .unwrap();
+        write_0600(&agent_file(home.dir.path()), &naming_owner);
+        let kit = different_key(&home);
+        let auth = auth_bytes(home.dir.path());
+        let err = import_kit(&home, kit)
+            .await
+            .expect_err("a record that names this owner refuses the root-key change")
+            .to_string();
+        assert_eq!(err, crate::agents::agents_would_stop_opening(1));
+        assert_eq!(auth_bytes(home.dir.path()), auth);
+        assert_eq!(
+            std::fs::read(agent_file(home.dir.path())).unwrap(),
+            naming_owner
+        );
+
+        let home = owner_home();
+        let other_owners = serde_json::to_vec(&json!({
+            "agents": [{ "record": { "owner": "person:local:someone-else" } }]
+        }))
+        .unwrap();
+        write_0600(&agent_file(home.dir.path()), &other_owners);
+        let kit = different_key(&home);
+        let new_key = kit.data_key_id.clone();
+        let response = import_kit(&home, kit)
+            .await
+            .expect("a file that names only other owners leaves this owner free");
+        assert_eq!(response.status, "imported");
+        let stored = crate::auth::load_principal_root_protection(
+            home.dir.path(),
+            &home.principal_id,
+            &home.localhost_root,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(stored.data_key_id, new_key);
+        assert_eq!(
+            std::fs::read(agent_file(home.dir.path())).unwrap(),
+            other_owners
+        );
+
+        let home = owner_home();
+        write_0600(&agent_file(home.dir.path()), b"not json");
+        let kit = different_key(&home);
+        let auth = auth_bytes(home.dir.path());
+        let err = import_kit(&home, kit)
+            .await
+            .expect_err("an unreadable file refuses with its own reason")
+            .to_string();
+        assert_eq!(err, crate::agents::AGENTS_FILE_UNREADABLE);
+        assert_eq!(auth_bytes(home.dir.path()), auth);
+
+        let home = owner_home();
+        let oversized = serde_json::to_vec(&json!({
+            "agents": [{ "record": { "owner": home.principal_id } }],
+            "pad": " ".repeat(crate::agents::MAX_AGENT_FILE_BYTES as usize)
+        }))
+        .unwrap();
+        assert!(oversized.len() as u64 > crate::agents::MAX_AGENT_FILE_BYTES);
+        write_0600(&agent_file(home.dir.path()), &oversized);
+        let kit = different_key(&home);
+        let err = import_kit(&home, kit)
+            .await
+            .expect_err("a file past the read bound refuses as unreadable")
+            .to_string();
+        assert_eq!(err, crate::agents::AGENTS_FILE_UNREADABLE);
     }
 }
 
