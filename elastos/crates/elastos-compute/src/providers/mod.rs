@@ -34,10 +34,8 @@ pub type BridgeHostcallAsync = Arc<
 /// `Handle::try_current`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ComponentBridgeLeg {
-    /// v1: `handle.block_on` on this thread. No thread is added for the call.
+    /// `handle.block_on` on this thread. No thread is added for the call.
     Caller,
-    /// v2: one scoped thread, so the guest runtime does not block on itself.
-    Side,
 }
 
 std::thread_local! {

@@ -1170,10 +1170,8 @@ impl Runtime {
         }
     }
 
-    /// Runs one bridge future on `handle`. `leg` is chosen by the component
-    /// call: v1 passes [`ComponentBridgeLeg::Caller`] and stays on this thread,
-    /// including a `spawn_blocking` worker whose runtime handle is entered. v2
-    /// passes [`ComponentBridgeLeg::Side`] and waits on one scoped thread.
+    /// Runs one bridge future on `handle`, on this thread. A `spawn_blocking`
+    /// worker whose runtime handle is entered stays on that thread too.
     pub(crate) fn block_on_component_bridge<T>(
         handle: &tokio::runtime::Handle,
         leg: ComponentBridgeLeg,
@@ -1182,15 +1180,8 @@ impl Runtime {
     where
         T: Send,
     {
-        match leg {
-            ComponentBridgeLeg::Caller => handle.block_on(fut),
-            ComponentBridgeLeg::Side => std::thread::scope(|scope| {
-                scope
-                    .spawn(|| handle.block_on(fut))
-                    .join()
-                    .unwrap_or_else(|err| std::panic::resume_unwind(err))
-            }),
-        }
+        let ComponentBridgeLeg::Caller = leg;
+        handle.block_on(fut)
     }
 
     /// The model account a capsule's bridge calls spend. The key is the agent
