@@ -1296,31 +1296,37 @@ async fn a_runtime_without_a_component_provider_cannot_start_a_bundle() {
 #[test]
 fn a_capsule_the_bridge_holds_no_ceiling_for_gets_the_empty_one() {
     let source = include_str!("runtime.rs").replace("\r\n", "\n");
-    let handler = &source[source.find("component.set_bus_hostcall(Arc::new(").unwrap()..];
-    let handler = &handler[..handler.find("\n            }));\n").unwrap()];
-    let lookup = "let manifest_capabilities = host_manifest_capabilities\n                    \
-                  .read()\n                    \
-                  .ok()\n                    \
-                  .and_then(|guard| guard.get(capsule_id).cloned())\n                    \
+    // The lookup lives in the one function both hostcalls use. The v1
+    // wrapper only runs that function's future on the caller thread.
+    let start = source
+        .find("let manifest_capabilities = host_manifest_capabilities")
+        .expect("ceiling lookup");
+    let handler = &source[start..];
+    let handler = &handler[..handler.find("\n    }\n").expect("end of bridge context")];
+    let lookup = "let manifest_capabilities = host_manifest_capabilities\n            \
+                  .read()\n            \
+                  .ok()\n            \
+                  .and_then(|guard| guard.get(capsule_id).cloned())\n            \
                   .unwrap_or_default();";
+    assert_eq!(source.matches(lookup).count(), 1);
     assert_eq!(handler.matches(lookup).count(), 1);
-    // The handler reads the map of ceilings there and nowhere else, and what
-    // it read is the ceiling the request is judged under.
     assert_eq!(handler.matches("host_manifest_capabilities").count(), 1);
     assert_eq!(handler.matches("manifest_capabilities,\n").count(), 1);
-    // The content of a launch is looked up the same way: by the caller's own
-    // id, there and nowhere else, and a caller with no entry gets none. Its
-    // guard ends with the lookup: the content table's lock is not held across
-    // the call, so an end can take content away while a guest is in the
-    // bridge.
-    let held = "let launch = host_launch_contents\n                    \
-                .read()\n                    \
-                .unwrap_or_else(|it| it.into_inner())\n                    \
-                .get(capsule_id)\n                    \
+    let held = "let launch = host_launch_contents\n            \
+                .read()\n            \
+                .unwrap_or_else(|it| it.into_inner())\n            \
+                .get(capsule_id)\n            \
                 .cloned();";
     assert_eq!(handler.matches(held).count(), 1);
     assert_eq!(handler.matches("host_launch_contents").count(), 1);
     assert_eq!(handler.matches("launch,\n").count(), 1);
+    assert_eq!(source.matches("Self::component_bridge_context(").count(), 1);
+    let sync = &source[source.find("component.set_bus_hostcall(Arc::new(").unwrap()..];
+    let sync = &sync[..sync.find("\n            }));\n").unwrap()];
+    assert!(
+        sync.contains("bridge_for_v1("),
+        "v1 runs the same bridge future"
+    );
 }
 
 /// A-asks. A capsule whose manifest has asks is started unsealed, under

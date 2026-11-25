@@ -1210,6 +1210,71 @@ impl Runtime {
         (ceiling, budget)
     }
 
+    /// The ceiling and the launch content for one bridge call, looked up by
+    /// that caller's own capsule id. Both hostcalls use this. The locks end
+    /// here, before the call. The arguments are the tables the caller already
+    /// holds; one struct would only rename them.
+    #[allow(clippy::too_many_arguments)]
+    fn component_bridge_context(
+        host_reg: &Arc<ProviderRegistry>,
+        host_cap_mgr: &Arc<elastos_runtime::capability::CapabilityManager>,
+        host_pending: &Arc<elastos_runtime::capability::pending::PendingRequestStore>,
+        host_data_dir: &Path,
+        host_manifest_capabilities: &StdRwLock<HashMap<String, Vec<AuthorityBound>>>,
+        host_model_token_ceilings: &StdRwLock<HashMap<String, AgentModelCeiling>>,
+        host_model_budget: &Arc<ModelBudget>,
+        host_model_offer_bounds: &Arc<
+            StdRwLock<HashMap<String, crate::resource_bridge::ModelOfferBound>>,
+        >,
+        host_activation_stops: &StdRwLock<HashMap<String, Arc<ActivationStop>>>,
+        host_launch_contents: &StdRwLock<HashMap<String, Arc<LaunchContent>>>,
+        capsule_id: &str,
+        principal_id: Option<&str>,
+    ) -> crate::resource_bridge::BridgeContext {
+        let manifest_capabilities = host_manifest_capabilities
+            .read()
+            .ok()
+            .and_then(|guard| guard.get(capsule_id).cloned())
+            .unwrap_or_default();
+        // The content this caller was launched with, if it is the program of
+        // a content launch: looked up by its own id, as its ceiling is, and
+        // nobody else's. A poisoned lock still holds the table. The read
+        // guard ends with this statement: it is not held across the call.
+        let launch = host_launch_contents
+            .read()
+            .unwrap_or_else(|it| it.into_inner())
+            .get(capsule_id)
+            .cloned();
+        let (model_token_ceiling, model_budget) = Self::model_dispatch_budget(
+            capsule_id,
+            host_model_token_ceilings,
+            host_model_budget,
+            host_model_offer_bounds,
+        );
+        let stop = host_activation_stops
+            .read()
+            .unwrap_or_else(|it| it.into_inner())
+            .get(capsule_id)
+            .map(|stop| stop.flag.clone());
+        crate::resource_bridge::BridgeContext {
+            provider_registry: host_reg.clone(),
+            capability_manager: host_cap_mgr.clone(),
+            pending_store: host_pending.clone(),
+            capsule_id: capsule_id.to_string(),
+            // The provider minted this id for the one activation, so the
+            // Runtime session is the activation, taken from the hostcall
+            // and never from the Bus identity field the guest reads.
+            session_id: capsule_id.to_string(),
+            principal_id: principal_id.map(ToOwned::to_owned),
+            manifest_capabilities,
+            data_dir: Some(host_data_dir.to_path_buf()),
+            launch,
+            model_token_ceiling,
+            model_budget,
+            stop,
+        }
+    }
+
     /// Set the provider registry and capability manager for provider dispatch
     /// and real token minting.
     ///
@@ -1246,54 +1311,20 @@ impl Runtime {
             let host_handle = tokio::runtime::Handle::current();
             let bridge_call: BridgeHostcallAsync =
                 Arc::new(move |line, capsule_id, principal_id| {
-                    let manifest_capabilities = host_manifest_capabilities
-                        .read()
-                        .ok()
-                        .and_then(|guard| guard.get(capsule_id).cloned())
-                        .unwrap_or_default();
-                    // The content this caller was launched with, if it is the
-                    // program of a content launch: looked up by its own id, as
-                    // its ceiling is, and nobody else's. A poisoned lock still
-                    // holds the table, as for the guard. The read guard ends with
-                    // this statement: it is not held across the call below, so an
-                    // activation's end can take the content away while another
-                    // guest is inside the bridge.
-                    let launch = host_launch_contents
-                        .read()
-                        .unwrap_or_else(|it| it.into_inner())
-                        .get(capsule_id)
-                        .cloned();
-                    let (model_token_ceiling, model_budget) = Self::model_dispatch_budget(
-                        capsule_id,
+                    let ctx = Self::component_bridge_context(
+                        &host_reg,
+                        &host_cap_mgr,
+                        &host_pending,
+                        &host_data_dir,
+                        &host_manifest_capabilities,
                         &host_model_token_ceilings,
                         &host_model_budget,
                         &host_model_offer_bounds,
+                        &host_activation_stops,
+                        &host_launch_contents,
+                        capsule_id,
+                        principal_id,
                     );
-                    // The stop this activation was asked for, if any: the bridge's
-                    // wait loop leaves a long capability wait through it.
-                    let stop = host_activation_stops
-                        .read()
-                        .unwrap_or_else(|it| it.into_inner())
-                        .get(capsule_id)
-                        .map(|stop| stop.flag.clone());
-                    let ctx = crate::resource_bridge::BridgeContext {
-                        provider_registry: host_reg.clone(),
-                        capability_manager: host_cap_mgr.clone(),
-                        pending_store: host_pending.clone(),
-                        capsule_id: capsule_id.to_string(),
-                        // The provider minted this id for the one activation, so
-                        // the Runtime session is the activation, taken here from
-                        // the Runtime's own hostcall and never from the Bus
-                        // identity field the guest reads.
-                        session_id: capsule_id.to_string(),
-                        principal_id: principal_id.map(ToOwned::to_owned),
-                        manifest_capabilities,
-                        data_dir: Some(host_data_dir.clone()),
-                        launch,
-                        model_token_ceiling,
-                        model_budget,
-                        stop,
-                    };
                     let line = line.to_string();
                     Box::pin(async move {
                         let response =
@@ -3617,23 +3648,37 @@ fn table_holds<T>(table: &StdRwLock<HashMap<String, T>>, id: &str) -> bool {
         .contains_key(id)
 }
 
-#[cfg(all(test, target_os = "macos"))]
+#[cfg(test)]
 fn live_thread_count() -> u32 {
-    extern "C" {
-        fn mach_task_self() -> libc::mach_port_t;
+    #[cfg(target_os = "linux")]
+    {
+        return std::fs::read_dir("/proc/self/task")
+            .map(|entries| entries.filter(|entry| entry.is_ok()).count() as u32)
+            .unwrap_or(0);
     }
-    // SAFETY: `mach_task_self` is this process. `task_threads` writes a kernel
-    // array that this function releases with `vm_deallocate` before it returns.
-    unsafe {
-        let mut list: libc::thread_act_array_t = std::ptr::null_mut();
-        let mut count: libc::mach_msg_type_number_t = 0;
-        let task = mach_task_self();
-        let kr = libc::task_threads(task, &mut list, &mut count);
-        if kr == 0 && !list.is_null() {
-            let bytes = (count as usize).saturating_mul(std::mem::size_of::<libc::thread_act_t>());
-            libc::vm_deallocate(task, list as libc::vm_address_t, bytes as libc::vm_size_t);
+    #[cfg(target_os = "macos")]
+    {
+        extern "C" {
+            fn mach_task_self() -> libc::mach_port_t;
         }
-        count
+        // SAFETY: `mach_task_self` is this process. `task_threads` writes a
+        // kernel array that this function releases with `vm_deallocate`.
+        unsafe {
+            let mut list: libc::thread_act_array_t = std::ptr::null_mut();
+            let mut count: libc::mach_msg_type_number_t = 0;
+            let task = mach_task_self();
+            let kr = libc::task_threads(task, &mut list, &mut count);
+            if kr == 0 && !list.is_null() {
+                let bytes =
+                    (count as usize).saturating_mul(std::mem::size_of::<libc::thread_act_t>());
+                libc::vm_deallocate(task, list as libc::vm_address_t, bytes as libc::vm_size_t);
+            }
+            count
+        }
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        0
     }
 }
 
@@ -7419,7 +7464,6 @@ pub(crate) mod tests {
     /// A v1 bridge future runs on the `spawn_blocking` thread that called it.
     /// That thread has a runtime handle entered, so a choice made by
     /// `Handle::try_current` would add a thread for the call.
-    #[cfg(target_os = "macos")]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn v1_bridge_on_a_blocking_thread_adds_no_thread() {
         let handle = tokio::runtime::Handle::current();
