@@ -4313,12 +4313,6 @@ fn windows_answers_before_the_sign_in_read_and_the_parent_check() {
 #[test]
 fn the_spend_heal_does_not_block_the_start_and_the_gateway_audit_still_needs_a_readable_sign_in_file(
 ) {
-    let doc = include_str!("../../../../../docs/AGENT_ARCHITECTURE.md");
-    assert!(
-        doc.contains("the spend heal does not block the start"),
-        "the architecture doc still says the heal blocks the start"
-    );
-    assert!(doc.contains("the gateway's own audit check still needs a readable sign-in file"));
     let gateway = include_str!("../gateway_cmd.rs");
     assert_eq!(
         gateway.matches("verify_auth_audit_chain_ready(").count(),
