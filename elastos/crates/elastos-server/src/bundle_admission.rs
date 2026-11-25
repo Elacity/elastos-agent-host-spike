@@ -284,27 +284,83 @@ fn by_cid(data_dir: &Path) -> PathBuf {
 /// the cap; no more of such a file is read. Only [`check_bundle_signature`]
 /// calls this, at its place in the order.
 fn read_signature_file(path: &Path) -> Result<Vec<u8>, BundleRefusal> {
-    let unread = |error: std::io::Error| {
-        BundleRefusal::SignatureUnparsed(format!("could not read the signature file: {error}"))
-    };
-    let file = match std::fs::File::open(path) {
-        Ok(file) => file,
-        // It was there a moment ago, when the check began.
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Err(BundleRefusal::Unsigned)
-        }
-        Err(error) => return Err(unread(error)),
-    };
     let mut bytes = Vec::new();
-    file.take(MAX_SIGNATURE_FILE_BYTES + 1)
+    open_signature_file(path)?
+        .take(MAX_SIGNATURE_FILE_BYTES + 1)
         .read_to_end(&mut bytes)
-        .map_err(unread)?;
+        .map_err(signature_error)?;
     if bytes.len() as u64 > MAX_SIGNATURE_FILE_BYTES {
         return Err(BundleRefusal::SignatureUnparsed(format!(
             "the signature file is over {MAX_SIGNATURE_FILE_BYTES} bytes"
         )));
     }
     Ok(bytes)
+}
+
+fn refused_signature(kind: &str) -> BundleRefusal {
+    BundleRefusal::SignatureUnparsed(format!("the signature path is a {kind}"))
+}
+
+fn signature_error(error: std::io::Error) -> BundleRefusal {
+    #[cfg(unix)]
+    if error.raw_os_error() == Some(libc::ELOOP) {
+        return refused_signature("symlink");
+    }
+    #[cfg(unix)]
+    if error.raw_os_error() == Some(libc::ENXIO) {
+        return refused_signature("fifo");
+    }
+    if error.kind() == std::io::ErrorKind::NotFound {
+        BundleRefusal::Unsigned
+    } else {
+        BundleRefusal::SignatureUnparsed(format!("could not read the signature file: {error}"))
+    }
+}
+
+#[cfg(unix)]
+fn open_signature_file(path: &Path) -> Result<std::fs::File, BundleRefusal> {
+    use std::os::unix::fs::{FileTypeExt, OpenOptionsExt};
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC)
+        .open(path)
+        .map_err(signature_error)?;
+    let meta = file.metadata().map_err(signature_error)?;
+    if meta.is_file() {
+        return Ok(file);
+    }
+    let ty = meta.file_type();
+    let kind = if ty.is_dir() {
+        "folder"
+    } else if ty.is_fifo() {
+        "fifo"
+    } else {
+        "special file"
+    };
+    Err(refused_signature(kind))
+}
+
+#[cfg(windows)]
+fn open_signature_file(path: &Path) -> Result<std::fs::File, BundleRefusal> {
+    use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(0x0020_0000 | 0x0200_0000)
+        .open(path)
+        .map_err(signature_error)?;
+    let meta = file.metadata().map_err(signature_error)?;
+    let attributes = meta.file_attributes();
+    if attributes & 0x400 != 0 {
+        return Err(refused_signature("reparse point"));
+    }
+    if meta.is_file() {
+        return Ok(file);
+    }
+    Err(refused_signature(if attributes & 0x10 != 0 {
+        "folder"
+    } else {
+        "special file"
+    }))
 }
 
 /// The signature file beside a bundle, exactly: no other key is allowed.
@@ -329,8 +385,8 @@ pub struct AcceptedSignature {
 /// `cid` for, against the keys `verifier` trusts. Returns the signer's
 /// `did:key` and the bytes that were checked.
 ///
-/// The order is fixed: the file exists; the Home trusts at least one key;
-/// only then is the file read (up to [`MAX_SIGNATURE_FILE_BYTES`] and one
+/// The order is fixed: the Home trusts at least one key; only then is the
+/// file opened once, with no link followed, and read (up to [`MAX_SIGNATURE_FILE_BYTES`] and one
 /// byte more, to tell a file over the cap), and it parses and names this CID;
 /// the signer's key is read; the signature is checked strictly over the CID
 /// text; and that key is looked up among the keys the Home trusts. There is
@@ -353,10 +409,6 @@ pub fn check_bundle_signature(
     cid: &LabCid,
     verifier: &SignatureVerifier,
 ) -> Result<AcceptedSignature, BundleRefusal> {
-    let missing = |error: &std::io::Error| error.kind() == std::io::ErrorKind::NotFound;
-    if matches!(std::fs::metadata(file), Err(error) if missing(&error)) {
-        return Err(BundleRefusal::Unsigned);
-    }
     if verifier.trusted_key_count() == 0 {
         return Err(BundleRefusal::TrustSetEmpty);
     }
@@ -809,6 +861,7 @@ pub(crate) mod tests {
         let refusal = check_bundle_signature(folder.path(), &cid(CID_A), &trusts)
             .expect_err("a folder is not a signature file");
         assert_eq!(refusal.code(), "bundle_signature_unparsed", "{refusal}");
+        assert!(refusal.to_string().contains("folder"), "{refusal}");
 
         // And in the source: the read comes after the trust set is asked.
         let code = production();
@@ -822,6 +875,10 @@ pub(crate) mod tests {
         assert!(
             asked < read,
             "the file is read before the trust set is asked"
+        );
+        assert!(
+            !body.contains("std::fs::metadata("),
+            "the signature path is not probed before the trust set"
         );
         assert_eq!(code.matches("read_signature_file(").count(), 2, "one call");
     }
@@ -837,16 +894,47 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn a_missing_file_is_unsigned_whatever_the_trust_set_holds() {
+    fn a_missing_file_is_unsigned_when_a_key_is_trusted() {
         assert_eq!(
             check(None, CID_A, &trusting(&[&key(1)])),
             Err(BundleRefusal::Unsigned)
         );
+        // Trust is asked before the path is opened, so an empty set never
+        // discovers that the file is missing.
         assert_eq!(
             check(None, CID_A, &trusting(&[])),
-            Err(BundleRefusal::Unsigned)
+            Err(BundleRefusal::TrustSetEmpty)
         );
         assert_eq!(BundleRefusal::Unsigned.code(), "bundle_unsigned");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_a_fifo_and_a_folder_at_the_signature_path_are_refused_by_name() {
+        use std::os::unix::ffi::OsStrExt;
+        use std::os::unix::fs::symlink;
+        let publisher = key(1);
+        let verifier = trusting(&[&publisher]);
+        let folder = tempfile::tempdir().expect("a folder");
+        let file = folder.path().join("real.sig.json");
+        std::fs::write(&file, signed(CID_A, &publisher)).unwrap();
+        assert!(check_bundle_signature(&file, &cid(CID_A), &verifier).is_ok());
+        let link = folder.path().join("link.sig.json");
+        symlink(&file, &link).unwrap();
+        let refusal = check_bundle_signature(&link, &cid(CID_A), &verifier)
+            .expect_err("a symlink is not a signature file");
+        assert!(refusal.to_string().contains("symlink"), "{refusal}");
+        let fifo = folder.path().join("wait.sig.json");
+        let name = std::ffi::CString::new(fifo.as_os_str().as_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+        let started = std::time::Instant::now();
+        let refusal = check_bundle_signature(&fifo, &cid(CID_A), &verifier)
+            .expect_err("a fifo is not a signature file");
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(1),
+            "the fifo open blocked"
+        );
+        assert!(refusal.to_string().contains("fifo"), "{refusal}");
     }
 
     #[test]

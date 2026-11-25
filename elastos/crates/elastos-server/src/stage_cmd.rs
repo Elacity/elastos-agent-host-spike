@@ -466,8 +466,8 @@ mod tests {
                 .expect("at the cap");
         }
 
-        // A Home that trusts no key refuses a valid signature, and an absent
-        // one as unsigned, with dev_mode on.
+        // A Home that trusts no key refuses before the signature file is opened,
+        // including when that file is absent. dev_mode does not admit it.
         let home = Home::trusting(&[], true).await;
         let signature = home.write("offered.sig.json", &signed(CID_A, &publisher));
         let refusal = home
@@ -489,8 +489,8 @@ mod tests {
         let refusal = home
             .stage(&fixture("web-app"), &absent)
             .await
-            .expect_err("unsigned");
-        assert_eq!(refusal, BundleRefusal::Unsigned);
+            .expect_err("empty trust");
+        assert_eq!(refusal, BundleRefusal::TrustSetEmpty);
         assert!(home.store_names().is_empty());
     }
 
