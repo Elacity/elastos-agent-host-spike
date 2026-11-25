@@ -10,9 +10,11 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
+#[cfg(test)]
+pub use component::TestGate;
 pub use component::{
     ActivationOutcome, ComponentProvider, ResidentActivation, SEALED_BRIDGE, STOPPED_BEFORE_RUN,
-    V2_FRAME_ROUTE_DEADLINE,
+    STOPPED_DURING_START, V2_FRAME_ROUTE_DEADLINE,
 };
 
 /// Synchronous request/response bridge from a Component into the Runtime Bus.

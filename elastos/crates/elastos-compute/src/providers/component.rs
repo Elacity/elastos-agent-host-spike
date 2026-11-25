@@ -59,6 +59,10 @@ const COMPONENT_COMPILE_WAIT_TIMEOUT: Duration = Duration::from_secs(30);
 /// One deadline tick. Wasmtime calls this the engine "epoch"; this code says
 /// "tick", because "epoch" already names the capability revocation epoch.
 const DEADLINE_TICK: Duration = Duration::from_millis(10);
+/// Shortest positive sleep. The guest clock is whole milliseconds, so a 1 ms
+/// loop parks for at least this long: the thread yields, and the bucket
+/// refills for that parked time.
+const V2_SLEEP_FLOOR: Duration = Duration::from_millis(1);
 /// How long one activation's own code may run. Time inside Bus calls is not
 /// counted, so a run that waits on the Runtime is not ended for waiting.
 /// Two things this is not: it is not exact (a ticker thread that is starved
@@ -103,7 +107,7 @@ const ENDING_STOPPED: &str = "stopped";
 
 /// A test blocks one thread here and releases it from another.
 #[cfg(test)]
-struct TestGate {
+pub struct TestGate {
     entered: Mutex<bool>,
     enter: Condvar,
     release: Mutex<bool>,
@@ -112,7 +116,7 @@ struct TestGate {
 
 #[cfg(test)]
 impl TestGate {
-    fn new() -> Arc<Self> {
+    pub fn new() -> Arc<Self> {
         Arc::new(Self {
             entered: Mutex::new(false),
             enter: Condvar::new(),
@@ -130,7 +134,7 @@ impl TestGate {
         let _guard = self.go.wait_while(guard, |open| !*open).expect("gate");
     }
 
-    fn entered(&self) {
+    pub fn entered(&self) {
         let guard = self.entered.lock().expect("gate");
         let _guard = self
             .enter
@@ -138,7 +142,7 @@ impl TestGate {
             .expect("gate");
     }
 
-    fn open(&self) {
+    pub fn open(&self) {
         *self.release.lock().expect("gate") = true;
         self.go.notify_all();
     }
@@ -183,6 +187,8 @@ struct ComponentActivation {
     /// The test holds start here until it has the task, before the worker is published.
     #[cfg(test)]
     publish_gate: Option<Arc<TestGate>>,
+    #[cfg(feature = "test-fixtures")]
+    publish_hold: Option<Arc<(tokio::sync::Notify, tokio::sync::Notify)>>,
     #[cfg(test)]
     attach_gate: Option<Arc<TestGate>>,
     /// The test holds a natural exit here after the worker has signalled done.
@@ -195,6 +201,8 @@ struct ComponentActivation {
     test_max_ticks: u64,
     #[cfg(test)]
     pending_read: Arc<AtomicBool>,
+    #[cfg(test)]
+    test_wall_clock: bool,
     /// Grants this activation's guest already holds. `capabilities.request`
     /// on the v1 seam and a successful v2 read record them. Present reads
     /// the record and does not ask for a new grant.
@@ -273,6 +281,8 @@ struct V2RunControl {
     fuel_slice: u64,
     #[cfg(test)]
     pending_read: Arc<AtomicBool>,
+    #[cfg(test)]
+    wall_clock: bool,
 }
 
 /// What a sealed component gets for any call to the bridge.
@@ -280,6 +290,8 @@ pub const SEALED_BRIDGE: &str = "this capsule was started with no authority: it 
 
 /// The start error of an activation whose stop interrupted its start function.
 pub const STOPPED_BEFORE_RUN: &str = "component was stopped before its run began";
+/// A v2 start that a stop interrupted before the guest was published.
+pub const STOPPED_DURING_START: &str = "v2 guest was stopped before it was published";
 
 struct ComponentState {
     /// A sealed activation's call to the bridge is refused here, before any
@@ -414,6 +426,18 @@ impl ComponentProvider {
     /// v2 awaits this future on the guest runtime. No thread is started for the call.
     pub fn set_bus_hostcall_async(&self, hostcall: BridgeHostcallAsync) {
         *self.bus_hostcall_async.write().unwrap() = Some(hostcall);
+    }
+
+    #[cfg(feature = "test-fixtures")]
+    pub async fn testing_hold_publish(
+        &self,
+        id: &elastos_common::CapsuleId,
+    ) -> Arc<(tokio::sync::Notify, tokio::sync::Notify)> {
+        let hold = Arc::new((tokio::sync::Notify::new(), tokio::sync::Notify::new()));
+        if let Some(instance) = self.instances.write().await.get_mut(id) {
+            instance.publish_hold = Some(hold.clone());
+        }
+        hold
     }
 
     /// Records `grant` on a loaded guest. A test uses this before the guest runs.
@@ -876,6 +900,8 @@ impl ComponentProvider {
                 refuse_join_owner: false,
                 #[cfg(test)]
                 publish_gate: None,
+                #[cfg(feature = "test-fixtures")]
+                publish_hold: None,
                 #[cfg(test)]
                 attach_gate: None,
                 #[cfg(test)]
@@ -886,6 +912,8 @@ impl ComponentProvider {
                 test_max_ticks: V2_TEST_EPOCH_TICKS,
                 #[cfg(test)]
                 pending_read: Arc::new(AtomicBool::new(false)),
+                #[cfg(test)]
+                test_wall_clock: false,
                 grants: Arc::new(Mutex::new(crate::providers::bus2_ui::GrantBook::default())),
             },
         );
@@ -937,6 +965,8 @@ impl ComponentProvider {
         let async_hostcall = self.bus_hostcall_async.read().unwrap().clone();
         #[cfg(test)]
         let publish_gate = instance.publish_gate.clone();
+        #[cfg(feature = "test-fixtures")]
+        let publish_hold = instance.publish_hold.take();
         #[cfg(test)]
         let exit_gate = instance.exit_gate.clone();
         let state = ComponentState {
@@ -966,6 +996,8 @@ impl ComponentProvider {
             fuel_slice: V2_FUEL_SLICE,
             #[cfg(test)]
             pending_read: instance.pending_read.clone(),
+            #[cfg(test)]
+            wall_clock: instance.test_wall_clock,
         };
         let ending_cancel = control.cancel_requested.clone();
         #[cfg(test)]
@@ -1078,15 +1110,18 @@ impl ComponentProvider {
         if let Some(gate) = publish_gate {
             gate.wait();
         }
+        #[cfg(feature = "test-fixtures")]
+        if let Some(hold) = publish_hold {
+            hold.0.notify_one();
+            hold.1.notified().await;
+        }
         {
             let mut entries = self.instances.write().await;
             let Some(instance) = entries.get_mut(&handle.id) else {
                 drop(entries);
                 join.abort_task(&abort);
                 drop(sender);
-                return Err(ElastosError::Compute(
-                    "v2 guest was removed before its thread was stored".into(),
-                ));
+                return Err(ElastosError::Compute(STOPPED_DURING_START.into()));
             };
             if instance
                 .join
@@ -1096,9 +1131,7 @@ impl ComponentProvider {
                 drop(entries);
                 join.abort_task(&abort);
                 drop(sender);
-                return Err(ElastosError::Compute(
-                    "v2 guest was stopped before it was published".into(),
-                ));
+                return Err(ElastosError::Compute(STOPPED_DURING_START.into()));
             }
             instance.task = Some(abort);
             instance.starting = false;
@@ -1152,9 +1185,7 @@ impl ComponentProvider {
         match ready_rx.await {
             Ok(result) => result?,
             Err(_) => {
-                return Err(ElastosError::Compute(
-                    "v2 resident task ended during start".into(),
-                ));
+                return Err(ElastosError::Compute(STOPPED_DURING_START.into()));
             }
         }
         Ok(ResidentActivation {
@@ -1400,10 +1431,10 @@ impl ComponentProvider {
         control: V2RunControl,
         ready: tokio::sync::oneshot::Sender<Result<()>>,
     ) -> Result<&'static str> {
-        let bucket = Arc::new(Mutex::new(crate::providers::fuel_bucket::FuelBucket::full(
-            control.fuel,
-            Instant::now(),
-        )));
+        let fuel = crate::providers::fuel_bucket::FuelBucket::full(control.fuel, Instant::now());
+        #[cfg(test)]
+        let fuel = arm_test_wall(fuel, control.wall_clock);
+        let bucket = Arc::new(Mutex::new(fuel));
         state.fuel_bucket = Some(bucket.clone());
         let grants = state.grants.clone();
         let frames = state.frames.clone();
@@ -1941,20 +1972,42 @@ fn release_access(access: &mut impl wasmtime::AsContextMut<Data = ComponentState
     access.as_context_mut().set_epoch_deadline(1);
 }
 
-/// The guard exists before `begin_grant` / `begin_read` can return an error.
-/// A successful wait parks so the wake can refill the tick window.
+/// The guard clears `open` if the future is dropped before it resumes.
+/// The call does not park. Ticks count time the guest ran. The resume
+/// settles fuel and resets the deadline, even when an events read holds `open`.
 fn arm_host_wait(
     opened: bool,
     bucket: &Option<Arc<Mutex<crate::providers::fuel_bucket::FuelBucket>>>,
-    pending_ok: bool,
 ) -> ResumeOnDrop {
-    let guard = resume_guard(&if opened { bucket.clone() } else { None });
-    if opened && pending_ok {
-        if let Some(bucket) = bucket {
-            bucket.lock().expect("fuel").park();
+    resume_guard(&if opened { bucket.clone() } else { None })
+}
+
+/// Charge the burn of a call that does not wait. `open` ends clear, and
+/// `window_ticks` and the epoch deadline are left as they are.
+fn settle_guest_burn(
+    bucket: &Mutex<crate::providers::fuel_bucket::FuelBucket>,
+    store: &mut impl wasmtime::AsContextMut,
+) {
+    let lend = {
+        let mut slot = bucket.lock().expect("fuel");
+        if slot.fault.is_some() {
+            return;
         }
+        slot.open = false;
+        let remaining = match read_fuel(store) {
+            Ok(value) => value,
+            Err(name) => {
+                slot.fault = Some(name);
+                return;
+            }
+        };
+        let lend = slot.settle(remaining, Instant::now()).unwrap_or(0);
+        slot.open = false;
+        lend
+    };
+    if let Err(name) = write_fuel(store, lend) {
+        bucket.lock().expect("fuel").fault = Some(name);
     }
-    guard
 }
 
 /// A v2 bridge on the guest runtime. An async host call is awaited and dropped
@@ -2857,11 +2910,37 @@ impl v2::elastos::bus::identity::Host for ComponentState {
 
 impl v2::elastos::bus::clock::Host for ComponentState {
     fn now_ms(&mut self) -> u64 {
+        #[cfg(test)]
+        if let Some(ms) = test_wall_ms(self) {
+            return ms;
+        }
         self.fuel_bucket
             .as_ref()
             .map(|bucket| bucket.lock().expect("fuel").now_ms())
             .unwrap_or(0)
     }
+}
+
+#[cfg(test)]
+fn test_wall_ms(state: &ComponentState) -> Option<u64> {
+    let start = state
+        .fuel_bucket
+        .as_ref()?
+        .lock()
+        .expect("fuel")
+        .wall_origin?;
+    Some(u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX))
+}
+
+#[cfg(test)]
+fn arm_test_wall(
+    mut fuel: crate::providers::fuel_bucket::FuelBucket,
+    on: bool,
+) -> crate::providers::fuel_bucket::FuelBucket {
+    if on {
+        fuel.wall_origin = Some(Instant::now());
+    }
+    fuel
 }
 
 impl v2::elastos::bus::clock::HostWithStore<ComponentState> for HasSelf<ComponentState> {
@@ -2870,15 +2949,20 @@ impl v2::elastos::bus::clock::HostWithStore<ComponentState> for HasSelf<Componen
         deadline_ms: u64,
     ) {
         let (wait, cancel, stop, bucket, wake, sleeping) = accessor.with(|mut access| {
-            let _opened = charge_access(&mut access);
             let bucket = access.get().fuel_bucket.clone();
-            if let Some(bucket) = &bucket {
-                bucket.lock().expect("fuel").park();
-            }
             let wait = bucket
                 .as_ref()
                 .map(|bucket| bucket.lock().expect("fuel").sleep_for(deadline_ms))
                 .unwrap_or(Duration::ZERO);
+            // Nothing to wait for. The call still costs fuel. It does not
+            // park, and it does not reset the tick window or the deadline.
+            if wait.is_zero() {
+                if let Some(bucket) = &bucket {
+                    settle_guest_burn(bucket, &mut access);
+                }
+            } else {
+                let _opened = charge_access(&mut access);
+            }
             let state = access.get();
             #[cfg(test)]
             let sleeping = Some(state.in_clock_sleep.clone());
@@ -2893,17 +2977,25 @@ impl v2::elastos::bus::clock::HostWithStore<ComponentState> for HasSelf<Componen
                 sleeping,
             )
         });
+        if wait.is_zero() {
+            return;
+        }
+        if let Some(bucket) = &bucket {
+            bucket.lock().expect("fuel").park();
+        }
         let _guard = resume_guard(&bucket);
         // One wait. Cancel or stop notifies; the sleep is not sliced.
+        // A positive wait is at least [`V2_SLEEP_FLOOR`], so a 1 ms loop yields.
+        let host_wait = wait.max(V2_SLEEP_FLOOR);
         let notified = wake.notified();
         tokio::pin!(notified);
         if let Some(flag) = &sleeping {
             flag.store(true, Ordering::Release);
         }
-        if !cancel.load(Ordering::Acquire) && !stop.load(Ordering::Acquire) && !wait.is_zero() {
+        if !cancel.load(Ordering::Acquire) && !stop.load(Ordering::Acquire) {
             tokio::select! {
                 _ = &mut notified => {}
-                _ = tokio::time::sleep(wait) => {}
+                _ = tokio::time::sleep(host_wait) => {}
             }
         }
         if let Some(flag) = &sleeping {
@@ -2949,7 +3041,7 @@ impl v2::elastos::bus::capabilities::HostWithStore<ComponentState> for HasSelf<C
                 });
             (opened, bucket, pending)
         });
-        let _guard = arm_host_wait(opened, &bucket, pending.is_ok());
+        let _guard = arm_host_wait(opened, &bucket);
         let pending = pending.map_err(v2_error)?;
         let raw = await_v2_bridge(
             &pending.bridge.async_host,
@@ -2961,9 +3053,7 @@ impl v2::elastos::bus::capabilities::HostWithStore<ComponentState> for HasSelf<C
         )
         .await;
         let decided = accessor.with(|mut access| {
-            if opened {
-                release_access(&mut access);
-            }
+            release_access(&mut access);
             access.get().finish_grant(pending, raw)
         });
         match decided {
@@ -3013,7 +3103,7 @@ impl v2::elastos::bus::providers::HostWithStore<ComponentState> for HasSelf<Comp
                     cancel_requested,
                 )
             });
-        let _guard = arm_host_wait(opened, &bucket, pending.is_ok());
+        let _guard = arm_host_wait(opened, &bucket);
         let pending = pending?;
         let grant_id = pending.grant.clone();
         let raw = await_v2_bridge(
@@ -3027,9 +3117,7 @@ impl v2::elastos::bus::providers::HostWithStore<ComponentState> for HasSelf<Comp
         .await;
         let super::bus2_stream::PreparedRead { bytes, audit, hold } =
             accessor.with(|mut access| {
-                if opened {
-                    release_access(&mut access);
-                }
+                release_access(&mut access);
                 access.get().finish_read(pending, raw)
             })?;
         let (tx, rx) = tokio::sync::oneshot::channel();
@@ -4455,7 +4543,7 @@ mod tests {
         let opened = charge_access(&mut store);
         assert!(opened);
         let pending = store.data().begin_read(&request, false);
-        let guard = arm_host_wait(opened, &Some(bucket.clone()), pending.is_ok());
+        let guard = arm_host_wait(opened, &Some(bucket.clone()));
         assert!(pending.is_err(), "stat is not a read");
         drop(guard);
         assert!(!bucket.lock().unwrap().open, "the error left the loan open");
@@ -4936,6 +5024,7 @@ mod tests {
             fuel,
             fuel_slice,
             pending_read: Arc::new(AtomicBool::new(false)),
+            wall_clock: false,
         };
         match ComponentProvider::run_v2(
             engine.clone(),
@@ -7496,6 +7585,238 @@ mod tests {
             "2000 one-millisecond sleeps returned in {:?}",
             started.elapsed()
         );
+    }
+
+    /// A positive sleep parks for at least [`V2_SLEEP_FLOOR`] (1 ms). A loop
+    /// of that length yields the core and stays inside the tick budget.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_pending_events_read_beside_two_thousand_slow_invokes_lives() {
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let seen = calls.clone();
+        let provider = ComponentProvider::new();
+        provider.set_bus_hostcall_async(Arc::new(move |_line, _capsule, _principal| {
+            let seen = seen.clone();
+            Box::pin(async move {
+                tokio::time::sleep(Duration::from_millis(12)).await;
+                seen.fetch_add(1, Ordering::Release);
+                Ok("{}".to_string())
+            })
+        }));
+        let bytes = wat::parse_str(include_str!(
+            "../../../../tests/fixtures/components/v2-invoke-loop.wat"
+        ))
+        .unwrap();
+        let handle = load_v2_fixture(&provider, bytes).await;
+        provider
+            .testing_hold_grant(&handle.id, "g", "localhost://Local/note.txt", "read")
+            .await;
+        let pending = provider.instances.read().await[&handle.id]
+            .pending_read
+            .clone();
+        provider.start(&handle).await.expect("the invoker starts");
+        let started = Instant::now();
+        let ending = tokio::time::timeout(Duration::from_secs(50), async {
+            loop {
+                if let Some(ending) = provider.endings.read().await.get(&handle.id).cloned() {
+                    return ending;
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .expect("2000 invokes did not finish");
+        let elapsed = started.elapsed();
+        assert_eq!(ending, "returned", "{ending}");
+        assert_eq!(calls.load(Ordering::Acquire), 2000, "host calls");
+        assert!(
+            pending.load(Ordering::Acquire),
+            "the events read must still be pending"
+        );
+        assert!(
+            elapsed >= Duration::from_secs(20),
+            "2000 invokes of at least 10 ms finished in {elapsed:?}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_guest_that_spins_between_invokes_is_cut() {
+        let provider = ComponentProvider::new();
+        let source = include_str!("../../../../tests/fixtures/components/v2-invoke-loop.wat")
+            .replace("(i32.const 2000)", "(i32.const 6)")
+            .replace("(i64.const 0)", "(i64.const 50)");
+        let handle = load_v2_fixture(&provider, wat::parse_str(source).unwrap()).await;
+        {
+            let mut entries = provider.instances.write().await;
+            let guest = entries.get_mut(&handle.id).unwrap();
+            guest.test_max_ticks = 20;
+            guest.test_wall_clock = true;
+        }
+        provider.start(&handle).await.expect("the spinner starts");
+        let started = Instant::now();
+        let ending = tokio::time::timeout(Duration::from_secs(3), v2_ending(&provider, &handle))
+            .await
+            .expect("the spin between invokes did not end");
+        let elapsed = started.elapsed();
+        assert!(
+            ending.contains(ENDING_EPOCH_DEADLINE),
+            "spin between invokes ended {ending} after {elapsed:?}"
+        );
+        assert!(
+            elapsed < Duration::from_millis(800),
+            "one 50 ms spin must not be enough; elapsed {elapsed:?}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_sleep_until_zero_loop_is_cut_like_a_spin() {
+        let provider = ComponentProvider::new();
+        let spin = v2_variant(&[(
+            "call $new global.set $set\n      call $next)",
+            "call $new global.set $set\n      (loop $spin br $spin) i32.const 0)",
+        )]);
+        let spin_handle = load_v2_fixture(&provider, spin).await;
+        provider.start(&spin_handle).await.expect("spin starts");
+        let spin_started = Instant::now();
+        let spin_ending =
+            tokio::time::timeout(Duration::from_secs(2), v2_ending(&provider, &spin_handle))
+                .await
+                .expect("the spin did not end");
+        let spin_elapsed = spin_started.elapsed();
+        assert!(
+            spin_ending.contains(ENDING_EPOCH_DEADLINE),
+            "spin ending {spin_ending}"
+        );
+
+        let source = include_str!("../../../../tests/fixtures/components/v2-sleep.wat").replace(
+            "(func $begin (result i32)\n      (local $code i32)\n      ;; 400 ms on this guest's clock. The test's tick cap is shorter.\n      i64.const 400 call $sleep local.set $code\n      local.get $code i32.const 15 i32.and i32.const 2 i32.eq\n      if call $after-sleep return end\n      i32.const 0 global.set $phase\n      local.get $code i32.const 4 i32.shr_u call $park)",
+            "(func $begin (result i32)\n      (local $code i32)\n      (loop $again\n        i64.const 0 call $sleep local.set $code\n        local.get $code i32.const 15 i32.and i32.const 2 i32.eq\n        br_if $again)\n      i32.const 0 global.set $phase\n      local.get $code i32.const 4 i32.shr_u call $park)",
+        );
+        let handle = load_v2_fixture(&provider, wat::parse_str(source).unwrap()).await;
+        provider.start(&handle).await.expect("sleep 0 starts");
+        let started = Instant::now();
+        let ending = tokio::time::timeout(Duration::from_secs(2), v2_ending(&provider, &handle))
+            .await
+            .expect("sleep 0 did not end");
+        let elapsed = started.elapsed();
+        assert!(
+            ending.contains(ENDING_EPOCH_DEADLINE),
+            "sleep(0) ending {ending} after {elapsed:?}; spin was {spin_elapsed:?}"
+        );
+        assert!(elapsed > Duration::from_millis(50) && elapsed < Duration::from_secs(2));
+        assert!(spin_elapsed > Duration::from_millis(50) && spin_elapsed < Duration::from_secs(2));
+    }
+
+    async fn grant_event_guest(provider: &ComponentProvider) -> CapsuleHandle {
+        let bytes = wat::parse_str(include_str!(
+            "../../../../tests/fixtures/components/v2-grant-event.wat"
+        ))
+        .unwrap();
+        load_v2_fixture(provider, bytes).await
+    }
+
+    fn grant_gate_host(gate: Arc<TestGate>, token: &'static str) -> super::BridgeHostcallAsync {
+        Arc::new(move |_line, _capsule, _principal| {
+            let gate = gate.clone();
+            Box::pin(async move {
+                tokio::task::spawn_blocking(move || gate.wait())
+                    .await
+                    .expect("gate");
+                Ok(token_line(token, ""))
+            })
+        })
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_repeated_grant_revoked_event_keeps_the_next_grant() {
+        let gate = TestGate::new();
+        let provider = ComponentProvider::new();
+        provider.set_bus_hostcall_async(grant_gate_host(gate.clone(), "g2"));
+        let handle = grant_event_guest(&provider).await;
+        let book = provider.instances.read().await[&handle.id].grants.clone();
+        book.lock().expect("grant book").revoke("g1");
+        provider.testing_store_v2_frame(
+            handle.id.as_str(),
+            None,
+            vec![crate::providers::bus2_ui::FrameNode::Image {
+                grant: "g1".into(),
+                resource: "localhost://Local/a".into(),
+            }],
+        );
+        provider.start(&handle).await.expect("the guest starts");
+        tokio::task::spawn_blocking({
+            let gate = gate.clone();
+            move || gate.entered()
+        })
+        .await
+        .expect("entered");
+        let sender = provider.instances.read().await[&handle.id]
+            .events
+            .clone()
+            .expect("events");
+        sender
+            .send(v2::elastos::bus::types::Event::GrantRevoked("g1".into()))
+            .expect("deliver");
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let gone = provider
+                    .frames
+                    .lock()
+                    .expect("frames")
+                    .get(handle.id.as_str())
+                    .is_none();
+                if gone {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the grant-revoked event was not delivered");
+        gate.open();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let held = {
+                    let book = book.lock().expect("grant book");
+                    !book.closed && book.epoch() == 1 && !book.blocks_read("g2")
+                };
+                if held {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("g2 was not held");
+        provider.stop(&handle).await.expect("stop");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_real_revoke_during_a_request_refuses_the_new_grant() {
+        let gate = TestGate::new();
+        let provider = ComponentProvider::new();
+        provider.set_bus_hostcall_async(grant_gate_host(gate.clone(), "g2"));
+        let handle = grant_event_guest(&provider).await;
+        provider
+            .testing_hold_grant(&handle.id, "kept", "localhost://Local/a", "read")
+            .await;
+        let book = provider.instances.read().await[&handle.id].grants.clone();
+        provider.start(&handle).await.expect("the guest starts");
+        tokio::task::spawn_blocking({
+            let gate = gate.clone();
+            move || gate.entered()
+        })
+        .await
+        .expect("entered");
+        book.lock().expect("grant book").revoke("kept");
+        gate.open();
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        {
+            let book = book.lock().expect("grant book");
+            assert!(!book.closed, "the guest must still be running");
+            assert!(book.blocks_read("kept"), "the real revoke removed kept");
+            assert!(book.blocks_read("g2"), "the in-flight grant is refused");
+        }
+        provider.stop(&handle).await.expect("stop");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -13,7 +13,7 @@ use elastos_bundle_identity::{checked_bundle_within, Budget, CheckedBundle, LabC
 use elastos_common::{AuthorityBound, CapsuleManifest, CapsuleType, ElastosError, Result};
 use elastos_compute::providers::{
     component_bridge_leg, BridgeHostcall, BridgeHostcallAsync, ComponentBridgeLeg,
-    ComponentProvider, STOPPED_BEFORE_RUN,
+    ComponentProvider, STOPPED_BEFORE_RUN, STOPPED_DURING_START,
 };
 use elastos_compute::{CapsuleHandle, ComputeProvider};
 use elastos_storage::StorageProvider;
@@ -960,7 +960,9 @@ fn stop_reason(status: &str, cause: &str) -> elastos_runtime::primitives::audit:
 fn start_ended_by_stop(err: &ElastosError) -> bool {
     match err {
         ElastosError::CapsuleNotFound(_) => true,
-        ElastosError::Compute(message) => message == STOPPED_BEFORE_RUN,
+        ElastosError::Compute(message) => {
+            message == STOPPED_BEFORE_RUN || message == STOPPED_DURING_START
+        }
         _ => false,
     }
 }
@@ -7242,6 +7244,70 @@ pub(crate) mod tests {
         assert!(ended.ended_at.is_some());
         assert_eq!(ended.session_id, handle.id.0);
         assert_v2_home_cleared(&runtime, &component, &handle).await;
+    }
+
+    /// A stop while start is still in the publish gap is recorded stopped.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_stop_in_the_v2_publish_gap_is_recorded_stopped() {
+        let temp = tempfile::tempdir().unwrap();
+        let storage = Arc::new(
+            LocalFSProvider::new(temp.path().to_path_buf())
+                .await
+                .unwrap(),
+        );
+        let component = Arc::new(ComponentProvider::new());
+        let runtime =
+            Runtime::with_providers_and_component(storage, Vec::new(), Some(component.clone()));
+        let mut manifest: CapsuleManifest =
+            serde_json::from_str(&component_manifest_json("gap")).unwrap();
+        manifest.bus_contract = Some(ELASTOS_BUS_V2_CONTRACT.into());
+        manifest.wit_world_sha256 = Some(elastos_bus_v2_wit_sha256());
+        let handle = component
+            .load_admitted(v2_home_bytes("stay"), manifest)
+            .await
+            .unwrap();
+        let hold = component.testing_hold_publish(&handle.id).await;
+        let id = handle.id.0.clone();
+        runtime
+            .hold_launch_context(&handle, Some("person:local:resident".into()), None)
+            .await;
+        runtime
+            .register_capsule(RunningCapsuleInfo {
+                id: id.clone(),
+                name: "gap".into(),
+                status: CAPSULE_STARTING.to_string(),
+                capsule_type: handle.manifest.capsule_type.clone(),
+                handle: Some(handle.clone()),
+                session_id: id.clone(),
+                principal: Some("person:local:resident".into()),
+                cause: None,
+                ended_at: None,
+            })
+            .await;
+        let held = ActivationContextHeld::new(&runtime, &handle, component.clone(), None);
+        runtime.watch_activation(handle.id.clone(), handle.clone(), component.clone(), held);
+        tokio::time::timeout(std::time::Duration::from_secs(2), hold.0.notified())
+            .await
+            .expect("start did not reach the publish gap");
+        let stopping = tokio::spawn(async move { runtime.stop_capsule_by_id(&id).await });
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                if component.status(&handle).await.is_err() {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the stop did not take the guest out of the publish gap");
+        hold.1.notify_one();
+        let ended = stopping
+            .await
+            .expect("stop task")
+            .expect("stop")
+            .expect("entry");
+        assert_eq!(ended.status, CAPSULE_STOPPED);
+        assert_eq!(ended.cause.as_deref(), Some("stopped: user"));
     }
 
     /// A trap finishes the resident and clears its tokens, frame, and provider entry.

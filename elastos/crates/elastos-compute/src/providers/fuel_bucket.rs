@@ -46,6 +46,8 @@ pub(crate) struct FuelBucket {
     /// `get_fuel` or `set_fuel` failed. The run ends with this name.
     pub(crate) fault: Option<&'static str>,
     clock_ms: u64,
+    #[cfg(test)]
+    pub(crate) wall_origin: Option<Instant>,
 }
 
 impl FuelBucket {
@@ -63,6 +65,8 @@ impl FuelBucket {
             remainder: 0,
             fault: None,
             clock_ms: 0,
+            #[cfg(test)]
+            wall_origin: None,
         }
     }
 
