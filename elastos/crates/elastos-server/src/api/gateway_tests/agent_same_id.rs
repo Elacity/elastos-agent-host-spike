@@ -746,6 +746,94 @@ async fn two_imports_at_once_one_holds_the_key_in_force() {
     );
 }
 
+/// Two imports and a create, at both pauses. The same-key import still holds
+/// the writer. The other import and the create wait, and the new agent's
+/// note opens under whichever key the store left.
+#[tokio::test]
+async fn two_imports_and_a_create_do_not_seal_the_new_agent() {
+    two_imports_and_a_create(true);
+    two_imports_and_a_create(false);
+}
+
+fn two_imports_and_a_create(import_pauses: bool) {
+    let home = imported_home();
+    enable_agents(&home);
+    let different = different_root_key(&home);
+    let same = kit_holding(home.temp.path(), &home.principal_id, &home.localhost_root);
+    let old_key = stored_key_id(&home);
+    assert_eq!(same.data_key_id, old_key);
+    assert_ne!(different.data_key_id, old_key);
+    let point = if import_pauses {
+        crate::agents::PAUSE_BEFORE_STORE
+    } else {
+        crate::agents::PAUSE_BEFORE_WRAP
+    };
+    let home_ref = &home;
+    let created = std::thread::scope(|scope| {
+        let pause = crate::agents::arm_agent_writer_pause(home_ref.temp.path(), point);
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        if import_pauses {
+            let tx = done_tx;
+            let same_kit = same.clone();
+            let same_import = scope.spawn(move || {
+                let result = drive(import_kit(home_ref, same_kit, false));
+                let _ = tx.send(format!("{result:?}"));
+                result
+            });
+            wait_for_the_pause(home_ref.temp.path(), &done_rx);
+            let different_kit = different.clone();
+            let different_import =
+                scope.spawn(move || drive(import_kit(home_ref, different_kit, false)));
+            let create = scope.spawn(move || create_racing_agent(home_ref, "two-import-create"));
+            assert!(
+                still_running(&different_import),
+                "the other import did not wait for the writer"
+            );
+            assert!(still_running(&create), "create did not wait for the writer");
+            drop(pause);
+            let same_result = same_import.join().unwrap();
+            let _different_result = different_import.join().unwrap();
+            let created = create.join().unwrap();
+            same_result.expect("the import that holds the key in force is stored");
+            created
+        } else {
+            let tx = done_tx;
+            let create = scope.spawn(move || {
+                let result = create_racing_agent(home_ref, "two-import-create-first");
+                let _ = tx.send(format!("{result:?}"));
+                result
+            });
+            wait_for_the_pause(home_ref.temp.path(), &done_rx);
+            let same_import = scope.spawn(move || drive(import_kit(home_ref, same, false)));
+            let different_import =
+                scope.spawn(move || drive(import_kit(home_ref, different, false)));
+            assert!(
+                still_running(&same_import),
+                "the same-key import decided before the writer and did not hold it"
+            );
+            assert!(
+                still_running(&different_import),
+                "the other import did not wait for the writer"
+            );
+            drop(pause);
+            let created = create.join().unwrap();
+            let same_result = same_import.join().unwrap();
+            let different_result = different_import.join().unwrap();
+            same_result.expect("the import that holds the key in force is stored");
+            assert_eq!(
+                different_result
+                    .expect_err("the other kit is refused once the agent exists")
+                    .to_string(),
+                crate::agents::agents_would_stop_opening(1)
+            );
+            assert_eq!(stored_key_id(home_ref), old_key);
+            created
+        }
+    });
+    let created = created.expect("create");
+    note_opens(home.temp.path(), &created.agent_id);
+}
+
 fn agent_owner(dir: &std::path::Path) -> String {
     let file: Value = serde_json::from_slice(&agent_bytes(dir)).unwrap();
     file["agents"][0]["record"]["owner"]
@@ -935,4 +1023,280 @@ async fn reassignment_allows_when_this_owner_has_no_agents() {
         .expect("an owner with no agents can be reassigned");
     assert_eq!(response.status, "reassigned");
     assert_eq!(response.principal_id, other.principal_id);
+}
+
+/// A protection whose archive is missing is a named refusal. The import
+/// does not answer 500, and it does not store a new key over the agent.
+#[tokio::test]
+async fn a_missing_archive_does_not_turn_the_import_into_a_server_error() {
+    let home = imported_home();
+    let planted = crate::agents::tests::plant_opening_agent(
+        home.temp.path(),
+        &home.principal_id,
+        "plant-missing-archive",
+    );
+    let kit = different_root_key(&home);
+    let mut stored = crate::auth::load_principal_root_protection(
+        home.temp.path(),
+        &home.principal_id,
+        &home.localhost_root,
+    )
+    .unwrap()
+    .unwrap();
+    let key_before = stored.data_key_id.clone();
+    let note = std::fs::read(&planted.path).unwrap();
+    stored.protectors[0].archive = None;
+    crate::auth::store_principal_root_protection(home.temp.path(), stored).unwrap();
+    let agent_file = agent_bytes(home.temp.path());
+    let err = import_kit(&home, kit, false)
+        .await
+        .expect_err("a missing archive refuses the import");
+    assert!(err.is::<crate::agents::Refused>());
+    assert_eq!(err.to_string(), crate::agents::CANNOT_OPEN_THE_WRAP);
+    let response = crate::api::auth_gateway::auth_error_response(err);
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    assert_eq!(stored_key_id(&home), key_before);
+    assert_eq!(agent_bytes(home.temp.path()), agent_file);
+    assert_eq!(std::fs::read(&planted.path).unwrap(), note);
+}
+
+/// Add a replacement passkey, revoke the first, and the owner still lists
+/// and opens every agent with the same id and the same data.
+#[tokio::test]
+async fn a_replacement_passkey_lists_and_opens_every_agent() {
+    let dir = tempfile::tempdir().unwrap();
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let now = crate::auth::now_ts();
+    let credential_id = "owner-passkey-u5";
+    let mut store = elastos_identity::IdentityStore::new(dir.path()).unwrap();
+    store.load().unwrap();
+    store.add_credential(elastos_identity::StoredCredential {
+        credential_id: credential_id.to_string(),
+        public_key: format!("{credential_id}-public-key"),
+        sign_count: 1,
+        rp_id: "localhost".to_string(),
+    });
+    store.save().unwrap();
+    let binding = ProofBinding::passkey_webauthn(PasskeyWebAuthnBinding {
+        credential_id: credential_id.to_string(),
+        public_key: format!("{credential_id}-public-key"),
+        sign_count: 1,
+        user_verified: true,
+        origin: "http://localhost:61180".to_string(),
+        rp_id: "localhost".to_string(),
+        created_at: now,
+        last_used_at: now,
+        revoked_at: None,
+    });
+    let principal_id =
+        crate::auth::passkey_credential_principal_id("localhost", credential_id).unwrap();
+    let owner = crate::auth::upsert_principal_for_binding_as_role_named(
+        dir.path(),
+        binding,
+        principal_id,
+        crate::auth::RuntimePrincipalRole::Admin,
+        Some("Account holder"),
+        now,
+    )
+    .unwrap();
+    let first_binding = owner.proof_binding_id.clone();
+    let grant = AuthSessionGrantV1 {
+        schema: AuthSessionGrantV1::SCHEMA.to_string(),
+        grant_id: format!("grant:{}", uuid_like_token()),
+        session_id: format!("auth:{}", uuid_like_token()),
+        principal_id: owner.principal_id.clone(),
+        proof_binding_id: first_binding.clone(),
+        issued_at: now,
+        expires_at: now + 12 * 60 * 60,
+        apps: vec![HOME_CAPSULE_ID.to_string(), SYSTEM_CAPSULE_ID.to_string()],
+    };
+    crate::auth::store_session_grant(dir.path(), grant.clone()).unwrap();
+    let home_token =
+        issue_home_launch_token_for_auth_grant(dir.path(), HOME_CAPSULE_ID, &grant).unwrap();
+    let system_token = issue_home_projection_launch_token_with_context(
+        dir.path(),
+        SYSTEM_CAPSULE_ID,
+        SYSTEM_CAPSULE_ID,
+        &HomeLaunchTokenContext::for_test(
+            grant.principal_id.clone(),
+            grant.session_id.clone(),
+            Some(grant.proof_binding_id.clone()),
+            grant.grant_id.clone(),
+            crate::auth::PrincipalKind::Human,
+        ),
+    )
+    .unwrap();
+    crate::auth::store_test_principal_root_protection(dir.path(), &owner.principal_id);
+    let first = crate::agents::tests::plant_opening_agent(
+        dir.path(),
+        &owner.principal_id,
+        "plant-passkey-a",
+    );
+    let second = crate::agents::tests::plant_opening_agent(
+        dir.path(),
+        &owner.principal_id,
+        "plant-passkey-b",
+    );
+    let agent_file = std::fs::read(crate::agents::agent_file_path(dir.path()).unwrap()).unwrap();
+    let app = gateway_router(test_state(dir.path()));
+    let step_up = issue_passkey_step_up_token_for_test(
+        dir.path(),
+        &system_token,
+        SYSTEM_CAPSULE_ID,
+        "auth.passkey.add",
+        &json!({ "schema": "elastos.auth.passkey.add.intent/v1" }),
+    )
+    .unwrap();
+    let (status, begin) = post_json(
+        &app,
+        "/api/auth/passkey/add/begin",
+        &home_token,
+        json!({
+            "schema": "elastos.auth.passkey.add.begin.request/v1",
+            "app_token": system_token,
+            "step_up_token": step_up,
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{begin}");
+    let challenge = begin["options"]["publicKey"]["challenge"]
+        .as_str()
+        .expect("begin returns a challenge");
+    let attestation = crate::auth::passkey_attestation_with_id_for_test(
+        challenge,
+        "localhost",
+        "http://localhost:61180",
+        b"replacement-passkey-u5",
+    );
+    let (status, added) = post_json(
+        &app,
+        "/api/auth/passkey/add/complete",
+        &home_token,
+        json!({
+            "schema": "elastos.auth.passkey.add.complete.request/v1",
+            "app_token": system_token,
+            "ceremony_id": begin["ceremony_id"],
+            "response": attestation,
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{added}");
+    let replacement_binding = added["proof_binding_id"]
+        .as_str()
+        .expect("the added passkey names its binding")
+        .to_string();
+    assert_ne!(replacement_binding, first_binding);
+    let replacement =
+        crate::auth::load_principal_for_proof_binding(dir.path(), &replacement_binding).unwrap();
+    assert_eq!(replacement.principal_id, owner.principal_id);
+    let now = crate::auth::now_ts();
+    let next = AuthSessionGrantV1 {
+        schema: AuthSessionGrantV1::SCHEMA.to_string(),
+        grant_id: format!("grant:{}", uuid_like_token()),
+        session_id: format!("auth:{}", uuid_like_token()),
+        principal_id: replacement.principal_id.clone(),
+        proof_binding_id: replacement_binding.clone(),
+        issued_at: now,
+        expires_at: now + 12 * 60 * 60,
+        apps: vec![HOME_CAPSULE_ID.to_string(), SYSTEM_CAPSULE_ID.to_string()],
+    };
+    crate::auth::store_session_grant(dir.path(), next.clone()).unwrap();
+    let next_home =
+        issue_home_launch_token_for_auth_grant(dir.path(), HOME_CAPSULE_ID, &next).unwrap();
+    let next_system =
+        issue_home_launch_token_for_auth_grant(dir.path(), SYSTEM_CAPSULE_ID, &next).unwrap();
+    let (status, revoked) = post_json(
+        &app,
+        &format!("/api/auth/passkeys/{first_binding}/revoke"),
+        &next_home,
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{revoked}");
+    assert_eq!(revoked["status"], "revoked");
+    let first_record =
+        crate::auth::load_principal_for_proof_binding(dir.path(), &first_binding).unwrap();
+    assert!(first_record
+        .proof_binding
+        .passkey
+        .unwrap()
+        .revoked_at
+        .is_some());
+    let listed = app
+        .oneshot(
+            test_browser_request("localhost:61180", "null")
+                .method("GET")
+                .uri("/api/apps/system/agents")
+                .header("x-elastos-home-token", next_system)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let listed_status = listed.status();
+    let listed_body = axum::body::to_bytes(listed.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert_eq!(
+        listed_status,
+        StatusCode::OK,
+        "{}",
+        String::from_utf8_lossy(&listed_body)
+    );
+    let listed: Value = serde_json::from_slice(&listed_body).unwrap();
+    let mut ids: Vec<&str> = listed["agents"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|agent| agent["agent_id"].as_str().unwrap())
+        .collect();
+    ids.sort_unstable();
+    let mut expected = vec![first.agent_id.as_str(), second.agent_id.as_str()];
+    expected.sort_unstable();
+    assert_eq!(ids, expected);
+    assert_eq!(
+        std::fs::read(crate::agents::agent_file_path(dir.path()).unwrap()).unwrap(),
+        agent_file,
+        "the agent file is unchanged"
+    );
+    for planted in [&first, &second] {
+        assert_eq!(
+            crate::auth::read_principal_root_object(
+                dir.path(),
+                &planted.agent_id,
+                &planted.root,
+                &planted.uri,
+                &planted.path
+            )
+            .unwrap(),
+            planted.note,
+            "the note still opens"
+        );
+    }
+}
+
+async fn post_json(app: &Router, path: &str, home_token: &str, body: Value) -> (StatusCode, Value) {
+    let response = app
+        .clone()
+        .oneshot(
+            test_browser_request("localhost:61180", "http://localhost:61180")
+                .method("POST")
+                .uri(path)
+                .header("x-elastos-home-token", home_token)
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = response.status();
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let value = serde_json::from_slice(&bytes)
+        .unwrap_or_else(|_| json!({ "raw": String::from_utf8_lossy(&bytes).to_string() }));
+    (status, value)
 }
