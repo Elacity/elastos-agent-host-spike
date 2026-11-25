@@ -24,9 +24,9 @@ rights. The did provider and the wallet provider start through
 `elastos/crates/elastos-server/src/server_infra.rs`, and that call enters
 `os_entry::start_provider`. macOS starts them with `sandbox-exec` under a
 Seatbelt profile whose first lines are `(deny default)` and `(deny network*)`,
-using a verified copy of the binary. Linux x86_64 and aarch64 install the
-admitted rights rows, then fork and exec with no extra step in between. Every
-other operating system refuses that start. The model provider uses its own
+using a verified copy of the binary. On Linux x86_64 and aarch64 the
+child installs the admitted rights rows between fork and exec. Every other
+operating system refuses that start. The model provider uses its own
 launcher and starts on macOS and Linux. macOS runs it with `sandbox-exec` under
 a Seatbelt profile that begins with `(allow default)`, then denies outbound
 network and file read and write except the paths that profile names. Linux
