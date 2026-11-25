@@ -1210,7 +1210,9 @@ class ReleasePolicyTests(unittest.TestCase):
         self.assertIn("run: ./scripts/test-source-gate.sh trusted", source_gate)
         self.assertIn("python3 -I scripts/audit-re-review.py", SOURCE_GATE)
         self.assertIn("python3 -I scripts/trusted-code-test.py", SOURCE_GATE)
-        self.assertIn("python3 -I scripts/trusted-code.py >/dev/null", SOURCE_GATE)
+        self.assertIn('output="$(python3 -I scripts/trusted-code.py)"', SOURCE_GATE)
+        self.assertNotIn("trusted-code.py >/dev/null", SOURCE_GATE)
+        self.assertIn("printf '%s\\n' \"$output\" >&2", SOURCE_GATE)
         self.assertNotIn("python3 scripts/install-bootstrap-test.py", SOURCE_GATE)
         self.assertEqual(SOURCE_GATE.count("python3 scripts/release-platform-input-test.py"), 1)
         nested = (WORKFLOW.parents[2] / "scripts/release-platform-input-test.py").read_text()
@@ -2405,6 +2407,55 @@ class ReleasePolicyTests(unittest.TestCase):
         self.assertEqual(self.run_required(pr, {**mac, **assets, **skipped}, archive="False"), 1)
         self.assertEqual(self.run_required(pr, {**mac, **assets}, archive="true"), 0)
         self.assertEqual(self.run_required(merge, {**after, **skipped}, archive="true"), 1)
+
+    def test_source_gate_shows_trusted_code_output_when_it_fails(self):
+        start = SOURCE_GATE.index("trusted() {\n")
+        end = SOURCE_GATE.index("\n}\n", start)
+        function = SOURCE_GATE[start:end] + "\n}\n"
+        script = "set -euo pipefail\n" + function + "\ntrusted\n"
+        stub = textwrap.dedent("""\
+            #!/bin/bash
+            printf '%s\\n' "$*" >> "$CALLS"
+            case "$*" in
+              *trusted-code-test.py*) exit 0 ;;
+              *trusted-code.py*)
+                if [ "$TRUSTED_MODE" = fail ]; then
+                  printf '%s\\n' "missing file: planted.rs"
+                  exit 1
+                fi
+                printf '%s\\n' "trusted-code report"
+                exit 0
+                ;;
+              *) exit 9 ;;
+            esac
+            """)
+
+        def run(mode):
+            with tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                bindir = root / "bin"
+                bindir.mkdir()
+                python = bindir / "python3"
+                python.write_text(stub)
+                python.chmod(0o755)
+                calls = root / "calls"
+                result = subprocess.run(
+                    ["bash", "-c", script], cwd=root, capture_output=True, text=True, timeout=10,
+                    env={**os.environ, "PATH": f"{bindir}{os.pathsep}{os.environ['PATH']}",
+                         "CALLS": str(calls), "TRUSTED_MODE": mode})
+                return result, calls.read_text()
+
+        failed, calls = run("fail")
+        self.assertEqual(failed.returncode, 1, failed.stdout + failed.stderr)
+        self.assertIn("missing file: planted.rs", failed.stderr)
+        self.assertNotIn("missing file: planted.rs", failed.stdout)
+        self.assertIn("-I scripts/trusted-code.py", calls)
+        self.assertIn("-I scripts/trusted-code-test.py", calls)
+        passed, calls = run("pass")
+        self.assertEqual(passed.returncode, 0, passed.stderr)
+        self.assertNotIn("trusted-code report", passed.stdout)
+        self.assertNotIn("trusted-code report", passed.stderr)
+        self.assertIn("-I scripts/trusted-code.py", calls)
 
     def test_installed_app_jobs_skip_only_on_a_notes_only_pull_request(self):
         paths_job = JOBS["installed-app-paths"]

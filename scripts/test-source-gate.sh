@@ -72,7 +72,14 @@ audit() {
 
 trusted() {
   python3 -I scripts/trusted-code-test.py
-  python3 -I scripts/trusted-code.py >/dev/null
+  # trusted-code.py names a missing file, library, or program on stdout, then
+  # exits 1. Show that text. A passing run stays quiet.
+  local output status=0
+  output="$(python3 -I scripts/trusted-code.py)" || status=$?
+  if (( status != 0 )); then
+    printf '%s\n' "$output" >&2
+    return "$status"
+  fi
 }
 
 release() {
