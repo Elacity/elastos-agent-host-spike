@@ -565,7 +565,6 @@ pub(super) fn owned_fd_above_stdio(fd: i32) -> Result<OwnedFd, i32> {
     Ok(unsafe { OwnedFd::from_raw_fd(dup) })
 }
 
-#[cfg(unix)]
 fn open_loader_stat(path: &Path) -> std::io::Result<(libc::stat, OwnedFd)> {
     use std::os::unix::ffi::OsStrExt;
     let c_path = std::ffi::CString::new(path.as_os_str().as_bytes())

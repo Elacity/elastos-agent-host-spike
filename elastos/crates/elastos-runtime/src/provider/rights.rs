@@ -85,6 +85,7 @@ impl AdmittedRights {
         &self.rows
     }
 
+    #[cfg(not(elastos_unsupported_os_check))]
     pub(super) fn admits(&self, id: &str) -> bool {
         self.rows.iter().any(|row| row.id == id)
     }
