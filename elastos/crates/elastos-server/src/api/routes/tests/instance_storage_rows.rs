@@ -553,16 +553,21 @@ async fn a_later_run_cannot_use_the_earlier_runs_storage_grant() {
     grants.abort();
 }
 
-/// Where two runs of one agent are admitted together, the second cannot use
-/// the first's live storage grant. Before that refusal, the first grant still
-/// validates for the first run. The refusal is the session check
-/// (`wrong_capsule`). The file is unchanged. The second run gets its own
-/// grant.
-///
-/// Once U8 lands, a second live run of one agent is refused. This row then
-/// plants its second session, a resident row without a second launch, and
-/// keeps the session-check replay. The later-run row carries that proof for
-/// a run that starts after the first has ended.
+/// The planted session sits behind the live run's manifest ceiling.
+#[cfg(unix)]
+fn copy_manifest_ceiling(runtime: &crate::runtime::Runtime, from: &str, to: &str) {
+    let ceilings = runtime.manifest_ceilings_for_test();
+    let mut bounds = ceilings.write().unwrap_or_else(|err| err.into_inner());
+    if let Some(ceiling) = bounds.get(from).cloned() {
+        bounds.insert(to.to_string(), ceiling);
+    }
+}
+
+/// Two live sessions of one agent keep separate storage grants. The second
+/// session is a resident row and did not Start. Before the refusal, the first
+/// grant still validates for the first run. The refusal is the session check
+/// (`wrong_capsule`). The file is unchanged. After the first run ends, a later
+/// Start gets its own grant.
 #[cfg(unix)]
 #[tokio::test]
 async fn two_runs_of_one_agent_at_once_keep_separate_storage_grants() {
@@ -574,15 +579,43 @@ async fn two_runs_of_one_agent_at_once_keep_separate_storage_grants() {
     let used = launch_until_journal_is_used(&home, &agent, &control).await;
     let _notes = wait_notes_write(&home, &used.session).await;
 
-    // The launch loads the component, and that load includes its compile.
-    let second = tokio::time::timeout(Duration::from_secs(60), home.launch(&agent))
-        .await
-        .expect("a second run is admitted while the first is live")
-        .expect("the Runtime admits two runs of one agent at once")
-        .0;
-    assert_ne!(second.id, used.session);
-    home.wait_pending(&second.id).await;
-    let manifest = ceiling(&home, &second.id);
+    let second_id = "planted-storage-session";
+    home.runtime
+        .register_capsule(crate::runtime::RunningCapsuleInfo {
+            id: second_id.to_string(),
+            name: "planted".to_string(),
+            status: "running".to_string(),
+            capsule_type: elastos_common::CapsuleType::Wasm,
+            handle: None,
+            session_id: second_id.to_string(),
+            principal: Some(agent.clone()),
+            cause: None,
+            ended_at: None,
+        })
+        .await;
+    home.runtime
+        .insert_agent_session_for_test(crate::runtime::AgentSessionRecord {
+            agent_id: agent.clone(),
+            owner: "planted-owner".into(),
+            host_cid: "planted".into(),
+            launch_id: "launch:planted-storage-session".into(),
+            session_id: second_id.to_string(),
+        })
+        .await;
+    copy_manifest_ceiling(&home.runtime, &used.session, second_id);
+    assert_eq!(
+        used.token.capsule(),
+        used.session,
+        "the first grant names the live session"
+    );
+    let sessions = home.runtime.live_sessions_for_agent(&agent).await;
+    assert_eq!(
+        sessions.len(),
+        2,
+        "the planted row is a second live session of this agent"
+    );
+    assert_ne!(sessions[0], sessions[1], "the two live sessions are one id");
+    let manifest = ceiling(&home, second_id);
     // `wrong_capsule` is checked before revocation, so the refusal below does
     // not show that this token is still live. This read does not count a use.
     assert!(
@@ -594,17 +627,26 @@ async fn two_runs_of_one_agent_at_once_keep_separate_storage_grants() {
     assert_replay_refused(
         &home,
         &agent,
-        &second.id,
+        second_id,
         &used.token,
         manifest,
         "wrong_capsule",
     )
     .await;
-    own_grant_finishes(&home, &agent, &second.id, &control, &used.token).await;
 
     control.release_notes();
     let first = home.wait_ended(&used.session).await;
     assert_eq!(first.cause.as_deref(), Some("completed"), "{first:?}");
+
+    // The launch loads the component, and that load includes its compile.
+    let second = tokio::time::timeout(Duration::from_secs(60), home.launch(&agent))
+        .await
+        .expect("a later run is admitted after the first has ended")
+        .expect("the Runtime admits a Start after the first run has ended")
+        .0;
+    assert_ne!(second.id, used.session);
+    home.wait_pending(&second.id).await;
+    own_grant_finishes(&home, &agent, &second.id, &control, &used.token).await;
     grants.abort();
 }
 
