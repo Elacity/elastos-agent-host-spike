@@ -35,6 +35,8 @@ pub const CAPSULE_STOPPED: &str = "stopped";
 pub const CAPSULE_FAILED: &str = "failed";
 /// The cause of an activation whose guest's `run` returned success.
 pub const CAUSE_COMPLETED: &str = "completed";
+pub const BOUNDED_V2_REFUSAL: &str =
+    "elastos:bus@2.0.0 is a Home resident: start it with POST /api/capsules";
 
 /// How long an ended activation stays listed, so its session, status and cause
 /// can still be read after the response that started it has long gone. The end

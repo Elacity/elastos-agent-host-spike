@@ -255,6 +255,11 @@ async fn is_component_bundle(capsule_dir: &Path) -> anyhow::Result<bool> {
         return Ok(false);
     }
     let value: serde_json::Value = serde_json::from_slice(&tokio::fs::read(manifest).await?)?;
+    if value.get("bus_contract").and_then(|item| item.as_str())
+        == Some(elastos_common::ELASTOS_BUS_V2_CONTRACT)
+    {
+        anyhow::bail!(crate::runtime::BOUNDED_V2_REFUSAL);
+    }
     Ok(
         value.get("type").and_then(|value| value.as_str()) == Some("wasm")
             && value.get("runtime_abi").and_then(|value| value.as_str())
@@ -487,5 +492,39 @@ mod tests {
             "shell interactive"
         );
         assert_eq!(shell.matches("_elastos_").count(), 0, "shell host key");
+    }
+
+    #[tokio::test]
+    async fn run_refuses_a_bus_v2_component_before_load() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("capsule.json"),
+            r#"{"type":"wasm","runtime_abi":"elastos.component/v1","bus_contract":"elastos:bus@2.0.0"}"#,
+        )
+        .unwrap();
+        for dev_unsigned in [true, false] {
+            let err = run_capsule(
+                Some(dir.path().to_path_buf()),
+                None,
+                Vec::new(),
+                None,
+                dev_unsigned,
+                Vec::new(),
+            )
+            .await
+            .expect_err("a v2 component is refused");
+            let message = err.to_string();
+            assert!(
+                message.contains(elastos_common::ELASTOS_BUS_V2_CONTRACT),
+                "{message}"
+            );
+            assert!(message.contains("POST /api/capsules"), "{message}");
+        }
+        std::fs::write(
+            dir.path().join("capsule.json"),
+            r#"{"type":"wasm","runtime_abi":"elastos.component/v1","bus_contract":"elastos:bus@v1"}"#,
+        )
+        .unwrap();
+        assert!(is_component_bundle(dir.path()).await.unwrap());
     }
 }
