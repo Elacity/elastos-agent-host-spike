@@ -1244,55 +1244,7 @@ jobs:
         timeout-minutes: 100
         env:
           CARGO_BUILD_JOBS: "3"
-        run: |
-          set -euo pipefail
-          localhost="${GITHUB_WORKSPACE}/target/fence-localhost-provider"
-          helpers="${GITHUB_WORKSPACE}/target/provider-fence-tests"
-          CARGO_TARGET_DIR="$localhost" \
-            CARGO_BUILD_BUILD_DIR="$localhost/build" \
-            cargo build --locked \
-              --manifest-path elastos/Cargo.toml \
-              -p localhost-provider \
-              --bin localhost-provider \
-              --target-dir "$localhost"
-          CARGO_TARGET_DIR="$helpers" \
-            CARGO_BUILD_BUILD_DIR="$helpers/build" \
-            cargo build --locked \
-              --manifest-path capsules/object-provider/Cargo.toml \
-              --bin object-provider \
-              --target-dir "$helpers"
-          CARGO_TARGET_DIR="$helpers" \
-            CARGO_BUILD_BUILD_DIR="$helpers/build" \
-            cargo build --locked \
-              --manifest-path capsules/chain-provider/Cargo.toml \
-              --bin chain-provider \
-              --target-dir "$helpers"
-          cd elastos
-          log="${RUNNER_TEMP}/helper-fence-confine.log"
-          CARGO_TARGET_DIR="$localhost" \
-            CARGO_BUILD_BUILD_DIR="$localhost/build" \
-            cargo test --locked -p elastos-server --lib confine_helper_tests -- --test-threads=2 | tee "$log"
-          grep -Eq '^test result: ok\. [1-9][0-9]* passed; 0 failed;' "$log" \
-            || { echo "::error::confine_helper_tests selected no test or failed"; exit 1; }
-          # Linux rows only. The sandbox-exec swaps are macOS-only and stay on
-          # the Mac step; a zero match would fail this job.
-          for name in \
-            provider::os_entry::tests::localhost_object_and_chain_cannot_open_device_key \
-            provider::os_entry::tests::chain_provider_binary_answers_inside_its_fence \
-            provider::landlock_plan::tests::both_builders_use_the_resolved_loader_not_the_static_list \
-            provider::root_pin::tests::a_loader_swapped_to_another_file_or_a_directory_is_refused \
-            provider::os_entry::failure_record::tests::an_unconfined_child_is_refused_by_name_and_killed \
-            provider::os_entry::failure_record::tests::an_add_refusal_names_the_rule_and_its_path \
-            provider::os_entry::failure_record::tests::installer_failure_crosses_pipe_and_child_is_reaped \
-            provider::os_entry::failure_record::tests::swapped_storage_root_refuses_and_leaves_the_canary
-          do
-            log="${RUNNER_TEMP}/helper-fence-${name//:/_}.log"
-            CARGO_TARGET_DIR="$localhost" \
-              CARGO_BUILD_BUILD_DIR="$localhost/build" \
-              cargo test --locked -p elastos-runtime --lib "$name" -- --exact --test-threads=2 | tee "$log"
-            grep -Eq '^test result: ok\. 1 passed; 0 failed;' "$log" \
-              || { echo "::error::${name} selected no test or failed"; exit 1; }
-          done
+        run: bash scripts/helper-fence-rows.sh
       - name: prepare apt archive cache permissions
         run: |
           sudo install -d -o "$(id -u)" -g "$(id -g)" -m 755 /var/cache/apt/archives /var/cache/apt/ci-lists
@@ -1632,54 +1584,7 @@ jobs:
         timeout-minutes: 100
         env:
           CARGO_BUILD_JOBS: "3"
-        run: |
-          set -euo pipefail
-          localhost="${GITHUB_WORKSPACE}/target/fence-localhost-provider"
-          helpers="${GITHUB_WORKSPACE}/target/provider-fence-tests"
-          CARGO_TARGET_DIR="$localhost" \
-            CARGO_BUILD_BUILD_DIR="$localhost/build" \
-            cargo build --locked \
-              --manifest-path elastos/Cargo.toml \
-              -p localhost-provider \
-              --bin localhost-provider \
-              --target-dir "$localhost"
-          CARGO_TARGET_DIR="$helpers" \
-            CARGO_BUILD_BUILD_DIR="$helpers/build" \
-            cargo build --locked \
-              --manifest-path capsules/object-provider/Cargo.toml \
-              --bin object-provider \
-              --target-dir "$helpers"
-          CARGO_TARGET_DIR="$helpers" \
-            CARGO_BUILD_BUILD_DIR="$helpers/build" \
-            cargo build --locked \
-              --manifest-path capsules/chain-provider/Cargo.toml \
-              --bin chain-provider \
-              --target-dir "$helpers"
-          cd elastos
-          # A filter that matches nothing still exits 0. Count the rows.
-          # The sandbox-exec rows run here. The /proc confinement rows are
-          # Linux-only and are counted on the ubuntu-22.04-arm step.
-          log="${RUNNER_TEMP}/helper-fence-confine.log"
-          CARGO_TARGET_DIR="$localhost" \
-            CARGO_BUILD_BUILD_DIR="$localhost/build" \
-            cargo test --locked -p elastos-server --lib confine_helper_tests -- --test-threads=2 | tee "$log"
-          grep -Eq '^test result: ok\. [1-9][0-9]* passed; 0 failed;' "$log" \
-            || { echo "::error::confine_helper_tests selected no test or failed"; exit 1; }
-          for name in \
-            provider::os_entry::tests::a_root_swapped_between_render_and_sandbox_exec_is_refused_and_starts_nothing \
-            provider::os_entry::tests::a_symlink_subpath_resolves_outside_and_the_device_key_stays_unread \
-            provider::os_entry::tests::localhost_object_and_chain_cannot_open_device_key \
-            provider::os_entry::tests::chain_provider_binary_answers_inside_its_fence \
-            provider::landlock_plan::tests::both_builders_use_the_resolved_loader_not_the_static_list \
-            provider::root_pin::tests::a_loader_swapped_to_another_file_or_a_directory_is_refused
-          do
-            log="${RUNNER_TEMP}/helper-fence-${name//:/_}.log"
-            CARGO_TARGET_DIR="$localhost" \
-              CARGO_BUILD_BUILD_DIR="$localhost/build" \
-              cargo test --locked -p elastos-runtime --lib "$name" -- --exact --test-threads=2 | tee "$log"
-            grep -Eq '^test result: ok\. 1 passed; 0 failed;' "$log" \
-              || { echo "::error::${name} selected no test or failed"; exit 1; }
-          done
+        run: bash scripts/helper-fence-rows.sh
       - name: reserve hosted Mac build and fixture capacity
         timeout-minutes: 10
         run: python3 scripts/update-hop-compare.py prepare-ci-disk
