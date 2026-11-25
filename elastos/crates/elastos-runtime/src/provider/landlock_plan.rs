@@ -539,18 +539,25 @@ fn inspect_loader(candidate: &Path, root: &Path, trust_uid: u32) -> Result<Locat
     }
 }
 
+pub(super) fn last_errno() -> i32 {
+    #[cfg(target_os = "linux")]
+    unsafe {
+        *libc::__errno_location()
+    }
+    #[cfg(not(target_os = "linux"))]
+    unsafe {
+        *libc::__error()
+    }
+}
+
 /// Dup `fd` to a descriptor at or above 3 and close `fd`. A held descriptor
 /// in 0, 1, or 2 is replaced when the child dup2s its standard streams.
 pub(super) fn owned_fd_above_stdio(fd: i32) -> Result<OwnedFd, i32> {
     if fd < 0 {
-        return Err(std::io::Error::last_os_error()
-            .raw_os_error()
-            .unwrap_or(libc::EIO));
+        return Err(last_errno());
     }
     let dup = unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 3) };
-    let err = std::io::Error::last_os_error()
-        .raw_os_error()
-        .unwrap_or(libc::EIO);
+    let err = last_errno();
     unsafe { libc::close(fd) };
     if dup < 0 {
         return Err(err);

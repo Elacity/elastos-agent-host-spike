@@ -4,6 +4,7 @@
 //! `O_PATH`; the same open uses `O_CLOEXEC|O_NOFOLLOW|O_DIRECTORY`. A failed
 //! open is that errno. A descriptor whose device or inode differs is `ESTALE`.
 
+use super::landlock_plan::{last_errno, owned_fd_above_stdio};
 use std::ffi::CStr;
 use std::mem::MaybeUninit;
 #[cfg(test)]
@@ -17,17 +18,6 @@ pub(super) const DIRECTORY_OPEN_FLAGS: libc::c_int =
 #[cfg(not(target_os = "linux"))]
 pub(super) const DIRECTORY_OPEN_FLAGS: libc::c_int =
     libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_DIRECTORY;
-
-fn last_errno() -> i32 {
-    #[cfg(target_os = "linux")]
-    unsafe {
-        *libc::__errno_location()
-    }
-    #[cfg(not(target_os = "linux"))]
-    unsafe {
-        *libc::__error()
-    }
-}
 
 #[cfg(any(test, target_os = "macos"))]
 fn stat_identity(info: &libc::stat) -> (u64, u64) {
@@ -47,7 +37,7 @@ pub(super) fn hold_directory(path: &CStr) -> Result<OwnedFd, i32> {
     if fd < 0 {
         return Err(last_errno());
     }
-    let directory = super::landlock_plan::owned_fd_above_stdio(fd)?;
+    let directory = owned_fd_above_stdio(fd)?;
     let mut info = MaybeUninit::<libc::stat>::uninit();
     if unsafe { libc::fstat(directory.as_raw_fd(), info.as_mut_ptr()) } < 0 {
         return Err(last_errno());
@@ -107,7 +97,7 @@ pub(super) fn open_pinned_directory(
         return Err(last_errno());
     }
     // The descriptor was just opened and is not owned by anyone else.
-    let directory = super::landlock_plan::owned_fd_above_stdio(fd)?;
+    let directory = owned_fd_above_stdio(fd)?;
     let mut info = MaybeUninit::<libc::stat>::uninit();
     if unsafe { libc::fstat(directory.as_raw_fd(), info.as_mut_ptr()) } < 0 {
         return Err(last_errno());
