@@ -39,9 +39,15 @@ fn test_override() -> Option<String> {
     }
 }
 
+pub fn local_apps_health_line(sentence: &str) -> String {
+    format!("  Local apps are off. {sentence}")
+}
+
 pub fn set_local_apps_refusal(data_dir: &Path, sentence: Option<String>) {
     let mut refusals = LOCAL_APPS_REFUSAL.lock().expect("local apps refusal");
     let key = refusal_key(data_dir);
+    #[cfg(debug_assertions)]
+    note_guard_key(&key);
     match sentence {
         Some(sentence) => {
             refusals.insert(key, sentence);
@@ -49,6 +55,45 @@ pub fn set_local_apps_refusal(data_dir: &Path, sentence: Option<String>) {
         None => {
             refusals.remove(&key);
         }
+    }
+}
+
+#[cfg(debug_assertions)]
+thread_local! {
+    static GUARD_DEPTH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+    static GUARD_KEYS: std::cell::RefCell<Vec<PathBuf>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+#[cfg(debug_assertions)]
+fn note_guard_key(key: &Path) {
+    if GUARD_DEPTH.with(|depth| depth.get()) > 0 {
+        GUARD_KEYS.with(|slot| slot.borrow_mut().push(key.to_path_buf()));
+    }
+}
+
+/// Remember keys set while this guard is held. Drop removes those keys only.
+#[cfg(debug_assertions)]
+pub fn begin_local_apps_guard() {
+    GUARD_DEPTH.with(|depth| depth.set(depth.get() + 1));
+}
+
+#[cfg(debug_assertions)]
+pub fn end_local_apps_guard() {
+    let done = GUARD_DEPTH.with(|depth| {
+        let next = depth.get().saturating_sub(1);
+        depth.set(next);
+        next == 0
+    });
+    if !done {
+        return;
+    }
+    let keys = GUARD_KEYS.with(|slot| std::mem::take(&mut *slot.borrow_mut()));
+    if keys.is_empty() {
+        return;
+    }
+    let mut refusals = LOCAL_APPS_REFUSAL.lock().expect("local apps refusal");
+    for key in keys {
+        refusals.remove(&key);
     }
 }
 
@@ -124,7 +169,7 @@ pub(crate) struct LocalAppsTestGuard(std::sync::MutexGuard<'static, ()>);
 impl Drop for LocalAppsTestGuard {
     fn drop(&mut self) {
         let _kept = &self.0;
-        clear_local_apps_refusals();
+        end_local_apps_guard();
         set_local_apps_refusal_for_test(None);
     }
 }
@@ -132,13 +177,29 @@ impl Drop for LocalAppsTestGuard {
 #[cfg(test)]
 pub(crate) fn lock_local_apps_for_test() -> LocalAppsTestGuard {
     static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    LocalAppsTestGuard(LOCK.lock().unwrap_or_else(|err| err.into_inner()))
+    let guard = LocalAppsTestGuard(LOCK.lock().unwrap_or_else(|err| err.into_inner()));
+    begin_local_apps_guard();
+    guard
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use elastos_runtime::provider::ProviderRegistry;
+
+    #[test]
+    fn a_guard_drop_removes_only_the_keys_it_saw() {
+        let kept = tempfile::tempdir().unwrap();
+        set_local_apps_refusal(kept.path(), Some("kept".into()));
+        {
+            let _guard = lock_local_apps_for_test();
+            let other = tempfile::tempdir().unwrap();
+            set_local_apps_refusal(other.path(), Some("other".into()));
+            assert_eq!(local_apps_refusal(other.path()).as_deref(), Some("other"));
+        }
+        assert_eq!(local_apps_refusal(kept.path()).as_deref(), Some("kept"));
+        set_local_apps_refusal(kept.path(), None);
+    }
 
     #[test]
     fn refusal_is_keyed_by_the_data_folder() {

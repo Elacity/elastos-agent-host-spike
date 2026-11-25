@@ -153,6 +153,7 @@ fn write_manifest(data: &Path) {
         ("linux", "x86_64") => "linux-amd64",
         ("linux", "aarch64") => "linux-arm64",
         ("macos", "aarch64") => "darwin-arm64",
+        ("macos", "x86_64") => "darwin-amd64",
         (os, arch) => panic!("unsupported test platform {os}-{arch}"),
     };
     let manifest = format!(

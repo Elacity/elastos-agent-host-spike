@@ -20,12 +20,16 @@
 //! is still present is not moved aside. A matching marker still walks, so an
 //! older build's later device-key file is rewritten. A file is an envelope only when
 //! `is_encrypted_envelope` accepts it, in any field order. The walk reads a short
-//! header first at every size at or under 32 MiB. If that header cannot start an
-//! envelope, the file is left alone and its body is not read. A file larger than
-//! 32 MiB is left alone on every start, including the first migration, and its
-//! body is not read. Home and the other files keep working. A later read of that
-//! file is refused by name, unless the file key opens it: an envelope this key
-//! already wrote stays readable. The walk logs a count every few seconds. A waiter on
+//! header first. If that header cannot start an envelope, the file is left alone
+//! and its body is not read. A device-key envelope is rewritten onto the file key,
+//! one file at a time, through the same temporary file, check, and rename, up to
+//! `SEALED_READ_HARD_LIMIT`. That is the most `read_sealed_localhost_file` will
+//! load: one `Vec` from `read_to_end`, then a second `Vec` from hex-decoding the
+//! ciphertext. The rewrite holds about two copies of the file and drops the first
+//! before it builds the new envelope. A longer file whose header can start an
+//! envelope is left untouched and named; every other file still migrates. A later
+//! start uses the size and time stored beside the marker and does not open a file
+//! that still matches. The walk logs a count every few seconds. A waiter on
 //! `identity/localhost-file-key.lock` logs that. The walk runs from
 //! `setup_server_infrastructure`. `elastos serve` runs it and then spawns the
 //! helper (`spawn_host_providers`). `elastos serve`
@@ -77,11 +81,11 @@ const LOCALHOST_MIGRATION_RECORD: &[u8] = b"elastos-localhost-file-v1\n";
 #[cfg(unix)]
 const LOCALHOST_REWRITE_SUFFIX: &str = ".elastos-localhost-file-key-v1.tmp";
 #[cfg(unix)]
-const LOCALHOST_ENVELOPE_LIMIT: u64 = localhost_provider::ENVELOPE_BYTE_LIMIT;
+const LOCALHOST_TEMP_DIR: &str = "localhost-file-key-v1.tmpd";
+#[cfg(unix)]
+const LOCALHOST_SEEN: &str = "localhost-file-key-v1.seen";
 #[cfg(unix)]
 const ENVELOPE_HEADER: usize = 64;
-#[cfg(unix)]
-const RECOVERY: &str = "Make it readable or move it out of the folder, then restart.";
 #[cfg(unix)]
 const FINGERPRINT_DOMAIN: &[u8] = b"elastos-localhost-file-key-fingerprint-v1\0";
 /// Local-app roots whose files are sealed. `MyWebSite` and `Public` stay
@@ -103,6 +107,7 @@ thread_local! {
         std::cell::RefCell::new(None);
     static PROGRESS_CLOCK: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
     static BYTES_READ: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    static OPENS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
 /// Stops the walk after this many migration writes. `None` writes normally.
@@ -151,6 +156,20 @@ pub(crate) fn set_localhost_migration_progress_clock(now: Option<u64>) {
 pub(crate) fn take_localhost_migration_bytes_read() -> u64 {
     BYTES_READ.with(|slot| slot.replace(0))
 }
+
+/// File-content opens since the last take. A stat of a settled file is not an open.
+#[cfg(all(unix, test))]
+pub(crate) fn take_localhost_migration_opens() -> u64 {
+    OPENS.with(|slot| slot.replace(0))
+}
+
+#[cfg(all(unix, test))]
+fn note_open() {
+    OPENS.with(|slot| slot.set(slot.get() + 1));
+}
+
+#[cfg(all(unix, not(test)))]
+fn note_open() {}
 
 #[cfg(all(unix, test))]
 fn note_bytes_read(n: usize) {
@@ -288,24 +307,34 @@ fn relative_path(path: &Path) -> String {
 #[cfg(unix)]
 fn localhost_refused(path: &Path, why: &str) -> anyhow::Error {
     let rel = relative_path(path);
-    let cause = if why == "forged" {
-        return anyhow::anyhow!("{rel} is not the migration record. {RECOVERY}");
-    } else if why == "mismatch" {
+    if why == "forged" {
+        return anyhow::anyhow!("{rel} is not the migration record. Delete {rel}, then restart.");
+    }
+    if why == "mismatch" {
         return anyhow::anyhow!(
             "{rel} does not match this Home (restored or copied folder, changed device key). Restore the matching identity/device.key, or move AppCapsules, ElastOS, Local, Users, and UsersAI aside to start empty, then restart."
         );
-    } else if why.starts_with("larger") {
-        why
+    }
+    let (cause, remedy) = if why.starts_with("larger") {
+        (why, "Move it out of the folder, then restart.")
     } else if why.contains("link") {
-        "linked"
+        (
+            "linked",
+            "Replace the link with a regular file, then restart.",
+        )
     } else if why.contains("changed") {
-        "changed while read"
+        ("changed while read", "Leave it unchanged, then restart.")
     } else if why.contains("decrypt") {
-        "not decryptable"
+        ("not decryptable", "Remove it, then restart.")
+    } else if why.contains("not a regular") {
+        (
+            "not a regular file",
+            "Replace it with a regular file, then restart.",
+        )
     } else {
-        "not readable"
+        ("not readable", "Make it readable, then restart.")
     };
-    anyhow::anyhow!("{rel} is {cause}. {RECOVERY}")
+    anyhow::anyhow!("{rel} is {cause}. {remedy}")
 }
 
 #[cfg(unix)]
@@ -415,44 +444,39 @@ fn opened_identity(meta: &std::fs::Metadata) -> OpenedIdentity {
     }
 }
 
-/// A rewrite temp stays within `NAME_MAX`. A long original name is hashed so
-/// the temp can be created beside it.
+/// Temps live in the walk's own directory, named by the relative path, so a
+/// person's file is never removed because its name looks like a temp.
 #[cfg(unix)]
-fn rewrite_temp_name(file_name: &std::ffi::OsStr) -> std::ffi::OsString {
-    use std::os::unix::ffi::OsStrExt;
-
-    let raw = file_name.as_bytes();
-    if 1 + raw.len() + LOCALHOST_REWRITE_SUFFIX.len() <= 255 {
-        let mut name = std::ffi::OsString::from(".");
-        name.push(file_name);
-        name.push(LOCALHOST_REWRITE_SUFFIX);
-        return name;
-    }
-    use sha2::Digest;
-    let mut hasher = sha2::Sha256::new();
-    hasher.update(raw);
-    let digest: [u8; 32] = hasher.finalize().into();
-    let mut name = std::ffi::OsString::from(".");
-    name.push(hex::encode(digest));
-    name.push(LOCALHOST_REWRITE_SUFFIX);
-    name
+fn migration_root() -> std::path::PathBuf {
+    MIGRATION_ROOT.with(|slot| slot.borrow().clone())
 }
 
 #[cfg(unix)]
 fn rewrite_temp_path(path: &Path) -> std::io::Result<std::path::PathBuf> {
-    let parent = path.parent().ok_or_else(|| {
-        std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "localhost file has no directory",
-        )
-    })?;
-    let file_name = path.file_name().ok_or_else(|| {
-        std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "localhost file has no name",
-        )
-    })?;
-    Ok(parent.join(rewrite_temp_name(file_name)))
+    use sha2::Digest;
+    use std::os::unix::fs::DirBuilderExt;
+
+    let dir = migration_root().join("identity").join(LOCALHOST_TEMP_DIR);
+    match std::fs::symlink_metadata(&dir) {
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            std::fs::DirBuilder::new().mode(0o700).create(&dir)?;
+        }
+        Err(err) => return Err(err),
+        Ok(meta) if meta.file_type().is_symlink() || !meta.is_dir() => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "localhost temp directory is not a directory",
+            ));
+        }
+        Ok(_) => {}
+    }
+    let mut hasher = sha2::Sha256::new();
+    hasher.update(relative_path(path).as_bytes());
+    let digest: [u8; 32] = hasher.finalize().into();
+    let mut name = std::ffi::OsString::from(".");
+    name.push(hex::encode(digest));
+    name.push(LOCALHOST_REWRITE_SUFFIX);
+    Ok(dir.join(name))
 }
 
 #[cfg(unix)]
@@ -560,11 +584,135 @@ fn read_nofollow(path: &Path) -> std::io::Result<Vec<u8>> {
 }
 
 #[cfg(unix)]
-fn is_rewrite_temp(name: &std::ffi::OsStr) -> bool {
-    use std::os::unix::ffi::OsStrExt;
+#[derive(Clone, PartialEq, Eq)]
+struct SeenFile {
+    len: u64,
+    mtime: i64,
+    mtime_nsec: i64,
+    hard: bool,
+}
 
-    let bytes = name.as_bytes();
-    bytes.starts_with(b".") && bytes.ends_with(LOCALHOST_REWRITE_SUFFIX.as_bytes())
+#[cfg(unix)]
+enum MigratedFile {
+    Settled,
+    OverHard,
+}
+
+#[cfg(unix)]
+fn seen_file(meta: &std::fs::Metadata, hard: bool) -> SeenFile {
+    use std::os::unix::fs::MetadataExt;
+    SeenFile {
+        len: meta.len(),
+        mtime: meta.mtime(),
+        mtime_nsec: meta.mtime_nsec(),
+        hard,
+    }
+}
+
+#[cfg(unix)]
+fn parse_seen(bytes: &[u8]) -> std::collections::HashMap<String, SeenFile> {
+    let mut seen = std::collections::HashMap::new();
+    let mut lines = std::str::from_utf8(bytes).unwrap_or("").lines();
+    if lines.next() != Some("1") {
+        return seen;
+    }
+    for line in lines {
+        let mut parts = line.splitn(5, ' ');
+        let (Some(len), Some(mtime), Some(mtime_nsec), Some(flag), Some(rel)) = (
+            parts.next().and_then(|text| text.parse().ok()),
+            parts.next().and_then(|text| text.parse().ok()),
+            parts.next().and_then(|text| text.parse().ok()),
+            parts.next(),
+            parts.next(),
+        ) else {
+            continue;
+        };
+        if rel.is_empty() || (flag != "s" && flag != "h") {
+            continue;
+        }
+        seen.insert(
+            rel.to_string(),
+            SeenFile {
+                len,
+                mtime,
+                mtime_nsec,
+                hard: flag == "h",
+            },
+        );
+    }
+    seen
+}
+
+#[cfg(unix)]
+fn read_seen(path: &Path) -> anyhow::Result<std::collections::HashMap<String, SeenFile>> {
+    use std::io::Read;
+    use std::os::unix::fs::OpenOptionsExt;
+
+    let meta = match std::fs::symlink_metadata(path) {
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(std::collections::HashMap::new());
+        }
+        Err(_) => return Err(localhost_refused(path, "cannot be read")),
+        Ok(meta) => meta,
+    };
+    if meta.file_type().is_symlink() {
+        return Err(localhost_refused(path, "is a link"));
+    }
+    if !meta.is_file() {
+        return Err(localhost_refused(path, "is not a file"));
+    }
+    if meta.len() > localhost_provider::ENVELOPE_BYTE_LIMIT {
+        return Ok(std::collections::HashMap::new());
+    }
+    let mut file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)
+        .map_err(|_| localhost_refused(path, "cannot be read"))?;
+    let mut bytes = Vec::new();
+    file.by_ref()
+        .take(meta.len())
+        .read_to_end(&mut bytes)
+        .map_err(|_| localhost_refused(path, "cannot be read"))?;
+    Ok(parse_seen(&bytes))
+}
+
+#[cfg(unix)]
+fn write_seen(
+    path: &Path,
+    seen: &std::collections::HashMap<String, SeenFile>,
+) -> anyhow::Result<()> {
+    let mut keys: Vec<&String> = seen.keys().collect();
+    keys.sort();
+    let mut text = String::from("1\n");
+    for key in keys {
+        let item = &seen[key];
+        let flag = if item.hard { "h" } else { "s" };
+        text.push_str(&format!(
+            "{} {} {} {} {}\n",
+            item.len, item.mtime, item.mtime_nsec, flag, key
+        ));
+    }
+    let parent = path
+        .parent()
+        .ok_or_else(|| localhost_refused(path, "cannot be read"))?;
+    ensure_identity_dir(parent)?;
+    replace_file_fsync_rename(path, text.as_bytes(), 0o600, None)
+        .map_err(|err| migration_io(path, "cannot be replaced", err))?;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn over_hard_sentence(names: &[String]) -> String {
+    names
+        .iter()
+        .map(|name| {
+            format!(
+                "{name} is larger than this process can read. Move it out of the folder, then restart."
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 #[cfg(unix)]
@@ -597,28 +745,12 @@ fn migrate_localhost_envelope(
     path: &Path,
     device_key: &[u8; 32],
     file_key: &[u8; 32],
-) -> anyhow::Result<()> {
+) -> anyhow::Result<MigratedFile> {
     use std::io::Read;
-    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
-    use zeroize::Zeroize;
+    use std::os::unix::fs::OpenOptionsExt;
 
     note_progress();
-    let pre = std::fs::symlink_metadata(path)
-        .with_context(|| localhost_refused(path, "cannot be read"))?;
-    if pre.file_type().is_symlink() {
-        return Err(localhost_refused(path, "is a link"));
-    }
-    if !pre.is_file() {
-        return Err(localhost_refused(path, "is not a regular file"));
-    }
-    if pre.nlink() > 1 {
-        return Err(localhost_refused(path, "is linked from another path"));
-    }
-    // One file over the cap never turns local apps off. The walk does not
-    // read it. A later read refuses it by name unless the file key opens it.
-    if pre.len() > LOCALHOST_ENVELOPE_LIMIT {
-        return Ok(());
-    }
+    note_open();
     let mut file = std::fs::OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
@@ -643,53 +775,45 @@ fn migrate_localhost_envelope(
         .read(&mut header)
         .with_context(|| localhost_refused(path, "cannot be read"))?;
     note_bytes_read(read);
-    if opened.len > LOCALHOST_ENVELOPE_LIMIT {
-        return Ok(());
+    if localhost_provider::header_rules_out_envelope(&header[..read])
+        || localhost_provider::header_is_file_key_envelope(&header[..read])
+    {
+        return Ok(MigratedFile::Settled);
     }
-    if localhost_provider::header_rules_out_envelope(&header[..read]) {
-        return Ok(());
+    if opened.len > localhost_provider::SEALED_READ_HARD_LIMIT {
+        return Ok(MigratedFile::OverHard);
     }
-    let mut bytes = header[..read].to_vec();
+    let mut bytes = Vec::new();
+    if bytes.try_reserve(opened.len as usize).is_err() {
+        return Ok(MigratedFile::OverHard);
+    }
+    bytes.extend_from_slice(&header[..read]);
     if opened.len > read as u64 {
-        let mut rest = Vec::new();
         file.by_ref()
-            .take((LOCALHOST_ENVELOPE_LIMIT + 1).saturating_sub(read as u64))
-            .read_to_end(&mut rest)
+            .take(opened.len - read as u64)
+            .read_to_end(&mut bytes)
             .with_context(|| localhost_refused(path, "cannot be read"))?;
-        note_bytes_read(rest.len());
-        bytes.extend(rest);
+        note_bytes_read(bytes.len().saturating_sub(read));
     }
-    if bytes.len() as u64 > LOCALHOST_ENVELOPE_LIMIT {
-        return Ok(());
+    if bytes.len() as u64 > localhost_provider::SEALED_READ_HARD_LIMIT {
+        return Ok(MigratedFile::OverHard);
     }
     run_before_replace(path);
     opened_file_still_matches(path, &opened)?;
-    if !localhost_provider::is_encrypted_envelope(&bytes) {
-        return Ok(());
+    match localhost_provider::rekey_device_envelope(device_key, file_key, bytes) {
+        Ok(localhost_provider::RekeyOutcome::NotEnvelope)
+        | Ok(localhost_provider::RekeyOutcome::AlreadyFileKey) => Ok(MigratedFile::Settled),
+        Ok(localhost_provider::RekeyOutcome::Rewritten(sealed)) => {
+            opened_file_still_matches(path, &opened)?;
+            replace_file_fsync_rename(path, &sealed, kept_mode(opened.mode), Some(&opened))
+                .map_err(|err| migration_io(path, "cannot be replaced", err))?;
+            Ok(MigratedFile::Settled)
+        }
+        Err(err) if err.to_string().contains("does not decrypt") => {
+            Err(localhost_refused(path, "does not decrypt"))
+        }
+        Err(err) => Err(err).with_context(|| localhost_refused(path, "cannot be sealed")),
     }
-    if let Ok(mut plaintext) = localhost_provider::decrypt_bytes(device_key, &bytes) {
-        let sealed = localhost_provider::encrypt_bytes(file_key, &plaintext);
-        plaintext.zeroize();
-        let sealed = sealed.with_context(|| localhost_refused(path, "cannot be sealed"))?;
-        opened_file_still_matches(path, &opened)?;
-        replace_file_fsync_rename(path, &sealed, kept_mode(opened.mode), Some(&opened))
-            .map_err(|err| migration_io(path, "cannot be replaced", err))?;
-        return Ok(());
-    }
-    if let Ok(mut plaintext) = localhost_provider::decrypt_bytes(file_key, &bytes) {
-        plaintext.zeroize();
-        return Ok(());
-    }
-    Err(localhost_refused(path, "does not decrypt"))
-}
-
-#[cfg(unix)]
-fn without_rewrite_temps(names: &[std::ffi::OsString]) -> Vec<std::ffi::OsString> {
-    names
-        .iter()
-        .filter(|name| !is_rewrite_temp(name))
-        .cloned()
-        .collect()
 }
 
 #[cfg(unix)]
@@ -708,7 +832,12 @@ fn migrate_localhost_tree(
     dir: &Path,
     device_key: &[u8; 32],
     file_key: &[u8; 32],
+    seen: &std::collections::HashMap<String, SeenFile>,
+    next: &mut std::collections::HashMap<String, SeenFile>,
+    over_hard: &mut Vec<String>,
 ) -> anyhow::Result<()> {
+    use std::os::unix::fs::MetadataExt;
+
     let names = directory_names(dir)?;
     for name in &names {
         let path = dir.join(name);
@@ -718,26 +847,50 @@ fn migrate_localhost_tree(
         if file_type.is_symlink() {
             return Err(localhost_refused(&path, "is a link"));
         }
-        if file_type.is_file() && is_rewrite_temp(name) {
-            charge_migration_write()?;
-            std::fs::remove_file(&path)
-                .map_err(|err| localhost_write_refused(&path, &err.to_string()))?;
-            continue;
-        }
         if file_type.is_dir() {
-            migrate_localhost_tree(&path, device_key, file_key)?;
+            migrate_localhost_tree(&path, device_key, file_key, seen, next, over_hard)?;
             continue;
         }
         if !file_type.is_file() {
             return Err(localhost_refused(&path, "is not a regular file"));
         }
-        if std::os::unix::fs::MetadataExt::nlink(&meta) > 1 {
+        if meta.nlink() > 1 {
             return Err(localhost_refused(&path, "is linked from another path"));
         }
-        migrate_localhost_envelope(&path, device_key, file_key)?;
+        let rel = relative_path(&path);
+        if let Some(old) = seen.get(&rel) {
+            if old.len == meta.len()
+                && old.mtime == meta.mtime()
+                && old.mtime_nsec == meta.mtime_nsec()
+            {
+                if old.hard {
+                    over_hard.push(rel.clone());
+                }
+                next.insert(rel, old.clone());
+                continue;
+            }
+        }
+        let remembered = seen_file(&meta, false);
+        match migrate_localhost_envelope(&path, device_key, file_key)? {
+            MigratedFile::Settled => {
+                let after = std::fs::symlink_metadata(&path)
+                    .with_context(|| localhost_refused(&path, "cannot be read"))?;
+                next.insert(rel, seen_file(&after, false));
+            }
+            MigratedFile::OverHard => {
+                over_hard.push(rel.clone());
+                next.insert(
+                    rel,
+                    SeenFile {
+                        hard: true,
+                        ..remembered
+                    },
+                );
+            }
+        }
     }
     let again = directory_names(dir)?;
-    if without_rewrite_temps(&names) != without_rewrite_temps(&again) {
+    if names != again {
         return Err(localhost_refused(dir, "changed while it was being read"));
     }
     Ok(())
@@ -923,27 +1076,45 @@ fn acquire_migration_lock(data_dir: &Path) -> anyhow::Result<LocalhostMigrationL
 }
 
 #[cfg(unix)]
-fn sweep_rewrite_temp(path: &Path) -> anyhow::Result<()> {
-    let tmp =
-        rewrite_temp_path(path).map_err(|err| localhost_write_refused(path, &err.to_string()))?;
-    match std::fs::symlink_metadata(&tmp) {
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(err) => Err(localhost_write_refused(&tmp, &err.to_string())),
-        Ok(meta) if meta.file_type().is_symlink() => Err(localhost_refused(&tmp, "is a link")),
-        Ok(meta) if meta.is_file() => {
-            charge_migration_write()?;
-            std::fs::remove_file(&tmp)
-                .map_err(|err| localhost_write_refused(&tmp, &err.to_string()))?;
-            Ok(())
-        }
-        Ok(_) => Err(localhost_refused(&tmp, "is not a file")),
+fn sweep_owned_temp_dir(data_dir: &Path) -> anyhow::Result<()> {
+    let dir = data_dir.join("identity").join(LOCALHOST_TEMP_DIR);
+    let meta = match std::fs::symlink_metadata(&dir) {
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(err).with_context(|| localhost_refused(&dir, "cannot be read")),
+        Ok(meta) => meta,
+    };
+    if meta.file_type().is_symlink() {
+        return Err(localhost_refused(&dir, "is a link"));
     }
+    if !meta.is_dir() {
+        return Err(localhost_refused(&dir, "is not a directory"));
+    }
+    for entry in
+        std::fs::read_dir(&dir).with_context(|| localhost_refused(&dir, "cannot be read"))?
+    {
+        let entry = entry.with_context(|| localhost_refused(&dir, "cannot be read"))?;
+        let path = entry.path();
+        let meta = std::fs::symlink_metadata(&path)
+            .with_context(|| localhost_refused(&path, "cannot be read"))?;
+        if meta.file_type().is_symlink() {
+            return Err(localhost_refused(&path, "is a link"));
+        }
+        if !meta.is_file() || std::os::unix::fs::MetadataExt::nlink(&meta) > 1 {
+            return Err(localhost_refused(&path, "is not a regular file"));
+        }
+        charge_migration_write()?;
+        std::fs::remove_file(&path)
+            .map_err(|err| localhost_write_refused(&path, &err.to_string()))?;
+    }
+    Ok(())
 }
 
 #[cfg(unix)]
 fn write_localhost_marker(marker: &Path, record: &[u8]) -> anyhow::Result<()> {
     let identity = marker.parent().ok_or_else(|| {
-        anyhow::anyhow!("identity/localhost-file-key-v1 is not readable. {RECOVERY}")
+        anyhow::anyhow!(
+            "identity/localhost-file-key-v1 is not readable. Make it readable, then restart."
+        )
     })?;
     ensure_identity_dir(identity)?;
     replace_file_fsync_rename(marker, record, 0o600, None)
@@ -964,7 +1135,15 @@ fn migrate_localhost_files_to_file_key(
     plan_for_this_home(data_dir, &marker, &file_key)?;
     let _lock = acquire_migration_lock(data_dir)?;
     let plan = plan_for_this_home(data_dir, &marker, &file_key)?;
-    sweep_rewrite_temp(&marker)?;
+    sweep_owned_temp_dir(data_dir)?;
+    let seen_path = identity.join(LOCALHOST_SEEN);
+    let seen = if matches!(plan, MarkerPlan::Keep) {
+        read_seen(&seen_path)?
+    } else {
+        std::collections::HashMap::new()
+    };
+    let mut next = std::collections::HashMap::new();
+    let mut over_hard = Vec::new();
     for root in LOCALHOST_ENCRYPTED_ROOTS {
         let path = data_dir.join(root);
         match std::fs::symlink_metadata(&path) {
@@ -972,7 +1151,14 @@ fn migrate_localhost_files_to_file_key(
                 return Err(localhost_refused(&path, "is a link"));
             }
             Ok(meta) if meta.is_dir() => {
-                migrate_localhost_tree(&path, device_key, &file_key)?;
+                migrate_localhost_tree(
+                    &path,
+                    device_key,
+                    &file_key,
+                    &seen,
+                    &mut next,
+                    &mut over_hard,
+                )?;
             }
             Ok(_) => return Err(localhost_refused(&path, "is not a directory")),
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
@@ -981,10 +1167,17 @@ fn migrate_localhost_files_to_file_key(
             }
         }
     }
+    if next != seen || !seen_path.is_file() {
+        write_seen(&seen_path, &next)?;
+    }
     if matches!(plan, MarkerPlan::Write) {
         write_localhost_marker(&marker, &localhost_marker_record(&file_key))?;
     }
-    Ok(())
+    if over_hard.is_empty() {
+        Ok(())
+    } else {
+        Err(anyhow::anyhow!(over_hard_sentence(&over_hard)))
+    }
 }
 
 /// Localhost-provider init config.

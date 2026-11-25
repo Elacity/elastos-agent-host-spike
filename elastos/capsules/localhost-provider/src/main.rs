@@ -5,7 +5,7 @@
 //! When an encryption key is provided, files are encrypted at rest with AES-256-GCM.
 
 use elastos_guest::prelude::*;
-use localhost_provider::{encrypt_bytes, read_sealed_localhost_file};
+use localhost_provider::{encrypt_file_key_bytes, read_sealed_localhost_file};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::{self, BufRead, Read, Write};
@@ -494,7 +494,7 @@ impl LocalProvider {
                 content.to_vec()
             };
 
-            let encrypted = encrypt_bytes(key, &plaintext)?;
+            let encrypted = encrypt_file_key_bytes(key, &plaintext)?;
             fs::write(&full_path, &encrypted)?;
             return Ok(content.len() as u64);
         }
