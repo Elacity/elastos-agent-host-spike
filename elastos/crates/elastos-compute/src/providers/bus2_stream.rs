@@ -17,6 +17,9 @@ use wasmtime::StoreContextMut;
 pub(crate) const READ_CHUNK: usize = 64 * 1024;
 /// The host cap on one read, and on every read one provider holds together.
 pub(crate) const HOST_MAX_READ_BYTES: usize = 16 * 1024 * 1024;
+/// How many reads one provider may hold open. Each hold is its own allocation,
+/// so a count is capped as well as the bytes.
+const MAX_OPEN_HOLDS: usize = 256;
 
 #[derive(Debug)]
 struct Slot {
@@ -81,6 +84,9 @@ impl ReadHold {
     pub(crate) fn try_reserve(budget: &Arc<ReadBudget>, bytes: usize) -> Option<Self> {
         let mut ledger = budget.inner.lock().expect("read ledger");
         ledger.open.retain(|weak| weak.strong_count() > 0);
+        if ledger.open.len() >= MAX_OPEN_HOLDS {
+            return None;
+        }
         let next = ledger.held.checked_add(bytes)?;
         if next > HOST_MAX_READ_BYTES {
             return None;
@@ -240,5 +246,25 @@ impl<D> StreamProducer<D> for WindowRead {
             }
             None => Poll::Ready(Ok(StreamResult::Dropped)),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_two_hundred_fifty_seventh_one_byte_hold_is_refused() {
+        let budget = Arc::new(ReadBudget::new());
+        let mut holds = Vec::new();
+        for _ in 0..MAX_OPEN_HOLDS {
+            holds.push(ReadHold::try_reserve(&budget, 1).expect("a hold inside the cap"));
+        }
+        assert!(
+            ReadHold::try_reserve(&budget, 1).is_none(),
+            "one more hold was accepted"
+        );
+        holds.pop();
+        assert!(ReadHold::try_reserve(&budget, 1).is_some());
     }
 }
