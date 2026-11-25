@@ -6,6 +6,8 @@
 //! refused by name. The size cap is checked before JSON, and the depth cap
 //! before a key, so those refusals stay the ones named here.
 
+use std::collections::HashSet;
+
 use serde_json::Value;
 
 pub const UI_MEDIA_TYPE: &str = "application/vnd.elastos.ui+json;v=0";
@@ -147,7 +149,7 @@ fn scan_value(bytes: &[u8], i: &mut usize, depth: usize) -> Result<(), String> {
 
 fn scan_object(bytes: &[u8], i: &mut usize, depth: usize) -> Result<(), String> {
     *i += 1;
-    let mut keys = Vec::new();
+    let mut keys = HashSet::new();
     loop {
         skip_ws(bytes, i);
         if bytes.get(*i) == Some(&b'}') {
@@ -162,10 +164,9 @@ fn scan_object(bytes: &[u8], i: &mut usize, depth: usize) -> Result<(), String> 
             skip_ws(bytes, i);
         }
         let key = scan_string(bytes, i)?;
-        if keys.iter().any(|seen| seen == &key) {
+        if !keys.insert(key.clone()) {
             return Err(format!("duplicate key {key:?}"));
         }
-        keys.push(key);
         skip_ws(bytes, i);
         if bytes.get(*i) != Some(&b':') {
             return Err("document is not JSON".to_string());
@@ -328,6 +329,9 @@ pub struct GrantBook {
     dropped: Vec<String>,
     /// Set by [`GrantBook::clear`]. A later read or present stays denied.
     closed: bool,
+    /// Bumped when every held grant is revoked together. An in-flight request
+    /// captured the previous value and will not record its token.
+    epoch: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -338,11 +342,15 @@ struct HeldGrant {
 }
 
 impl GrantBook {
-    pub fn hold(&mut self, id: &str, resource: &str, action: &str) {
-        self.revoked.retain(|kept| kept != id);
+    /// Records a grant the host just gave. A closed book, or an id already
+    /// revoked, is refused: a late hold must not undo that revoke.
+    pub fn hold(&mut self, id: &str, resource: &str, action: &str) -> bool {
+        if self.closed || self.revoked.iter().any(|kept| kept == id) {
+            return false;
+        }
         self.dropped.retain(|kept| kept != id);
         if self.grants.iter().any(|grant| grant.id == id) {
-            return;
+            return true;
         }
         if self.grants.len() == MAX_HELD_GRANTS {
             let old = self.grants.remove(0);
@@ -356,6 +364,21 @@ impl GrantBook {
             resource: resource.to_string(),
             actions: vec![action.to_string()],
         });
+        true
+    }
+
+    pub fn epoch(&self) -> u64 {
+        self.epoch
+    }
+
+    /// Revokes every grant this guest holds and bumps [`Self::epoch`].
+    /// A stop uses [`Self::clear`] instead, which closes the book.
+    pub fn revoke_all_held(&mut self) {
+        self.epoch = self.epoch.wrapping_add(1);
+        let ids: Vec<String> = self.grants.iter().map(|grant| grant.id.clone()).collect();
+        for id in ids {
+            self.revoke(&id);
+        }
     }
 
     pub fn revoke(&mut self, id: &str) {
