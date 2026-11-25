@@ -2217,8 +2217,9 @@ jobs:
             sleep 20
             # cargo-audit reports RustSec advisories in its own red job but does not cancel the rest: base has open advisories, and cancelling on it killed every PR run within a minute.
             # A core-size job whose only failed step is its budget verdict does not cancel either: that is settled by changing CORE-BUDGET or moving code, and the review wants the test results. Its counter tests, refusals, checkout and timeouts still cancel.
+            # required then fails because that verdict failed. The other jobs have already finished, so cancelling on required does nothing useful.
             counts="$(gh api "$run/attempts/$GITHUB_RUN_ATTEMPT/jobs?per_page=100" --jq \
-              '[.jobs[] | select(.name != "cancel-on-failure" and .name != "cargo-audit") | select(.name != "core-size" or .conclusion != "failure" or ([.steps[]? | select(.conclusion == "failure") | .name] != ["core size against elastos/CORE-BUDGET"]))] | "\(map(select(.conclusion == "failure" or .conclusion == "timed_out")) | length) \(map(select(.status != "completed")) | length)"')" || continue
+              '[.jobs[] | select(.name != "cancel-on-failure" and .name != "cargo-audit" and .name != "required") | select(.name != "core-size" or .conclusion != "failure" or ([.steps[]? | select(.conclusion == "failure") | .name] != ["core size against elastos/CORE-BUDGET"]))] | "\(map(select(.conclusion == "failure" or .conclusion == "timed_out")) | length) \(map(select(.status != "completed")) | length)"')" || continue
             read -r failed pending <<< "$counts"
             if (( failed > 0 )); then
               echo "A job failed; cancelling the rest of this pull request run."
