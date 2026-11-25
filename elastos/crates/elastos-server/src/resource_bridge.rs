@@ -760,6 +760,7 @@ struct ResourceInvokeDispatch {
     request: serde_json::Value,
     resource: String,
     required_action: Action,
+    use_spent: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -910,6 +911,7 @@ fn resource_invoke_dispatch(
         request: body,
         resource,
         required_action,
+        use_spent: false,
     })
 }
 
@@ -1011,6 +1013,9 @@ fn finish_component_invoke(
             "audit".to_string(),
             serde_json::Value::String(audit_id.to_string()),
         );
+        if dispatch.use_spent {
+            object.insert("use_spent".into(), serde_json::Value::Bool(true));
+        }
     }
     response
 }
@@ -1113,6 +1118,11 @@ async fn authorize_and_dispatch_resource_invoke(
             "denied",
             resource_error_response("capability_denied", "Capability validation failed"),
         );
+    }
+    dispatch.use_spent = dispatch.operation == "read";
+    if dispatch.use_spent && dispatch.request["use_grant"].as_bool() == Some(true) {
+        let ok = serde_json::json!({"type": "resource_result", "result": {"status": "ok"}});
+        return finish_component_invoke(bridge_ctx, &audit_id, &dispatch, "ok", ok);
     }
 
     if let Some(refusal) = agents_area_dispatch_refusal(&dispatch) {
@@ -5297,6 +5307,90 @@ pub(crate) mod tests {
             None,
         );
         encode_bridge_capability_token(&token)
+    }
+
+    fn once_read_token(ctx: &BridgeContext, resource: &str) -> (CapabilityToken, String) {
+        let token = ctx.capability_manager.grant(
+            &ctx.capsule_id,
+            ResourceId::new(resource),
+            Action::Read,
+            TokenConstraints::new(0, false, None, Some(1)),
+            None,
+        );
+        let encoded = encode_bridge_capability_token(&token);
+        (token, encoded)
+    }
+
+    fn capability_use_successes(ctx: &BridgeContext, token_id: &str) -> usize {
+        ctx.capability_manager
+            .audit_log()
+            .recent_events(64)
+            .into_iter()
+            .filter(|event| {
+                matches!(
+                    event,
+                    elastos_runtime::primitives::audit::AuditEvent::CapabilityUse {
+                        token_id: id,
+                        success: true,
+                        ..
+                    } if id == token_id
+                )
+            })
+            .count()
+    }
+
+    async fn read_invoke(
+        ctx: &BridgeContext,
+        uri: &str,
+        token: &str,
+        use_grant: bool,
+    ) -> serde_json::Value {
+        let mut body = serde_json::json!({"path": uri});
+        if use_grant {
+            body["use_grant"] = serde_json::Value::Bool(true);
+        }
+        let line = serde_json::json!({
+            "id": 1,
+            "request": {
+                "type": "resource_invoke",
+                "uri": uri,
+                "operation": "read",
+                "token": token,
+                "body": body,
+            }
+        })
+        .to_string();
+        handle_request(&line, &Some(ctx.clone()))
+            .await
+            .expect("the bridge answers")
+    }
+
+    /// One counted grant is one CapabilityUse. A read that fails after validate
+    /// has spent it, and a present of that same grant is the same check.
+    #[tokio::test]
+    async fn a_once_grant_records_exactly_one_capability_use() {
+        let ctx = bridge_context();
+        let uri = "localhost://Local/SharedByLocalUsersAndBots/Home/pic.png";
+        let (token, encoded) = once_read_token(&ctx, uri);
+        let failed = read_invoke(&ctx, uri, &encoded, false).await;
+        assert_eq!(failed["response"]["use_spent"], true, "{failed}");
+        assert_ne!(failed["response"]["type"], "resource_result", "{failed}");
+        assert_eq!(capability_use_successes(&ctx, &token.id().to_string()), 1);
+        assert!(!ctx.capability_manager.can_still_validate(&token).await);
+        let again = read_invoke(&ctx, uri, &encoded, false).await;
+        assert_eq!(again["response"]["code"], "capability_denied", "{again}");
+        assert_eq!(capability_use_successes(&ctx, &token.id().to_string()), 1);
+
+        let (shown, shown_encoded) = once_read_token(&ctx, uri);
+        let present = read_invoke(&ctx, uri, &shown_encoded, true).await;
+        assert_eq!(present["response"]["type"], "resource_result", "{present}");
+        assert_eq!(present["response"]["result"]["status"], "ok", "{present}");
+        assert_eq!(present["response"]["use_spent"], true, "{present}");
+        assert_eq!(capability_use_successes(&ctx, &shown.id().to_string()), 1);
+        assert!(!ctx.capability_manager.can_still_validate(&shown).await);
+        let after = read_invoke(&ctx, uri, &shown_encoded, false).await;
+        assert_eq!(after["response"]["code"], "capability_denied", "{after}");
+        assert_eq!(capability_use_successes(&ctx, &shown.id().to_string()), 1);
     }
 
     #[test]

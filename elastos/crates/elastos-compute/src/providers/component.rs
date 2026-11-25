@@ -30,8 +30,10 @@ use elastos_guest::{
     runtime::{ResponseEnvelope, RuntimeRequest, RuntimeResponse},
 };
 
+use crate::providers::bus2_ui::{Frame, FrameNode};
 use crate::{CapsuleHandle, CapsuleInfo, ComputeProvider};
 
+type HostAnswer = std::result::Result<String, String>;
 use super::{BridgeHostcall, BridgeHostcallAsync, BridgeLegGuard, ComponentBridgeLeg};
 
 bindgen!({
@@ -292,6 +294,7 @@ pub const SEALED_BRIDGE: &str = "this capsule was started with no authority: it 
 pub const STOPPED_BEFORE_RUN: &str = "component was stopped before its run began";
 /// A v2 start that a stop interrupted before the guest was published.
 pub const STOPPED_DURING_START: &str = "v2 guest was stopped before it was published";
+const BOOK_CLOSED: &str = "the grant book is closed";
 
 struct ComponentState {
     /// A sealed activation's call to the bridge is refused here, before any
@@ -2014,21 +2017,17 @@ fn settle_guest_burn(
 /// when `deadline` passes, so a timeout keeps no thread. A call that blocks
 /// this poll runs to the end first. A sync host call, used by tests, runs on
 /// this thread and adds none.
-async fn await_v2_bridge(
-    async_host: &Option<BridgeHostcallAsync>,
-    sync_host: &Option<BridgeHostcall>,
-    line: &str,
-    capsule_id: &str,
-    principal: Option<&str>,
-    deadline: Duration,
-) -> std::result::Result<String, String> {
-    if let Some(call) = async_host {
+async fn await_v2_bridge(bridge: &OpenBridge, deadline: Duration) -> HostAnswer {
+    let line = bridge.line.as_str();
+    let capsule_id = bridge.capsule_id.as_str();
+    let principal = bridge.principal.as_deref();
+    if let Some(call) = &bridge.async_host {
         return match tokio::time::timeout(deadline, call(line, capsule_id, principal)).await {
             Ok(result) => result,
             Err(_) => Err("timeout".into()),
         };
     }
-    let Some(call) = sync_host else {
+    let Some(call) = &bridge.sync_host else {
         return Err("component bridge is not configured".into());
     };
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -2037,6 +2036,25 @@ async fn await_v2_bridge(
         Ok(result) => result,
         Err(_) => Err("panicked".into()),
     }
+}
+
+#[cfg(test)]
+async fn test_bridge(
+    async_host: Option<BridgeHostcallAsync>,
+    sync_host: Option<BridgeHostcall>,
+    deadline: Duration,
+) -> HostAnswer {
+    await_v2_bridge(
+        &OpenBridge {
+            line: String::new(),
+            async_host,
+            sync_host,
+            capsule_id: "capsule".into(),
+            principal: None,
+        },
+        deadline,
+    )
+    .await
 }
 
 fn bridge_failure(err: String) -> elastos::bus::types::BusError {
@@ -2376,6 +2394,7 @@ fn json_body(
 
 /// One v2 host call that has not run yet. The guest awaits it, then checks
 /// the grant again. Dropping it drops the call.
+#[derive(Clone)]
 struct OpenBridge {
     line: String,
     async_host: Option<BridgeHostcallAsync>,
@@ -2544,54 +2563,53 @@ impl ComponentState {
         mut pending: PendingRead,
         raw: std::result::Result<String, String>,
     ) -> V2Result<super::bus2_stream::PreparedRead> {
-        if self.stop_requested.load(Ordering::Acquire)
-            || self.cancel_requested.load(Ordering::Acquire)
-        {
-            return Err(V2BusError::Denied("the grant book is closed".into()));
+        if self.book_closed() {
+            return Err(V2BusError::Denied(BOOK_CLOSED.into()));
         }
-        let response = decode_bridge(raw).map_err(v2_error)?;
-        let (result, audit) = match response {
-            RuntimeResponse::ResourceResult { result, audit } => (result, audit),
-            other => return Err(v2_error(response_error(&other))),
-        };
-        if result.get("status").and_then(|value| value.as_str()) != Some("ok") {
-            let code = result
-                .get("code")
-                .and_then(|value| value.as_str())
-                .unwrap_or("invalid");
-            let message = result
-                .get("message")
-                .and_then(|value| value.as_str())
-                .unwrap_or("read failed");
-            return Err(v2_error(bus_error(code, message)));
+        let book = Arc::clone(&self.grants);
+        let spent = matches!(raw.as_ref(), Ok(text) if runtime_spent_use(text));
+        let grant = pending.grant.clone();
+        let finished = (move || {
+            let response = decode_bridge(raw).map_err(v2_error)?;
+            let (result, audit) = match response {
+                RuntimeResponse::ResourceResult { result, audit } => (result, audit),
+                other => return Err(v2_error(response_error(&other))),
+            };
+            if result.get("status").and_then(|value| value.as_str()) != Some("ok") {
+                let code = result
+                    .get("code")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("invalid");
+                let message = result
+                    .get("message")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("read failed");
+                return Err(v2_error(bus_error(code, message)));
+            }
+            let data = result.get("data").unwrap_or(&result);
+            if book.lock().expect("grant book").blocks_read(&pending.grant) {
+                return Err(V2BusError::Denied("the grant is closed".into()));
+            }
+            let bytes = window_bytes(data)?;
+            if bytes.len() > pending.cap {
+                return Err(V2BusError::Invalid(format!(
+                    "object is {} bytes, over the cap of {}",
+                    bytes.len(),
+                    pending.cap
+                )));
+            }
+            pending.hold.shrink(bytes.len());
+            book.lock().expect("grant book").spend(&pending.grant);
+            Ok(super::bus2_stream::PreparedRead {
+                bytes,
+                audit,
+                hold: pending.hold,
+            })
+        })();
+        if spent && finished.is_err() {
+            self.grants.lock().expect("grant book").spend(&grant);
         }
-        let data = result.get("data").unwrap_or(&result);
-        if self
-            .grants
-            .lock()
-            .expect("grant book")
-            .blocks_read(&pending.grant)
-        {
-            return Err(V2BusError::Denied("the grant is closed".into()));
-        }
-        let bytes = window_bytes(data)?;
-        if bytes.len() > pending.cap {
-            return Err(V2BusError::Invalid(format!(
-                "object is {} bytes, over the cap of {}",
-                bytes.len(),
-                pending.cap
-            )));
-        }
-        pending.hold.shrink(bytes.len());
-        self.grants
-            .lock()
-            .expect("grant book")
-            .spend(&pending.grant);
-        Ok(super::bus2_stream::PreparedRead {
-            bytes,
-            audit,
-            hold: pending.hold,
-        })
+        finished
     }
 
     /// A v2 read on this thread. Tests use it. The guest awaits [`Self::begin_read`].
@@ -2606,33 +2624,54 @@ impl ComponentState {
         self.finish_read(pending, raw)
     }
 
-    /// The book stays locked until the frame is stored. A revoke waits, then
-    /// drops the frame. The frame of a closed or revoked grant is never stored.
-    fn present_document(&mut self, media: &str, document: &[u8]) -> V2Result<()> {
+    fn book_closed(&self) -> bool {
+        self.stop_requested.load(Ordering::Acquire) || self.cancel_requested.load(Ordering::Acquire)
+    }
+
+    fn present_parts(&self, media: &str, document: &[u8]) -> V2Result<(Frame, Vec<OpenBridge>)> {
         if self.sealed {
             return Err(V2BusError::Denied(SEALED_BRIDGE.into()));
         }
-        if self.stop_requested.load(Ordering::Acquire)
-            || self.cancel_requested.load(Ordering::Acquire)
-        {
-            return Err(V2BusError::Denied("the grant book is closed".into()));
+        if self.book_closed() {
+            return Err(V2BusError::Denied(BOOK_CLOSED.into()));
         }
+        let book = self.grants.lock().expect("grant book");
+        let frame = crate::providers::bus2_ui::present_frame(media, document, &book)
+            .map_err(present_error)?;
+        let mut bridges = Vec::new();
+        for node in &frame.nodes {
+            let FrameNode::Image { grant, resource } = node else {
+                continue;
+            };
+            bridges.push(self.open_bridge(format!(
+                r#"{{"id":1,"request":{{"type":"resource_invoke","uri":{resource:?},"operation":"read","token":{grant:?},"body":{{"path":{resource:?},"use_grant":true}}}}}}"#
+            )));
+        }
+        Ok((frame, bridges))
+    }
+
+    fn store_present(&mut self, frame: Frame, raws: &[HostAnswer]) -> V2Result<()> {
         let mut book = self.grants.lock().expect("grant book");
         #[cfg(test)]
         if let Some(gate) = &self.present_gate {
             gate.wait();
         }
-        let frame = crate::providers::bus2_ui::present_frame(media, document, &book)
-            .map_err(present_error)?;
+        let mut n = 0;
         for node in &frame.nodes {
-            if let crate::providers::bus2_ui::FrameNode::Image { grant, .. } = node {
-                book.spend(grant);
+            let FrameNode::Image { grant, .. } = node else {
+                continue;
+            };
+            let text = raws[n]
+                .as_ref()
+                .map_err(|err| V2BusError::Internal(err.clone()))?;
+            n += 1;
+            if !runtime_spent_use(text) || book.blocks_presented_image(grant) {
+                return Err(V2BusError::Denied("the grant is spent".into()));
             }
+            book.spend(grant);
         }
-        if self.stop_requested.load(Ordering::Acquire)
-            || self.cancel_requested.load(Ordering::Acquire)
-        {
-            return Err(V2BusError::Denied("the grant book is closed".into()));
+        if self.book_closed() {
+            return Err(V2BusError::Denied(BOOK_CLOSED.into()));
         }
         self.frames.lock().expect("frames").insert(
             self.capsule_id.clone(),
@@ -2642,6 +2681,13 @@ impl ComponentState {
             },
         );
         Ok(())
+    }
+
+    #[cfg(test)]
+    fn present_document(&mut self, media: &str, document: &[u8]) -> V2Result<()> {
+        let (frame, bridges) = self.present_parts(media, document)?;
+        let raws: Vec<_> = bridges.iter().map(sync_bridge).collect();
+        self.store_present(frame, &raws)
     }
 
     fn open_bridge(&self, line: String) -> OpenBridge {
@@ -2670,6 +2716,10 @@ fn sync_bridge(bridge: &OpenBridge) -> std::result::Result<String, String> {
         Ok(result) => result,
         Err(_) => Err("panicked".into()),
     }
+}
+
+fn runtime_spent_use(raw: &str) -> bool {
+    raw.contains("\"use_spent\":true") || raw.contains("\"use_spent\": true")
 }
 
 fn decode_bridge(
@@ -3043,15 +3093,7 @@ impl v2::elastos::bus::capabilities::HostWithStore<ComponentState> for HasSelf<C
         });
         let _guard = arm_host_wait(opened, &bucket);
         let pending = pending.map_err(v2_error)?;
-        let raw = await_v2_bridge(
-            &pending.bridge.async_host,
-            &pending.bridge.sync_host,
-            &pending.bridge.line,
-            &pending.bridge.capsule_id,
-            pending.bridge.principal.as_deref(),
-            V2_APPROVAL_DEADLINE,
-        )
-        .await;
+        let raw = await_v2_bridge(&pending.bridge, V2_APPROVAL_DEADLINE).await;
         let decided = accessor.with(|mut access| {
             release_access(&mut access);
             access.get().finish_grant(pending, raw)
@@ -3106,15 +3148,7 @@ impl v2::elastos::bus::providers::HostWithStore<ComponentState> for HasSelf<Comp
         let _guard = arm_host_wait(opened, &bucket);
         let pending = pending?;
         let grant_id = pending.grant.clone();
-        let raw = await_v2_bridge(
-            &pending.bridge.async_host,
-            &pending.bridge.sync_host,
-            &pending.bridge.line,
-            &pending.bridge.capsule_id,
-            pending.bridge.principal.as_deref(),
-            V2_HOST_DEADLINE,
-        )
-        .await;
+        let raw = await_v2_bridge(&pending.bridge, V2_HOST_DEADLINE).await;
         let super::bus2_stream::PreparedRead { bytes, audit, hold } =
             accessor.with(|mut access| {
                 release_access(&mut access);
@@ -3158,7 +3192,13 @@ impl v2::elastos::bus::ui::HostWithStore<ComponentState> for HasSelf<ComponentSt
         media_type: String,
         document: Vec<u8>,
     ) -> std::result::Result<(), v2::elastos::bus::types::BusError> {
-        accessor.with(|mut access| access.get().present_document(&media_type, &document))
+        let (frame, bridges) =
+            accessor.with(|mut access| access.get().present_parts(&media_type, &document))?;
+        let mut raws = Vec::with_capacity(bridges.len());
+        for bridge in &bridges {
+            raws.push(await_v2_bridge(bridge, V2_HOST_DEADLINE).await);
+        }
+        accessor.with(|mut access| access.get().store_present(frame, &raws))
     }
 }
 
@@ -3250,15 +3290,7 @@ mod tests {
             })
         });
         let started = Instant::now();
-        let kept = super::await_v2_bridge(
-            &Some(blocking),
-            &None,
-            "",
-            "",
-            None,
-            Duration::from_millis(20),
-        )
-        .await;
+        let kept = super::test_bridge(Some(blocking), None, Duration::from_millis(20)).await;
         assert!(started.elapsed() >= Duration::from_millis(80));
         assert_eq!(kept.unwrap(), "kept");
         let yielding: super::BridgeHostcallAsync = std::sync::Arc::new(|_, _, _| {
@@ -3267,15 +3299,7 @@ mod tests {
                 Ok("cut".to_string())
             })
         });
-        let cut = super::await_v2_bridge(
-            &Some(yielding),
-            &None,
-            "",
-            "",
-            None,
-            Duration::from_millis(20),
-        )
-        .await;
+        let cut = super::test_bridge(Some(yielding), None, Duration::from_millis(20)).await;
         assert_eq!(cut.unwrap_err(), "timeout");
     }
 
@@ -4116,14 +4140,7 @@ mod tests {
             .build()
             .expect("runtime");
         let err = rt
-            .block_on(await_v2_bridge(
-                &Some(slow),
-                &None,
-                "",
-                "capsule",
-                None,
-                Duration::from_millis(40),
-            ))
+            .block_on(test_bridge(Some(slow), None, Duration::from_millis(40)))
             .expect_err("the guest must unblock");
         assert!(err.contains("timeout"), "{err}");
     }
@@ -4136,14 +4153,7 @@ mod tests {
             .build()
             .expect("runtime");
         let err = rt
-            .block_on(await_v2_bridge(
-                &None,
-                &Some(boom),
-                "",
-                "capsule",
-                None,
-                Duration::from_secs(2),
-            ))
+            .block_on(test_bridge(None, Some(boom), Duration::from_secs(2)))
             .expect_err("a panic must not look like success");
         assert!(err.contains("panicked"), "{err}");
         assert!(!err.contains("timeout"), "{err}");
@@ -4626,6 +4636,104 @@ mod tests {
         assert!(format!("{err:?}").contains("expired"), "{err:?}");
     }
 
+    /// A once grant is one count. A read validate spent is spent here too when
+    /// the read then fails. A present spends that same count through the runtime.
+    #[test]
+    fn a_once_grant_is_one_count_for_a_failed_read_and_a_present() {
+        let lines = Arc::new(Mutex::new(Vec::new()));
+        let seen = lines.clone();
+        let mut state = ComponentState::new(
+            Some(Arc::new(move |line, _, _| {
+                seen.lock().expect("lines").push(line.to_string());
+                Ok(use_spent_host()("x", "y", None).expect("host"))
+            })),
+            "capsule".into(),
+            None,
+        );
+        let media = crate::providers::bus2_ui::UI_MEDIA_TYPE;
+        let once = |state: &mut ComponentState, id: &str| {
+            let pending = one_read_grant(state);
+            state
+                .finish_grant(pending, Ok(token_line(id, r#","max_uses":1"#)))
+                .expect("once grant")
+        };
+        let read_of = |id: &str| v2::elastos::bus::types::InvokeRequest {
+            resource: "localhost://Local/a".into(),
+            operation: "read".into(),
+            grant: Some(id.into()),
+            params: br#"{"max_bytes":8}"#.to_vec(),
+        };
+        let image = |id: &str| format!(r#"{{"frame":[{{"image":{{"grant":"{id}"}}}}]}}"#);
+        let failed = once(&mut state, "fail");
+        let pending = state
+            .begin_read(&read_of(&failed.id), false)
+            .expect("begin");
+        state
+            .finish_read(
+                pending,
+                Ok(serde_json::json!({
+                    "id": 1,
+                    "response": {
+                        "type": "error",
+                        "code": "not_found",
+                        "message": "missing",
+                        "use_spent": true
+                    }
+                })
+                .to_string()),
+            )
+            .expect_err("the read fails");
+        assert!(state.grants.lock().expect("grant book").blocks_read("fail"));
+        let err = state
+            .present_document(media, image("fail").as_bytes())
+            .expect_err("a failed read spends the present");
+        assert!(format!("{err:?}").contains("fail is spent"), "{err:?}");
+        assert!(lines.lock().expect("lines").is_empty());
+
+        let big = once(&mut state, "big");
+        let pending = state.begin_read(&read_of(&big.id), false).expect("begin");
+        state
+            .finish_read(pending, Ok(ok_text_read("0123456789")))
+            .expect_err("over the cap");
+        assert!(state.grants.lock().expect("grant book").blocks_read("big"));
+        let err = state
+            .present_document(media, image("big").as_bytes())
+            .expect_err("an oversize read spends the present");
+        assert!(format!("{err:?}").contains("big is spent"), "{err:?}");
+
+        let show = once(&mut state, "show");
+        state
+            .present_document(media, image(&show.id).as_bytes())
+            .expect("present spends through the runtime");
+        let called = lines.lock().expect("lines").clone();
+        assert_eq!(called.len(), 1, "{called:?}");
+        let parsed: serde_json::Value = serde_json::from_str(&called[0]).expect("line");
+        assert_eq!(parsed["request"]["type"], "resource_invoke");
+        assert_eq!(parsed["request"]["operation"], "read");
+        assert_eq!(parsed["request"]["body"]["use_grant"], true);
+        assert_eq!(parsed["request"]["token"], show.id);
+        let refused = state.begin_read(&read_of(&show.id), false);
+        let Err(err) = refused else {
+            panic!("the present spent the read");
+        };
+        assert!(format!("{err:?}").contains("the grant is spent"), "{err:?}");
+
+        state.hostcall = Some(Arc::new(|_, _, _| {
+            Ok(serde_json::json!({
+                "id": 1,
+                "response": {"type": "resource_result", "result": {"status": "ok"}}
+            })
+            .to_string())
+        }));
+        let bare = once(&mut state, "bare");
+        state
+            .present_document(media, image(&bare.id).as_bytes())
+            .expect_err("a present with no runtime spend is refused");
+        state
+            .begin_read(&read_of(&bare.id), false)
+            .expect("the book was not spent alone");
+    }
+
     /// The last use is spent when the read finishes. The product stop still
     /// sends every byte and an ok trailer. The next read is spent. A revoke
     /// in the middle of a stream ends it with an error trailer.
@@ -4707,10 +4815,25 @@ mod tests {
                     "status": "ok",
                     "data": { "content": content, "size": content.len() },
                     "audit": "read-1"
-                }
+                },
+                "use_spent": true
             }
         })
         .to_string()
+    }
+
+    fn use_spent_host() -> BridgeHostcall {
+        Arc::new(|_, _, _| {
+            Ok(serde_json::json!({
+                "id": 1,
+                "response": {
+                    "type": "resource_result",
+                    "result": {"status": "ok"},
+                    "use_spent": true
+                }
+            })
+            .to_string())
+        })
     }
 
     async fn presented_image(
@@ -4730,7 +4853,7 @@ mod tests {
             uses_left,
             expires_at_ms,
         );
-        let mut state = ComponentState::new(None, id.into(), None);
+        let mut state = ComponentState::new(Some(use_spent_host()), id.into(), None);
         state.grants = grants;
         state.frames = provider.frames.clone();
         let doc = format!(r#"{{"frame":[{{"image":{{"grant":"{grant}"}}}},{{"text":"kept"}}]}}"#);
@@ -5667,6 +5790,17 @@ mod tests {
                 seen.fetch_add(1, Ordering::Relaxed);
                 let value: serde_json::Value = serde_json::from_str(line).expect("bridge line");
                 let request = &value["request"];
+                if request["type"].as_str() == Some("resource_invoke") {
+                    return Ok(serde_json::json!({
+                        "id": 1,
+                        "response": {
+                            "type": "resource_result",
+                            "result": {"status": "ok"},
+                            "use_spent": true
+                        }
+                    })
+                    .to_string());
+                }
                 let token = match request["action"].as_str() {
                     Some("read")
                         if request["resource"]
@@ -5784,8 +5918,8 @@ mod tests {
         assert!(matches!(sealed, V2BusError::Denied(message) if message == SEALED_BRIDGE));
         assert_eq!(
             calls.load(Ordering::Relaxed),
-            3,
-            "present does not call the bridge"
+            4,
+            "an image present asks the runtime to spend the grant"
         );
     }
 
@@ -7321,7 +7455,7 @@ mod tests {
     #[test]
     fn a_revoke_during_present_does_not_leave_the_frame() {
         let gate = TestGate::new();
-        let mut state = ComponentState::new(None, "capsule-1".into(), None);
+        let mut state = ComponentState::new(Some(use_spent_host()), "capsule-1".into(), None);
         state.present_gate = Some(gate.clone());
         hold_note_grant(&state.grants);
         let book = state.grants.clone();
@@ -7380,22 +7514,9 @@ mod tests {
                 reason: "to read".into(),
             })
             .expect("the request can start");
-        let bridge_async = pending.bridge.async_host.clone();
-        let bridge_sync = pending.bridge.sync_host.clone();
-        let line = pending.bridge.line.clone();
-        let capsule = pending.bridge.capsule_id.clone();
-        let principal = pending.bridge.principal.clone();
-        let calling = tokio::spawn(async move {
-            await_v2_bridge(
-                &bridge_async,
-                &bridge_sync,
-                &line,
-                &capsule,
-                principal.as_deref(),
-                V2_APPROVAL_DEADLINE,
-            )
-            .await
-        });
+        let bridge = pending.bridge.clone();
+        let calling =
+            tokio::spawn(async move { await_v2_bridge(&bridge, V2_APPROVAL_DEADLINE).await });
         tokio::task::spawn_blocking({
             let gate = gate.clone();
             move || gate.entered()
@@ -7940,16 +8061,9 @@ mod tests {
         let ready: BridgeHostcallAsync =
             Arc::new(|_line, _capsule, _principal| Box::pin(async { Ok("{}".to_string()) }));
         for _ in 0..200 {
-            await_v2_bridge(
-                &Some(ready.clone()),
-                &None,
-                "",
-                "capsule",
-                None,
-                V2_HOST_DEADLINE,
-            )
-            .await
-            .expect("call");
+            test_bridge(Some(ready.clone()), None, V2_HOST_DEADLINE)
+                .await
+                .expect("call");
         }
         let slow: BridgeHostcallAsync = Arc::new(|_line, _capsule, _principal| {
             Box::pin(async {
@@ -7958,16 +8072,9 @@ mod tests {
             })
         });
         for _ in 0..50 {
-            let err = await_v2_bridge(
-                &Some(slow.clone()),
-                &None,
-                "",
-                "capsule",
-                None,
-                Duration::from_millis(20),
-            )
-            .await
-            .expect_err("timeout");
+            let err = test_bridge(Some(slow.clone()), None, Duration::from_millis(20))
+                .await
+                .expect_err("timeout");
             assert!(err.contains("timeout"), "{err}");
         }
         let after = threads();
@@ -8004,16 +8111,9 @@ mod tests {
                 reason: "to read".into(),
             })
             .expect("begin");
-        let raw = await_v2_bridge(
-            &pending.bridge.async_host,
-            &pending.bridge.sync_host,
-            &pending.bridge.line,
-            &pending.bridge.capsule_id,
-            pending.bridge.principal.as_deref(),
-            V2_APPROVAL_DEADLINE,
-        )
-        .await
-        .expect("an answer inside 30s succeeds");
+        let raw = await_v2_bridge(&pending.bridge, V2_APPROVAL_DEADLINE)
+            .await
+            .expect("an answer inside 30s succeeds");
         let grant = state.finish_grant(pending, Ok(raw)).expect("recorded");
         assert_eq!(grant.id, "late-grant");
     }
