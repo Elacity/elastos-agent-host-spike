@@ -2896,12 +2896,21 @@ fn main() {
                 .contains("ok"),
             "{facts}"
         );
+        // The object HTTP route answers the session denial before it consults
+        // the registry, so that body does not prove the provider is absent.
+        // Absence is the registry line in facts["object"].
+        assert_eq!(facts["http_object"], 403, "{facts}");
         assert!(
             facts["http_object_body"]
                 .as_str()
                 .unwrap_or("")
                 .contains("object_session_proxy_denied"),
             "{facts}"
+        );
+        let object_line = facts["object"].as_str().unwrap_or("");
+        assert!(
+            !object_line.contains("protocol_version"),
+            "registry absence is not a running provider: {object_line}"
         );
         assert!(
             facts["http_chain_body"]
