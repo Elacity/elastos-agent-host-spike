@@ -1539,8 +1539,7 @@ async fn managed_frame_nodes(
     let Some(coords) = load_live_runtime_coords(data_dir).await else {
         return Vec::new();
     };
-    let Some((client, shell)) =
-        frame_shell(&coords.api_url, &coords.attach_secret, context).await
+    let Some((client, shell)) = frame_shell(&coords.api_url, &coords.attach_secret, context).await
     else {
         return Vec::new();
     };
