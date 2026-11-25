@@ -1951,7 +1951,7 @@ fn decode_b64(text: &str) -> Option<Vec<u8>> {
             _ => None,
         }
     }
-    if text.len() % 4 != 0 {
+    if !text.len().is_multiple_of(4) {
         return None;
     }
     let mut out = Vec::with_capacity(text.len() / 4 * 3);
