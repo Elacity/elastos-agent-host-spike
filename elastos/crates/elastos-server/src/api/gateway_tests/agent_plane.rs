@@ -1269,25 +1269,6 @@ async fn http_status(url: &str) -> u16 {
     }
 }
 
-#[test]
-fn two_plan_waits_refuse_a_third_start() {
-    let home = std::path::Path::new("/two-plan-waits");
-    let other = std::path::Path::new("/another-home");
-    let first = crate::resource_bridge::hold_plan_wait_for_test(home).expect("first wait");
-    let second = crate::resource_bridge::hold_plan_wait_for_test(home).expect("second wait");
-    assert!(crate::resource_bridge::plan_waits_block_another_start(home));
-    assert!(crate::resource_bridge::hold_plan_wait_for_test(home).is_none());
-    assert!(
-        crate::resource_bridge::hold_plan_wait_for_test(other).is_some(),
-        "another Home's Start is not this Home's wait"
-    );
-    drop(first);
-    drop(second);
-    assert!(!crate::resource_bridge::plan_waits_block_another_start(
-        home
-    ));
-}
-
 #[tokio::test]
 async fn a_stopped_plan_is_not_minted() {
     let home = Home::open();

@@ -598,6 +598,26 @@ async fn an_ended_instance_revokes_its_one_use_plan_token() {
     assert!(!manager.can_still_validate(&token).await);
 }
 
+/// Two waits on one Home fill the cap. A third wait on that Home is refused.
+/// Another Home still takes a wait. Dropping the first two frees the cap.
+#[cfg(test)]
+#[test]
+fn two_plan_waits_refuse_a_third_start() {
+    let home = std::path::Path::new("/two-plan-waits");
+    let other = std::path::Path::new("/another-home");
+    let first = hold_plan_wait_for_test(home).expect("first wait");
+    let second = hold_plan_wait_for_test(home).expect("second wait");
+    assert!(plan_waits_block_another_start(home));
+    assert!(hold_plan_wait_for_test(home).is_none());
+    assert!(
+        hold_plan_wait_for_test(other).is_some(),
+        "another Home's Start is not this Home's wait"
+    );
+    drop(first);
+    drop(second);
+    assert!(!plan_waits_block_another_start(home));
+}
+
 fn plan_result_value(
     data_dir: &Path,
     request_id: &str,

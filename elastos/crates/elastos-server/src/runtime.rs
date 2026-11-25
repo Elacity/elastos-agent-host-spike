@@ -52,13 +52,6 @@ pub(crate) fn release_planted_host_panic() {
 }
 
 #[cfg(test)]
-const _PLANT_HOST_PANIC_LINKED: fn() = plant_host_panic;
-#[cfg(test)]
-const _HOLD_HOST_PANIC_LINKED: fn() = hold_planted_host_panic;
-#[cfg(test)]
-const _RELEASE_HOST_PANIC_LINKED: fn() = release_planted_host_panic;
-
-#[cfg(test)]
 fn take_planted_host_panic() -> bool {
     let planted = PLANT_HOST_PANIC.swap(false, Ordering::AcqRel);
     if planted && HOST_PANIC_HOLD.load(Ordering::Acquire) {
@@ -3710,6 +3703,31 @@ pub(crate) mod tests {
         Component, ComponentImportSection, ComponentTypeRef as EncodedComponentTypeRef,
         ComponentTypeSection, InstanceType,
     };
+
+    #[test]
+    fn the_host_panic_plant_starts_clear() {
+        assert!(!PLANT_HOST_PANIC.load(Ordering::Acquire));
+        assert!(!HOST_PANIC_HOLD.load(Ordering::Acquire));
+        assert!(!HOST_PANIC_RELEASE.load(Ordering::Acquire));
+        // The planters stay distinct and uncalled. Calling one here would arm
+        // a guest that shares this process. A default test build still names
+        // them, so they are not dead code when the agents feature is off.
+        assert!(!std::ptr::fn_addr_eq(
+            plant_host_panic as fn(),
+            hold_planted_host_panic as fn()
+        ));
+        assert!(!std::ptr::fn_addr_eq(
+            hold_planted_host_panic as fn(),
+            release_planted_host_panic as fn()
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_new_runtime_has_no_instance_authority() {
+        let (runtime, _dir) = test_runtime().await;
+        assert!(!runtime.instance_authority_is_set());
+        assert!(runtime.instance_authority_plane().is_none());
+    }
 
     #[tokio::test]
     async fn an_unset_instance_authority_revokes_nothing_and_succeeds() {

@@ -67,11 +67,6 @@ pub(crate) fn dirs_lock_works() -> bool {
 }
 
 #[cfg(test)]
-const _PLANT_TASK_PANIC_LINKED: fn() = plant_task_panic;
-#[cfg(test)]
-const _DIRS_LOCK_LINKED: fn() -> bool = dirs_lock_works;
-
-#[cfg(test)]
 static REGISTRIES: OnceLock<
     Mutex<HashMap<PathBuf, std::sync::Arc<elastos_runtime::provider::ProviderRegistry>>>,
 > = OnceLock::new();
@@ -107,12 +102,6 @@ pub(crate) fn installed_provider_registry(
     registries().lock().ok()?.get(data_dir).cloned()
 }
 
-#[cfg(test)]
-const _INSTALLED_REGISTRY_LINKED: fn(
-    &Path,
-) -> Option<
-    std::sync::Arc<elastos_runtime::provider::ProviderRegistry>,
-> = installed_provider_registry;
 #[cfg(unix)]
 const KIND: &str = "agent";
 #[cfg(unix)]
@@ -802,6 +791,21 @@ mod tests {
     use elastos_runtime::primitives::audit::AuditLog;
     use elastos_runtime::session::{Session, SessionId, SessionType};
     use std::sync::Arc;
+
+    #[test]
+    fn the_plane_helpers_start_disarmed_and_a_fresh_folder_has_no_registry() {
+        assert!(super::dirs_lock_works());
+        let dir = tempfile::tempdir().expect("temp dir");
+        assert!(super::installed_provider_registry(dir.path()).is_none());
+        assert!(!super::PLANT_TASK_PANIC.load(std::sync::atomic::Ordering::Acquire));
+        // The planter stays uncalled. Calling it here would arm a listener
+        // that shares this process. A default test build still names it.
+        fn not_the_planter() {}
+        assert!(!std::ptr::fn_addr_eq(
+            super::plant_task_panic as fn(),
+            not_the_planter as fn()
+        ));
+    }
 
     #[test]
     fn only_the_unbound_attach_shell_may_answer() {
