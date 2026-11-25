@@ -3956,7 +3956,7 @@ mod tests {
         let handle = load_v2_fixture(&provider, bytes).await;
         {
             let mut entries = provider.instances.write().await;
-            entries.get_mut(&handle.id).unwrap().test_max_ticks = V2_TEST_EPOCH_TICKS;
+            entries.get_mut(&handle.id).unwrap().test_max_ticks = 4;
         }
         provider.start(&handle).await.expect("the sleeper starts");
         let started = Instant::now();
