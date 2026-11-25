@@ -5968,6 +5968,38 @@ mod tests {
     }
 
     #[test]
+    fn an_envelope_in_another_field_order_is_rewritten() {
+        let device_key = [0x96; 32];
+        let file_key = expected_localhost_file_key(&device_key);
+        let temp = TempDir::new().unwrap();
+        let root = temp.path();
+        let path = root.join("Users/reordered.bin");
+        let sealed = localhost_provider::encrypt_bytes(&device_key, b"reordered").unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&sealed).unwrap();
+        let object = value.as_object().unwrap();
+        let mut reordered = serde_json::Map::new();
+        reordered.insert("ciphertext".to_string(), object["ciphertext"].clone());
+        reordered.insert("nonce".to_string(), object["nonce"].clone());
+        reordered.insert("version".to_string(), object["version"].clone());
+        let bytes = serde_json::to_vec(&serde_json::Value::Object(reordered)).unwrap();
+        assert!(localhost_provider::is_encrypted_envelope(&bytes));
+        assert!(
+            !bytes.starts_with(br#"{"version":1,"nonce":""#),
+            "the row must not use the compact field order"
+        );
+        assert_eq!(
+            localhost_provider::decrypt_bytes(&device_key, &bytes).unwrap(),
+            b"reordered"
+        );
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, &bytes).unwrap();
+        localhost_provider_bridge_config(root, &device_key).unwrap();
+        assert_ne!(fs::read(&path).unwrap(), bytes);
+        assert_envelope_opens_with_exactly_one_key(&path, b"reordered", &device_key, &file_key);
+        assert_current_marker(root, &device_key);
+    }
+
+    #[test]
     fn rewrite_keeps_an_owner_mode_and_drops_extra_attributes() {
         use std::os::unix::fs::{MetadataExt, PermissionsExt};
         use std::process::Command;

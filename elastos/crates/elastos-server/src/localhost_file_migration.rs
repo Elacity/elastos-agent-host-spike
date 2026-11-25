@@ -9,9 +9,10 @@
 //! SHA-256(`elastos-localhost-file-key-fingerprint-v1\0` || file key). A
 //! different fingerprint leaves files untouched (restored or copied folder,
 //! changed device key). A matching marker still walks, so an older build's
-//! later device-key file is rewritten. Only a file starting with
-//! `{"version":1,"nonce":"` is read past those bytes. Above 32 MiB is refused
-//! by name. The walk logs a count every few seconds. A waiter on
+//! later device-key file is rewritten. A file is an envelope only when
+//! `is_encrypted_envelope` accepts it, in any field order. The walk does not
+//! skip on a fixed prefix. Above 32 MiB is refused by name. The walk logs a
+//! count every few seconds. A waiter on
 //! `identity/localhost-file-key.lock` logs that. `elastos serve` and
 //! `elastos gateway`, including `elastos home --browser`, take `host_lock.rs`
 //! `acquire_host_process_lock` before setup (`serve_cmd.rs` `run_serve`,
@@ -42,10 +43,6 @@ const LOCALHOST_MIGRATION_RECORD: &[u8] = b"elastos-localhost-file-v1\n";
 const LOCALHOST_REWRITE_SUFFIX: &str = ".elastos-localhost-file-key-v1.tmp";
 #[cfg(unix)]
 const LOCALHOST_ENVELOPE_LIMIT: u64 = 32 * 1024 * 1024;
-#[cfg(unix)]
-const ENVELOPE_PREFIX: &[u8] = b"{\"version\":1,\"nonce\":\"";
-#[cfg(unix)]
-const _: () = assert!(ENVELOPE_PREFIX.len() == 22);
 #[cfg(unix)]
 const RECOVERY: &str = "Make it readable or move it out of the folder, then restart.";
 #[cfg(unix)]
@@ -409,18 +406,9 @@ fn migrate_localhost_envelope(
     if meta.len() > LOCALHOST_ENVELOPE_LIMIT {
         return Err(localhost_refused(path, "larger than 32 MiB"));
     }
-    if (meta.len() as usize) < ENVELOPE_PREFIX.len() {
-        return Ok(());
-    }
-    let mut header = [0u8; 22];
-    file.read_exact(&mut header)
-        .with_context(|| localhost_refused(path, "cannot be read"))?;
-    if header.as_slice() != ENVELOPE_PREFIX {
-        return Ok(());
-    }
-    let mut bytes = header.to_vec();
+    let mut bytes = Vec::new();
     file.by_ref()
-        .take(LOCALHOST_ENVELOPE_LIMIT + 1 - header.len() as u64)
+        .take(LOCALHOST_ENVELOPE_LIMIT + 1)
         .read_to_end(&mut bytes)
         .with_context(|| localhost_refused(path, "cannot be read"))?;
     if bytes.len() as u64 > LOCALHOST_ENVELOPE_LIMIT {
