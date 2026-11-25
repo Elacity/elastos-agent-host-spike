@@ -2762,7 +2762,7 @@ function requestHomePasskeyAdd(homeToken, parentOrigin) {
 
 async function refreshRecoveryStatus() {
   if (!recoveryStatusNode || !hasShellAccess()) {
-    return;
+    return null;
   }
   try {
     const status = await fetchJson("/api/auth/recovery/status", {
@@ -2770,10 +2770,12 @@ async function refreshRecoveryStatus() {
     });
     setRecoveryStatus(status);
     focusRequestedSettingsAction();
+    return status;
   } catch (error) {
     showRecoveryStatus("Unavailable", "error");
     showRecoveryNote(String(error.message || error), "error");
     setRecoveryButton("Download Recovery Kit", true);
+    return null;
   }
 }
 
@@ -2889,7 +2891,7 @@ async function onRecoveryDownload(options = {}) {
     return true;
   } catch (error) {
     showRecoveryStatus("Not set", "error");
-    showRecoveryNote(String(error.message || error), "error");
+    showRecoveryNote(recoveryRefusal(error), "error");
     setRecoveryButton("Download Recovery Kit", false);
     return false;
   } finally {
@@ -2919,7 +2921,7 @@ async function onRecoveryImport(event) {
     if (plan.reassign) {
       pendingRecoveryImport = { imported };
       showRecoveryStatus("Review", "muted");
-      showRecoveryPending(plan);
+      showRecoveryPending(plan, status.agents_built === true);
       return;
     }
     pendingRecoveryImport = { imported };
@@ -2931,7 +2933,7 @@ async function onRecoveryImport(event) {
     }
   } catch (error) {
     showRecoveryStatus("Import failed", "error");
-    showRecoveryNote(String(error.message || error), "error");
+    showRecoveryNote(recoveryRefusal(error), "error");
   } finally {
     if (recoveryImportInput) {
       recoveryImportInput.value = "";
@@ -2964,7 +2966,7 @@ async function onRecoveryAttach() {
     }
   } catch (error) {
     showRecoveryStatus("Attach failed", "error");
-    showRecoveryNote(String(error.message || error), "error");
+    showRecoveryNote(recoveryRefusal(error), "error");
     if (recoveryAttachButton) {
       recoveryAttachButton.disabled = false;
     }
@@ -2986,7 +2988,7 @@ async function submitRecoveryImport(body, terminalRetryToken = "") {
   } else if (readText(response.home_token)) {
     apiHomeToken = readText(response.home_token);
   }
-  await refreshRecoveryStatus();
+  const status = await refreshRecoveryStatus();
   await refreshSystemSummary();
   await refreshAccountList();
   notifyHomeSummaryChanged();
@@ -2994,11 +2996,12 @@ async function submitRecoveryImport(body, terminalRetryToken = "") {
     if (recoveryPasswordInput) {
       recoveryPasswordInput.value = "";
     }
+    const agentsBuilt = Boolean(status && status.agents_built === true);
     showRecoveryStatus("", "success");
     showRecoveryNote(
       response.status === "reassigned"
-        ? `Recovered root attached. ${recoveryImportSuccessMessage(response)}`
-        : recoveryImportSuccessMessage(response),
+        ? `Recovered root attached. ${recoveryImportSuccessMessage(response, agentsBuilt)}`
+        : recoveryImportSuccessMessage(response, agentsBuilt),
       "success",
     );
   } else {
@@ -3094,7 +3097,30 @@ function fullRecoveryImportRequest(principalId, localhostRoot, bundle, recoveryP
   return request;
 }
 
-function recoveryImportSuccessMessage(response) {
+const AGENTS_STAY_ON_THIS_HOME = "Agents and their data stay on the Home where you created them; this bundle does not carry them.";
+
+function recoveryRefusal(error) {
+  const message = String((error && error.message) || error || "");
+  const patterns = [
+    /(\d+ agent on this Home would stop opening, so nothing was changed\. Use this Recovery Kit on another Home instead\.|\d+ agents on this Home would stop opening, so nothing was changed\. Use this Recovery Kit on another Home instead\.)/,
+    /(\d+ agent on this Home uses a key this Home can't put in a Recovery Kit yet, so nothing was changed\.|\d+ agents on this Home use a key this Home can't put in a Recovery Kit yet, so nothing was changed\.)/,
+    /(\d+ agents? on this Home would belong to nobody\. This recovery changes the owner id (?:its record names|their records name)\.)/,
+    /(This Home has an agents file this build cannot read, so a root-key change is refused\.)/,
+    /(This Home cannot open the key that wraps an agent's data, so a root-key change is refused\.)/,
+    /(This passkey no longer names the account this recovery started with, so the recovery is refused\.)/,
+    /(The agents lock changed while this Home was taking it, so the write is refused\.)/,
+    /(agents are unavailable: (?:agent file path is not a regular file|agent file mode is wider than 0600|agent file cannot be read|agent file does not parse|agent file holds a field or value this Runtime does not write|agent file schema is unknown|agent file sequence is invalid|agent record version is unknown|agent file holds a record that is not an agent|agent record carries a role an agent never has|agent id is repeated|agent root is repeated|agent id, root or binding is held by a record in the sign-in file|agent storage protection is invalid|agent file custody is unsupported on Windows|agent kind binding mismatch|agent admission kind invalid|agent admission id invalid|agent admission subject mismatch|agent admission root mismatch|agent admission owner missing|agent admission request id missing|agent admission package name missing|agent admission package cid missing|agent admission binding id mismatch))/,
+  ];
+  for (const pattern of patterns) {
+    const found = message.match(pattern);
+    if (found) {
+      return found[1];
+    }
+  }
+  return message;
+}
+
+function recoveryImportSuccessMessage(response, agentsBuilt) {
   const count = Number(response && response.wallet_restore && response.wallet_restore.imported_count
     ? response.wallet_restore.imported_count
     : 0);
@@ -3111,7 +3137,8 @@ function recoveryImportSuccessMessage(response) {
       parts.push("This device is now authorized for your Profile; contacts learn it automatically.");
     }
   }
-  return parts.length > 0 ? `Recovery Kit imported. ${parts.join(" ")}` : "Recovery Kit imported.";
+  const base = parts.length > 0 ? `Recovery Kit imported. ${parts.join(" ")}` : "Recovery Kit imported.";
+  return agentsBuilt ? `${base} ${AGENTS_STAY_ON_THIS_HOME}` : base;
 }
 
 function recoveryImportIsComplete(response) {
@@ -3187,12 +3214,13 @@ function setRecoveryButton(label, disabled) {
   }
 }
 
-function showRecoveryPending(plan) {
+function showRecoveryPending(plan, agentsBuilt) {
   if (!recoveryPendingNode || !recoveryPendingTextNode) {
     return;
   }
   const root = shortText(readText(plan && plan.kitRoot), 14) || "this root";
-  recoveryPendingTextNode.textContent = `This kit belongs to another Home account (${root}). Recover that account with this passkey? The current temporary account will be replaced.`;
+  const stay = agentsBuilt ? ` ${AGENTS_STAY_ON_THIS_HOME}` : "";
+  recoveryPendingTextNode.textContent = `This kit belongs to another Home account (${root}). Recover that account with this passkey? The current temporary account will be replaced.${stay}`;
   recoveryPendingNode.hidden = false;
   showRecoveryNote("", "muted");
   if (recoveryAttachButton) {
@@ -4182,6 +4210,10 @@ function readText(value) {
 
 function publicSystemError(value, fallback) {
   const message = readText(value && value.message ? value.message : value);
+  const named = recoveryRefusal(message);
+  if (named && (named !== message || recoveryRefusal(`request failed: 409 ${message}`) === message)) {
+    return named;
+  }
   if (!message || /\b(schema|projection|provider|adapter|capability|affordance|runtime-owned|launch token|hostcall|request failed|failed to fetch|unauthorized|forbidden|[45]\d\d)\b|engine_[a-z_]+/i.test(message)) {
     return fallback;
   }
