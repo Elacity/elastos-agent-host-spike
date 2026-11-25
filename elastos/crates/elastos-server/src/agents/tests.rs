@@ -135,6 +135,7 @@ enum SpendFault {
     None,
     AppendFails,
     StopBeforeFile,
+    FileWriteFails,
 }
 
 thread_local! {
@@ -161,12 +162,22 @@ pub(crate) fn stop_before_spend_file() -> SpendFaultGuard {
     SpendFaultGuard
 }
 
+/// The next charge appends the spend event and then the file write fails.
+pub(crate) fn fail_spend_file_write() -> SpendFaultGuard {
+    SPEND_FAULT.with(|fault| fault.set(SpendFault::FileWriteFails));
+    SpendFaultGuard
+}
+
 pub(crate) fn spend_append_fails() -> bool {
     SPEND_FAULT.with(|fault| fault.get() == SpendFault::AppendFails)
 }
 
 pub(crate) fn spend_stops_before_file() -> bool {
     SPEND_FAULT.with(|fault| fault.get() == SpendFault::StopBeforeFile)
+}
+
+pub(crate) fn spend_file_write_fails() -> bool {
+    SPEND_FAULT.with(|fault| fault.get() == SpendFault::FileWriteFails)
 }
 
 /// Retires a planted agent. The spent total stays on the record.
@@ -180,6 +191,41 @@ pub(crate) fn retire_for_dispatch(data_dir: &Path, owner_id: &str, agent_id: &st
         session_id: SESSION_ID,
     };
     retire_in_any_build(data_dir, &caller, agent_id, 20).unwrap();
+}
+
+/// Turns one planted agent's `active` flag on or off. The feature gate is not involved.
+pub(crate) fn set_dispatch_active(data_dir: &Path, owner_id: &str, agent_id: &str, active: bool) {
+    let owner = crate::auth::stored_principal_record(data_dir, owner_id)
+        .unwrap()
+        .unwrap();
+    let caller = Caller {
+        principal_id: owner_id,
+        proof_binding_id: &owner.proof_binding_id,
+        session_id: SESSION_ID,
+    };
+    let opened = open(data_dir, true).unwrap();
+    let mut after = opened.file.clone();
+    let agent = after
+        .agents
+        .iter_mut()
+        .find(|agent| agent.record.principal_id == agent_id)
+        .unwrap();
+    if agent.active == active {
+        return;
+    }
+    agent.active = active;
+    agent.record.updated_at = 30;
+    after.sequence += 1;
+    write(
+        data_dir,
+        &opened,
+        Operation::SetActive,
+        &after,
+        &caller,
+        agent_id,
+        30,
+    )
+    .unwrap();
 }
 
 pub(crate) fn stop_dispatch_agent(data_dir: &Path, owner_id: &str, agent_id: &str, disable: bool) {

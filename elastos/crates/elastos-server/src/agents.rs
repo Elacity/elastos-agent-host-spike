@@ -677,6 +677,101 @@ fn hosted_owner_still_approved(data_dir: &Path, agent_id: &str, offer_id: Option
     }
 }
 
+/// The agent is still active for this owner, and a hosted offer is still approved.
+/// The agent lock is held for both reads.
+pub(crate) fn hosted_charge_still_standing(
+    data_dir: &Path,
+    owner: &str,
+    agent_id: &str,
+    offer_id: &str,
+) -> Result<(), SpendRefusal> {
+    let opened = open(data_dir, true).map_err(|err| SpendRefusal::Name(reason_of(&err)))?;
+    agent_of(&opened.file, agent_id, Some(owner)).map_err(SpendRefusal::Name)?;
+    if !hosted_owner_still_approved(data_dir, agent_id, Some(offer_id)) {
+        return Err(SpendRefusal::HostedRun);
+    }
+    Ok(())
+}
+
+/// Writes each active agent's stored total up to its signed spend floor.
+/// A file that already holds that floor is left as it is.
+pub fn raise_spend_file_to_signed_floor(data_dir: &Path) -> Result<(), &'static str> {
+    if !build_allows_for_home(data_dir) {
+        return Ok(());
+    }
+    for _ in 0..64 {
+        let opened = open(data_dir, true).map_err(|err| reason_of(&err))?;
+        let Some((agent_id, owner, total)) = agent_behind_its_floor(data_dir, &opened)? else {
+            return Ok(());
+        };
+        let proof = opened
+            .owner_file
+            .iter()
+            .find(|person| person.principal_id == owner)
+            .map(|person| person.proof_binding_id.clone())
+            .ok_or(NO_OWNER)?;
+        let mut after = opened.file.clone();
+        after.sequence = after.sequence.checked_add(1).ok_or(BAD_SEQUENCE)?;
+        let slot = after
+            .agents
+            .iter_mut()
+            .find(|agent| agent.record.principal_id == agent_id)
+            .ok_or(NO_SUCH_AGENT)?;
+        slot.model_tokens_spent = total;
+        let caller = Caller {
+            principal_id: &owner,
+            proof_binding_id: &proof,
+            session_id: "",
+        };
+        let now = crate::auth::now_ts();
+        write(
+            data_dir,
+            &opened,
+            Operation::Charge,
+            &after,
+            &caller,
+            &agent_id,
+            now,
+        )
+        .map_err(|_| CANNOT_WRITE)?;
+        let checked = open(data_dir, false).map_err(|err| reason_of(&err))?;
+        let written = checked
+            .file
+            .agents
+            .iter()
+            .find(|agent| agent.record.principal_id == agent_id)
+            .map(|agent| agent.model_tokens_spent)
+            .unwrap_or(0);
+        if written < total {
+            return Err(CANNOT_WRITE);
+        }
+    }
+    Err(CANNOT_WRITE)
+}
+
+fn agent_behind_its_floor(
+    data_dir: &Path,
+    opened: &Opened,
+) -> Result<Option<(String, String, u64)>, &'static str> {
+    for agent in &opened.file.agents {
+        if !agent.active || agent.record.retired_at.is_some() {
+            continue;
+        }
+        let Some(owner) = agent.record.owner.clone().filter(|id| !id.is_empty()) else {
+            continue;
+        };
+        let floor = crate::model_budget::signed_spend_floor(
+            data_dir,
+            &agent.record.principal_id,
+            agent.model_tokens_spent,
+        )?;
+        if floor > agent.model_tokens_spent {
+            return Ok(Some((agent.record.principal_id.clone(), owner, floor)));
+        }
+    }
+    Ok(None)
+}
+
 pub(crate) fn charge_model_spend(
     data_dir: &Path,
     owner: &str,
@@ -689,6 +784,7 @@ pub(crate) fn charge_model_spend(
     if !build_allows_for_home(data_dir) {
         return Err(SpendRefusal::Name(FEATURE_OFF));
     }
+    raise_spend_file_to_signed_floor(data_dir).map_err(SpendRefusal::Name)?;
     let opened = open(data_dir, true).map_err(|err| SpendRefusal::Name(reason_of(&err)))?;
     let agent = agent_of(&opened.file, agent_id, Some(owner)).map_err(SpendRefusal::Name)?;
     let floor =
@@ -797,6 +893,10 @@ fn write(
             anyhow::bail!("spend event was not appended");
         }
         crate::auth::append_audit_event(data_dir, event)?;
+        #[cfg(all(test, unix))]
+        if tests::spend_file_write_fails() {
+            return Err(Named(CANNOT_WRITE).into());
+        }
         #[cfg(all(test, unix))]
         if tests::spend_stops_before_file() {
             return Ok(());

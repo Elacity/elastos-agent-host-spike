@@ -263,6 +263,7 @@ impl ModelBudget {
     }
 
     pub(crate) fn bind_home(&self, data_dir: PathBuf) {
+        let _ = crate::agents::raise_spend_file_to_signed_floor(&data_dir);
         *self.home.lock().unwrap_or_else(PoisonError::into_inner) = Some(data_dir);
     }
 
@@ -334,13 +335,21 @@ impl ModelBudget {
         let fingerprint = HoldFingerprint::of(run, tokens);
         // A retry of the same run id after a restart is charged again: holds do not survive the process.
         if let Some(held) = account.holds.get(&run.id) {
-            return if held == &fingerprint {
-                Ok(Hold {
-                    tokens: held.tokens,
-                })
-            } else {
-                Err(Refusal::ConflictingRetry)
-            };
+            if held != &fingerprint {
+                return Err(Refusal::ConflictingRetry);
+            }
+            let tokens = held.tokens;
+            if let (Some(dir), Some(offer_id)) = (home.as_deref(), offer_id) {
+                let owner = account.owner.clone().ok_or(Refusal::Record(NO_OWNER))?;
+                let agent_id = agent.principal().to_string();
+                crate::agents::hosted_charge_still_standing(dir, &owner, &agent_id, offer_id)
+                    .map_err(|refusal| match refusal {
+                        SpendRefusal::HostedRun => Refusal::HostedRun,
+                        SpendRefusal::Name(name) => Refusal::Record(name),
+                        SpendRefusal::Over(_, _, _, _) => Refusal::HostedRun,
+                    })?;
+            }
+            return Ok(Hold { tokens });
         }
         if account.holds.len() >= MAX_HOLDS_PER_AGENT {
             return Err(Refusal::HoldsFull);
@@ -1278,5 +1287,358 @@ mod tests {
             signature: None,
         };
         crate::auth::append_audit_event(dir, event).unwrap();
+    }
+
+    /// Six bound charges share one file cap. Four holds of ten fill a ceiling of forty.
+    #[cfg(unix)]
+    #[test]
+    fn concurrent_bound_reserves_share_one_cap() {
+        let (dir, _owner, agent) = planted_agent();
+        let budget = Arc::new(ModelBudget::new());
+        budget.bind_home(dir.path().to_path_buf());
+        let key = AgentKey::for_test(&agent);
+        budget.open(&key, 40).unwrap();
+        let start = Arc::new(Barrier::new(6));
+        let racers: Vec<_> = (0..6)
+            .map(|i| {
+                let (budget, start, key) = (budget.clone(), start.clone(), key.clone());
+                std::thread::spawn(move || {
+                    start.wait();
+                    budget
+                        .reserve(&key, &run_key(key.principal(), &i.to_string()), 10)
+                        .is_ok()
+                })
+            })
+            .collect();
+        let won = racers
+            .into_iter()
+            .map(|racer| racer.join().unwrap())
+            .filter(|ok| *ok)
+            .count();
+        assert_eq!(won, 4, "four holds of ten fill the ceiling exactly");
+        assert_eq!(stored_spent(dir.path(), &agent), 40);
+        assert_eq!(
+            budget.reserve(&key, &run_key(&agent, "over"), 1),
+            Err(over_cap(1, 40, 40))
+        );
+    }
+
+    /// The spend event is appended and the file write then fails. A later open
+    /// writes the file up to that event before the next charge.
+    #[cfg(unix)]
+    #[test]
+    fn a_file_write_after_the_spend_append_refuses_and_the_next_open_heals() {
+        let (dir, _owner, agent) = planted_agent();
+        let (budget, key) = opened_on(dir.path(), &agent, 100);
+        budget.reserve(&key, &run_key(&agent, "first"), 40).unwrap();
+        let held = budget.held_for_test(&key);
+        let file_before = file_spent(dir.path(), &agent);
+        let rows = spend_rows(dir.path(), &agent);
+        let _fault = crate::agents::tests::fail_spend_file_write();
+        let err = budget.reserve(&key, &run_key(&agent, "fail-write"), 10);
+        assert!(
+            matches!(err, Err(Refusal::Record(crate::agents::CANNOT_WRITE))),
+            "{err:?}"
+        );
+        drop(_fault);
+        assert_eq!(budget.held_for_test(&key), held);
+        assert_eq!(file_spent(dir.path(), &agent), file_before);
+        assert_eq!(spend_rows(dir.path(), &agent), rows + 1);
+        let floor = event_spent(dir.path(), &agent);
+        assert!(floor > file_before, "{floor} {file_before}");
+        drop(budget);
+        let healed = ModelBudget::new();
+        healed.bind_home(dir.path().to_path_buf());
+        assert_eq!(file_spent(dir.path(), &agent), floor);
+    }
+
+    /// A crash leaves the spend event ahead of the file. Home start writes the
+    /// file up to that event, and 600 later rows do not lower the next charge.
+    #[cfg(unix)]
+    #[test]
+    fn a_crash_after_the_spend_append_is_healed_before_later_rows() {
+        let (dir, _owner, agent) = planted_agent();
+        let (budget, key) = opened_on(dir.path(), &agent, 100);
+        budget.reserve(&key, &run_key(&agent, "first"), 40).unwrap();
+        let _fault = crate::agents::tests::stop_before_spend_file();
+        budget.reserve(&key, &run_key(&agent, "crash"), 40).unwrap();
+        let floor = event_spent(dir.path(), &agent);
+        drop(_fault);
+        drop(budget);
+        assert!(file_spent(dir.path(), &agent) < floor, "the file write ran");
+        let healed = ModelBudget::new();
+        healed.bind_home(dir.path().to_path_buf());
+        assert_eq!(file_spent(dir.path(), &agent), floor);
+        for index in 0..600 {
+            let event = elastos_runtime::auth::RuntimeAuditEventV1 {
+                schema: elastos_runtime::auth::RuntimeAuditEventV1::SCHEMA.to_string(),
+                event_id: format!("audit:later:{index}"),
+                event_type: "home.marker".to_string(),
+                principal_id: None,
+                proof_binding_id: None,
+                session_id: None,
+                challenge_id: None,
+                capsule_id: None,
+                result: "ok".to_string(),
+                reason: "later row".to_string(),
+                occurred_at: crate::auth::now_ts(),
+                signer_did: None,
+                signature: None,
+            };
+            crate::auth::append_audit_event(dir.path(), event).unwrap();
+        }
+        assert!(
+            audit_of(dir.path()).iter().all(|event| {
+                event.event_type != "agent.record.spend"
+                    || event.principal_id.as_deref() != Some(agent.as_str())
+            }),
+            "the spend event was still in the retained rows"
+        );
+        assert_eq!(file_spent(dir.path(), &agent), floor);
+        let (next, key) = opened_on(dir.path(), &agent, 100);
+        next.reserve(&key, &run_key(&agent, "after"), 1).unwrap();
+        assert!(file_spent(dir.path(), &agent) > floor);
+    }
+
+    /// The same run is refused when the agent is turned off, and again when the
+    /// owner's passkey is revoked. Neither retry writes the file.
+    #[cfg(unix)]
+    #[test]
+    fn an_identical_retry_rechecks_standing_and_approval() {
+        let bridge = include_str!("resource_bridge.rs");
+        let at = bridge.find("match reserve_model_create(").expect("reserve");
+        let send = bridge[at..].find(".send_raw(").expect("send");
+        assert!(
+            bridge[at..at + send].contains("return finish_component_invoke"),
+            "a refused reserve returns before the provider send"
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let (owner_id, owner_proof) = enroll_passkey_owner(dir.path());
+        let agent = crate::agents::tests::plant_for_dispatch(dir.path(), &owner_id, &owner_id);
+        crate::api::plant_offer_approval(
+            dir.path(),
+            "model:openrouter",
+            &owner_proof,
+            now_ms() + 60_000,
+        );
+        let (budget, key) = opened_on(dir.path(), &agent, 100);
+        let retry = run_key(&agent, "same-request");
+        budget
+            .reserve_for_offer(&key, &retry, 40, Some("model:openrouter"))
+            .unwrap();
+        let spent = file_spent(dir.path(), &agent);
+        crate::agents::tests::set_dispatch_active(dir.path(), &owner_id, &agent, false);
+        let off = budget.reserve_for_offer(&key, &retry, 40, Some("model:openrouter"));
+        assert!(
+            matches!(off, Err(Refusal::Record(crate::agents::NOT_ACTIVE))),
+            "{off:?}"
+        );
+        assert_eq!(file_spent(dir.path(), &agent), spent);
+        crate::agents::tests::set_dispatch_active(dir.path(), &owner_id, &agent, true);
+        crate::auth::revoke_passkey_binding(dir.path(), &owner_proof, crate::auth::now_ts())
+            .unwrap();
+        let revoked = budget.reserve_for_offer(&key, &retry, 40, Some("model:openrouter"));
+        assert!(matches!(revoked, Err(Refusal::HostedRun)), "{revoked:?}");
+        assert_eq!(file_spent(dir.path(), &agent), spent);
+    }
+
+    /// Two admin owners keep separate offers and separate ceilings.
+    #[cfg(unix)]
+    #[test]
+    fn two_admin_owners_cannot_spend_each_others_offer_or_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let (owner_a, proof_a) = enroll_passkey_owner(dir.path());
+        let (owner_b, proof_b) = second_passkey_admin(dir.path(), &owner_a);
+        let agent_a = crate::agents::tests::plant_for_dispatch(dir.path(), &owner_a, &owner_a);
+        let agent_b =
+            crate::agents::tests::plant_another_dispatch(dir.path(), &owner_b, "request-b");
+        plant_two_approvals(dir.path(), &proof_a, &proof_b);
+        let budget = ModelBudget::new();
+        budget.bind_home(dir.path().to_path_buf());
+        let key_a = AgentKey::for_test(&agent_a);
+        let key_b = AgentKey::for_test(&agent_b);
+        budget.open(&key_a, 40).unwrap();
+        budget.open(&key_b, 40).unwrap();
+        budget
+            .reserve_for_offer(
+                &key_a,
+                &run_key(&agent_a, "a-own"),
+                10,
+                Some("model:openrouter"),
+            )
+            .unwrap();
+        assert_eq!(stored_spent(dir.path(), &agent_a), 10);
+        let cross = budget.reserve_for_offer(
+            &key_b,
+            &run_key(&agent_b, "b-on-a"),
+            10,
+            Some("model:openrouter"),
+        );
+        assert!(matches!(cross, Err(Refusal::HostedRun)), "{cross:?}");
+        assert_eq!(stored_spent(dir.path(), &agent_a), 10);
+        assert_eq!(stored_spent(dir.path(), &agent_b), 0);
+        budget
+            .reserve_for_offer(
+                &key_b,
+                &run_key(&agent_b, "b-own"),
+                10,
+                Some("model:venice"),
+            )
+            .unwrap();
+        assert_eq!(stored_spent(dir.path(), &agent_b), 10);
+        assert_eq!(stored_spent(dir.path(), &agent_a), 10);
+        let reverse = budget.reserve_for_offer(
+            &key_a,
+            &run_key(&agent_a, "a-on-b"),
+            1,
+            Some("model:venice"),
+        );
+        assert!(matches!(reverse, Err(Refusal::HostedRun)), "{reverse:?}");
+        assert_eq!(stored_spent(dir.path(), &agent_b), 10);
+        budget
+            .reserve_for_offer(
+                &key_a,
+                &run_key(&agent_a, "a-fill"),
+                30,
+                Some("model:openrouter"),
+            )
+            .unwrap();
+        assert_eq!(stored_spent(dir.path(), &agent_a), 40);
+        assert_eq!(
+            budget.reserve_for_offer(
+                &key_a,
+                &run_key(&agent_a, "a-over"),
+                1,
+                Some("model:openrouter"),
+            ),
+            Err(over_cap(1, 40, 40))
+        );
+        budget
+            .reserve_for_offer(
+                &key_b,
+                &run_key(&agent_b, "b-more"),
+                10,
+                Some("model:venice"),
+            )
+            .unwrap();
+        assert_eq!(stored_spent(dir.path(), &agent_b), 20);
+        assert_eq!(stored_spent(dir.path(), &agent_a), 40);
+    }
+
+    #[cfg(unix)]
+    fn file_spent(dir: &std::path::Path, agent: &str) -> u64 {
+        let path = crate::agents::agent_file_path(dir).unwrap();
+        let value: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        value["agents"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["record"]["principal_id"] == agent)
+            .and_then(|row| row["model_tokens_spent"].as_u64())
+            .unwrap_or(0)
+    }
+
+    #[cfg(unix)]
+    fn now_ms() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64
+    }
+
+    #[cfg(unix)]
+    fn enroll_passkey_owner(dir: &std::path::Path) -> (String, String) {
+        let mut identity = elastos_identity::IdentityManager::new(dir.to_path_buf()).unwrap();
+        let secret = crate::auth::random_secret_hex();
+        let owner = crate::auth::OwnerAdmission {
+            origin: "http://localhost:61971",
+            rp_id: "localhost",
+            claimant: &secret,
+            loopback: true,
+        };
+        let (_, options) = crate::auth::begin_owner_enrollment(
+            dir,
+            &mut identity,
+            &owner,
+            "owner",
+            crate::auth::now_ts(),
+        )
+        .unwrap()
+        .unwrap();
+        let attestation = crate::auth::owner_attestation_for_test(
+            &options.unwrap().public_key.challenge,
+            owner.rp_id,
+            owner.origin,
+        );
+        crate::auth::complete_owner_enrollment(
+            dir,
+            &mut identity,
+            &owner,
+            "owner",
+            Some(&attestation),
+            None,
+            crate::auth::now_ts(),
+        )
+        .unwrap()
+        .unwrap();
+        let principal = crate::auth::active_passkey_principals(dir)
+            .unwrap()
+            .into_iter()
+            .find(crate::auth::is_admin)
+            .unwrap();
+        (principal.principal_id, principal.proof_binding_id)
+    }
+
+    #[cfg(unix)]
+    fn second_passkey_admin(dir: &std::path::Path, first_id: &str) -> (String, String) {
+        let mut state = crate::auth::load_auth_state(dir).unwrap();
+        let mut second = state
+            .principals
+            .iter()
+            .find(|principal| principal.principal_id == first_id)
+            .unwrap()
+            .clone();
+        second.principal_id = format!("{first_id}-b");
+        second.localhost_root = crate::auth::principal_localhost_root(&second.principal_id);
+        let mut passkey = second.proof_binding.passkey.clone().unwrap();
+        passkey.credential_id = format!("{}-b", passkey.credential_id);
+        second.proof_binding = elastos_runtime::auth::ProofBinding::passkey_webauthn(passkey);
+        second.proof_binding_id = second.proof_binding.id();
+        second.role = crate::auth::RuntimePrincipalRole::Admin;
+        let id = second.principal_id.clone();
+        let proof = second.proof_binding_id.clone();
+        state.principals.push(second);
+        crate::auth::save_auth_state(dir, &state, None).unwrap();
+        crate::auth::store_test_principal_root_protection(dir, &id);
+        (id, proof)
+    }
+
+    #[cfg(unix)]
+    fn plant_two_approvals(dir: &std::path::Path, proof_a: &str, proof_b: &str) {
+        let root = dir.join("providers").join("model-provider");
+        let config = root.join("config.json");
+        let decisions = root.join("egress-decisions.json");
+        let expires = now_ms() + 60_000;
+        crate::api::plant_offer_approval(dir, "model:openrouter", proof_a, expires);
+        let config_a = std::fs::read(&config).unwrap();
+        let decisions_a = std::fs::read(&decisions).unwrap();
+        crate::api::plant_offer_approval(dir, "model:venice", proof_b, expires);
+        let mut offers: serde_json::Value = serde_json::from_slice(&config_a).unwrap();
+        let offers_b: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&config).unwrap()).unwrap();
+        offers["offers"]
+            .as_array_mut()
+            .unwrap()
+            .push(offers_b["offers"][0].clone());
+        crate::auth::atomic_write(&config, &serde_json::to_vec_pretty(&offers).unwrap()).unwrap();
+        let mut rows: serde_json::Value = serde_json::from_slice(&decisions_a).unwrap();
+        let rows_b: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&decisions).unwrap()).unwrap();
+        rows["decisions"][0]["id"] = serde_json::Value::String("model-egress-plant-a".into());
+        let mut row_b = rows_b["decisions"][0].clone();
+        row_b["id"] = serde_json::Value::String("model-egress-plant-b".into());
+        rows["decisions"].as_array_mut().unwrap().push(row_b);
+        crate::auth::atomic_write(&decisions, &serde_json::to_vec_pretty(&rows).unwrap()).unwrap();
     }
 }
