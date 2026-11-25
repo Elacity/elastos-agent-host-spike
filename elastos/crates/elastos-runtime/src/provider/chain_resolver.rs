@@ -525,48 +525,20 @@ mod tests {
             format!("0x{}", hex::encode(key.verifying_key().to_bytes()))
         }
 
+        /// Product settings live in a fixture file: the generic Runtime names
+        /// no product.
+        fn second_init_settings() -> serde_json::Value {
+            let text = std::fs::read_to_string(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../tests/fixtures/chain-second-init.json"
+            ))
+            .unwrap();
+            serde_json::from_str(&text.replace("__ISSUER__", &issuer_hex())).unwrap()
+        }
+
         fn protected_config() -> ProviderConfig {
             ProviderConfig {
-                extra: serde_json::json!({
-                    "protected_content_runtime_issuer": issuer_hex(),
-                    "protected_content_network": {
-                        "id": "esc-mainnet",
-                        "display_name": "Protected ESC",
-                        "kind": "evm_json_rpc",
-                        "chain_id": 20,
-                        "native_symbol": "ELA",
-                        "provider": "operator",
-                        "mainnet": true,
-                        "explorer_url": null,
-                        "rpc_url": "https://primary.example.invalid",
-                        "rights_methods": [{
-                            "id": "has_access_by_content_id",
-                            "contract": "0x0000000000000000000000000000000000000001",
-                            "abi": "has_access_by_content_id_address_bytes16",
-                            "selector": "0x12345678",
-                            "protected_content_policies": [{
-                                "action": "view",
-                                "evidence_rpc_urls": [
-                                    "https://rights-a.example.invalid",
-                                    "https://rights-b.example.invalid"
-                                ]
-                            }]
-                        }],
-                        "protected_content_creator_mint": {
-                            "ledger": "0x0000000000000000000000000000000000000022",
-                            "pay_token": "0x0000000000000000000000000000000000000033",
-                            "asset_created_emitter": "0x0000000000000000000000000000000000000044",
-                            "abi": "elacity_mint_v1"
-                        },
-                        "protected_content_market": {
-                            "authority_gateway_contract": "0x00000000000000000000000000000000000000aa",
-                            "evidence_rpc_urls": [
-                                "https://market-a.example.invalid",
-                                "https://market-b.example.invalid"
-                            ]
-                        }
-                    }
-                }),
+                extra: second_init_settings(),
                 ..ProviderConfig::default()
             }
         }
