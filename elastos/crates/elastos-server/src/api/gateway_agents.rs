@@ -456,6 +456,15 @@ fn stop_found_no_live_guest(error: &anyhow::Error) -> bool {
     })
 }
 
+/// A stop that found nothing to end. That is a refusal, not a failed stop,
+/// so the signed chain does not gain an `agent.stopped` result `failed`.
+fn stop_is_a_refusal(error: &anyhow::Error) -> bool {
+    let text = error.to_string();
+    text == crate::api::agent_plane::TASK_ENDED
+        || text == "agent runtime is not running"
+        || stop_found_no_live_guest(error)
+}
+
 pub(super) async fn agents_rename(
     State(state): State<GatewayState>,
     headers: HeaderMap,
@@ -540,7 +549,10 @@ pub(super) async fn agents_activate(
                         );
                     }
                 }
-                Err(error) if error.to_string() == crate::api::agent_plane::TASK_ENDED => {}
+                // No guest is running: the record is off, and that is the
+                // whole effect. A runtime that failed while a guest was up
+                // still signs `failed` and answers the error.
+                Err(error) if stop_is_a_refusal(&error) => {}
                 Err(error) => {
                     let _ = append_agent_lifecycle_audit(
                         &state.data_dir,
@@ -1008,6 +1020,11 @@ async fn stop_agent(
     }
     let outcome = match stop_runtime_agent(&state.data_dir, &request.agent_id).await {
         Ok(outcome) => outcome,
+        // A refusal (no session, already stopped, the plane is down or its
+        // task has ended) is not a failed stop. The requested row is already
+        // signed. A runtime that failed while a guest was up still signs
+        // `failed`.
+        Err(error) if stop_is_a_refusal(&error) => return Err(error),
         Err(error) => {
             let _ = append_agent_lifecycle_audit(
                 &state.data_dir,

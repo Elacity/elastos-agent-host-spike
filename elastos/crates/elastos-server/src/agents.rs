@@ -645,10 +645,21 @@ fn write(
 
 /// An agent that is off, retired, or on a Home with agents off cannot ask,
 /// be granted, or use its storage. A principal that is not an agent is left
-/// alone, so a person's capsule is unchanged.
+/// alone, so a person's capsule is unchanged. A data directory with no agent
+/// file is that case: opening it would refuse the ask when the Home's sign-in
+/// file is absent, and a person's capsule would change.
 pub(crate) fn refuse_inactive_agent(data_dir: &Path, principal_id: &str) -> anyhow::Result<()> {
     if principal_id.is_empty() || !build_allows_for_home(data_dir) {
         return Ok(());
+    }
+    let path = match agent_file_path(data_dir) {
+        Ok(path) => path,
+        Err(_) => return Ok(()),
+    };
+    match read_agent_file(data_dir, &path) {
+        Ok(None) => return Ok(()),
+        Ok(Some(_)) => {}
+        Err(reason) => return refused(format!("agents are unavailable: {reason}")),
     }
     let opened = open(data_dir, false)?;
     let Some(agent) = opened
@@ -1263,16 +1274,36 @@ pub(crate) fn stored_agent_for_root(
         .cloned())
 }
 
+/// The agent file's record for one principal and root, including an agent
+/// that is off or retired and a Home that has turned agents off. The key
+/// stays with the record, so a write does not fall through to plaintext.
+/// A grant still uses [`stored_agent_for_root`], which returns none unless
+/// the agent is on.
+fn stored_agent_for_protection(
+    data_dir: &Path,
+    principal_id: &str,
+    localhost_root: &str,
+) -> anyhow::Result<Option<StoredAgent>> {
+    if !build_allows_for_home(data_dir) {
+        return Ok(None);
+    }
+    let opened = open(data_dir, false)?;
+    Ok(opened.file.agents.into_iter().find(|agent| {
+        agent.record.principal_id == principal_id && agent.record.localhost_root == localhost_root
+    }))
+}
+
 /// The agent file's stored protection for one principal and root, or `None`.
 /// The sign-in file holds none for an agent, so this is where the bridge's
-/// protection reader finds one.
+/// protection reader finds one. An agent that is off still has its key: the
+/// bytes stay sealed, and the ask is refused separately.
 pub(crate) fn stored_protection(
     data_dir: &Path,
     principal_id: &str,
     localhost_root: &str,
 ) -> anyhow::Result<Option<PrincipalRootProtectionV1>> {
     Ok(
-        stored_agent_for_root(data_dir, principal_id, localhost_root)?
+        stored_agent_for_protection(data_dir, principal_id, localhost_root)?
             .map(|agent| agent.protection),
     )
 }
@@ -1285,7 +1316,7 @@ pub(crate) fn stored_wrap(
     data_dir: &Path,
     protection: &PrincipalRootProtectionV1,
 ) -> anyhow::Result<(String, [u8; 12], Vec<u8>)> {
-    let Some(agent) = stored_agent_for_root(
+    let Some(agent) = stored_agent_for_protection(
         data_dir,
         &protection.principal_id,
         &protection.localhost_root,

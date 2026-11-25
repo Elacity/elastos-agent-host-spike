@@ -1159,6 +1159,13 @@ async fn owner_stop_reaches_a_guest_when_the_agent_or_the_home_is_off() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "turn off: {body}");
+    // Turning this agent off ends its guest. The old row left the guest live
+    // so a later Stop could reach it. That is no longer the rule.
+    assert_eq!(
+        live_principal(&live(&world).await, &world.agent_a),
+        0,
+        "turning the agent off left its guest running"
+    );
     let (other_status, other_body) = stop(&world, &world.other, &world.agent_a).await;
     assert_ne!(
         other_status,
@@ -1167,11 +1174,19 @@ async fn owner_stop_reaches_a_guest_when_the_agent_or_the_home_is_off() {
     );
     assert_eq!(
         live_principal(&live(&world).await, &world.agent_a),
-        1,
-        "the other owner's stop ended the guest"
+        0,
+        "the other owner's stop changed the guest"
     );
     let (status, body) = stop(&world, &world.admin, &world.agent_a).await;
-    assert_eq!(status, StatusCode::OK, "stop while off: {body}");
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "stop after off already ended the guest: {body}"
+    );
+    assert!(
+        body.contains("no running session") || body.contains("already stopped"),
+        "{body}"
+    );
     assert_eq!(live_principal(&live(&world).await, &world.agent_a), 0);
 
     started(&world, &world.agent_b).await;

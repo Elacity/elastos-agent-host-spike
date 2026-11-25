@@ -1236,10 +1236,18 @@ pub(crate) async fn dispatch_agent_plan_step(
         return resource_error_response("admission_missing", "agent plan admission is unavailable");
     };
     let ctx = held.context;
-    // Stop is read before any later check can mint. The admission was already
-    // taken, so this refusal is not a second dispatch. An effect that has
-    // already entered the provider is still tracked to its outcome. The same
-    // flag is read again under the one-use lock, immediately before the mint.
+    // The book is read before the stop flag. Once the instance is marked
+    // ending, the refusal is `instance ended`. The flag is the earlier
+    // window, while the instance is still open: the step was stopped before
+    // it was sent, and this check still runs before a mint. An effect that
+    // has already entered the provider is still tracked to its outcome. The
+    // same flag is read again under the one-use lock, immediately before
+    // the mint.
+    if ctx.plan_book.as_ref().is_some_and(|book| {
+        !crate::runtime::Runtime::plan_instance_is_open(book, capsule_id, requester_id)
+    }) {
+        return instance_ended_response();
+    }
     if instance_has_ended(&ctx) {
         return stopped_before_send();
     }

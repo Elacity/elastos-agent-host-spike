@@ -1162,7 +1162,7 @@ mod trusted_gateway_tests {
         let _ = held.wait();
         assert!(listened, "gateway did not listen");
         assert_eq!(
-            status, "unknown",
+            status, "unresolved",
             "a locked restart left the stranded plan {status}"
         );
     }
@@ -1184,7 +1184,7 @@ mod trusted_gateway_tests {
         let _ = held.kill();
         let _ = held.wait();
         assert!(listened, "gateway did not listen");
-        assert_eq!(status, "unknown", "a bare pid kept the plan {status}");
+        assert_eq!(status, "unresolved", "a bare pid kept the plan {status}");
     }
 
     /// Another process holds the data directory host lock. Its plan stays

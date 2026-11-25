@@ -328,15 +328,13 @@ mod on {
         let installed = installed_home();
         let agent_id = create_agent(&installed, "u3-agent-caller-setup").await;
         let data = &installed.home.data;
-        let root = crate::auth::principal_kind_localhost_root(
-            &agent_id,
-            crate::auth::PrincipalKind::Agent,
-        );
-        let binding = crate::agents::stored_agent_for_root(data, &agent_id, &root)
-            .unwrap()
-            .unwrap()
-            .record
-            .proof_binding_id;
+        // `stored_agent_for_root` returns none while the agent is off. The
+        // binding still lives on the record, and Stop's lookup reads it.
+        let binding =
+            crate::agents::stored_agent_for_stop(data, &installed.owner.principal_id, &agent_id)
+                .unwrap()
+                .record
+                .proof_binding_id;
         let now = now_ts();
         let grant = AuthSessionGrantV1 {
             schema: AuthSessionGrantV1::SCHEMA.to_string(),
@@ -874,15 +872,13 @@ mod on {
         let installed = installed_home();
         let agent_id = create_agent(&installed, "self-1").await;
         let data = &installed.home.data;
-        let root = crate::auth::principal_kind_localhost_root(
-            &agent_id,
-            crate::auth::PrincipalKind::Agent,
-        );
-        let binding = crate::agents::stored_agent_for_root(data, &agent_id, &root)
-            .unwrap()
-            .unwrap()
-            .record
-            .proof_binding_id;
+        // `stored_agent_for_root` returns none while the agent is off. The
+        // binding still lives on the record, and Stop's lookup reads it.
+        let binding =
+            crate::agents::stored_agent_for_stop(data, &installed.owner.principal_id, &agent_id)
+                .unwrap()
+                .record
+                .proof_binding_id;
         let now = now_ts();
         let grant = AuthSessionGrantV1 {
             schema: AuthSessionGrantV1::SCHEMA.to_string(),
