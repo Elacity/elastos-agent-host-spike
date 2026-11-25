@@ -426,6 +426,43 @@ pub(crate) fn retain_agent_plan_dispatch_authority(
     Ok(())
 }
 
+/// What the retained hostcall context can see for this step. A row uses it
+/// to tell a missing book from a closed instance. Anything other than `open`
+/// names the two books.
+#[cfg(test)]
+pub(crate) fn retained_plan_instance_is_open(
+    request_id: &str,
+    session_id: &str,
+    agent_id: &str,
+    runtime_book: &Arc<std::sync::Mutex<crate::runtime::PlanBook>>,
+) -> String {
+    let Ok(authorities) = plan_authorities().lock() else {
+        return "poison".to_string();
+    };
+    let Some(held) = authorities.get(request_id) else {
+        return "no authority".to_string();
+    };
+    let principal = held.context.principal_id.as_deref().unwrap_or("");
+    let Some(book) = held.context.plan_book.as_ref() else {
+        return format!(
+            "no book capsule={} session={} principal={principal}",
+            held.context.capsule_id, held.context.session_id
+        );
+    };
+    if crate::runtime::Runtime::plan_instance_is_open(book, session_id, agent_id) {
+        return "open".to_string();
+    }
+    format!(
+        "closed same_arc={} runtime_open={} runtime_book={} retained_book={} capsule={} ctx_session={} principal={principal}",
+        Arc::ptr_eq(book, runtime_book),
+        crate::runtime::Runtime::plan_instance_is_open(runtime_book, session_id, agent_id),
+        crate::runtime::Runtime::plan_book_view(runtime_book, session_id),
+        crate::runtime::Runtime::plan_book_view(book, session_id),
+        held.context.capsule_id,
+        held.context.session_id
+    )
+}
+
 pub(crate) fn forget_agent_plan_dispatch_authority(capsule_id: &str) {
     if let Ok(mut authorities) = plan_authorities().lock() {
         authorities.retain(|_, held| held.context.capsule_id != capsule_id);

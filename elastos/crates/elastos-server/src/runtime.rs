@@ -541,6 +541,52 @@ fn take_plan_decision_hook(session_id: &str) -> Option<PlanDecisionHook> {
         .remove(session_id)
 }
 
+/// Held after the end marks the instance and before `release` drops the
+/// step's admission. A dispatch after that drop cannot see the mark.
+#[cfg(test)]
+pub(crate) struct PlanEndPause {
+    pub entered: Arc<tokio::sync::Notify>,
+    pub release: Arc<tokio::sync::Notify>,
+}
+
+#[cfg(test)]
+struct PlanEndGate {
+    session_id: String,
+    entered: Arc<tokio::sync::Notify>,
+    release: Arc<tokio::sync::Notify>,
+}
+
+#[cfg(test)]
+static PLAN_END_GATES: StdMutex<Vec<PlanEndGate>> = StdMutex::new(Vec::new());
+
+#[cfg(test)]
+pub(crate) fn arm_after_plan_end_mark(session_id: &str) -> PlanEndPause {
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    PLAN_END_GATES
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+        .push(PlanEndGate {
+            session_id: session_id.to_string(),
+            entered: Arc::clone(&entered),
+            release: Arc::clone(&release),
+        });
+    PlanEndPause { entered, release }
+}
+
+#[cfg(test)]
+async fn pause_after_plan_end_mark(session_id: &str) {
+    let gate = {
+        let mut gates = PLAN_END_GATES.lock().unwrap_or_else(|err| err.into_inner());
+        let pos = gates.iter().rposition(|gate| gate.session_id == session_id);
+        pos.map(|pos| gates.swap_remove(pos))
+    };
+    if let Some(gate) = gate {
+        gate.entered.notify_one();
+        gate.release.notified().await;
+    }
+}
+
 impl AgentStopMarks {
     fn holds(&self, agent_id: &str) -> bool {
         self.tokens.get(agent_id).is_some_and(|set| !set.is_empty())
@@ -866,6 +912,10 @@ impl ActivationContextHeld {
         // The end of this session is decided here, under the plan lock, before
         // the entry records `ended_at`. `begin_agent_stop` does not decide it.
         plan_book(&self.plan_book).mark_stopping(&self.id.0);
+        // `release` drops a step's admission. A dispatch after that drop
+        // cannot see this mark, so a row reads the refusal in between.
+        #[cfg(test)]
+        pause_after_plan_end_mark(&self.id.0).await;
         let (status, cause) = match self.settled.clone() {
             Some(settled) => settled,
             None => {
@@ -1639,6 +1689,21 @@ impl Runtime {
         Arc::clone(&self.plan_book)
     }
 
+    /// The component hostcall this Runtime installed. The plan book in that
+    /// closure is the one a launched guest dispatches against.
+    #[cfg(test)]
+    pub(crate) fn call_component_hostcall_for_test(
+        &self,
+        line: &str,
+        capsule_id: &str,
+        principal_id: Option<&str>,
+    ) -> std::result::Result<String, String> {
+        self.component_provider
+            .as_ref()
+            .ok_or_else(|| "component bridge is not configured".to_string())?
+            .call_bus_hostcall_for_test(line, capsule_id, principal_id)
+    }
+
     /// Remember this running instance. An instance that was never bound, or
     /// that was removed after it ended with nothing in flight, is refused.
     pub(crate) fn bind_plan_instance(&self, session_id: &str, agent_id: &str) {
@@ -1664,6 +1729,19 @@ impl Runtime {
         agent_id: &str,
     ) -> bool {
         instance_open(&plan_book(book), session_id, agent_id)
+    }
+
+    /// The bound row for `session_id`, or the keys present when it is absent.
+    #[cfg(test)]
+    pub(crate) fn plan_book_view(book: &Arc<StdMutex<PlanBook>>, session_id: &str) -> String {
+        let locked = plan_book(book);
+        match locked.instances.get(session_id) {
+            Some(inst) => format!("agent={} stopping={}", inst.agent_id, inst.stopping),
+            None => {
+                let keys: Vec<&String> = locked.instances.keys().collect();
+                format!("absent keys={keys:?}")
+            }
+        }
     }
 
     /// Check and mark under one hold of the plan lock. Refuses when the

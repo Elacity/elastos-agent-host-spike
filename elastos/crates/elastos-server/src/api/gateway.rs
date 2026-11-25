@@ -98,6 +98,8 @@ pub(crate) use gateway_inbox::inbox_request_entries_for_test;
 #[path = "gateway_inspect_actions.rs"]
 mod gateway_inspect_actions;
 pub(crate) use gateway_inspect_actions::agent_plan_result_for_requester;
+#[cfg(test)]
+pub(in crate::api) use gateway_inspect_actions::dispatch_approved_agent_plan;
 pub(crate) use gateway_inspect_actions::submit_pending_agent_plan;
 #[path = "gateway_model_remote.rs"]
 mod gateway_model_remote;

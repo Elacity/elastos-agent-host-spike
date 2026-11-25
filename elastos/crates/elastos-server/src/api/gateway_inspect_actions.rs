@@ -440,7 +440,7 @@ pub(super) fn settle_agent_plans_lost_before_start(data_dir: &FsPath) -> anyhow:
 
 /// Claim the stored step, audit the claim, then let its settlement outlive the
 /// Inbox request. A stopped process still leaves a one-way claim.
-pub(super) async fn dispatch_approved_agent_plan(
+pub(in crate::api) async fn dispatch_approved_agent_plan(
     state: &GatewayState,
     context: &HomeLaunchTokenContext,
     request_id: &str,
