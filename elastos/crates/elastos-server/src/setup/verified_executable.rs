@@ -649,6 +649,191 @@ mod tests {
         assert!(second_child.wait().unwrap().success());
         drop(prepared);
     }
+
+    fn prepared_copy() -> (VerifiedExecutable, PathBuf) {
+        let exe = std::env::current_exe().unwrap();
+        let mut file = File::open(&exe).unwrap();
+        let digest = super::sha256_hex(&mut file).unwrap();
+        let prepared = VerifiedExecutable::prepare(&exe, &format!("sha256:{digest}")).unwrap();
+        let exec_path = prepared.exec_path().to_path_buf();
+        (prepared, exec_path)
+    }
+
+    fn wait_ready(path: &Path) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while !path.exists() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "child did not adopt the private copy"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    }
+
+    /// This process holds the adopted guard, releases that same guard, and the
+    /// folder is gone. The parent has already dropped its own lock.
+    #[test]
+    fn releasing_the_adopted_guard_removes_the_private_copy() {
+        const TEST: &str = "setup::verified_executable::tests::releasing_the_adopted_guard_removes_the_private_copy";
+        if std::env::var_os("ELASTOS_P28_RELEASE_SOLE").is_some() {
+            let guard = crate::host_lock::hold_running_exec_copy().unwrap();
+            if guard.is_none() {
+                eprintln!("child did not adopt its private copy");
+                std::process::exit(3);
+            }
+            std::fs::write(std::env::var("ELASTOS_P28_RELEASE_READY").unwrap(), b"held").unwrap();
+            let go = std::env::var("ELASTOS_P28_RELEASE_GO").unwrap();
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+            while !Path::new(&go).exists() {
+                if std::time::Instant::now() > deadline {
+                    std::process::exit(4);
+                }
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            super::release_running_exec_copy();
+            if std::env::current_exe().unwrap().exists() {
+                eprintln!("release left the private copy");
+                std::process::exit(5);
+            }
+            drop(guard);
+            std::process::exit(0);
+        }
+        let root = tempfile::tempdir().unwrap();
+        let ready = root.path().join("ready");
+        let go = root.path().join("go");
+        let (mut prepared, exec_path) = prepared_copy();
+        let child = std::process::Command::new(&exec_path)
+            .arg("--exact")
+            .arg(TEST)
+            .env("ELASTOS_P28_RELEASE_SOLE", "1")
+            .env("ELASTOS_P28_RELEASE_READY", &ready)
+            .env("ELASTOS_P28_RELEASE_GO", &go)
+            .spawn()
+            .unwrap();
+        wait_ready(&ready);
+        prepared.persist_private_copy();
+        drop(prepared);
+        std::fs::write(&go, b"go").unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(
+            output.status.success(),
+            "stdout {} stderr {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(!exec_path.exists(), "the private copy survived release");
+    }
+
+    /// A second process still holds the copy, so this process's release leaves it.
+    #[test]
+    fn a_second_holder_keeps_the_private_copy() {
+        const TEST: &str =
+            "setup::verified_executable::tests::a_second_holder_keeps_the_private_copy";
+        if std::env::var_os("ELASTOS_P28_RELEASE_SECOND").is_some() {
+            let guard = crate::host_lock::hold_running_exec_copy().unwrap();
+            if guard.is_none() {
+                eprintln!("child did not adopt its private copy");
+                std::process::exit(3);
+            }
+            std::fs::write(std::env::var("ELASTOS_P28_RELEASE_READY").unwrap(), b"held").unwrap();
+            let go = std::env::var("ELASTOS_P28_RELEASE_GO").unwrap();
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+            while !Path::new(&go).exists() {
+                if std::time::Instant::now() > deadline {
+                    std::process::exit(4);
+                }
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            super::release_running_exec_copy();
+            if !std::env::current_exe().unwrap().exists() {
+                eprintln!("the other holder's copy was deleted");
+                std::process::exit(5);
+            }
+            drop(guard);
+            std::process::exit(0);
+        }
+        let root = tempfile::tempdir().unwrap();
+        let ready = root.path().join("ready");
+        let go = root.path().join("go");
+        let (prepared, exec_path) = prepared_copy();
+        let child = std::process::Command::new(&exec_path)
+            .arg("--exact")
+            .arg(TEST)
+            .env("ELASTOS_P28_RELEASE_SECOND", "1")
+            .env("ELASTOS_P28_RELEASE_READY", &ready)
+            .env("ELASTOS_P28_RELEASE_GO", &go)
+            .spawn()
+            .unwrap();
+        wait_ready(&ready);
+        std::fs::write(&go, b"go").unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(
+            output.status.success(),
+            "stdout {} stderr {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(exec_path.exists(), "a second holder lost the private copy");
+        drop(prepared);
+    }
+
+    /// The host-lock exit that fires before the watch loop drops the same guard.
+    #[test]
+    fn the_unwatched_private_copy_is_released_on_exit() {
+        const TEST: &str =
+            "setup::verified_executable::tests::the_unwatched_private_copy_is_released_on_exit";
+        if std::env::var_os("ELASTOS_P28_RELEASE_EARLY").is_some() {
+            let guard = crate::host_lock::hold_running_exec_copy().unwrap();
+            if guard.is_none() {
+                eprintln!("child did not adopt its private copy");
+                std::process::exit(3);
+            }
+            std::fs::write(std::env::var("ELASTOS_P28_RELEASE_READY").unwrap(), b"held").unwrap();
+            let go = std::env::var("ELASTOS_P28_RELEASE_GO").unwrap();
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+            while !Path::new(&go).exists() {
+                if std::time::Instant::now() > deadline {
+                    std::process::exit(4);
+                }
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            let data = std::path::PathBuf::from(std::env::var("ELASTOS_P28_RELEASE_DATA").unwrap());
+            crate::host_lock::spawn_installed_binary_supersession_watch(&data, "serve");
+            eprintln!("the unwatched exit returned");
+            std::process::exit(9);
+        }
+        let root = tempfile::tempdir().unwrap();
+        let ready = root.path().join("ready");
+        let go = root.path().join("go");
+        let data = root.path().join("home");
+        std::fs::create_dir_all(data.join("installation")).unwrap();
+        let (mut prepared, exec_path) = prepared_copy();
+        let child = std::process::Command::new(&exec_path)
+            .arg("--exact")
+            .arg(TEST)
+            .env("ELASTOS_P28_RELEASE_EARLY", "1")
+            .env("ELASTOS_P28_RELEASE_READY", &ready)
+            .env("ELASTOS_P28_RELEASE_GO", &go)
+            .env("ELASTOS_P28_RELEASE_DATA", &data)
+            .spawn()
+            .unwrap();
+        wait_ready(&ready);
+        prepared.persist_private_copy();
+        drop(prepared);
+        std::fs::write(&go, b"go").unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert_eq!(
+            output.status.code(),
+            Some(75),
+            "stdout {} stderr {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            !exec_path.exists(),
+            "the unwatched exit left the private copy"
+        );
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -727,9 +912,8 @@ fn open_exec_copy_lock(dir: &Path) -> Result<File> {
     Ok(file)
 }
 
-/// Holds the caller's private exec copy until drop. The directory is removed
-/// only when this process is the last holder: another process may still be
-/// executing the same copy.
+/// The one open of this process's private-copy lock. Drop removes the directory
+/// only when this process is the last holder.
 #[cfg(target_os = "macos")]
 pub struct ExecCopyGuard {
     dir: PathBuf,
@@ -745,9 +929,36 @@ impl Drop for ExecCopyGuard {
     }
 }
 
+#[cfg(target_os = "macos")]
+static PROCESS_EXEC_COPY: std::sync::Mutex<Option<ExecCopyGuard>> = std::sync::Mutex::new(None);
+
+#[cfg(target_os = "macos")]
+pub struct ExecCopyHold {
+    owner: bool,
+}
+
+#[cfg(target_os = "macos")]
+impl Drop for ExecCopyHold {
+    fn drop(&mut self) {
+        if self.owner {
+            release_running_exec_copy();
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn process_exec_slot() -> std::sync::MutexGuard<'static, Option<ExecCopyGuard>> {
+    PROCESS_EXEC_COPY
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+}
+
 /// `Ok(None)` when this process was not started from a private exec copy.
 #[cfg(target_os = "macos")]
-pub(crate) fn adopt_running_exec_copy() -> Result<Option<ExecCopyGuard>> {
+pub(crate) fn adopt_running_exec_copy() -> Result<Option<ExecCopyHold>> {
+    if process_exec_slot().is_some() {
+        return Ok(Some(ExecCopyHold { owner: false }));
+    }
     let Ok(exe) = std::env::current_exe() else {
         return Ok(None);
     };
@@ -755,26 +966,19 @@ pub(crate) fn adopt_running_exec_copy() -> Result<Option<ExecCopyGuard>> {
         return Ok(None);
     };
     let lock = open_exec_copy_lock(&dir)?;
-    Ok(Some(ExecCopyGuard { dir, _lock: lock }))
+    let mut slot = process_exec_slot();
+    if slot.is_some() {
+        drop(lock);
+        return Ok(Some(ExecCopyHold { owner: false }));
+    }
+    *slot = Some(ExecCopyGuard { dir, _lock: lock });
+    Ok(Some(ExecCopyHold { owner: true }))
 }
 
-/// Removes this process's private exec copy when it is the last holder.
-/// `process::exit` skips destructors, so the supersession watch calls this
-/// before it exits. Another process that still holds the copy keeps the tree.
+/// Drops this process's guard. `process::exit` skips destructors, so a replaced host calls this first.
 #[cfg(target_os = "macos")]
 pub(crate) fn release_running_exec_copy() {
-    let Ok(exe) = std::env::current_exe() else {
-        return;
-    };
-    let Some(dir) = private_exec_dir(&exe) else {
-        return;
-    };
-    let Ok(lock) = open_exec_copy_lock(&dir) else {
-        return;
-    };
-    if lock.try_lock().is_ok() {
-        let _ = fs::remove_dir_all(dir);
-    }
+    drop(process_exec_slot().take());
 }
 
 #[cfg(target_os = "macos")]

@@ -234,7 +234,7 @@ struct BinarySnapshot {
 
 /// This process's private exec copy, when it was started from one.
 #[cfg(target_os = "macos")]
-pub type RunningExecCopy = Option<crate::setup::verified_executable::ExecCopyGuard>;
+pub type RunningExecCopy = Option<crate::setup::verified_executable::ExecCopyHold>;
 /// Other platforms do not exec from a private copy.
 #[cfg(not(target_os = "macos"))]
 pub type RunningExecCopy = Option<()>;
@@ -251,6 +251,12 @@ pub fn hold_running_exec_copy() -> anyhow::Result<RunningExecCopy> {
     }
 }
 
+fn exit_replaced_host() -> ! {
+    #[cfg(target_os = "macos")]
+    crate::setup::verified_executable::release_running_exec_copy();
+    std::process::exit(75);
+}
+
 pub fn spawn_installed_binary_supersession_watch(data_dir: &Path, role: &str) {
     let mut watch = match BinarySupersessionWatch::from_data_dir(data_dir) {
         Ok(watch) => watch,
@@ -262,7 +268,7 @@ pub fn spawn_installed_binary_supersession_watch(data_dir: &Path, role: &str) {
                 crate::setup::verified_executable::private_exec_dir(&exe).is_some()
             }) {
                 eprintln!("[{role}] {err:#}. Exiting stale host.");
-                std::process::exit(75);
+                exit_replaced_host();
             }
             let _ = err;
             return;
@@ -276,9 +282,7 @@ pub fn spawn_installed_binary_supersession_watch(data_dir: &Path, role: &str) {
             interval.tick().await;
             if let Some(reason) = watch.superseded_reason() {
                 eprintln!("[{}] {}", role, reason);
-                #[cfg(target_os = "macos")]
-                crate::setup::verified_executable::release_running_exec_copy();
-                std::process::exit(75);
+                exit_replaced_host();
             }
         }
     });
