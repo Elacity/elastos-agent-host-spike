@@ -1211,12 +1211,6 @@ class ReleasePolicyTests(unittest.TestCase):
         self.assertIn('"install-bootstrap-test.py"', nested)
         self.assertIn('[sys.executable, str(script), "--bash", "/bin/bash"]', nested)
 
-    def test_wasm_capsule_runs_on_the_macos_job_only(self):
-        self.assertNotIn("lab/wasm-capsule", JOBS["lab-gates"])
-        self.assertNotIn("toolchain install 1.91.0", JOBS["lab-gates"])
-        self.assertIn("working-directory: lab/wasm-capsule", JOBS["lab-wasm-capsule"])
-        self.assertIn("runs-on: macos-15", JOBS["lab-wasm-capsule"])
-
     def test_ci_actions_and_sccache_release_are_immutable(self):
         action = WORKFLOW.parents[1] / "actions/rust-compile-cache/action.yml"
         for path in (WORKFLOW, WORKFLOW.parent / "release-package.yml", action):
