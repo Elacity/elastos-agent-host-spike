@@ -30,6 +30,14 @@ pub const STAGED_BUNDLE_SCOPE: &str =
 pub const INSTALLED_RUNTIME_SCOPE: &str =
     "release head, release and components hash-check each other and name this repository commit; records only, the installed data folder did not run";
 
+/// What `review_binding` asks for. A reviewer name is cut at the first
+/// character that is not a letter, then matched in lower case against the
+/// closed family table. A family name may be a prefix of that stem, so
+/// `GeminiNeon` is gemini. `claude` and `claude_opus` are one family.
+/// `codex` and `claude` are two. A name that matches nothing is refused by
+/// that name.
+pub const REVIEW_BINDING_SCOPE: &str = "review_binding asks for two different reviewer families.";
+
 /// What the runtime-ran row covers: the suite was told a named binary whose
 /// canonical path is the installed binary, and the one Runtime identity it
 /// recorded names that path with the installed binary's SHA-256; after the
@@ -519,16 +527,65 @@ impl GitIdentity {
     }
 }
 
-/// One review of the tested candidate. It binds only when it passed and names
-/// the exact commit checked out, on a clean tree, when the report is written;
-/// any other review leaves A14 unbound. It does not show that the suite's
-/// results came from that tree.
+/// One review of the tested candidate. The reviews bind only when two different
+/// reviewer families passed and each names the exact commit checked out, on a
+/// clean tree, when the report is written. A reviewer family comes from the
+/// closed table in `reviewer_family`. Any other review leaves A14 unbound. It
+/// does not show that the suite's results came from that tree.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct Review {
     pub reviewer: String,
     pub verdict: String,
     pub commit: String,
+}
+
+/// Closed reviewer families. The first name of each group is the family the
+/// receipt reports. The names after it are the same family.
+const REVIEWER_FAMILIES: &[(&str, &[&str])] = &[
+    ("grok", &["grok"]),
+    ("gemini", &["gemini", "neon", "carbon"]),
+    ("deepseek", &["deepseek"]),
+    ("claude", &["claude", "opus", "sonnet", "haiku"]),
+    ("codex", &["codex", "gpt"]),
+    ("glm", &["glm"]),
+    ("kimi", &["kimi"]),
+];
+
+/// The family of `reviewer`, or nothing when the name is not in the table.
+/// The name is cut at the first character that is not an ASCII letter and the
+/// stem is lower-cased. A family name that is a prefix of that stem matches,
+/// so `GeminiNeon` is `gemini`. The longest match wins. Two families at that
+/// length match nothing, and the caller refuses the name.
+fn reviewer_family(reviewer: &str) -> Option<&'static str> {
+    let stem: String = reviewer
+        .bytes()
+        .take_while(|byte| byte.is_ascii_alphabetic())
+        .map(|byte| byte.to_ascii_lowercase() as char)
+        .collect();
+    if stem.is_empty() {
+        return None;
+    }
+    let mut found: Vec<&'static str> = Vec::new();
+    let mut best_len = 0usize;
+    for &(family, aliases) in REVIEWER_FAMILIES {
+        for alias in aliases {
+            if !stem.starts_with(alias) || alias.len() < best_len {
+                continue;
+            }
+            if alias.len() > best_len {
+                found.clear();
+                best_len = alias.len();
+            }
+            if !found.contains(&family) {
+                found.push(family);
+            }
+        }
+    }
+    match found.as_slice() {
+        [family] => Some(*family),
+        _ => None,
+    }
 }
 
 /// Every reason the reviews do not bind to `git`; empty means bound.
@@ -543,18 +600,41 @@ pub fn review_failures(reviews: Option<&[Review]>, git: Option<&GitIdentity>) ->
         Some(git) if git.dirty => failures.push("reviews cannot bind: dirty tree".into()),
         Some(_) => {}
     }
+    let mut families = BTreeSet::new();
     for review in reviews {
         let reviewer = &review.reviewer;
         if !test_name(reviewer) {
             failures.push("malformed review: reviewer".into());
             continue;
         }
-        if review.verdict != "pass" {
+        // An unknown name is refused by that name. It does not count as its
+        // own family, including when the review also fails for another reason.
+        let family = reviewer_family(reviewer);
+        if family.is_none() {
+            failures.push(format!("unknown reviewer: {reviewer}"));
+        }
+        let passed = review.verdict == "pass";
+        if !passed {
             failures.push(format!("review did not pass: {reviewer}"));
         }
-        if git.is_some_and(|git| git.commit != review.commit) {
+        let same_commit = git.is_none_or(|git| git.commit == review.commit);
+        if !same_commit {
             failures.push(format!("review names another commit: {reviewer}"));
         }
+        if passed && same_commit {
+            if let Some(family) = family {
+                families.insert(family);
+            }
+        }
+    }
+    match families.len() {
+        0 => failures.push("reviews need two reviewer families".into()),
+        1 => {
+            for family in &families {
+                failures.push(format!("reviews name one reviewer family: {family}"));
+            }
+        }
+        _ => {}
     }
     failures.sort();
     failures.dedup();
@@ -1276,6 +1356,7 @@ pub fn render_bound_run(
         "reviews": reviews,
         "review_status": if unbound.is_empty() { "bound" } else { "unbound" },
         "review_failures": unbound,
+        "review_binding_scope": REVIEW_BINDING_SCOPE,
         "staged_bundles": staged,
         "staged_bundle_status": if unstaged.is_empty() { "recorded" } else { "missing" },
         "staged_bundle_failures": unstaged,

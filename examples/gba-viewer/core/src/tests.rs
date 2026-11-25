@@ -273,6 +273,61 @@ fn c2_a_rom_one_byte_over_the_cap_is_refused_by_name() {
     assert!(storage.calls.is_empty());
 }
 
+/// c6: two `.gba` files are refused by name, before any digest, and nothing
+/// is written.
+#[test]
+fn c6_two_roms_are_refused_by_name() {
+    let mut storage = FakeBus::default();
+    let (launch, result) = run_launch(
+        &mut storage,
+        &[("a.gba", small_rom()), ("b.gba", small_rom())],
+    );
+    let error = result.expect_err("two ROMs are refused");
+    assert_eq!(error.to_string(), "gba_core_rom_ambiguous: 2");
+    assert!(
+        launch.digests.is_empty(),
+        "an ambiguous set makes no digest call"
+    );
+    assert!(launch.output.is_empty());
+    drop(launch);
+    assert!(storage.calls.is_empty());
+}
+
+/// A ROM path is plain and relative. A backslash or a control character is
+/// refused by name, the same way a content path is refused. A nested path of
+/// plain parts is still the one ROM.
+#[test]
+fn a_backslash_or_a_control_in_a_rom_path_is_refused() {
+    let bad = [
+        "a\\b.gba",
+        "games\\ucity.gba",
+        "a\nb.gba",
+        "a\tb.gba",
+        "a\rb.gba",
+        "a\u{0000}b.gba",
+        "a\u{007f}.gba",
+    ];
+    for path in bad {
+        let mut storage = FakeBus::default();
+        let (launch, result) = run_launch(&mut storage, &[(path, small_rom())]);
+        let error = result.expect_err(path);
+        assert_eq!(
+            error.to_string(),
+            format!("gba_core_listing_invalid: has an invalid ROM path: {path}"),
+            "{path:?}"
+        );
+        assert!(launch.output.is_empty(), "{path:?}");
+        drop(launch);
+        assert!(storage.calls.is_empty());
+    }
+
+    let mut storage = FakeBus::default();
+    let (_, result) = run_launch(&mut storage, &[("games/ucity.gba", small_rom())]);
+    let text = result.expect("a plain nested path is one ROM");
+    let record: Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(record["path"], "games/ucity.gba");
+}
+
 /// c3: a set with no `.gba` file and a `.gba` file of zero bytes are refused
 /// by name, and nothing is written.
 #[test]

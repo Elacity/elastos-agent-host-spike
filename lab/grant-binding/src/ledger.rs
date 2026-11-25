@@ -485,12 +485,13 @@ impl Verifier {
     }
 
     /// Returns one hold's amount to the ceiling and drops the hold.
-    #[allow(unused_variables)]
+    /// The guest's request is at hand and is not read: a hold never shrinks
+    /// by what the guest reports.
     fn return_unused_hold(
         ledger: &mut Ledger,
         reservation: Reservation,
         amount: u64,
-        request: &GuestRequest,
+        _request: &GuestRequest,
     ) {
         ledger.open.remove(&reservation.id);
         ledger.held -= amount;

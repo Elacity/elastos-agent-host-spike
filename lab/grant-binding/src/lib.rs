@@ -177,7 +177,6 @@ pub struct Verifier {
     next_instance: u64,
     next_handle: u64,
     pending_parent: Option<Handle>,
-    #[allow(dead_code)] // later slices fill the ledger
     ledger: std::sync::Mutex<ledger::Ledger>,
     pending_once: bool,
     pending_session: bool,

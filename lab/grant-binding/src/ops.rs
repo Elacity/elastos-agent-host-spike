@@ -34,10 +34,10 @@ impl std::fmt::Display for OperateRefuse {
         match self {
             OperateRefuse::Binding(refusal) => refusal.fmt(formatter),
             OperateRefuse::OverwriteNotGranted => {
-                formatter.write_str("append does not permit overwrite")
+                formatter.write_str("the grant does not permit overwrite")
             }
             OperateRefuse::AppendNotGranted => {
-                formatter.write_str("overwrite does not permit append")
+                formatter.write_str("the grant does not permit append")
             }
             OperateRefuse::ChildJournalNotGranted => {
                 formatter.write_str("child journal is its own right")
@@ -306,7 +306,7 @@ fn model_append_grant_does_not_permit_overwrite() {
         )
         .expect_err("append grant refuses overwrite");
     assert_eq!(refusal, OperateRefuse::OverwriteNotGranted);
-    assert_eq!(refusal.to_string(), "append does not permit overwrite");
+    assert_eq!(refusal.to_string(), "the grant does not permit overwrite");
 }
 
 #[test]
@@ -330,7 +330,7 @@ fn model_overwrite_grant_does_not_permit_append() {
         )
         .expect_err("overwrite grant refuses append");
     assert_eq!(refusal, OperateRefuse::AppendNotGranted);
-    assert_eq!(refusal.to_string(), "overwrite does not permit append");
+    assert_eq!(refusal.to_string(), "the grant does not permit append");
 }
 
 #[test]
@@ -358,7 +358,7 @@ fn model_forged_overwrite_right_has_no_effect() {
         )
         .expect_err("guest claim does not grant overwrite");
     assert_eq!(refusal, OperateRefuse::OverwriteNotGranted);
-    assert_eq!(refusal.to_string(), "append does not permit overwrite");
+    assert_eq!(refusal.to_string(), "the grant does not permit overwrite");
 }
 
 #[test]
@@ -387,7 +387,7 @@ fn model_forged_append_right_has_no_effect() {
         )
         .expect_err("guest claim does not grant append");
     assert_eq!(refusal, OperateRefuse::AppendNotGranted);
-    assert_eq!(refusal.to_string(), "overwrite does not permit append");
+    assert_eq!(refusal.to_string(), "the grant does not permit append");
 }
 
 #[test]
@@ -416,7 +416,7 @@ fn model_forged_identity_does_not_grant_append() {
         )
         .expect_err("guest identity does not grant append");
     assert_eq!(refusal, OperateRefuse::AppendNotGranted);
-    assert_eq!(refusal.to_string(), "overwrite does not permit append");
+    assert_eq!(refusal.to_string(), "the grant does not permit append");
 }
 
 #[test]
@@ -445,7 +445,7 @@ fn model_forged_session_does_not_grant_append() {
         )
         .expect_err("guest session does not grant append");
     assert_eq!(refusal, OperateRefuse::AppendNotGranted);
-    assert_eq!(refusal.to_string(), "overwrite does not permit append");
+    assert_eq!(refusal.to_string(), "the grant does not permit append");
 }
 
 #[test]
@@ -480,7 +480,7 @@ fn model_forged_instance_does_not_grant_append() {
         )
         .expect_err("guest instance does not grant append");
     assert_eq!(refusal, OperateRefuse::AppendNotGranted);
-    assert_eq!(refusal.to_string(), "overwrite does not permit append");
+    assert_eq!(refusal.to_string(), "the grant does not permit append");
 }
 
 #[test]
@@ -575,7 +575,7 @@ fn model_child_journal_does_not_permit_append_or_overwrite() {
         )
         .expect_err("child-journal does not permit append");
     assert_eq!(append, OperateRefuse::AppendNotGranted);
-    assert_eq!(append.to_string(), "overwrite does not permit append");
+    assert_eq!(append.to_string(), "the grant does not permit append");
     let overwrite = verifier
         .operate(
             &call,
@@ -585,7 +585,7 @@ fn model_child_journal_does_not_permit_append_or_overwrite() {
         )
         .expect_err("child-journal does not permit overwrite");
     assert_eq!(overwrite, OperateRefuse::OverwriteNotGranted);
-    assert_eq!(overwrite.to_string(), "append does not permit overwrite");
+    assert_eq!(overwrite.to_string(), "the grant does not permit overwrite");
 }
 
 #[test]

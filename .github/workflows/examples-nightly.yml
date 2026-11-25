@@ -53,6 +53,8 @@ jobs:
         gate:
           - { name: photo-viewer, run: "bash examples/photo-viewer/verify.sh" }
           - { name: docs-viewer, run: "bash examples/docs-viewer/verify.sh" }
+          # Pull requests run the parser part from ci.yml when this folder or
+          # its check files change. This job runs the whole gate.
           - { name: archive-viewer, run: "bash examples/archive-viewer/verify.sh --runtime" }
           - { name: capsule-kit-guest, run: "bash examples/capsule-kit/guest/verify.sh" }
           - { name: gba-viewer, run: "bash examples/gba-viewer/verify.sh" }
