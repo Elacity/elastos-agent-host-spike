@@ -59,9 +59,9 @@ pub(crate) fn open_stopping_sessions(data_dir: &Path) -> anyhow::Result<Vec<Stri
     Ok(open_stopping(&state.audit).into_keys().collect())
 }
 
-fn open_stopping<'a>(
-    audit: &'a [RuntimeAuditEventV1],
-) -> std::collections::HashMap<String, &'a RuntimeAuditEventV1> {
+fn open_stopping(
+    audit: &[RuntimeAuditEventV1],
+) -> std::collections::HashMap<String, &RuntimeAuditEventV1> {
     let mut open = std::collections::HashMap::new();
     for event in audit {
         if event.event_type != "agent.stopped" {

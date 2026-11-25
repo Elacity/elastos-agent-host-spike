@@ -1275,7 +1275,10 @@ pub(crate) fn stored_agent_for_stop(
 
 /// The agent file's record for one principal and root, while agents are on for
 /// this Home. `None` in a build without the feature, while they are off, and
-/// for any id or root the file does not hold.
+/// for any id or root the file does not hold. Production asks go through
+/// `stored_agent_for_protection` and `refuse_inactive_agent`. This lookup is
+/// what the tests hold the filtered rule against.
+#[cfg(test)]
 pub(crate) fn stored_agent_for_root(
     data_dir: &Path,
     principal_id: &str,
