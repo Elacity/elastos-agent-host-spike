@@ -462,7 +462,10 @@ impl ComponentProvider {
                 .filter(|node| match node {
                     crate::providers::bus2_ui::FrameNode::Text(_) => true,
                     crate::providers::bus2_ui::FrameNode::Image { grant, .. } => {
-                        !book.blocks_read(grant)
+                        // Authorised at present. Spending the last use on that
+                        // present leaves the node. Revoke, eviction, expiry,
+                        // and a closed book remove it.
+                        !book.blocks_presented_image(grant)
                     }
                 })
                 .collect(),
@@ -4396,7 +4399,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_present_then_read_drops_the_spent_once_image() {
+    async fn a_once_grant_stays_for_two_reads_until_revoke() {
         let provider = ComponentProvider::new();
         let bytes = wat::parse_str(include_str!(
             "../../../../tests/fixtures/components/v2-resident.wat"
@@ -4404,19 +4407,33 @@ mod tests {
         .unwrap();
         let handle = load_v2_fixture(&provider, bytes).await;
         presented_image(&provider, handle.id.as_str(), "pic", Some(1), None).await;
-        assert!(provider.instances.read().await[&handle.id]
-            .grants
-            .lock()
-            .expect("grant book")
-            .blocks_read("pic"));
-        let frame = provider
-            .read_v2_frame(None, handle.id.as_str())
-            .expect("frame");
-        assert_eq!(image_count(&frame), 0);
-        assert!(matches!(
-            frame.nodes.first(),
-            Some(crate::providers::bus2_ui::FrameNode::Text(text)) if text == "kept"
-        ));
+        assert!(
+            provider.instances.read().await[&handle.id]
+                .grants
+                .lock()
+                .expect("grant book")
+                .blocks_read("pic"),
+            "present spent the one use"
+        );
+        for _ in 0..2 {
+            let frame = provider
+                .read_v2_frame(None, handle.id.as_str())
+                .expect("frame");
+            assert_eq!(image_count(&frame), 1, "a spent present stays");
+            assert!(matches!(
+                frame.nodes.first(),
+                Some(crate::providers::bus2_ui::FrameNode::Image { resource, .. })
+                    if resource == "localhost://Users/self/Pictures/a.png"
+            ));
+        }
+        provider
+            .deliver_grant_revoked(&handle.id, "pic")
+            .await
+            .expect("revoke");
+        assert!(
+            provider.read_v2_frame(None, handle.id.as_str()).is_none(),
+            "revoke removes the stored frame"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

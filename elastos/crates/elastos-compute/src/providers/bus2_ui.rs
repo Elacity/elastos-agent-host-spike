@@ -472,6 +472,19 @@ impl GrantBook {
         self.closed || self.refusal(id).is_some()
     }
 
+    /// A presented image stays while this grant is still held and unexpired.
+    /// Spending its last use does not remove it. A missing grant (revoked or
+    /// evicted), an expiry, or a closed book does.
+    pub fn blocks_presented_image(&self, id: &str) -> bool {
+        if self.closed {
+            return true;
+        }
+        let Some(held) = self.grants.iter().find(|grant| grant.id == id) else {
+            return true;
+        };
+        held.expires_at_ms.is_some_and(|exp| wall_ms() >= exp)
+    }
+
     pub fn is_empty(&self) -> bool {
         self.grants.is_empty()
     }
@@ -672,6 +685,40 @@ mod tests {
         assert!(
             matches!(never, PresentError::Denied(ref message) if message.contains("not a grant") && !message.contains("not among the 32")),
             "an id that was never revoked must not claim the revoke list, got {never:?}"
+        );
+    }
+
+    #[test]
+    fn a_spent_grant_still_backs_a_presented_image() {
+        let mut book = GrantBook::default();
+        book.hold_limited(
+            "once",
+            "localhost://Users/self/Pictures/a.png",
+            "read",
+            Some(1),
+            None,
+        );
+        book.spend("once");
+        assert!(book.blocks_read("once"), "the last use is spent");
+        assert!(
+            !book.blocks_presented_image("once"),
+            "spending the last use keeps the presented image"
+        );
+        book.hold_limited(
+            "old",
+            "localhost://Users/self/Pictures/a.png",
+            "read",
+            None,
+            Some(1),
+        );
+        assert!(
+            book.blocks_presented_image("old"),
+            "an expired grant drops it"
+        );
+        book.revoke("once");
+        assert!(
+            book.blocks_presented_image("once"),
+            "a revoke drops the presented image"
         );
     }
 
