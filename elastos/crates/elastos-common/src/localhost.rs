@@ -108,7 +108,7 @@ pub fn is_plaintext_root(root: &str) -> bool {
 
 /// Roots a v2 read may name. The bridge and the localhost provider both use
 /// this list, so the two processes cannot drift.
-pub const V2_READ_ROOTS: &[&str] = &["Local", "Public", "Users"];
+pub const V2_READ_ROOTS: &[&str] = &["Local", "MyWebSite", "Public", "Users"];
 
 pub fn v2_read_offers(root: &str) -> bool {
     V2_READ_ROOTS.contains(&root)
@@ -331,10 +331,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn v2_read_roots_are_local_public_and_users() {
-        assert_eq!(V2_READ_ROOTS, ["Local", "Public", "Users"]);
-        assert!(v2_read_offers("Local"));
-        assert!(!v2_read_offers("MyWebSite"));
+    fn v2_read_roots_are_local_my_website_public_and_users() {
+        assert_eq!(V2_READ_ROOTS, ["Local", "MyWebSite", "Public", "Users"]);
+        assert!(v2_read_offers("MyWebSite"));
+        assert!(v2_read_offers("Public"));
+        assert!(!v2_read_offers("UsersAI"));
     }
 
     #[test]

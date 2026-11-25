@@ -1352,7 +1352,7 @@ fn submit_agent_plan_response(
     }
 }
 
-/// Local, Public, and Users are offered. Any other localhost root is named.
+/// Local, MyWebSite, Public, and Users are offered. Any other root is named.
 fn unoffered_v2_read_root(resource: &str) -> Option<&str> {
     let (root, _) = elastos_common::localhost::parse_localhost_uri(resource)?;
     if elastos_common::localhost::v2_read_offers(root) {
@@ -2945,15 +2945,10 @@ pub(crate) mod tests {
     #[test]
     fn a_v2_read_names_every_localhost_root_this_path_does_not_offer() {
         assert_eq!(unoffered_v2_read_root("localhost://Local/a"), None);
+        assert_eq!(unoffered_v2_read_root("localhost://MyWebSite/a"), None);
         assert_eq!(unoffered_v2_read_root("localhost://Public/a"), None);
         assert_eq!(unoffered_v2_read_root("localhost://Users/self/a"), None);
-        for root in [
-            "MyWebSite",
-            "ElastOS",
-            "AppCapsules",
-            "UsersAI",
-            "WebSpaces",
-        ] {
+        for root in ["ElastOS", "AppCapsules", "UsersAI", "WebSpaces"] {
             assert_eq!(
                 unoffered_v2_read_root(&format!("localhost://{root}/a")),
                 Some(root),
