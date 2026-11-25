@@ -5053,6 +5053,89 @@ pub(crate) mod tests {
         assert!(runtime.list_capsules().await.is_empty());
     }
 
+    fn restart_home(data: &Path) {
+        let _ = crate::supervisor::Supervisor::new(
+            data.to_path_buf(),
+            crate::setup::ComponentsManifest {
+                extra: Default::default(),
+                model_catalog: None,
+                collaboration_network: None,
+                external: std::collections::HashMap::new(),
+                capsules: std::collections::HashMap::new(),
+                profiles: std::collections::HashMap::new(),
+            },
+        );
+    }
+
+    /// A folder placed in `capsules/` by something other than this Home's
+    /// install is still refused after a restart. Start does not record it.
+    #[tokio::test]
+    async fn a_folder_dropped_into_capsules_is_refused_after_a_restart() {
+        let (runtime, temp) = component_runtime().await;
+        let key = elastos_runtime::signature::SigningKey::from_bytes(&[94; 32]);
+        runtime
+            .configure_capsule_admission(
+                temp.path(),
+                &[hex::encode(key.verifying_key().to_bytes())],
+                false,
+            )
+            .await
+            .unwrap();
+        let folder = temp.path().join("capsules/dropped");
+        signed_component_folder(&folder, "dropped", &key);
+        restart_home(temp.path());
+        assert!(crate::setup::recorded_install_cid(temp.path(), &folder).is_none());
+        let error = runtime.run_local(&folder, Vec::new()).await.unwrap_err();
+        assert!(
+            error.to_string().contains("no install recorded it"),
+            "{error}"
+        );
+    }
+
+    /// Changing an installed folder in place does not become an install.
+    /// A leftover stage tree does not make start record the new bytes.
+    #[tokio::test]
+    async fn a_folder_changed_in_place_is_refused_after_a_restart_with_and_without_a_leftover() {
+        let (runtime, temp) = component_runtime().await;
+        let key = elastos_runtime::signature::SigningKey::from_bytes(&[95; 32]);
+        runtime
+            .configure_capsule_admission(
+                temp.path(),
+                &[hex::encode(key.verifying_key().to_bytes())],
+                false,
+            )
+            .await
+            .unwrap();
+        let folder = temp.path().join("capsules/changed");
+        signed_component_folder(&folder, "changed", &key);
+        crate::setup::record_install_cid(temp.path(), &folder, &folder);
+        let installed = crate::setup::recorded_install_cid(temp.path(), &folder).unwrap();
+        std::fs::write(folder.join("extra.txt"), b"changed in place").unwrap();
+        restart_home(temp.path());
+        assert_eq!(
+            crate::setup::recorded_install_cid(temp.path(), &folder).as_deref(),
+            Some(installed.as_str())
+        );
+        let error = runtime.run_local(&folder, Vec::new()).await.unwrap_err();
+        assert!(
+            error.to_string().contains("no install recorded it"),
+            "without a leftover: {error}"
+        );
+
+        std::fs::create_dir(temp.path().join("capsules/.capsule-stage-planted")).unwrap();
+        restart_home(temp.path());
+        assert!(temp.path().join("capsules/.capsule-stage-planted").exists());
+        assert_eq!(
+            crate::setup::recorded_install_cid(temp.path(), &folder).as_deref(),
+            Some(installed.as_str())
+        );
+        let error = runtime.run_local(&folder, Vec::new()).await.unwrap_err();
+        assert!(
+            error.to_string().contains("no install recorded it"),
+            "with a leftover: {error}"
+        );
+    }
+
     /// The dev-only component load refuses unless the owner turned dev mode
     /// on: a Runtime never configured and a Home with `dev_mode = false`
     /// both refuse it, so a normal start cannot reach unchecked bytes.

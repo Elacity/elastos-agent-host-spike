@@ -34,10 +34,13 @@ const CACHED_CID_FILE: &str = ".elastos-cid";
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum CapsuleCommitStop {
     Run,
+    BeforeIntent,
     BeforeSwap,
     FailSwap,
+    BetweenRenames,
     AfterSwapBeforeRecord,
     AfterRecordBeforeCleanup,
+    AfterIntentBeforeLeftover,
     FailSecondRename,
 }
 
@@ -1541,17 +1544,59 @@ impl Supervisor {
 }
 
 fn commit_staged_capsule(data_dir: &Path, staged: tempfile::TempDir, dest: &Path) -> Result<()> {
-    // One walk: the record walks the folder that is in place after the exchange.
     let dir = staged.keep();
+    #[cfg(unix)]
+    {
+        commit_recorded_capsule(data_dir, &dir, dest)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = data_dir;
+        if let Err(error) = exchange_capsule_directory(&dir, dest) {
+            if dir.exists() {
+                let _ = std::fs::remove_dir_all(&dir);
+            }
+            return Err(error);
+        }
+        crate::setup::record_install_cid(data_dir, dest, dest);
+        if dir.exists() {
+            std::fs::remove_dir_all(&dir)?;
+        }
+        Ok(())
+    }
+}
+
+/// Walks the staged tree, writes the intent, exchanges, then records that CID.
+/// Start does not invent a CID for a folder it finds.
+#[cfg(unix)]
+fn commit_recorded_capsule(data_dir: &Path, dir: &Path, dest: &Path) -> Result<()> {
+    // A download whose bytes have no walk CID is still placed. It is not an
+    // admission: the record for this destination is cleared, and start does
+    // not invent one.
+    let Some(new_cid) = crate::setup::walked_install_cid(dir).ok() else {
+        return commit_unnamed_capsule(data_dir, dir, dest);
+    };
+    #[cfg(test)]
+    if capsule_commit_stopped(CapsuleCommitStop::BeforeIntent) {
+        bail!("stopped before the capsule intent");
+    }
+    let _lock = crate::setup::lock_install_cids(data_dir)?;
+    let previous = crate::setup::recorded_install_cid(data_dir, dest);
+    crate::setup::write_capsule_install_intent(data_dir, dest, &new_cid, previous.as_deref(), dir)?;
     #[cfg(test)]
     if capsule_commit_stopped(CapsuleCommitStop::BeforeSwap) {
         bail!("stopped before the capsule exchange");
     }
-    if let Err(error) = exchange_capsule_directory(&dir, dest) {
-        // The exchange did not happen. The installed folder is unchanged.
-        // Drop the staged tree so a failed swap leaves no extra folder.
+    if let Err(error) = exchange_capsule_directory(dir, dest) {
+        #[cfg(test)]
+        if capsule_commit_stopped(CapsuleCommitStop::BetweenRenames) {
+            return Err(error);
+        }
+        // The exchange did not land. Drop the intent and the staged tree.
+        // A crash stop between the renames returns above and leaves both.
+        let _ = crate::setup::remove_capsule_install_intent(data_dir);
         if dir.exists() {
-            let _ = std::fs::remove_dir_all(&dir);
+            let _ = std::fs::remove_dir_all(dir);
         }
         return Err(error);
     }
@@ -1559,13 +1604,45 @@ fn commit_staged_capsule(data_dir: &Path, staged: tempfile::TempDir, dest: &Path
     if capsule_commit_stopped(CapsuleCommitStop::AfterSwapBeforeRecord) {
         bail!("stopped after the capsule exchange");
     }
-    crate::setup::record_install_cid(data_dir, dest, dest);
+    // The CID is the one walked from the staged tree, not a new walk of dest.
+    // A record path that cannot be replaced (a directory left in its place)
+    // leaves the install with no new row. The bytes stay.
+    if let Err(error) = crate::setup::record_prepared_install_cid(data_dir, dest, &new_cid) {
+        eprintln!("  No install CID record for {} ({error:#})", dest.display());
+        let _ = crate::setup::clear_install_cid(data_dir, dest);
+    }
     #[cfg(test)]
     if capsule_commit_stopped(CapsuleCommitStop::AfterRecordBeforeCleanup) {
         bail!("stopped after the capsule record");
     }
+    crate::setup::remove_capsule_install_intent(data_dir)?;
+    #[cfg(test)]
+    if capsule_commit_stopped(CapsuleCommitStop::AfterIntentBeforeLeftover) {
+        bail!("stopped after the capsule intent was removed");
+    }
     if dir.exists() {
-        std::fs::remove_dir_all(&dir)?;
+        std::fs::remove_dir_all(dir)?;
+    }
+    Ok(())
+}
+
+/// Places a staged tree that has no walk CID and clears that destination's
+/// record. There is no intent, so a crash does not teach start a CID.
+#[cfg(unix)]
+fn commit_unnamed_capsule(data_dir: &Path, dir: &Path, dest: &Path) -> Result<()> {
+    if let Err(error) = exchange_capsule_directory(dir, dest) {
+        #[cfg(test)]
+        if capsule_commit_stopped(CapsuleCommitStop::BetweenRenames) {
+            return Err(error);
+        }
+        if dir.exists() {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+        return Err(error);
+    }
+    let _ = crate::setup::clear_install_cid(data_dir, dest);
+    if dir.exists() {
+        std::fs::remove_dir_all(dir)?;
     }
     Ok(())
 }
@@ -1579,6 +1656,12 @@ fn exchange_capsule_directory(staged: &Path, dest: &Path) -> Result<()> {
     #[cfg(test)]
     if capsule_commit_stopped(CapsuleCommitStop::FailSwap) {
         bail!("stopped on the capsule exchange");
+    }
+    #[cfg(test)]
+    if capsule_commit_stopped(CapsuleCommitStop::FailSecondRename)
+        || capsule_commit_stopped(CapsuleCommitStop::BetweenRenames)
+    {
+        return exchange_capsule_with_restore(staged, dest);
     }
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     {
@@ -1603,6 +1686,10 @@ fn exchange_capsule_with_restore(staged: &Path, dest: &Path) -> Result<()> {
     let retired = parent.join(format!(".capsule-retired-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&retired);
     std::fs::rename(dest, &retired)?;
+    #[cfg(test)]
+    if capsule_commit_stopped(CapsuleCommitStop::BetweenRenames) {
+        bail!("stopped between the capsule renames");
+    }
     #[cfg(test)]
     if capsule_commit_stopped(CapsuleCommitStop::FailSecondRename) {
         let restored = std::fs::rename(&retired, dest);
@@ -3345,6 +3432,11 @@ mod tests {
             crate::setup::recorded_install_cid(data, &dest).unwrap(),
             old_cid
         );
+        let intent = crate::setup::capsule_install_intent_path(data);
+        let intent_mode = std::fs::metadata(&intent).unwrap().permissions().mode() & 0o777;
+        assert_eq!(intent_mode, 0o600, "the intent is owner-only");
+        let intent_text = std::fs::read_to_string(&intent).unwrap();
+        assert!(intent_text.contains(&old_cid), "{intent_text}");
         assert!(std::fs::read_dir(dest.parent().unwrap())
             .unwrap()
             .any(|entry| {
@@ -3355,15 +3447,22 @@ mod tests {
                     .starts_with(".capsule-stage-")
             }));
         crate::setup::reconcile_capsule_install(data).unwrap();
-        assert!(std::fs::read_dir(dest.parent().unwrap())
-            .unwrap()
-            .all(|entry| {
-                !entry
-                    .unwrap()
-                    .file_name()
-                    .to_string_lossy()
-                    .starts_with(".capsule-")
-            }));
+        assert!(
+            !intent.exists(),
+            "start drops an intent whose folder is unchanged"
+        );
+        assert!(
+            std::fs::read_dir(dest.parent().unwrap())
+                .unwrap()
+                .any(|entry| {
+                    entry
+                        .unwrap()
+                        .file_name()
+                        .to_string_lossy()
+                        .starts_with(".capsule-stage-")
+                }),
+            "start does not delete a stage tree it cannot show belongs to a finished install"
+        );
         assert_eq!(
             std::fs::read(dest.join("browser/index.html")).unwrap(),
             b"old page"
@@ -3372,6 +3471,18 @@ mod tests {
             crate::setup::recorded_install_cid(data, &dest).unwrap(),
             old_cid
         );
+        // The product leaves that stage tree. The rest of this test removes
+        // it so the next crash is the only leftover.
+        for entry in std::fs::read_dir(dest.parent().unwrap()).unwrap() {
+            let path = entry.unwrap().path();
+            if path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with(".capsule-stage-"))
+            {
+                std::fs::remove_dir_all(path).unwrap();
+            }
+        }
 
         CAPSULE_COMMIT_STOP.with(|flag| flag.set(CapsuleCommitStop::FailSwap));
         let error = commit_staged_capsule(data, stage(dest.parent().unwrap(), b"new page"), &dest)
@@ -3470,58 +3581,378 @@ mod tests {
         let retired_dest = data.join("capsules/restored");
         plant(&retired_dest, b"retired page");
         crate::setup::record_install_cid(data, &retired_dest, &retired_dest);
+        let retired_cid = crate::setup::recorded_install_cid(data, &retired_dest).unwrap();
+        let other = data.join("capsules/other");
+        plant(&other, b"other page");
+        crate::setup::record_install_cid(data, &other, &other);
+        let other_cid = crate::setup::recorded_install_cid(data, &other).unwrap();
         let retired = retired_dest
             .parent()
             .unwrap()
             .join(".capsule-retired-manual");
         std::fs::rename(&retired_dest, &retired).unwrap();
-        assert!(!retired_dest.exists());
         crate::setup::reconcile_capsule_install(data).unwrap();
+        assert!(
+            !retired_dest.exists(),
+            "start does not put a retired tree onto a destination"
+        );
         assert_eq!(
-            std::fs::read(retired_dest.join("browser/index.html")).unwrap(),
+            std::fs::read(retired.join("browser/index.html")).unwrap(),
             b"retired page"
         );
-        assert!(crate::setup::recorded_install_cid(data, &retired_dest).is_some());
-        assert!(!retired.exists());
+        assert_eq!(
+            std::fs::read(other.join("browser/index.html")).unwrap(),
+            b"other page"
+        );
+        assert_eq!(
+            crate::setup::recorded_install_cid(data, &retired_dest).unwrap(),
+            retired_cid
+        );
+        assert_eq!(
+            crate::setup::recorded_install_cid(data, &other).unwrap(),
+            other_cid
+        );
 
-        let previous = dest.clone();
-        std::fs::create_dir_all(previous.parent().unwrap()).unwrap();
-        let debris = previous.parent().unwrap().join(".capsule-stage-debris");
+        let debris = dest.parent().unwrap().join(".capsule-stage-debris");
         std::fs::create_dir(&debris).unwrap();
         std::fs::set_permissions(&debris, std::fs::Permissions::from_mode(0o700)).unwrap();
-        let _ = Supervisor::new(
-            data.to_path_buf(),
-            crate::setup::ComponentsManifest {
-                extra: Default::default(),
-                model_catalog: None,
-                collaboration_network: None,
-                external: std::collections::HashMap::new(),
-                capsules: std::collections::HashMap::new(),
-                profiles: std::collections::HashMap::new(),
-            },
+        let kept_cid = crate::setup::recorded_install_cid(data, &dest).unwrap();
+        let _ = Supervisor::new(data.to_path_buf(), empty_capsule_manifest());
+        assert!(
+            debris.exists(),
+            "start left a stage tree it cannot attribute"
         );
-        assert!(!debris.exists(), "start left a staged leftover");
+        assert_eq!(
+            crate::setup::recorded_install_cid(data, &dest).unwrap(),
+            kept_cid
+        );
+        std::fs::remove_dir_all(&debris).unwrap();
+    }
 
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_second_rename_leaves_no_install_cid_for_bytes_that_are_not_there() {
+        fn plant(dir: &Path, page: &[u8]) {
+            std::fs::create_dir_all(dir.join("browser")).unwrap();
+            std::fs::write(
+                dir.join("capsule.json"),
+                include_bytes!("../../../../capsules/chat-room/capsule.json"),
+            )
+            .unwrap();
+            std::fs::write(dir.join("browser/index.html"), page).unwrap();
+        }
+        let root = tempfile::tempdir().unwrap();
+        let data = root.path();
+        let dest = data.join("capsules/chat-room");
+        plant(&dest, b"still here");
+        crate::setup::record_install_cid(data, &dest, &dest);
+        let old_cid = crate::setup::recorded_install_cid(data, &dest).unwrap();
+        let staged = tempfile::Builder::new()
+            .prefix(".capsule-stage-")
+            .tempdir_in(dest.parent().unwrap())
+            .unwrap();
+        plant(staged.path(), b"should not land");
+        let absent_cid = crate::setup::walked_install_cid(staged.path()).unwrap();
+        assert_ne!(absent_cid, old_cid);
         CAPSULE_COMMIT_STOP.with(|flag| flag.set(CapsuleCommitStop::FailSecondRename));
-        let parent = dest.parent().unwrap();
-        let staged = stage(parent, b"should not land");
-        let staged_path = staged.keep();
-        let error = exchange_capsule_with_restore(&staged_path, &dest).unwrap_err();
+        let error = commit_staged_capsule(data, staged, &dest).unwrap_err();
+        CAPSULE_COMMIT_STOP.with(|flag| flag.set(CapsuleCommitStop::Run));
         assert!(
             error.to_string().contains("second capsule rename"),
             "{error}"
         );
         assert_eq!(
             std::fs::read(dest.join("browser/index.html")).unwrap(),
-            b"newer page"
+            b"still here"
         );
-        assert!(!staged_path.exists());
-        assert!(std::fs::read_dir(parent).unwrap().all(|entry| {
-            !entry
-                .unwrap()
+        assert_eq!(
+            crate::setup::recorded_install_cid(data, &dest).unwrap(),
+            old_cid
+        );
+        let ledger =
+            std::fs::read_to_string(data.join("capsules/install-cids.json")).unwrap_or_default();
+        assert!(
+            !ledger.contains(&absent_cid),
+            "the ledger recorded bytes that are not installed: {ledger}"
+        );
+        assert!(!crate::setup::capsule_install_intent_path(data).exists());
+        assert!(std::fs::read_dir(dest.parent().unwrap())
+            .unwrap()
+            .all(|entry| {
+                !entry
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".capsule-retired-")
+            }));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn capsule_install_crash_before_the_intent_and_between_renames_and_after_the_intent() {
+        fn plant(dir: &Path, page: &[u8]) {
+            std::fs::create_dir_all(dir.join("browser")).unwrap();
+            std::fs::write(
+                dir.join("capsule.json"),
+                include_bytes!("../../../../capsules/chat-room/capsule.json"),
+            )
+            .unwrap();
+            std::fs::write(dir.join("browser/index.html"), page).unwrap();
+        }
+        fn stage(parent: &Path, page: &[u8]) -> tempfile::TempDir {
+            let staged = tempfile::Builder::new()
+                .prefix(".capsule-stage-")
+                .tempdir_in(parent)
+                .unwrap();
+            plant(staged.path(), page);
+            staged
+        }
+        let root = tempfile::tempdir().unwrap();
+        let data = root.path();
+        let dest = data.join("capsules/chat-room");
+        plant(&dest, b"old page");
+        crate::setup::record_install_cid(data, &dest, &dest);
+        let old_cid = crate::setup::recorded_install_cid(data, &dest).unwrap();
+
+        CAPSULE_COMMIT_STOP.with(|flag| flag.set(CapsuleCommitStop::BeforeIntent));
+        let error = commit_staged_capsule(data, stage(dest.parent().unwrap(), b"new page"), &dest)
+            .unwrap_err();
+        assert!(error.to_string().contains("before the capsule intent"));
+        assert!(!crate::setup::capsule_install_intent_path(data).exists());
+        crate::setup::reconcile_capsule_install(data).unwrap();
+        assert_eq!(
+            crate::setup::recorded_install_cid(data, &dest).unwrap(),
+            old_cid
+        );
+        assert!(std::fs::read_dir(dest.parent().unwrap())
+            .unwrap()
+            .any(|entry| {
+                entry
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".capsule-stage-")
+            }));
+        for entry in std::fs::read_dir(dest.parent().unwrap()).unwrap() {
+            let path = entry.unwrap().path();
+            if path
                 .file_name()
-                .to_string_lossy()
-                .starts_with(".capsule-retired-")
-        }));
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with(".capsule-stage-"))
+            {
+                std::fs::remove_dir_all(path).unwrap();
+            }
+        }
+
+        CAPSULE_COMMIT_STOP.with(|flag| flag.set(CapsuleCommitStop::BetweenRenames));
+        let error = commit_staged_capsule(data, stage(dest.parent().unwrap(), b"new page"), &dest)
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("between the capsule renames"),
+            "{error}"
+        );
+        assert!(!dest.exists());
+        assert!(crate::setup::capsule_install_intent_path(data).exists());
+        crate::setup::reconcile_capsule_install(data).unwrap();
+        assert!(crate::setup::recorded_install_cid(data, &dest).is_none());
+        assert!(!crate::setup::capsule_install_intent_path(data).exists());
+        let kept = std::fs::read_dir(dest.parent().unwrap())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .find(|name| name.starts_with(".capsule-kept-chat-room-retired"))
+            .expect("the previous folder is kept aside by name");
+        let kept_path = dest.parent().unwrap().join(&kept);
+        assert_eq!(
+            std::fs::read(kept_path.join("browser/index.html")).unwrap(),
+            b"old page"
+        );
+        assert!(
+            std::fs::read_dir(dest.parent().unwrap())
+                .unwrap()
+                .any(|entry| {
+                    let name = entry.unwrap().file_name();
+                    let name = name.to_string_lossy();
+                    name.starts_with(".capsule-kept-chat-room-staged")
+                        || name.starts_with(".capsule-stage-")
+                }),
+            "the uncommitted new tree is not deleted"
+        );
+
+        plant(&dest, b"installed page");
+        crate::setup::record_install_cid(data, &dest, &dest);
+        CAPSULE_COMMIT_STOP.with(|flag| flag.set(CapsuleCommitStop::AfterIntentBeforeLeftover));
+        let error =
+            commit_staged_capsule(data, stage(dest.parent().unwrap(), b"landed page"), &dest)
+                .unwrap_err();
+        CAPSULE_COMMIT_STOP.with(|flag| flag.set(CapsuleCommitStop::Run));
+        assert!(error.to_string().contains("intent was removed"), "{error}");
+        let landed = crate::setup::recorded_install_cid(data, &dest).unwrap();
+        assert!(!crate::setup::capsule_install_intent_path(data).exists());
+        assert!(std::fs::read_dir(dest.parent().unwrap())
+            .unwrap()
+            .any(|entry| {
+                entry
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".capsule-stage-")
+            }));
+        crate::setup::reconcile_capsule_install(data).unwrap();
+        assert_eq!(
+            crate::setup::recorded_install_cid(data, &dest).unwrap(),
+            landed
+        );
+        assert!(
+            std::fs::read_dir(dest.parent().unwrap())
+                .unwrap()
+                .any(|entry| {
+                    entry
+                        .unwrap()
+                        .file_name()
+                        .to_string_lossy()
+                        .starts_with(".capsule-stage-")
+                }),
+            "with no intent, start does not delete the leftover"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_second_process_cannot_finish_an_install_while_the_lock_is_held() {
+        fn plant(dir: &Path, page: &[u8]) {
+            std::fs::create_dir_all(dir.join("browser")).unwrap();
+            std::fs::write(
+                dir.join("capsule.json"),
+                include_bytes!("../../../../capsules/chat-room/capsule.json"),
+            )
+            .unwrap();
+            std::fs::write(dir.join("browser/index.html"), page).unwrap();
+        }
+        if std::env::var_os("ELASTOS_P28_INSTALL_LOCK").is_some() {
+            let data = std::path::PathBuf::from(std::env::var("ELASTOS_P28_INSTALL_DATA").unwrap());
+            let _lock = crate::setup::lock_install_cids(&data).unwrap();
+            std::fs::write(
+                std::env::var("ELASTOS_P28_INSTALL_READY").unwrap(),
+                b"ready",
+            )
+            .unwrap();
+            let release = std::env::var("ELASTOS_P28_INSTALL_RELEASE").unwrap();
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+            while !std::path::Path::new(&release).exists() {
+                if std::time::Instant::now() > deadline {
+                    std::process::exit(4);
+                }
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            std::process::exit(0);
+        }
+        let root = tempfile::tempdir().unwrap();
+        let data = root.path();
+        let dest = data.join("capsules/chat-room");
+        plant(&dest, b"old page");
+        crate::setup::record_install_cid(data, &dest, &dest);
+        let old_cid = crate::setup::recorded_install_cid(data, &dest).unwrap();
+        let staged = tempfile::Builder::new()
+            .prefix(".capsule-stage-")
+            .tempdir_in(dest.parent().unwrap())
+            .unwrap();
+        plant(staged.path(), b"new page");
+        CAPSULE_COMMIT_STOP.with(|flag| flag.set(CapsuleCommitStop::BeforeSwap));
+        commit_staged_capsule(data, staged, &dest).unwrap_err();
+        CAPSULE_COMMIT_STOP.with(|flag| flag.set(CapsuleCommitStop::Run));
+        let intent = crate::setup::capsule_install_intent_path(data);
+        assert!(intent.exists());
+        let ready = root.path().join("ready");
+        let release = root.path().join("release");
+        let child = std::process::Command::new(std::env::current_exe().unwrap())
+            .arg("--exact")
+            .arg("supervisor::tests::a_second_process_cannot_finish_an_install_while_the_lock_is_held")
+            .env("ELASTOS_P28_INSTALL_LOCK", "1")
+            .env("ELASTOS_P28_INSTALL_DATA", data)
+            .env("ELASTOS_P28_INSTALL_READY", &ready)
+            .env("ELASTOS_P28_INSTALL_RELEASE", &release)
+            .spawn()
+            .unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while !ready.exists() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "child did not take the install lock"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        crate::setup::reconcile_capsule_install(data).unwrap();
+        assert!(
+            intent.exists(),
+            "start finished an install while another process held the lock"
+        );
+        assert_eq!(
+            crate::setup::recorded_install_cid(data, &dest).unwrap(),
+            old_cid
+        );
+        std::fs::write(&release, b"go").unwrap();
+        let status = child.wait_with_output().unwrap();
+        assert!(status.status.success(), "{status:?}");
+        crate::setup::reconcile_capsule_install(data).unwrap();
+        assert!(
+            !intent.exists(),
+            "the install was unchanged, so start drops the intent"
+        );
+        assert_eq!(
+            crate::setup::recorded_install_cid(data, &dest).unwrap(),
+            old_cid
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_home_with_no_intent_file_keeps_its_install_records() {
+        fn plant(dir: &Path, page: &[u8]) {
+            std::fs::create_dir_all(dir.join("browser")).unwrap();
+            std::fs::write(
+                dir.join("capsule.json"),
+                include_bytes!("../../../../capsules/chat-room/capsule.json"),
+            )
+            .unwrap();
+            std::fs::write(dir.join("browser/index.html"), page).unwrap();
+        }
+        let root = tempfile::tempdir().unwrap();
+        let data = root.path();
+        let dest = data.join("capsules/chat-room");
+        plant(&dest, b"released page");
+        crate::setup::record_install_cid(data, &dest, &dest);
+        let cid = crate::setup::recorded_install_cid(data, &dest).unwrap();
+        let ledger_path = data.join("capsules/install-cids.json");
+        let ledger = std::fs::read(&ledger_path).unwrap();
+        let dropped = data.join("capsules/dropped");
+        plant(&dropped, b"nobody installed this");
+        assert!(!crate::setup::capsule_install_intent_path(data).exists());
+        let _ = Supervisor::new(data.to_path_buf(), empty_capsule_manifest());
+        assert_eq!(std::fs::read(&ledger_path).unwrap(), ledger);
+        assert_eq!(
+            crate::setup::recorded_install_cid(data, &dest).as_deref(),
+            Some(cid.as_str())
+        );
+        assert!(crate::setup::recorded_install_cid(data, &dropped).is_none());
+        assert!(!crate::setup::capsule_install_intent_path(data).exists());
+        assert_eq!(
+            std::fs::read(dest.join("browser/index.html")).unwrap(),
+            b"released page"
+        );
+        assert_eq!(
+            std::fs::read(dropped.join("browser/index.html")).unwrap(),
+            b"nobody installed this"
+        );
+    }
+
+    fn empty_capsule_manifest() -> crate::setup::ComponentsManifest {
+        crate::setup::ComponentsManifest {
+            extra: Default::default(),
+            model_catalog: None,
+            collaboration_network: None,
+            external: std::collections::HashMap::new(),
+            capsules: std::collections::HashMap::new(),
+            profiles: std::collections::HashMap::new(),
+        }
     }
 }

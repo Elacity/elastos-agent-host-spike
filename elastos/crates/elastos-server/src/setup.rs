@@ -3039,25 +3039,239 @@ pub(crate) fn recorded_install_cid(_data_dir: &Path, _dir: &Path) -> Option<Stri
     None
 }
 
+/// Exclusive lock for the install ledger. A live capsule install holds it
+/// from the intent through the leftover. Start tells that process apart by
+/// this lock: when the lock is taken, start leaves stage trees alone.
+/// The same thread may enter again; the outer guard owns the flock.
+#[cfg(unix)]
+pub(crate) struct InstallCidLock {
+    file: Option<fs::File>,
+    owner: bool,
+}
+
+#[cfg(unix)]
+impl Drop for InstallCidLock {
+    fn drop(&mut self) {
+        // Closing the file releases the flock. The flag is this thread's
+        // re-entry mark and is cleared with the lock.
+        drop(self.file.take());
+        if self.owner {
+            INSTALL_CID_LOCK_HELD.with(|held| held.set(false));
+        }
+    }
+}
+
+#[cfg(unix)]
+std::thread_local! {
+    static INSTALL_CID_LOCK_HELD: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+#[cfg(unix)]
+fn install_lock_path(data_dir: &Path) -> PathBuf {
+    data_dir.join("capsules").join(".install-cids.lock")
+}
+
+/// The intent beside the ledger. Mode 0600. It names the destination, the
+/// CID walked from the staged tree, and the previous recorded CID, if any.
+#[cfg(unix)]
+pub(crate) fn capsule_install_intent_path(data_dir: &Path) -> PathBuf {
+    data_dir.join("capsules").join(".install-intent.json")
+}
+
+#[cfg(unix)]
+fn open_install_lock(data_dir: &Path) -> anyhow::Result<fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let path = install_lock_path(data_dir);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(&path)
+        .with_context(|| format!("cannot open {}", path.display()))
+}
+
+#[cfg(unix)]
+pub(crate) fn lock_install_cids(data_dir: &Path) -> anyhow::Result<InstallCidLock> {
+    use std::os::fd::AsRawFd;
+    if INSTALL_CID_LOCK_HELD.with(|held| held.get()) {
+        return Ok(InstallCidLock {
+            file: None,
+            owner: false,
+        });
+    }
+    let file = open_install_lock(data_dir)?;
+    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } != 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    INSTALL_CID_LOCK_HELD.with(|held| held.set(true));
+    Ok(InstallCidLock {
+        file: Some(file),
+        owner: true,
+    })
+}
+
+#[cfg(unix)]
+fn try_lock_install_cids(data_dir: &Path) -> anyhow::Result<Option<InstallCidLock>> {
+    use std::os::fd::AsRawFd;
+    if INSTALL_CID_LOCK_HELD.with(|held| held.get()) {
+        return Ok(Some(InstallCidLock {
+            file: None,
+            owner: false,
+        }));
+    }
+    let file = open_install_lock(data_dir)?;
+    let result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+    if result != 0 {
+        let err = std::io::Error::last_os_error();
+        if err.kind() == std::io::ErrorKind::WouldBlock
+            || err.raw_os_error() == Some(libc::EWOULDBLOCK)
+            || err.raw_os_error() == Some(libc::EAGAIN)
+        {
+            return Ok(None);
+        }
+        return Err(err.into());
+    }
+    INSTALL_CID_LOCK_HELD.with(|held| held.set(true));
+    Ok(Some(InstallCidLock {
+        file: Some(file),
+        owner: true,
+    }))
+}
+
+#[cfg(unix)]
+pub(crate) fn walked_install_cid(walked: &Path) -> anyhow::Result<String> {
+    use crate::bundle_admission::BUNDLE_WALK_BUDGET;
+    let bundle = elastos_bundle_identity::checked_bundle_within(walked, BUNDLE_WALK_BUDGET)
+        .map_err(|refusal| {
+            anyhow::anyhow!(
+                "capsule folder walk refused ({})",
+                crate::bundle_admission::walk_refusal(refusal).code()
+            )
+        })?;
+    Ok(bundle.cid().to_string())
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[cfg(unix)]
+struct CapsuleInstallIntent {
+    destination: String,
+    new_cid: String,
+    #[serde(default)]
+    previous_cid: Option<String>,
+    staged: String,
+}
+
+#[cfg(unix)]
+fn write_private_file(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let parent = path.parent().context("private file has no parent")?;
+    fs::create_dir_all(parent)?;
+    let scratch = tempfile::Builder::new()
+        .prefix(".install-intent.")
+        .tempfile_in(parent)?;
+    scratch.as_file().write_all(bytes)?;
+    scratch
+        .as_file()
+        .set_permissions(fs::Permissions::from_mode(0o600))?;
+    scratch.as_file().sync_all()?;
+    scratch.persist(path).map_err(|err| err.error)?;
+    fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
+    sync_path(parent)?;
+    Ok(())
+}
+
+#[cfg(unix)]
+pub(crate) fn write_capsule_install_intent(
+    data_dir: &Path,
+    destination: &Path,
+    new_cid: &str,
+    previous_cid: Option<&str>,
+    staged: &Path,
+) -> anyhow::Result<()> {
+    let destination = canonical_install_folder(destination)
+        .context("capsule install intent has no destination")?
+        .to_string_lossy()
+        .into_owned();
+    let intent = CapsuleInstallIntent {
+        destination,
+        new_cid: new_cid.to_string(),
+        previous_cid: previous_cid.map(str::to_owned),
+        staged: staged.to_string_lossy().into_owned(),
+    };
+    let bytes = serde_json::to_vec(&intent)?;
+    write_private_file(&capsule_install_intent_path(data_dir), &bytes)
+}
+
+#[cfg(unix)]
+pub(crate) fn remove_capsule_install_intent(data_dir: &Path) -> anyhow::Result<()> {
+    match fs::remove_file(capsule_install_intent_path(data_dir)) {
+        Err(err) if err.kind() != std::io::ErrorKind::NotFound => Err(err.into()),
+        _ => Ok(()),
+    }
+}
+
+#[cfg(unix)]
+enum IntentFile {
+    Absent,
+    Ready(CapsuleInstallIntent),
+    Unreadable,
+}
+
+#[cfg(unix)]
+fn read_capsule_install_intent(data_dir: &Path) -> IntentFile {
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+    let path = capsule_install_intent_path(data_dir);
+    let file = match fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(&path)
+    {
+        Ok(file) => file,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return IntentFile::Absent,
+        Err(_) => return IntentFile::Unreadable,
+    };
+    let meta = match file.metadata() {
+        Ok(meta) => meta,
+        Err(_) => return IntentFile::Unreadable,
+    };
+    if !meta.is_file()
+        || meta.nlink() != 1
+        || meta.uid() != unsafe { libc::geteuid() }
+        || meta.mode() & 0o777 != 0o600
+    {
+        return IntentFile::Unreadable;
+    }
+    let mut text = String::new();
+    let mut file = file;
+    if file.read_to_string(&mut text).is_err() {
+        return IntentFile::Unreadable;
+    }
+    match serde_json::from_str::<CapsuleInstallIntent>(&text) {
+        Ok(intent)
+            if !intent.destination.is_empty()
+                && !intent.new_cid.is_empty()
+                && !intent.new_cid.chars().any(char::is_whitespace) =>
+        {
+            IntentFile::Ready(intent)
+        }
+        _ => IntentFile::Unreadable,
+    }
+}
+
 /// Points the Home's ledger row for `dir` at `cid`, or removes the row when
 /// `cid` is `None`. The file is written from a new, randomly named file in one
 /// rename, so a link at the path is replaced, not followed.
 #[cfg(unix)]
 fn write_install_cid_ledger(data_dir: &Path, dir: &Path, cid: Option<&str>) -> anyhow::Result<()> {
+    let _lock = lock_install_cids(data_dir)?;
     let path = install_cid_ledger(data_dir);
     let parent = path.parent().context("install CID ledger has no parent")?;
     fs::create_dir_all(parent)?;
-    use std::os::fd::AsRawFd;
-    use std::os::unix::fs::OpenOptionsExt;
-    let _lock = fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .mode(0o600)
-        .custom_flags(libc::O_NOFOLLOW)
-        .open(parent.join(".install-cids.lock"))?;
-    if unsafe { libc::flock(_lock.as_raw_fd(), libc::LOCK_EX) } != 0 {
-        return Err(std::io::Error::last_os_error().into());
-    }
     let key = canonical_install_folder(dir)
         .context("install CID ledger has no folder key")?
         .to_string_lossy()
@@ -3089,12 +3303,37 @@ fn write_install_cid_ledger(
 /// Records the walk CID of `walked`, its extracted bytes and receipts, as the
 /// install CID of `dir`, the folder the install places them at, in the Home at
 /// `data_dir`. The install goes on when the record cannot be written, and then
-/// keeps no record.
+/// keeps no record. A start does not call this: a CID enters the record only
+/// from an install this Home performed.
 pub(crate) fn record_install_cid(data_dir: &Path, walked: &Path, dir: &Path) {
     if let Err(err) = write_install_cid(data_dir, walked, dir) {
         eprintln!("  No install CID record for {} ({err:#})", dir.display());
         let _ = clear_install_cid(data_dir, dir);
     }
+}
+
+/// Records `cid`, already walked from the staged tree of this install, as the
+/// install CID of `dir`. This does not walk `dir`.
+#[cfg(unix)]
+pub(crate) fn record_prepared_install_cid(
+    data_dir: &Path,
+    dir: &Path,
+    cid: &str,
+) -> anyhow::Result<()> {
+    let record = install_cid_record(dir)?;
+    let parent = record
+        .parent()
+        .context("install CID record has no parent")?;
+    let mut prefix = record.file_name().unwrap_or_default().to_os_string();
+    prefix.push(".");
+    let mut scratch = tempfile::Builder::new()
+        .prefix(&prefix)
+        .tempfile_in(parent)?;
+    writeln!(scratch, "{cid}")?;
+    scratch.as_file().sync_all()?;
+    scratch.persist(&record).map_err(|err| err.error)?;
+    sync_path(parent)?;
+    write_install_cid_ledger(data_dir, dir, Some(cid))
 }
 
 pub(crate) fn clear_install_cid(data_dir: &Path, dir: &Path) -> anyhow::Result<()> {
@@ -3107,86 +3346,212 @@ pub(crate) fn clear_install_cid(data_dir: &Path, dir: &Path) -> anyhow::Result<(
     write_install_cid_ledger(data_dir, dir, None)
 }
 
-/// Finish a capsule install a crash left half-done, then drop its leftovers.
+/// Finish an install whose intent is still here. With no intent, this changes
+/// no record and deletes no tree: a CID enters the record only from an install
+/// this Home performed, and start does not compute one from a folder in place.
 ///
-/// Before the exchange: the installed folder and its record stay, and a
-/// `.capsule-stage-*` tree is left. This removes that tree.
-/// A failed exchange leaves the installed folder and its record, and the
-/// commit already removed the staged tree.
-/// After the exchange and before the record: the new folder is installed, the
-/// previous tree is the staged path, and the record is still the previous
-/// one. This rewrites the record from the installed folder and removes the
-/// leftover.
-/// After the record and before cleanup: the record is already the new folder.
-/// This removes the leftover.
-/// An older two-step crash can leave the installed folder missing and one
-/// `.capsule-retired-*` tree. When exactly one ledger folder is missing and
-/// exactly one retired tree remains, this puts that tree back. Any other
-/// count is not guessed: the missing record is cleared and the leftover is
-/// removed.
+/// A live install holds [`.install-cids.lock`](install_lock_path). Start that
+/// cannot take that lock leaves every stage tree where it is.
 #[cfg(unix)]
 pub(crate) fn reconcile_capsule_install(data_dir: &Path) -> anyhow::Result<()> {
     let capsules = data_dir.join("capsules");
     if !capsules.is_dir() {
         return Ok(());
     }
-    let mut staged = Vec::new();
+    let Some(_lock) = try_lock_install_cids(data_dir)? else {
+        eprintln!("capsule install lock is held; a live installer's stage tree is left in place");
+        return Ok(());
+    };
+    let capsules = fs::canonicalize(&capsules).unwrap_or(capsules);
+    match read_capsule_install_intent(data_dir) {
+        IntentFile::Absent => Ok(()),
+        IntentFile::Unreadable => {
+            eprintln!(
+                "capsule install intent {} is unreadable; records and trees were left in place",
+                capsule_install_intent_path(data_dir).display()
+            );
+            Ok(())
+        }
+        IntentFile::Ready(intent) => finish_capsule_install_intent(data_dir, &capsules, &intent),
+    }
+}
+
+#[cfg(unix)]
+fn finish_capsule_install_intent(
+    data_dir: &Path,
+    capsules: &Path,
+    intent: &CapsuleInstallIntent,
+) -> anyhow::Result<()> {
+    let dest = PathBuf::from(&intent.destination);
+    if !destination_is_in(capsules, &dest) {
+        eprintln!(
+            "capsule install intent names {}; that destination is outside this Home's capsules, so the record was left in place",
+            dest.display()
+        );
+        return Ok(());
+    }
+    let walked = if real_directory(&dest) {
+        walked_install_cid(&dest).ok()
+    } else {
+        None
+    };
+    if walked.as_deref() == Some(intent.new_cid.as_str()) {
+        record_prepared_install_cid(data_dir, &dest, &intent.new_cid)?;
+        remove_capsule_install_intent(data_dir)?;
+        remove_finished_leftover(capsules, Path::new(&intent.staged))?;
+        return Ok(());
+    }
+    if intent
+        .previous_cid
+        .as_deref()
+        .is_some_and(|cid| walked.as_deref() == Some(cid))
+    {
+        remove_capsule_install_intent(data_dir)?;
+        return Ok(());
+    }
+    clear_install_cid(data_dir, &dest)?;
+    let mut kept = Vec::new();
+    if let Some(path) = keep_tree_aside(capsules, Path::new(&intent.staged), &dest, "staged")? {
+        kept.push(path);
+    }
     let mut retired = Vec::new();
-    let mut folders = Vec::new();
-    for entry in fs::read_dir(&capsules)? {
-        let entry = entry?;
-        let name = entry.file_name();
-        let text = name.to_string_lossy();
-        if text.starts_with('.') {
-            if text.starts_with(".capsule-stage-") {
-                staged.push(entry.path());
-            } else if text.starts_with(".capsule-retired-") {
+    if let Ok(entries) = fs::read_dir(capsules) {
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let text = name.to_string_lossy();
+            if text.starts_with(".capsule-retired-") {
                 retired.push(entry.path());
             }
-            continue;
-        }
-        if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
-            folders.push(entry.path());
         }
     }
-    let ledger = read_install_cid_ledger(data_dir);
-    let missing: Vec<String> = ledger
-        .keys()
-        .filter(|key| !Path::new(key).is_dir())
-        .cloned()
-        .collect();
-    let mut restored = false;
-    if missing.len() == 1 && retired.len() == 1 && staged.is_empty() {
-        fs::rename(&retired[0], Path::new(&missing[0]))?;
-        retired.clear();
-        restored = true;
-    }
-    for path in staged.iter().chain(retired.iter()) {
-        match fs::remove_dir_all(path) {
-            Err(err) if err.kind() != std::io::ErrorKind::NotFound => return Err(err.into()),
-            _ => {}
+    for path in retired {
+        if let Some(kept_path) = keep_tree_aside(capsules, &path, &dest, "retired")? {
+            kept.push(kept_path);
         }
     }
-    let removed_leftover = !staged.is_empty() || !retired.is_empty();
-    if !restored {
-        for key in &missing {
-            clear_install_cid(data_dir, Path::new(key))?;
-        }
-    }
-    if restored || removed_leftover {
-        for key in read_install_cid_ledger(data_dir).keys() {
-            let dir = Path::new(key);
-            if dir.is_dir() {
-                record_install_cid(data_dir, dir, dir);
-            }
-        }
-    }
-    for dir in folders {
-        if dir.join("capsule.json").is_file() && recorded_install_cid(data_dir, &dir).is_none() {
-            record_install_cid(data_dir, &dir, &dir);
+    remove_capsule_install_intent(data_dir)?;
+    if kept.is_empty() {
+        eprintln!(
+            "capsule install for {} matches neither recorded CID; no leftover tree was deleted",
+            dest.display()
+        );
+    } else {
+        for path in &kept {
+            eprintln!(
+                "capsule install for {} matches neither recorded CID; kept {}",
+                dest.display(),
+                path.display()
+            );
         }
     }
     Ok(())
+}
+
+#[cfg(unix)]
+fn destination_is_in(capsules: &Path, dest: &Path) -> bool {
+    let Some(parent) = dest.parent() else {
+        return false;
+    };
+    let Ok(parent) = fs::canonicalize(parent) else {
+        return false;
+    };
+    parent == capsules
+        && dest
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| !name.starts_with('.') && !name.is_empty())
+}
+
+#[cfg(unix)]
+fn real_directory(path: &Path) -> bool {
+    fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_dir())
+}
+
+#[cfg(unix)]
+fn direct_leaf(capsules: &Path, path: &Path, prefix: &str) -> bool {
+    if !real_directory(path) {
+        return false;
+    }
+    let Some(parent) = path.parent() else {
+        return false;
+    };
+    let Ok(parent) = fs::canonicalize(parent) else {
+        return false;
+    };
+    parent == capsules
+        && path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with(prefix))
+}
+
+/// Removes the previous tree an exchange left at the staged path, after the
+/// destination has been recorded. Any other path is left in place.
+#[cfg(unix)]
+fn remove_finished_leftover(capsules: &Path, staged: &Path) -> anyhow::Result<()> {
+    if !staged.exists() {
+        return Ok(());
+    }
+    if !direct_leaf(capsules, staged, ".capsule-stage-") {
+        eprintln!(
+            "capsule install leftover {} is not this Home's stage tree; it was left in place",
+            staged.display()
+        );
+        return Ok(());
+    }
+    fs::remove_dir_all(staged)?;
+    Ok(())
+}
+
+/// Moves `path` to a name under `capsules` and returns that name. A path that
+/// is not a stage or retired directory of this Home stays where it is.
+#[cfg(unix)]
+fn keep_tree_aside(
+    capsules: &Path,
+    path: &Path,
+    dest: &Path,
+    kind: &str,
+) -> anyhow::Result<Option<PathBuf>> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    let prefix = if kind == "staged" {
+        ".capsule-stage-"
+    } else {
+        ".capsule-retired-"
+    };
+    if !direct_leaf(capsules, path, prefix) && !direct_leaf(capsules, path, ".capsule-kept-") {
+        eprintln!(
+            "capsule install leftover {} was left in place",
+            path.display()
+        );
+        return Ok(Some(path.to_path_buf()));
+    }
+    if path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.starts_with(".capsule-kept-"))
+    {
+        return Ok(Some(path.to_path_buf()));
+    }
+    let dest_name = dest
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("capsule");
+    let mut kept = capsules.join(format!(".capsule-kept-{dest_name}-{kind}"));
+    if kept.exists() {
+        eprintln!(
+            "capsule install kept {} and left {} in place",
+            kept.display(),
+            path.display()
+        );
+        return Ok(Some(path.to_path_buf()));
+    }
+    fs::rename(path, &kept)?;
+    if !real_directory(&kept) {
+        kept = path.to_path_buf();
+    }
+    Ok(Some(kept))
 }
 
 #[cfg(windows)]
@@ -3231,10 +3596,9 @@ fn record_installed_component_folders(
 /// record.
 #[cfg(unix)]
 pub(crate) fn write_install_cid(data_dir: &Path, walked: &Path, dir: &Path) -> anyhow::Result<()> {
-    use crate::bundle_admission::BUNDLE_WALK_BUDGET;
     let record = install_cid_record(dir)?;
-    let bundle = match elastos_bundle_identity::checked_bundle_within(walked, BUNDLE_WALK_BUDGET) {
-        Ok(bundle) => bundle,
+    let cid = match walked_install_cid(walked) {
+        Ok(cid) => cid,
         Err(_) => {
             match fs::remove_file(&record) {
                 Err(err) if err.kind() != std::io::ErrorKind::NotFound => return Err(err.into()),
@@ -3243,19 +3607,7 @@ pub(crate) fn write_install_cid(data_dir: &Path, walked: &Path, dir: &Path) -> a
             return write_install_cid_ledger(data_dir, dir, None);
         }
     };
-    let parent = record
-        .parent()
-        .context("install CID record has no parent")?;
-    let mut prefix = record.file_name().unwrap_or_default().to_os_string();
-    prefix.push(".");
-    let mut scratch = tempfile::Builder::new()
-        .prefix(&prefix)
-        .tempfile_in(parent)?;
-    writeln!(scratch, "{}", bundle.cid())?;
-    scratch.as_file().sync_all()?;
-    scratch.persist(&record).map_err(|err| err.error)?;
-    sync_path(parent)?;
-    write_install_cid_ledger(data_dir, dir, Some(&bundle.cid().to_string()))
+    record_prepared_install_cid(data_dir, dir, &cid)
 }
 
 #[cfg(windows)]
