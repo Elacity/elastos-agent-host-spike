@@ -3912,7 +3912,7 @@ fn host_starts_heal_after_the_lock_and_skip_no_agent() {
     assert!(copy.contains(".floor("));
     assert_eq!(raise.matches("load_spend_audit(").count(), 1);
     let lock_fn = source_until(source_from(agents, "fn lock_for_write"), "\nfn open(");
-    let open_fail = lock_fn.find("return Err(Named(LOCK_NOT_FREE)").unwrap();
+    let open_fail = lock_fn.find("Err(_) => Err(Named(LOCK_NOT_FREE)").unwrap();
     let waited = lock_fn.find("exclusive_within").unwrap();
     let process = lock_fn.find("AGENT_WRITE").unwrap();
     assert!(

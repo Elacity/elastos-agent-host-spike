@@ -618,8 +618,7 @@ fn acquire_agent_lock(data_dir: &Path, create_when_absent: bool) -> anyhow::Resu
 fn open_agent_lock_file(path: &Path) -> anyhow::Result<std::fs::File> {
     match crate::auth_state_files::open_regular_lock_file(path, "agent records") {
         Ok(file) => Ok(file),
-        #[allow(clippy::needless_return)]
-        Err(_) => return Err(Named(LOCK_NOT_FREE).into()),
+        Err(_) => Err(Named(LOCK_NOT_FREE).into()),
     }
 }
 
