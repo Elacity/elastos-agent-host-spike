@@ -547,17 +547,21 @@ pub(in crate::api) async fn dispatch_approved_agent_plan(
     let record_if_lost = record.clone();
     let data_dir_if_lost = data_dir.clone();
     let request_id = record.request_id.clone();
+    // Built before the task is spawned, so a drop before the first poll
+    // still settles the claim.
+    let cleanup = UnsettledDispatch {
+        data_dir: data_dir.clone(),
+        record: record.clone(),
+        request_id: request_id.clone(),
+        finished: false,
+    };
+    #[cfg(all(test, unix))]
+    let unpolled_id = request_id.clone();
     let task = tokio::spawn(async move {
-        // Lives in this task. Dropping the caller's future detaches this
-        // task; if the task then ends without a settlement, this guard
-        // records unknown and resolves the flight.
-        let mut cleanup = UnsettledDispatch {
-            data_dir: data_dir.clone(),
-            record: record.clone(),
-            request_id: request_id.clone(),
-            finished: false,
-        };
-        #[cfg(test)]
+        #[cfg(all(test, unix))]
+        note_dispatch_was_polled(&request_id);
+        let mut cleanup = cleanup;
+        #[cfg(all(test, unix))]
         wait_plan_task_gate(&request_id).await;
         let response = tokio::time::timeout(
             plan_dispatch_wait(&request_id),
@@ -616,7 +620,7 @@ pub(in crate::api) async fn dispatch_approved_agent_plan(
         // The effect has returned. The record is still `dispatching` until the
         // settle below, and this guard still holds the flight. Stop cannot
         // answer stopped in this window. Release comes after the record write.
-        #[cfg(test)]
+        #[cfg(all(test, unix))]
         crate::resource_bridge::pause_plan_dispatch_for_test(
             &request_id,
             crate::resource_bridge::PlanDispatchPoint::BeforeSettle,
@@ -636,6 +640,10 @@ pub(in crate::api) async fn dispatch_approved_agent_plan(
         }
         settled
     });
+    #[cfg(all(test, unix))]
+    if take_unpolled_dispatch(&unpolled_id) {
+        task.abort();
+    }
     match task.await {
         Ok(settled) => settled,
         Err(err) => {
@@ -701,13 +709,13 @@ pub(crate) fn clear_plan_dispatch_wait_for_test(request_id: &str) {
         .remove(request_id);
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 struct PlanTaskGate {
     entered: std::sync::Arc<tokio::sync::Notify>,
     release: std::sync::Arc<tokio::sync::Notify>,
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 fn plan_task_gates() -> &'static std::sync::Mutex<Vec<(String, PlanTaskGate)>> {
     static GATES: std::sync::OnceLock<std::sync::Mutex<Vec<(String, PlanTaskGate)>>> =
         std::sync::OnceLock::new();
@@ -738,7 +746,58 @@ pub(crate) fn arm_plan_task_gate(request_id: &str) -> PlanTaskPause {
     PlanTaskPause { entered, release }
 }
 
-#[cfg(test)]
+/// The next dispatch of this id aborts its task before the task is polled.
+#[cfg(all(test, unix))]
+pub(crate) fn arm_unpolled_dispatch(request_id: &str) {
+    unpolled_dispatches()
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+        .push(request_id.to_string());
+}
+
+#[cfg(all(test, unix))]
+fn unpolled_dispatches() -> &'static std::sync::Mutex<Vec<String>> {
+    static IDS: std::sync::OnceLock<std::sync::Mutex<Vec<String>>> = std::sync::OnceLock::new();
+    IDS.get_or_init(|| std::sync::Mutex::new(Vec::new()))
+}
+
+/// Set when a spawned dispatch is polled. An abort before the first poll leaves it clear.
+#[cfg(all(test, unix))]
+fn dispatch_poll_marks() -> &'static std::sync::Mutex<Vec<String>> {
+    static MARKS: std::sync::OnceLock<std::sync::Mutex<Vec<String>>> = std::sync::OnceLock::new();
+    MARKS.get_or_init(|| std::sync::Mutex::new(Vec::new()))
+}
+
+#[cfg(all(test, unix))]
+fn note_dispatch_was_polled(request_id: &str) {
+    dispatch_poll_marks()
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+        .push(request_id.to_string());
+}
+
+#[cfg(all(test, unix))]
+pub(crate) fn dispatch_was_polled(request_id: &str) -> bool {
+    dispatch_poll_marks()
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+        .iter()
+        .any(|id| id == request_id)
+}
+
+#[cfg(all(test, unix))]
+fn take_unpolled_dispatch(request_id: &str) -> bool {
+    let mut ids = unpolled_dispatches()
+        .lock()
+        .unwrap_or_else(|err| err.into_inner());
+    let Some(pos) = ids.iter().rposition(|id| id == request_id) else {
+        return false;
+    };
+    ids.swap_remove(pos);
+    true
+}
+
+#[cfg(all(test, unix))]
 async fn wait_plan_task_gate(request_id: &str) {
     let gate = {
         let mut gates = plan_task_gates()

@@ -375,7 +375,7 @@ struct UnknownPlanStep {
     session_id: String,
     agent_id: String,
     request_id: String,
-    /// When to drop a name recorded after its row was gone.
+    /// Drop this name at this instant. A product name sets it when recorded.
     purge_at: Option<std::time::Instant>,
 }
 
@@ -478,18 +478,14 @@ fn finish_flight(book: &mut PlanBook, id: u64, as_unknown: bool) {
     forget_open_effect(&flight.request_id);
     let session_id = flight.session_id.clone();
     if as_unknown {
-        // The row is already gone. Keep the name for one retention.
-        let purge_at = book
-            .row_gone
-            .contains(&session_id)
-            .then(|| book_now(book) + ENDED_CAPSULE_RETENTION);
+        // One retention from the moment the name is recorded, row or no row.
         push_unknown(
             book,
             UnknownPlanStep {
                 session_id: flight.session_id,
                 agent_id: flight.agent_id,
                 request_id: flight.request_id,
-                purge_at,
+                purge_at: Some(book_now(book) + ENDED_CAPSULE_RETENTION),
             },
         );
     }
@@ -542,9 +538,13 @@ fn push_unknown(book: &mut PlanBook, step: UnknownPlanStep) {
     }
 }
 
-/// Drops unknown names for a session whose row has left the registry.
+/// Drops this session's names once their own purge time has come.
+/// A name that is not yet due stays when the row is swept.
 fn purge_unknown_session(book: &mut PlanBook, session_id: &str) {
-    book.unknown.retain(|step| step.session_id != session_id);
+    drop_due_unknown(book);
+    let now = book_now(book);
+    book.unknown
+        .retain(|step| step.session_id != session_id || step.purge_at.is_some_and(|due| now < due));
     if book
         .inflight
         .values()
@@ -681,14 +681,14 @@ pub(crate) struct PlanEndPause {
     pub release: Arc<tokio::sync::Notify>,
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 struct PlanEndGate {
     session_id: String,
     entered: Arc<tokio::sync::Notify>,
     release: Arc<tokio::sync::Notify>,
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 static PLAN_END_GATES: StdMutex<Vec<PlanEndGate>> = StdMutex::new(Vec::new());
 
 #[cfg(all(test, unix))]
@@ -706,7 +706,7 @@ pub(crate) fn arm_after_plan_end_mark(session_id: &str) -> PlanEndPause {
     PlanEndPause { entered, release }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 async fn pause_after_plan_end_mark(session_id: &str) {
     let gate = {
         let mut gates = PLAN_END_GATES.lock().unwrap_or_else(|err| err.into_inner());
@@ -805,7 +805,8 @@ struct StopCalls {
     next: u64,
 }
 
-/// One activation's stop. The flag rises only after that caller's provider stop succeeds.
+/// One activation's stop. The cause and the flag are written on commit.
+/// The first commit's cause stays. A ticket that is dropped or fails is withdrawn.
 struct ActivationStop {
     flag: Arc<crate::resource_bridge::ActivationStopFlag>,
     calls: StdMutex<StopCalls>,
@@ -824,22 +825,23 @@ impl ActivationStop {
         }
     }
 
-    fn stage(&self, reason: &str) -> u64 {
+    fn open_id(&self) -> u64 {
         let mut calls = self.calls.lock().unwrap_or_else(|err| err.into_inner());
-        calls
-            .cause
-            .get_or_insert_with(|| format!("{CAPSULE_STOPPED}: {reason}"));
         let id = calls.next;
         calls.next = calls.next.wrapping_add(1);
         calls.open.insert(id);
         id
     }
 
-    fn commit(&self, id: u64) {
+    /// The first commit writes the cause. A later commit keeps that cause.
+    fn finish(&self, id: u64, reason: &str) {
         let mut calls = self.calls.lock().unwrap_or_else(|err| err.into_inner());
         if !calls.open.remove(&id) {
             return;
         }
+        calls
+            .cause
+            .get_or_insert_with(|| format!("{CAPSULE_STOPPED}: {reason}"));
         calls.committed = calls.committed.saturating_add(1);
         self.flag.requested.store(true, Ordering::Release);
     }
@@ -857,8 +859,8 @@ impl ActivationStop {
     /// has no provider call between the two.
     #[cfg(test)]
     fn request(&self, reason: &str) {
-        let id = self.stage(reason);
-        self.commit(id);
+        let id = self.open_id();
+        self.finish(id, reason);
     }
 
     /// The reason this stop was requested with, if any.
@@ -874,6 +876,38 @@ impl ActivationStop {
     /// stop: then the stop, not the call, is what ended the guest.
     fn cancelled(&self) -> bool {
         self.flag.cancelled.load(Ordering::Acquire)
+    }
+}
+
+/// One caller's ticket. Drop withdraws it unless `commit` already ran.
+struct OpenStop {
+    stop: Arc<ActivationStop>,
+    id: u64,
+    reason: String,
+    live: bool,
+}
+
+impl Drop for OpenStop {
+    fn drop(&mut self) {
+        if self.live {
+            self.stop.withdraw(self.id);
+        }
+    }
+}
+
+impl OpenStop {
+    fn stage(stop: &Arc<ActivationStop>, reason: &str) -> Self {
+        Self {
+            stop: Arc::clone(stop),
+            id: stop.open_id(),
+            reason: reason.to_string(),
+            live: true,
+        }
+    }
+
+    fn commit(mut self) {
+        self.live = false;
+        self.stop.finish(self.id, &self.reason);
     }
 }
 
@@ -950,14 +984,14 @@ static FAIL_CAPSULE_STOP: StdMutex<Vec<(usize, String)>> = StdMutex::new(Vec::ne
 static PROVIDER_STOP_CALLS: StdMutex<Vec<usize>> = StdMutex::new(Vec::new());
 
 /// Holds provider stops after the reason is staged and before the flag is raised.
-#[cfg(test)]
+#[cfg(all(test, unix))]
 struct ProviderStopHold {
     entered: Arc<tokio::sync::Notify>,
     releases: StdMutex<Vec<Arc<tokio::sync::Notify>>>,
     arrived: std::sync::atomic::AtomicUsize,
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 static PROVIDER_STOP_HOLDS: StdMutex<Vec<(usize, String, Arc<ProviderStopHold>)>> =
     StdMutex::new(Vec::new());
 
@@ -979,7 +1013,7 @@ impl ProviderStopPause {
         self.hold.entered.notified().await;
     }
 
-    /// Lets the next waiting stop continue.
+    /// Lets the next waiting stop continue. The last to arrive goes first.
     pub(crate) fn release_one(&self) {
         let release = self
             .hold
@@ -990,6 +1024,21 @@ impl ProviderStopPause {
         if let Some(release) = release {
             release.notify_one();
         }
+    }
+
+    /// Lets the earliest waiting stop continue.
+    pub(crate) fn release_oldest(&self) {
+        let mut releases = self
+            .hold
+            .releases
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        if releases.is_empty() {
+            return;
+        }
+        let release = releases.remove(0);
+        drop(releases);
+        release.notify_one();
     }
 }
 
@@ -1021,7 +1070,7 @@ impl Drop for ProviderStopPause {
 /// What a guest does at the first line of its watcher, before it runs.
 /// Keyed by agent id. The launch turn is still held, so the guest's end
 /// cannot pass `hold_launch_turn` until the start returns.
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub(crate) enum GuestOpening {
     /// Tell the test whether the plan instance is open, then run the guest.
     Dispatch(tokio::sync::oneshot::Sender<bool>),
@@ -1029,7 +1078,7 @@ pub(crate) enum GuestOpening {
     Exit,
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 static GUEST_OPENING: StdMutex<Vec<(String, GuestOpening)>> = StdMutex::new(Vec::new());
 
 #[cfg(all(test, unix))]
@@ -1040,7 +1089,7 @@ pub(crate) fn arm_guest_opening(agent_id: &str, opening: GuestOpening) {
         .push((agent_id.to_string(), opening));
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 fn guest_opening_is_armed(agent_id: &str) -> bool {
     GUEST_OPENING
         .lock()
@@ -1049,11 +1098,82 @@ fn guest_opening_is_armed(agent_id: &str) -> bool {
         .any(|(id, _)| id == agent_id)
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 fn take_guest_opening(agent_id: &str) -> Option<GuestOpening> {
     let mut armed = GUEST_OPENING.lock().unwrap_or_else(|err| err.into_inner());
     let pos = armed.iter().rposition(|(id, _)| id == agent_id)?;
     Some(armed.swap_remove(pos).1)
+}
+
+/// Pauses one watcher at a named point. Keyed by the stop map so tests stay apart.
+#[cfg(all(test, unix))]
+struct WatchPause {
+    key: usize,
+    point: &'static str,
+    release: Arc<tokio::sync::Notify>,
+    entered: Arc<tokio::sync::Notify>,
+}
+
+#[cfg(all(test, unix))]
+static WATCH_PAUSES: StdMutex<Vec<WatchPause>> = StdMutex::new(Vec::new());
+
+#[cfg(all(test, unix))]
+pub(crate) struct WatchHold {
+    pub(crate) release: Arc<tokio::sync::Notify>,
+    pub(crate) entered: Arc<tokio::sync::Notify>,
+}
+
+#[cfg(all(test, unix))]
+impl Drop for WatchHold {
+    fn drop(&mut self) {
+        let mut pauses = WATCH_PAUSES.lock().unwrap_or_else(|err| err.into_inner());
+        if let Some(pos) = pauses
+            .iter()
+            .rposition(|pause| Arc::ptr_eq(&pause.release, &self.release))
+        {
+            pauses.swap_remove(pos);
+        }
+        drop(pauses);
+        self.release.notify_one();
+    }
+}
+
+#[cfg(all(test, unix))]
+fn arm_watch_pause(
+    stops: &Arc<StdRwLock<HashMap<String, Arc<ActivationStop>>>>,
+    point: &'static str,
+) -> WatchHold {
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    WATCH_PAUSES
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+        .push(WatchPause {
+            key: Arc::as_ptr(stops) as usize,
+            point,
+            release: Arc::clone(&release),
+            entered: Arc::clone(&entered),
+        });
+    WatchHold { release, entered }
+}
+
+#[cfg(all(test, unix))]
+async fn pause_watch(
+    stops: &Arc<StdRwLock<HashMap<String, Arc<ActivationStop>>>>,
+    point: &'static str,
+) {
+    let pause = {
+        let key = Arc::as_ptr(stops) as usize;
+        let mut pauses = WATCH_PAUSES.lock().unwrap_or_else(|err| err.into_inner());
+        let pos = pauses
+            .iter()
+            .rposition(|pause| pause.key == key && pause.point == point);
+        pos.map(|pos| pauses.swap_remove(pos))
+    };
+    if let Some(pause) = pause {
+        pause.entered.notify_one();
+        pause.release.notified().await;
+    }
 }
 
 #[cfg(test)]
@@ -1378,7 +1498,7 @@ impl ActivationContextHeld {
         plan_book(&self.plan_book).mark_stopping(&self.id.0);
         // `release` drops a step's admission. A dispatch after that drop
         // cannot see this mark, so a row reads the refusal in between.
-        #[cfg(test)]
+        #[cfg(all(test, unix))]
         pause_after_plan_end_mark(&self.id.0).await;
         let (status, cause) = match self.settled.clone() {
             Some(settled) => settled,
@@ -2219,7 +2339,7 @@ impl Runtime {
         let agent_id = facts.agent_id.to_string();
         // The plan instance was bound before the guest was spawned. Binding
         // again would reopen a session whose end already reaped it.
-        #[cfg(test)]
+        #[cfg(all(test, unix))]
         self.yield_until_guest_opening_runs(facts.agent_id).await;
         let ended = self
             .get_capsule(&session_id)
@@ -2264,6 +2384,7 @@ impl Runtime {
     /// not reopened. An absent row is a new instance.
     pub(crate) fn bind_plan_instance(&self, session_id: &str, agent_id: &str) {
         let mut book = plan_book(&self.plan_book);
+        drop_due_unknown(&mut book);
         // A session already marked stopping is not reopened. An absent row
         // is a new instance: the late bind that used to insert one after the
         // guest had ended is gone.
@@ -2320,6 +2441,7 @@ impl Runtime {
         request_id: &str,
     ) -> std::result::Result<PlanEffectGuard, ()> {
         let mut locked = plan_book(book);
+        drop_due_unknown(&mut locked);
         #[cfg(test)]
         if let Some(hook) = take_plan_decision_hook(session_id) {
             hook(&mut locked);
@@ -2798,6 +2920,12 @@ impl Runtime {
         true
     }
 
+    /// Pauses the watcher at `point` until the test releases it.
+    #[cfg(all(test, unix))]
+    pub(crate) fn arm_watch_pause_for_test(&self, point: &'static str) -> WatchHold {
+        arm_watch_pause(&self.activation_stops, point)
+    }
+
     /// Pauses this session's provider stop after the reason is staged.
     #[cfg(all(test, unix))]
     pub(crate) fn arm_provider_stop_hold(&self, session_id: &str) -> ProviderStopPause {
@@ -2821,7 +2949,7 @@ impl Runtime {
         }
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     async fn pause_during_provider_stop(&self, id: &str) {
         let hold = {
             let holds = PROVIDER_STOP_HOLDS
@@ -4211,6 +4339,17 @@ impl Runtime {
         plan_book(&self.plan_book).clock = now;
     }
 
+    /// Names still stored, including ones whose purge time has passed.
+    #[cfg(all(test, unix))]
+    pub(crate) fn unknown_ids_for_test(&self, agent_id: &str) -> Vec<String> {
+        plan_book(&self.plan_book)
+            .unknown
+            .iter()
+            .filter(|step| step.agent_id == agent_id)
+            .map(|step| step.request_id.clone())
+            .collect()
+    }
+
     #[cfg(all(test, unix))]
     pub(crate) fn unknown_count_for_test(&self, agent_id: &str) -> usize {
         let mut book = plan_book(&self.plan_book);
@@ -4248,7 +4387,7 @@ impl Runtime {
 
     /// Lets the guest task run its opening while this start still holds the
     /// launch turn. The opening is taken by that task.
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     async fn yield_until_guest_opening_runs(&self, agent_id: &str) {
         let _ = self;
         if !guest_opening_is_armed(agent_id) {
@@ -4284,11 +4423,13 @@ impl Runtime {
         tokio::spawn(async move {
             // A stop that arrived while the activation was still starting: the
             // guest is not run at all, and the stop is its whole end.
+            #[cfg(all(test, unix))]
+            pause_watch(&held.activation_stops, "sees-stop").await;
             if let Some(cause) = held.requested_stop() {
                 held.end_instance(CAPSULE_STOPPED, &cause).await;
                 return;
             }
-            #[cfg(test)]
+            #[cfg(all(test, unix))]
             if let Some(agent_id) = held.live_run.as_ref().map(|run| run.agent_id.clone()) {
                 if let Some(opening) = take_guest_opening(&agent_id) {
                     match opening {
@@ -4314,6 +4455,8 @@ impl Runtime {
                     if let Some(info) = registry.write().await.get_mut(&id.0) {
                         info.status = CAPSULE_RUNNING.to_string();
                     }
+                    #[cfg(all(test, unix))]
+                    pause_watch(&held.activation_stops, "outcome").await;
                     match activation.ended().await {
                         ActivationOutcome::Returned => match held.requested_stop() {
                             Some(cause) => (CAPSULE_STOPPED, cause),
@@ -4479,9 +4622,16 @@ impl Runtime {
 
     /// Unregister a capsule from the runtime
     pub async fn unregister_capsule(&self, id: &str) {
-        let mut capsules = self.running_capsules.write().await;
-        if capsules.remove(id).is_some() {
-            tracing::info!("Unregistered capsule: {}", id);
+        let removed = {
+            let mut capsules = self.running_capsules.write().await;
+            let removed = capsules.remove(id).is_some();
+            if removed {
+                tracing::info!("Unregistered capsule: {}", id);
+            }
+            removed
+        };
+        if removed {
+            self.purge_unknown_sessions(&[id.to_string()]);
         }
     }
 
@@ -4624,13 +4774,16 @@ impl Runtime {
             }));
         };
 
-        // The flag rises only after this caller's provider stop succeeds.
-        let ticket = stop.stage(reason);
+        // The cause and the flag are written when this caller's provider stop
+        // has succeeded. A drop or a failure before that withdraws only this
+        // ticket. The agent's stop mark is stored in that same commit, before
+        // the cause is published and before the wait for the end.
+        let ticket = OpenStop::stage(&stop, reason);
         if let Some((handle, provider)) = provider {
             tracing::info!("Stopping capsule '{}' ({})", info.name, id);
             #[cfg(test)]
             self.note_provider_stop_call();
-            #[cfg(test)]
+            #[cfg(all(test, unix))]
             self.pause_during_provider_stop(id).await;
             let stopped = provider.stop(handle).await;
             #[cfg(test)]
@@ -4639,13 +4792,23 @@ impl Runtime {
             } else {
                 stopped
             };
-            if let Err(error) = stopped {
-                stop.withdraw(ticket);
-                return Err(error);
-            }
+            stopped?;
         }
-        stop.commit(ticket);
-
+        // The launch gate is held across the mark and the commit, and the
+        // mark is written first. A Start that observes the cause already
+        // observes the mark: the cause is not published until the mark is in
+        // the set, and Start takes this same gate to read the set.
+        {
+            let mut launches = self.agent_launches.lock().await;
+            if let Some(agent_id) = launches
+                .sessions
+                .get(id)
+                .map(|record| record.agent_id.clone())
+            {
+                launches.stop_requested.insert(agent_id);
+            }
+            ticket.commit();
+        }
         self.wait_ended(id).await;
         // The end happened, whatever its recorded status and cause: the
         // entry the list serves says which, and a stop whose guest ran to its
@@ -8315,5 +8478,108 @@ pub(crate) mod tests {
                 "{stops:?}"
             );
         });
+    }
+
+    #[cfg(unix)]
+    async fn start_unsigned_quiet(runtime: &Runtime, dir: &std::path::Path) -> String {
+        runtime
+            .configure_capsule_admission(dir, &[], true)
+            .await
+            .unwrap();
+        let folder = dir.join("quiet");
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(
+            folder.join("capsule.json"),
+            component_manifest_json("quiet"),
+        )
+        .unwrap();
+        std::fs::write(folder.join("app.component.wasm"), quiet_component()).unwrap();
+        let (handle, _) = runtime
+            .start_local_with_signer(&folder, Vec::new(), None, None)
+            .await
+            .expect("the quiet guest starts");
+        handle.id.0
+    }
+
+    #[cfg(unix)]
+    async fn wait_capsule_cause(runtime: &Runtime, id: &str) -> String {
+        tokio::time::timeout(std::time::Duration::from_secs(60), async {
+            loop {
+                if let Some(cause) = runtime.get_capsule(id).await.and_then(|info| info.cause) {
+                    return cause;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the guest did not record an end")
+    }
+
+    /// The guest has already returned. A stop dropped inside the provider stop
+    /// leaves no cause, so the watcher records the natural end.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_stop_dropped_in_the_provider_records_a_natural_end() {
+        let (runtime, dir) = component_runtime().await;
+        let runtime = Arc::new(runtime);
+        let pause = runtime.arm_watch_pause_for_test("outcome");
+        let id = start_unsigned_quiet(&runtime, dir.path()).await;
+        tokio::time::timeout(std::time::Duration::from_secs(60), pause.entered.notified())
+            .await
+            .expect("the watcher did not reach the outcome");
+        let hold = runtime.arm_provider_stop_hold(&id);
+        let stopping = Arc::clone(&runtime);
+        let stop_id = id.clone();
+        let task =
+            tokio::spawn(async move { stopping.stop_capsule_with_reason(&stop_id, "owner").await });
+        tokio::time::timeout(std::time::Duration::from_secs(5), hold.entered())
+            .await
+            .expect("the stop did not reach the provider");
+        assert!(runtime.requested_stop_for_test(&id).is_none());
+        task.abort();
+        let _ = task.await;
+        assert!(
+            runtime.requested_stop_for_test(&id).is_none(),
+            "the dropped stop left a cause"
+        );
+        pause.release.notify_one();
+        assert_eq!(wait_capsule_cause(&runtime, &id).await, CAUSE_COMPLETED);
+    }
+
+    /// A stop that fails while the watcher has not started the guest does not
+    /// become the guest's end. The guest still records a natural return.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_failed_stop_during_start_does_not_end_the_run() {
+        let (runtime, dir) = component_runtime().await;
+        let runtime = Arc::new(runtime);
+        let pause = runtime.arm_watch_pause_for_test("sees-stop");
+        let id = start_unsigned_quiet(&runtime, dir.path()).await;
+        tokio::time::timeout(std::time::Duration::from_secs(60), pause.entered.notified())
+            .await
+            .expect("the watcher did not reach the start");
+        let hold = runtime.arm_provider_stop_hold(&id);
+        runtime.arm_failing_capsule_stop(&id);
+        let stopping = Arc::clone(&runtime);
+        let stop_id = id.clone();
+        let task =
+            tokio::spawn(async move { stopping.stop_capsule_with_reason(&stop_id, "owner").await });
+        tokio::time::timeout(std::time::Duration::from_secs(5), hold.entered())
+            .await
+            .expect("the stop did not reach the provider");
+        assert!(runtime.requested_stop_for_test(&id).is_none());
+        pause.release.notify_one();
+        assert_eq!(wait_capsule_cause(&runtime, &id).await, CAUSE_COMPLETED);
+        hold.release_one();
+        let stopped = tokio::time::timeout(std::time::Duration::from_secs(5), task)
+            .await
+            .expect("the stop did not return")
+            .expect("the stop task");
+        assert!(
+            stopped.is_err(),
+            "the failed stop ended the run: {stopped:?}"
+        );
+        let info = runtime.get_capsule(&id).await.expect("the ended row");
+        assert_eq!(info.cause.as_deref(), Some(CAUSE_COMPLETED));
     }
 }

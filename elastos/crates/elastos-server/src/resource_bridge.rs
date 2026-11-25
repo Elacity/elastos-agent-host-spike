@@ -580,7 +580,7 @@ fn current_plan_step() -> Option<PlanStep> {
     PLAN_STEP.try_with(Clone::clone).ok()
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum PlanDispatchPoint {
     BeforeCheck,
@@ -591,7 +591,7 @@ pub(crate) enum PlanDispatchPoint {
     BeforeSettle,
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 struct PlanHold {
     request_id: String,
     point: PlanDispatchPoint,
@@ -599,7 +599,7 @@ struct PlanHold {
     release: Arc<tokio::sync::Notify>,
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 static PLAN_HOLDS: Mutex<Vec<PlanHold>> = Mutex::new(Vec::new());
 
 #[cfg(all(test, unix))]
@@ -629,7 +629,7 @@ pub(crate) fn arm_plan_dispatch_hold(
     PlanDispatchPause { entered, release }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 async fn pause_plan_dispatch(request_id: &str, point: PlanDispatchPoint) {
     let hold = {
         let mut holds = PLAN_HOLDS.lock().unwrap_or_else(|err| err.into_inner());
@@ -645,7 +645,7 @@ async fn pause_plan_dispatch(request_id: &str, point: PlanDispatchPoint) {
 }
 
 /// The dispatch task waits here, after the effect and before the record is settled.
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub(crate) async fn pause_plan_dispatch_for_test(request_id: &str, point: PlanDispatchPoint) {
     pause_plan_dispatch(request_id, point).await;
 }
@@ -733,9 +733,9 @@ async fn register_one_use_grant(
         )
         .await;
     let id = pending.id.as_str().to_string();
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     wait_one_use_grant_race(request_id, &id).await;
-    #[cfg(not(test))]
+    #[cfg(not(all(test, unix)))]
     let _ = request_id;
     if ctx
         .pending_store
@@ -767,7 +767,7 @@ async fn register_one_use_grant(
     Ok(id)
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 struct OneUseGrantRace {
     request_id: String,
     entered: Arc<tokio::sync::Notify>,
@@ -775,7 +775,7 @@ struct OneUseGrantRace {
     pending_id: Arc<Mutex<Option<String>>>,
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 static ONE_USE_GRANT_RACE: Mutex<Option<OneUseGrantRace>> = Mutex::new(None);
 
 /// Lets a test grant the pending record before this registration does.
@@ -832,7 +832,7 @@ pub(crate) fn arm_one_use_grant_race(request_id: &str) -> OneUseGrantPause {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 async fn wait_one_use_grant_race(request_id: &str, pending_id: &str) {
     let race = {
         let mut slot = ONE_USE_GRANT_RACE
@@ -996,7 +996,7 @@ async fn admit_plan_effect(
     if take_plan_panic(&step.request_id) {
         panic!("plan dispatch panic seam");
     }
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pause_plan_dispatch(&step.request_id, PlanDispatchPoint::InEffect).await;
     Ok((guard, AdmittedEffect::admit()))
 }
@@ -1061,7 +1061,7 @@ pub(crate) async fn dispatch_agent_plan_step(
     // The admission is already removed. Refuse unless this instance is still
     // running and not stopping. The same check runs again immediately before
     // the write.
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pause_plan_dispatch(request_id, PlanDispatchPoint::BeforeCheck).await;
     if let Some(refusal) = plan_step_refusal(
         data_dir,
@@ -1182,7 +1182,7 @@ pub(crate) async fn dispatch_agent_plan_step(
             pending_id,
         }),
     });
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pause_plan_dispatch(request_id, PlanDispatchPoint::AfterToken).await;
     let request = serde_json::json!({
         "uri": uri,
