@@ -60,7 +60,7 @@ POST_MERGE_GUARD = "${{ github.event_name == 'push' || github.event_name == 'sch
 REQUIRED_NEEDS = ("source-gate", "fork-gate", "pr-substance", "test-behaviour", "cargo-audit", "core-size", "engine-llama-amd64",
                   "engine-llama-arm64",
                   "lint", "lab-gates", "lab-standin", "lab-operator-effects-macos", "lab-wasm-capsule", "test-elastos", "test-capsules", "custody-harness-smoke", "release-upstream-paths",
-                  "release-upstream-assets", "installed-app-paths", "source-home-linux", "source-home-linux-arm64",
+                  "release-upstream-assets", "installed-app-paths", "archive-viewer-paths", "archive-viewer-parser", "source-home-linux", "source-home-linux-arm64",
                   "source-home-macos", "update-hop-linux", "musl-check-linux", "musl-check-linux-arm64")
 # Read the fixed job/step indentation used here; actionlint checks YAML syntax.
 def jobs(source):
@@ -127,6 +127,9 @@ def event_context(event, ref, ref_type="", override="", head_ref=None, **extra):
         "github.head_ref": head_ref,
         # installed-app-paths answers run on every event but a notes-only pull request.
         "needs.installed-app-paths.outputs.run": "true",
+        # archive-viewer-paths answers run on a merge queue, a manual run, and a
+        # pull request whose decision step did not say run=false.
+        "needs.archive-viewer-paths.outputs.run": "true",
     }
     context.update(extra)
     return context
@@ -2155,6 +2158,8 @@ class ReleasePolicyTests(unittest.TestCase):
             "release-upstream-paths": ("release-upstream-paths", "ubuntu-24.04"),
             "release-upstream-assets": ("release-upstream-assets (${{ matrix.platform }})", "${{ matrix.os }}"),
             "installed-app-paths": ("installed-app-paths", "ubuntu-24.04"),
+            "archive-viewer-paths": ("archive-viewer-paths", "ubuntu-24.04"),
+            "archive-viewer-parser": ("archive-viewer-parser", "ubuntu-24.04"),
             "source-home-linux": ("source-home-linux (${{ matrix.os }})", "${{ matrix.os }}"),
             "source-home-linux-arm64": ("source-home-linux (${{ matrix.check_name || matrix.os }})", "${{ matrix.os }}"),
             "source-home-macos": ("source-home-macos", "macos-15"),
@@ -2226,14 +2231,16 @@ class ReleasePolicyTests(unittest.TestCase):
             "lab-gates": "fork-gate", "lab-standin": "fork-gate", "lab-operator-effects-macos": "fork-gate", "lab-wasm-capsule": "fork-gate", "test-elastos": "fork-gate", "test-capsules": "fork-gate",
             "custody-harness-smoke": "fork-gate",
             "release-upstream-paths": None, "release-upstream-assets": "[release-upstream-paths, engine-llama-arm64]",
-            "installed-app-paths": None, "source-home-linux": "[installed-app-paths, engine-llama-amd64]",
+            "installed-app-paths": None, "archive-viewer-paths": None,
+            "archive-viewer-parser": "[archive-viewer-paths, fork-gate]",
+            "source-home-linux": "[installed-app-paths, engine-llama-amd64]",
             "source-home-linux-arm64": "[installed-app-paths, engine-llama-arm64]",
             "source-home-macos": "source-gate", "update-hop-linux": "[installed-app-paths, fork-gate]",
             "musl-check-linux": "[installed-app-paths, fork-gate]", "musl-check-linux-arm64": "[installed-app-paths, fork-gate]",
             "cancel-on-failure": None,
             "required": "[source-gate, fork-gate, pr-substance, test-behaviour, cargo-audit, core-size, engine-llama-amd64, engine-llama-arm64, "
                         "lint, lab-gates, lab-standin, lab-operator-effects-macos, lab-wasm-capsule, test-elastos, test-capsules, custody-harness-smoke, release-upstream-paths, "
-                        "release-upstream-assets, installed-app-paths, source-home-linux, source-home-linux-arm64, source-home-macos, "
+                        "release-upstream-assets, installed-app-paths, archive-viewer-paths, archive-viewer-parser, source-home-linux, source-home-linux-arm64, source-home-macos, "
                         "update-hop-linux, musl-check-linux, musl-check-linux-arm64]",
         }
         graph = {job: (re.search(r"(?m)^    needs: (.+)$", block) or [None, None])[1] for job, block in JOBS.items()}
@@ -2284,9 +2291,10 @@ class ReleasePolicyTests(unittest.TestCase):
             self.assertEqual(self.run_fork_gate([None, conclusion, "success"]), (1, 2),
                              f"a source-gate {conclusion} must stop a fork pull request's compile jobs")
 
-    def run_required(self, context, results, upstream="false", installed="true"):
+    def run_required(self, context, results, upstream="false", installed="true", archive=None):
         """Run the required job's check as Actions would for this context; return its exit status.
-        installed is the installed-app-paths output; None leaves the output out."""
+        installed is the installed-app-paths output; None leaves the output out.
+        archive is the archive-viewer-paths output; None leaves that output out."""
         step, = steps("required")
         env = {name: str(evaluate(field(step, name), context)).lower()
                for name in ("SPARK_PULL_REQUEST", "POST_MERGE", "PULL_REQUEST", "CUSTODY_EVENT")}
@@ -2294,6 +2302,8 @@ class ReleasePolicyTests(unittest.TestCase):
         needs["release-upstream-paths"]["outputs"]["run"] = upstream
         if installed is not None:
             needs["installed-app-paths"]["outputs"]["run"] = installed
+        if archive is not None:
+            needs["archive-viewer-paths"]["outputs"]["run"] = archive
         for job, result in results.items():
             needs[job]["result"] = result
         # The run block is its 10-space lines; the next job's leading comment follows it.
@@ -2365,6 +2375,20 @@ class ReleasePolicyTests(unittest.TestCase):
             cases.append((f"only {job} skipped on an ordinary PR", pr, {**base, job: "skipped"}, "true", 1))
         for name, context, results, answer, expected in cases:
             self.assertEqual(self.run_required(context, results, installed=answer), expected, name)
+
+    def test_archive_parser_skips_only_when_its_paths_job_did_not_say_run(self):
+        pr = event_context("pull_request", "refs/pull/9/merge")
+        push = event_context("push", "refs/heads/spike/agent-host")
+        merge = event_context("merge_group", "refs/heads/gh-readonly-queue/develop/pr-1")
+        mac, assets = {"source-home-macos": "skipped"}, {"release-upstream-assets": "skipped"}
+        skipped = {"archive-viewer-parser": "skipped"}
+        self.assertEqual(self.run_required(pr, {**mac, **assets, **skipped}, archive="false"), 0)
+        self.assertEqual(self.run_required(pr, {**mac, **assets, **skipped}, archive="true"), 1)
+        self.assertEqual(self.run_required(pr, {**mac, **assets}, archive="true"), 0)
+        self.assertEqual(
+            self.run_required(push, {**assets, "pr-substance": "skipped", **skipped}, archive="false"), 0)
+        self.assertEqual(
+            self.run_required(merge, {**assets, "pr-substance": "skipped", **skipped}, archive="true"), 1)
 
     def test_installed_app_jobs_skip_only_on_a_notes_only_pull_request(self):
         paths_job = JOBS["installed-app-paths"]

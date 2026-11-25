@@ -1166,6 +1166,69 @@ jobs:
             echo "run=true" >> "$GITHUB_OUTPUT"
           fi
 
+  # The archive viewer's parser part (guest tests and the fuel gate) is the
+  # pull-request check. examples-nightly.yml runs the whole verify.sh. This job
+  # loads scripts/ci-archive-viewer-paths.py from the pull request's base
+  # commit, so a pull request cannot replace the rule that decides it. A missing
+  # base, a failing rule, or any answer but the one line "run=false" runs the
+  # parser. A merge queue and a manual run also run it. A push and the nightly
+  # schedule do not: the nightly examples workflow runs the whole gate.
+  archive-viewer-paths:
+    name: archive-viewer-paths
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      run: ${{ (github.event_name == 'pull_request' && steps.decide.outputs.run != 'false') || github.event_name == 'merge_group' || github.event_name == 'workflow_dispatch' }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        if: github.event_name == 'pull_request'
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.ref || github.sha }}
+          persist-credentials: false
+          fetch-depth: 0
+      - name: decide whether the archive parser must run
+        id: decide
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_REF: ${{ github.base_ref }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          # The rule that decides is the copy in this event's base commit, never the pull
+          # request's own: a pull request that rewrites the rule is judged by the rule it
+          # would replace. A base commit that is missing or holds no rule, a rule that fails
+          # and any answer but the one line "run=false" all run the parser. The copy runs
+          # from outside the checkout.
+          rule="$RUNNER_TEMP/archive-viewer-paths-rule.py"
+          answer="$RUNNER_TEMP/archive-viewer-paths-answer"
+          : > "$answer"
+          if [[ "$BASE_SHA" =~ ^[0-9a-f]{40,64}$ ]] \
+              && git show "${BASE_SHA}:scripts/ci-archive-viewer-paths.py" > "$rule" \
+              && GITHUB_OUTPUT="$answer" python3 -I "$rule" \
+              && printf 'run=false\n' | cmp -s - "$answer"; then
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  archive-viewer-parser:
+    name: archive-viewer-parser
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    needs: [archive-viewer-paths, fork-gate]
+    if: ${{ needs.archive-viewer-paths.outputs.run == 'true' }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.ref || github.sha }}
+      - uses: dtolnay/rust-toolchain@035fceb3c12fb0c6a9461b52775e16473133e591 # 1.95.0
+        with:
+          targets: wasm32-unknown-unknown
+      - name: archive viewer parser and fuel gate
+        run: bash examples/archive-viewer/verify.sh --parser
+
   # The source-home jobs run in parallel with tests across the three
   # architectures, beside the cheap source gate. setup-source-home compiles the
   # runtime, shell, home-cli and every provider in --release; ARM also
@@ -2166,7 +2229,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     if: always()
-    needs: [source-gate, fork-gate, pr-substance, test-behaviour, cargo-audit, core-size, engine-llama-amd64, engine-llama-arm64, lint, lab-gates, lab-standin, lab-operator-effects-macos, lab-wasm-capsule, test-elastos, test-capsules, custody-harness-smoke, release-upstream-paths, release-upstream-assets, installed-app-paths, source-home-linux, source-home-linux-arm64, source-home-macos, update-hop-linux, musl-check-linux, musl-check-linux-arm64]
+    needs: [source-gate, fork-gate, pr-substance, test-behaviour, cargo-audit, core-size, engine-llama-amd64, engine-llama-arm64, lint, lab-gates, lab-standin, lab-operator-effects-macos, lab-wasm-capsule, test-elastos, test-capsules, custody-harness-smoke, release-upstream-paths, release-upstream-assets, installed-app-paths, archive-viewer-paths, archive-viewer-parser, source-home-linux, source-home-linux-arm64, source-home-macos, update-hop-linux, musl-check-linux, musl-check-linux-arm64]
     steps:
       - name: every job passed or was skipped by its own guard
         env:
@@ -2196,6 +2259,10 @@ jobs:
           # A pull request that changes only notes and lab files skips the installed-app jobs.
           if os.environ["PULL_REQUEST"] == "true" and needs.get("installed-app-paths", {}).get("outputs", {}).get("run") == "false":
               may_skip.update(("source-home-linux", "source-home-linux-arm64", "update-hop-linux", "musl-check-linux", "musl-check-linux-arm64"))
+          # The archive parser runs on a pull request only when its paths job said so,
+          # and on a merge queue or a manual run. Any other answer skips it.
+          if needs.get("archive-viewer-paths", {}).get("outputs", {}).get("run") != "true":
+              may_skip.add("archive-viewer-parser")
           failed = [f"{job}: {need['result']}" for job, need in sorted(needs.items())
                     if need["result"] != "success" and not (need["result"] == "skipped" and job in may_skip)]
           for line in failed:
