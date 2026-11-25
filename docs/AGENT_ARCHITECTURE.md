@@ -352,6 +352,8 @@ the same Home, with the same owner key, reopens every agent of that owner.
 Another person's agents stay closed to the recovered owner, and those agents
 still open for their own owner.
 
+Key rotation replaces the owner's passkey and brings the owner's root key back through recovery; agents have no key of their own today, and a future one keeps the agent id and root.
+
 These limits are part of the property:
 
 - A new Home has no agents.
