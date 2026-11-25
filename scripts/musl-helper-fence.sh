@@ -35,11 +35,9 @@ log="$(mktemp)"
 set +e
 (
   cd "$root/elastos"
-  ELASTOS_MUSL_HELPER_FENCE=1 \
-    ELASTOS_MUSL_LOCALHOST="$localhost" \
-    ELASTOS_MUSL_OBJECT="$object" \
-    ELASTOS_MUSL_CHAIN="$chain" \
-    cargo test --locked -p elastos-server --lib musl_release_helpers_start_under_the_fence -- --exact --nocapture
+  export ELASTOS_MUSL_HELPER_FENCE=1 ELASTOS_MUSL_LOCALHOST="$localhost"
+  export ELASTOS_MUSL_OBJECT="$object" ELASTOS_MUSL_CHAIN="$chain"
+  cargo test --locked -p elastos-server --lib -- --exact --nocapture confine_helper_tests::musl_release_helpers_start_under_the_fence
 ) >"$log" 2>&1
 status=$?
 set -e
