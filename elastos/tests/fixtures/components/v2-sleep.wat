@@ -83,7 +83,7 @@
       call $finish)
     (func $begin (result i32)
       (local $code i32)
-      ;; 400 ms on this guest's clock. The test's run deadline is shorter.
+      ;; 400 ms on this guest's clock. The test's tick cap is shorter.
       i64.const 400 call $sleep local.set $code
       local.get $code i32.const 15 i32.and i32.const 2 i32.eq
       if call $after-sleep return end

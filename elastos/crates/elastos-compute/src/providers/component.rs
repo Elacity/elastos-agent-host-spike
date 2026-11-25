@@ -726,7 +726,6 @@ impl ComponentProvider {
             wake: instance.wake.clone(),
             #[cfg(test)]
             in_clock_sleep: instance.in_clock_sleep.clone(),
-            run_deadline: instance.run_deadline,
             ..ComponentState::new(hostcall, handle.id.0.clone(), principal_id)
         };
         let (engine, component) = (instance.engine.clone(), instance.component.clone());
@@ -3425,8 +3424,8 @@ mod tests {
         assert!(provider.instances.read().await.is_empty());
     }
 
-    /// A clock sleep is parked time. A run deadline shorter than the sleep
-    /// does not end the guest, and the guest answers when it wakes.
+    /// A clock sleep is parked time. The tick cap is shorter than the sleep
+    /// and does not end the guest, and the guest answers when it wakes.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn v2_sleep_past_the_run_deadline_returns() {
         let provider = ComponentProvider::new();
@@ -3437,15 +3436,16 @@ mod tests {
         let handle = load_v2_fixture(&provider, bytes).await;
         {
             let mut entries = provider.instances.write().await;
-            entries.get_mut(&handle.id).unwrap().run_deadline = Duration::from_millis(50);
+            entries.get_mut(&handle.id).unwrap().test_max_ticks = V2_TEST_EPOCH_TICKS;
         }
         provider.start(&handle).await.expect("the sleeper starts");
         let started = Instant::now();
         let ending = v2_ending(&provider, &handle).await;
         let elapsed = started.elapsed();
+        let tick_cap = DEADLINE_TICK.saturating_mul(u32::try_from(V2_TEST_EPOCH_TICKS).unwrap());
         assert!(
-            elapsed >= Duration::from_millis(300),
-            "the sleep must outlast the 50 ms run deadline, elapsed {} ms",
+            elapsed >= tick_cap,
+            "the sleep must outlast the {V2_TEST_EPOCH_TICKS}-tick cap, elapsed {} ms",
             elapsed.as_millis()
         );
         assert_eq!(ending, "returned", "{ending}");
