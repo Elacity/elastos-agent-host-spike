@@ -210,7 +210,7 @@ async fn home_frame_comes_from_the_managed_runtime() {
     let stolen_body = stolen.text().await.unwrap();
     assert!(
         !stolen_body.contains("other-home"),
-        "a second gateway cannot read by naming, got {stolen_body}"
+        "this row proves only that the query principal is ignored, got {stolen_body}"
     );
 
     let (guest_status, guest_body) = frame_body(&app, &guest.home_token, "app=app-frame").await;

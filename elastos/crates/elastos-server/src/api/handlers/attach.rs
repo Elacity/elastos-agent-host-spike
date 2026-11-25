@@ -133,10 +133,20 @@ pub struct AttachRequest {
     #[serde(default = "default_scope")]
     pub scope: String,
     /// The principal a frame shell is bound to. Empty for every other attach.
-    /// The attach secret's holder names this principal. The verified Home
-    /// launch context binds it in the gateway and does not reach this handler.
-    /// This runtime's session owner is the device DID, not the Home person, so
-    /// a different name is not refused here.
+    ///
+    /// The holder of the attach secret, the reader of runtime-coords.json, can
+    /// POST any principal string. This handler stores that string on the new
+    /// shell token. AttachState carries the session registry, the secret, and
+    /// the shell notes. The session it creates is owned by the device DID
+    /// (`local_session_owner`). Home launch records and the Home person do not
+    /// reach this handler, so a principal those records would not name is
+    /// accepted. `home_attach_frame_shell` is the gateway mint: it posts only
+    /// the principal on the verified `HomeLaunchTokenContext`, and a caller of
+    /// that function cannot supply a different one. A later frame read with
+    /// the shell token returns the frame for the principal stored here. The
+    /// query principal is ignored. A second process that holds the same secret
+    /// can POST a principal these records do not name, and this handler
+    /// accepts that post.
     #[serde(default)]
     pub principal: String,
 }

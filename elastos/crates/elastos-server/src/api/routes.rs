@@ -78,12 +78,18 @@ pub(crate) struct ResidentFrameQuery {
     principal: String,
 }
 
-/// One stored frame. The shell's principal is the one named when the attach
-/// secret's holder minted it. A second process that holds the secret can name
-/// a principal here: the verified Home launch context does not reach attach,
-/// and this runtime's session owner is the device DID, not that Home person.
-/// The query principal is ignored. A guest session, a Home app session, and
-/// no session are refused by name.
+/// One stored frame. The shell token returns the frame for the principal
+/// stored when it was minted. The query principal is ignored.
+///
+/// The holder of the attach secret can POST any principal to
+/// `/api/auth/attach`. The gateway mint, `home_attach_frame_shell`, posts only
+/// the principal on the verified Home launch context. A presenter of the
+/// resulting shell token reads that stored principal's frame. Home launch
+/// records do not reach attach: AttachState has the session registry, the
+/// secret, and the shell notes, and the session is owned by the device DID.
+/// A second process that holds the secret can still name a principal those
+/// records do not. A guest session, a Home app session, and no session are
+/// refused by name.
 pub(crate) async fn resident_frame(
     Extension(runtime): Extension<Arc<Runtime>>,
     Extension(sessions): Extension<Arc<elastos_runtime::session::SessionRegistry>>,
