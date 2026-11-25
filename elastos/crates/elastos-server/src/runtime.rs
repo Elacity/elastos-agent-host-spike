@@ -2986,6 +2986,9 @@ impl Runtime {
     /// List all registered capsules, sorted by id. An entry that ended more
     /// than [`ENDED_CAPSULE_RETENTION`] ago leaves the listing here.
     pub async fn list_capsules(&self) -> Vec<RunningCapsuleInfo> {
+        if let Some(component) = &self.component_provider {
+            component.reap_joined_residents().await;
+        }
         self.list_capsules_pruning_at(std::time::Instant::now())
             .await
     }

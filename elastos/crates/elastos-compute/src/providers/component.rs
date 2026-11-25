@@ -814,10 +814,22 @@ impl ComponentProvider {
                 _ => ActivationOutcome::Trapped(ending.clone()),
             };
             let _ = outcome_tx.send(Some(outcome));
-            if let Some(instance) = instances.write().await.remove(&id_for_end) {
-                instance.grants.lock().expect("grant book").clear();
+            // A stop owns the join. The entry and its frame stay until that
+            // wait succeeds, or until the next status, stop, list, or launch
+            // sees the join is done.
+            {
+                let mut held = instances.write().await;
+                let owned = held
+                    .get(&id_for_end)
+                    .is_some_and(|instance| instance.join.is_some());
+                if !owned {
+                    if let Some(instance) = held.remove(&id_for_end) {
+                        instance.grants.lock().expect("grant book").clear();
+                    }
+                    drop(held);
+                    frames_for_end.lock().expect("frames").remove(&id_for_end.0);
+                }
             }
-            frames_for_end.lock().expect("frames").remove(&id_for_end.0);
             #[cfg(test)]
             endings.write().await.insert(id_for_end, ending);
         });
@@ -853,12 +865,51 @@ impl ComponentProvider {
         })
     }
 
+    /// Drops entries whose worker has joined after a stop window timed out.
+    /// Each entry's frame goes with it. A guest that is still stopping stays
+    /// and keeps its slot.
+    pub async fn reap_joined_residents(&self) {
+        let finished: Vec<CapsuleId> = {
+            let instances = self.instances.read().await;
+            instances
+                .iter()
+                .filter(|(_, instance)| instance.join.as_ref().is_some_and(|join| join.finished()))
+                .map(|(id, _)| id.clone())
+                .collect()
+        };
+        if finished.is_empty() {
+            return;
+        }
+        let mut removed = Vec::new();
+        {
+            let mut instances = self.instances.write().await;
+            for id in finished {
+                let done = instances
+                    .get(&id)
+                    .and_then(|instance| instance.join.as_ref())
+                    .is_some_and(|join| join.finished());
+                if !done {
+                    continue;
+                }
+                if let Some(instance) = instances.remove(&id) {
+                    instance.grants.lock().expect("grant book").clear();
+                    removed.push(id);
+                }
+            }
+        }
+        let mut frames = self.frames.lock().expect("frames");
+        for id in removed {
+            frames.remove(&id.0);
+        }
+    }
+
     /// Starts a loaded activation and returns once the guest is ready. A v1
     /// guest runs on a blocking thread. A v2 guest runs on its own thread, so
     /// a request worker is not the one inside the guest. Dropping the handle
     /// does not end the guest. The worker publishes the outcome and removes
     /// the activation entry when the run ends.
     pub async fn start_resident(&self, handle: &CapsuleHandle) -> Result<ResidentActivation> {
+        self.reap_joined_residents().await;
         let is_v2 = self
             .instances
             .read()
@@ -1318,6 +1369,11 @@ impl V2Join {
     fn owns_thread(&self) -> bool {
         self.started.load(Ordering::Acquire)
     }
+
+    /// The worker has been joined. A later stop does not need to wait again.
+    fn finished(&self) -> bool {
+        *self.done.lock().expect("join")
+    }
 }
 
 /// Moves this guest's worker into the one join, or returns the join a stop
@@ -1540,6 +1596,7 @@ impl ComputeProvider for ComponentProvider {
     }
 
     async fn stop(&self, handle: &CapsuleHandle) -> Result<()> {
+        self.reap_joined_residents().await;
         // One lock for the look and the action: a start cannot mark the
         // entry running between the two.
         let mut instances = self.instances.write().await;
@@ -1588,6 +1645,7 @@ impl ComputeProvider for ComponentProvider {
     }
 
     async fn status(&self, handle: &CapsuleHandle) -> Result<CapsuleStatus> {
+        self.reap_joined_residents().await;
         self.instances
             .read()
             .await
@@ -1597,6 +1655,7 @@ impl ComputeProvider for ComponentProvider {
     }
 
     async fn info(&self, handle: &CapsuleHandle) -> Result<CapsuleInfo> {
+        self.reap_joined_residents().await;
         let instances = self.instances.read().await;
         let instance = instances
             .get(&handle.id)
@@ -2749,6 +2808,142 @@ mod tests {
             assert!(Instant::now() < quiet, "the worker did not leave");
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
+    }
+
+    /// A worker that joins after both stop windows still holds its slot and
+    /// its frame. The next launch removes both, so a new guest fits the cap.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn v2_a_late_join_then_launch_fits_the_cap() {
+        let provider = Arc::new(ComponentProvider::new());
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let release = Arc::new((Mutex::new(false), Condvar::new()));
+        let gate = release.clone();
+        provider.set_bus_hostcall(Arc::new(move |_line, _, _| {
+            let _ = entered_tx.send(());
+            let (lock, cv) = &*gate;
+            let mut open = lock.lock().expect("release");
+            while !*open {
+                open = cv.wait(open).expect("release");
+            }
+            Ok(serde_json::json!({
+                "id": 1,
+                "response": {
+                    "type": "resource_result",
+                    "result": { "status": "ok", "data": { "content": "ok", "size": 2 } },
+                    "audit": "read-1"
+                }
+            })
+            .to_string())
+        }));
+        let blocked = wat::parse_str(include_str!(
+            "../../../../tests/fixtures/components/v2-read-stream.wat"
+        ))
+        .unwrap();
+        let resident = wat::parse_str(include_str!(
+            "../../../../tests/fixtures/components/v2-resident.wat"
+        ))
+        .unwrap();
+        let first = load_v2_fixture(&provider, blocked).await;
+        provider
+            .instances
+            .write()
+            .await
+            .get_mut(&first.id)
+            .unwrap()
+            .join_bound = Duration::from_millis(40);
+        provider.start(&first).await.unwrap();
+        entered_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("the guest enters the host call");
+        let second = load_v2_fixture(&provider, resident.clone()).await;
+        provider.start(&second).await.unwrap();
+        provider.testing_store_v2_frame(
+            &first.id.0,
+            None,
+            vec![crate::providers::bus2_ui::FrameNode::Text("late".into())],
+        );
+        let err = provider.stop(&first).await.unwrap_err().to_string();
+        assert!(
+            err.contains("still running"),
+            "the first stop window leaves the entry, got {err}"
+        );
+        provider.forget_instance(&first.id).await;
+        {
+            let instances = provider.instances.read().await;
+            let slot = instances
+                .get(&first.id)
+                .expect("both stop windows left the entry");
+            assert_eq!(slot.status, CapsuleStatus::Stopping);
+            assert!(
+                slot.join.as_ref().is_some_and(|join| !join.finished()),
+                "the worker has not joined yet"
+            );
+        }
+        assert!(
+            provider
+                .frames
+                .lock()
+                .expect("frames")
+                .contains_key(&first.id.0),
+            "both stop windows left the frame"
+        );
+        {
+            let (lock, cv) = &*release;
+            *lock.lock().expect("release") = true;
+            cv.notify_all();
+        }
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            let done = provider
+                .instances
+                .read()
+                .await
+                .get(&first.id)
+                .and_then(|instance| instance.join.as_ref().map(|join| join.finished()))
+                .unwrap_or(false);
+            if done {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the worker did not join after the host call returned"
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert!(
+            provider.instances.read().await.contains_key(&first.id),
+            "a joined worker stays until the next status, stop, list, or launch"
+        );
+        assert!(
+            provider
+                .frames
+                .lock()
+                .expect("frames")
+                .contains_key(&first.id.0),
+            "the frame stays with that entry"
+        );
+        let third = load_v2_fixture(&provider, resident).await;
+        provider
+            .start(&third)
+            .await
+            .expect("a late join leaves a slot for the next launch");
+        assert!(
+            !provider.instances.read().await.contains_key(&first.id),
+            "launch removes the joined entry"
+        );
+        assert!(
+            provider
+                .frames
+                .lock()
+                .expect("frames")
+                .get(&first.id.0)
+                .is_none(),
+            "launch removes that entry's frame"
+        );
+        assert!(provider.instances.read().await.contains_key(&second.id));
+        assert!(provider.instances.read().await.contains_key(&third.id));
+        provider.stop(&second).await.unwrap();
+        provider.stop(&third).await.unwrap();
     }
 
     /// Revoke, revoke-all, and activation end change the book before any poll.
