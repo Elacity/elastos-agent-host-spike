@@ -97,12 +97,12 @@ impl FuelBucket {
         self.clock_ms
     }
 
-    /// How long a `sleep-until` may block. The wait is the gap on this guest's
-    /// clock, and it never runs past `limit` (the next run deadline).
-    pub(crate) fn sleep_for(&mut self, deadline_ms: u64, limit: Duration) -> Duration {
+    /// How long a `sleep-until` blocks. The wait is the gap on this guest's
+    /// clock. That parked time is outside the run deadline.
+    pub(crate) fn sleep_for(&mut self, deadline_ms: u64) -> Duration {
         let wait = deadline_ms.saturating_sub(self.clock_ms);
         self.clock_ms = self.clock_ms.max(deadline_ms);
-        Duration::from_millis(wait).min(limit)
+        Duration::from_millis(wait)
     }
 }
 

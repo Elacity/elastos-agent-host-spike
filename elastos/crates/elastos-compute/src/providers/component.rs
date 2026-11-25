@@ -708,6 +708,7 @@ impl ComponentProvider {
             reads,
             stop_requested: instance.stop_requested.clone(),
             cancel_requested: instance.cancel_requested.clone(),
+            run_deadline: instance.run_deadline,
             ..ComponentState::new(hostcall, handle.id.0.clone(), principal_id)
         };
         let (engine, component) = (instance.engine.clone(), instance.component.clone());
@@ -2045,15 +2046,9 @@ impl v2::elastos::bus::clock::HostWithStore<ComponentState> for HasSelf<Componen
             if let Some(bucket) = &bucket {
                 bucket.lock().expect("fuel").park();
             }
-            let left = {
-                let state = access.get();
-                state
-                    .run_deadline
-                    .saturating_sub(state.run_started.elapsed().saturating_sub(state.in_bus))
-            };
             let wait = bucket
                 .as_ref()
-                .map(|bucket| bucket.lock().expect("fuel").sleep_for(deadline_ms, left))
+                .map(|bucket| bucket.lock().expect("fuel").sleep_for(deadline_ms))
                 .unwrap_or(Duration::ZERO);
             let state = access.get();
             (
@@ -3100,6 +3095,32 @@ mod tests {
             "spin ending was {ending}"
         );
         assert!(provider.instances.read().await.is_empty());
+    }
+
+    /// A clock sleep is parked time. A run deadline shorter than the sleep
+    /// does not end the guest, and the guest answers when it wakes.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn v2_sleep_past_the_run_deadline_returns() {
+        let provider = ComponentProvider::new();
+        let bytes = wat::parse_str(include_str!(
+            "../../../../tests/fixtures/components/v2-sleep.wat"
+        ))
+        .unwrap();
+        let handle = load_v2_fixture(&provider, bytes).await;
+        {
+            let mut entries = provider.instances.write().await;
+            entries.get_mut(&handle.id).unwrap().run_deadline = Duration::from_millis(50);
+        }
+        provider.start(&handle).await.expect("the sleeper starts");
+        let started = Instant::now();
+        let ending = v2_ending(&provider, &handle).await;
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed >= Duration::from_millis(300),
+            "the sleep must outlast the 50 ms run deadline, elapsed {} ms",
+            elapsed.as_millis()
+        );
+        assert_eq!(ending, "returned", "{ending}");
     }
 
     #[test]
