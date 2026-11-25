@@ -12,9 +12,15 @@
 //! later device-key file is rewritten. Only a file starting with
 //! `{"version":1,"nonce":"` is read past those bytes. Above 32 MiB is refused
 //! by name. The walk logs a count every few seconds. A waiter on
-//! `identity/localhost-file-key.lock` logs that. A second live Home stops in
-//! `host_lock.rs` `acquire_host_process_lock_inner` ("another ElastOS host
-//! already owns"). A new inode keeps a mode that is a subset of `0600`, else
+//! `identity/localhost-file-key.lock` logs that. `elastos serve` and
+//! `elastos gateway`, including `elastos home --browser`, take `host_lock.rs`
+//! `acquire_host_process_lock` before setup (`serve_cmd.rs` `run_serve`,
+//! `gateway_cmd.rs`). A second one stops with "another ElastOS host already
+//! owns" and does not walk. `elastos serve` skips that lock when
+//! `ELASTOS_ALLOW_SUBORDINATE_RUNTIME_HOST=1`. `elastos run` of a data capsule
+//! starts these providers without that lock (`main.rs` `serve_web_capsule`).
+//! Those walks share the migration lock. A helper already running in the other
+//! process is not stopped. A new inode keeps a mode that is a subset of `0600`, else
 //! `0600`, and drops ACLs and extended attributes. Plaintext is zeroized.
 
 use std::path::Path;
