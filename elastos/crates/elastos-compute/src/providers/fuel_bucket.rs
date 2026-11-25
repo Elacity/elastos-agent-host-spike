@@ -31,6 +31,12 @@ pub(crate) struct FuelBucket {
     at: Instant,
     /// This suspension was already charged. A spurious poll must not read fuel again.
     pub(crate) open: bool,
+    /// Sleep or a stream wait. The guest cannot run, so ticks do not count.
+    pub(crate) parked: bool,
+    /// Refill below one fuel unit, kept across wakes.
+    remainder: u64,
+    /// `get_fuel` or `set_fuel` failed. The run ends with this name.
+    pub(crate) fault: Option<&'static str>,
     clock_ms: u64,
 }
 
@@ -42,6 +48,9 @@ impl FuelBucket {
             lent: capacity,
             at: now,
             open: false,
+            parked: false,
+            remainder: 0,
+            fault: None,
             clock_ms: 0,
         }
     }
@@ -55,7 +64,8 @@ impl FuelBucket {
         }
         let burned = self.lent.saturating_sub(remaining);
         self.balance = self.balance.saturating_sub(burned);
-        let add = refill(now.saturating_duration_since(self.at)).min(self.capacity);
+        let add =
+            refill(now.saturating_duration_since(self.at), &mut self.remainder).min(self.capacity);
         self.at = now;
         self.balance = self.balance.saturating_add(add).min(self.capacity);
         self.open = true;
@@ -69,6 +79,18 @@ impl FuelBucket {
 
     pub(crate) fn resume(&mut self) {
         self.open = false;
+        self.parked = false;
+    }
+
+    pub(crate) fn park(&mut self) {
+        self.parked = true;
+    }
+
+    /// The store-level burn sets the gap to zero so the assertion is the
+    /// loan, not the scheduler.
+    #[cfg(test)]
+    pub(crate) fn close_the_gap(&mut self) {
+        self.at = Instant::now() + Duration::from_secs(1);
     }
 
     pub(crate) fn now_ms(&self) -> u64 {
@@ -84,9 +106,13 @@ impl FuelBucket {
     }
 }
 
-pub(crate) fn refill(elapsed: Duration) -> u64 {
-    let ms = u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX);
-    V2_BUCKET_REFILL_PER_SEC.saturating_mul(ms) / 1_000
+/// Whole fuel units in `elapsed`, plus any fraction still held in `remainder`.
+/// A 0.9 ms gap is 900 µs and is not dropped.
+pub(crate) fn refill(elapsed: Duration, remainder: &mut u64) -> u64 {
+    let us = u64::try_from(elapsed.as_micros()).unwrap_or(u64::MAX);
+    let acc = remainder.saturating_add(V2_BUCKET_REFILL_PER_SEC.saturating_mul(us));
+    *remainder = acc % 1_000_000;
+    acc / 1_000_000
 }
 
 #[derive(Default)]
@@ -141,6 +167,7 @@ mod tests {
         let mut lent = V2_BUCKET_CAPACITY;
         let mut spent = 0u64;
         let mut alive = true;
+        let mut remainder = 0u64;
         for &(burn, ms) in steps {
             if !alive {
                 break;
@@ -148,7 +175,7 @@ mod tests {
             let burn = burn.min(lent);
             spent += burn;
             balance = balance.saturating_sub(burn);
-            let add = V2_BUCKET_REFILL_PER_SEC.saturating_mul(ms) / 1_000;
+            let add = refill(Duration::from_millis(ms), &mut remainder);
             balance = balance.saturating_add(add).min(V2_BUCKET_CAPACITY);
             if balance == 0 {
                 alive = false;
@@ -226,6 +253,15 @@ mod tests {
         let (spent, alive, _) = drive(&steps);
         assert!(alive, "10,000 wakes of 64 fuel spent {spent}");
         assert_eq!(spent, 64 * 10_000);
+    }
+
+    #[test]
+    fn a_sub_millisecond_gap_keeps_its_fraction() {
+        let mut now = Instant::now();
+        let mut bucket = FuelBucket::full(100_000, now);
+        now += Duration::from_micros(900);
+        let lend = bucket.settle(10_000, now).unwrap();
+        assert_eq!(lend, 13_600, "0.9 ms must credit refill, not zero");
     }
 
     #[test]

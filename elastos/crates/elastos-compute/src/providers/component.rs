@@ -232,7 +232,7 @@ struct ComponentState {
     /// The v2 activation's cancel flag. v1 leaves this unset.
     cancel_requested: Arc<AtomicBool>,
     /// The v2 token bucket. v1 has none.
-    fuel_bucket: Option<Arc<Mutex<super::fuel_bucket::FuelBucket>>>,
+    fuel_bucket: Option<Arc<Mutex<crate::providers::fuel_bucket::FuelBucket>>>,
     /// v2's own limiter. v1 keeps [`ComponentState::limits`].
     guest_memory: super::fuel_bucket::GuestMemory,
     grants: Arc<Mutex<crate::providers::bus2_ui::GrantBook>>,
@@ -1053,7 +1053,7 @@ impl ComponentProvider {
         control: V2RunControl,
         ready: tokio::sync::oneshot::Sender<Result<()>>,
     ) -> Result<&'static str> {
-        let bucket = Arc::new(Mutex::new(super::fuel_bucket::FuelBucket::full(
+        let bucket = Arc::new(Mutex::new(crate::providers::fuel_bucket::FuelBucket::full(
             control.fuel,
             Instant::now(),
         )));
@@ -1079,11 +1079,20 @@ impl ComponentProvider {
             if cancel_requested.load(Ordering::Acquire) {
                 return Ok(UpdateDeadline::Interrupt);
             }
-            let parked = context
+            let (parked, fault) = context
                 .data()
                 .fuel_bucket
                 .as_ref()
-                .is_some_and(|bucket| bucket.lock().expect("fuel").open);
+                .map(|bucket| {
+                    let bucket = bucket.lock().expect("fuel");
+                    (bucket.parked, bucket.fault.is_some())
+                })
+                .unwrap_or((false, false));
+            if fault {
+                return Ok(UpdateDeadline::Interrupt);
+            }
+            // Ticks count whenever the guest can run or a host call is working.
+            // A sleep or a stream wait sets `parked` and does not count.
             if parked {
                 return Ok(UpdateDeadline::Continue(1));
             }
@@ -1129,7 +1138,15 @@ impl ComponentProvider {
                     .await
             })
             .await;
+        let fault = store
+            .data()
+            .fuel_bucket
+            .as_ref()
+            .and_then(|bucket| bucket.lock().expect("fuel").fault);
         ran.map_err(|err| {
+            if let Some(name) = fault {
+                return ElastosError::Compute(format!("V2 lifecycle run failed: (ending: {name})"));
+            }
             if out_of_fuel(&err) {
                 ElastosError::Compute(format!(
                     "V2 lifecycle run failed: (ending: {ENDING_EXECUTION_BOUND})"
@@ -1153,7 +1170,7 @@ struct V2EventFeed(
     Arc<Mutex<crate::providers::bus2_ui::GrantBook>>,
     Arc<Mutex<HashMap<String, StoredFrame>>>,
     String,
-    Arc<Mutex<super::fuel_bucket::FuelBucket>>,
+    Arc<Mutex<crate::providers::fuel_bucket::FuelBucket>>,
     #[cfg(test)] Arc<AtomicBool>,
 );
 
@@ -1171,7 +1188,9 @@ impl<D> StreamProducer<D> for V2EventFeed {
         // One read per suspension. A spurious wake leaves the loan alone.
         // The wait itself ends when stop drops the sender, or when stop
         // aborts the task after [`V2_STOP_GRACE`].
-        let _opened = charge_bucket(&self.4, &mut store);
+        if let Err(name) = charge_bucket(&self.4, &mut store) {
+            return Poll::Ready(Err(wasmtime::format_err!("{name}")));
+        }
         match self.0.poll_recv(cx) {
             Poll::Ready(Some(event)) => {
                 release_bucket(&self.4);
@@ -1192,11 +1211,18 @@ impl<D> StreamProducer<D> for V2EventFeed {
                 Poll::Ready(Ok(StreamResult::Cancelled))
             }
             Poll::Pending => {
+                self.4.lock().expect("fuel").park();
                 #[cfg(test)]
                 self.5.store(true, Ordering::Release);
                 Poll::Pending
             }
         }
+    }
+}
+
+impl Drop for V2EventFeed {
+    fn drop(&mut self) {
+        self.4.lock().expect("fuel").resume();
     }
 }
 
@@ -1320,23 +1346,67 @@ async fn wait_v2_join(join: Arc<V2Join>, bound: Duration) -> bool {
         .unwrap_or(false)
 }
 
-/// Charges the loan once. A bucket that is already parked is left unread.
-fn charge_bucket(
-    bucket: &Mutex<super::fuel_bucket::FuelBucket>,
-    store: &mut impl wasmtime::AsContextMut,
-) -> bool {
-    let mut bucket = bucket.lock().expect("fuel");
-    if bucket.open {
-        return false;
-    }
-    let remaining = store.as_context().get_fuel().unwrap_or(0);
-    let lend = bucket.settle(remaining, Instant::now()).unwrap_or(0);
-    drop(bucket);
-    let _ = store.as_context_mut().set_fuel(lend);
-    true
+fn read_fuel(store: &impl wasmtime::AsContext) -> std::result::Result<u64, &'static str> {
+    store.as_context().get_fuel().map_err(|_| "get_fuel")
 }
 
-fn release_bucket(bucket: &Mutex<super::fuel_bucket::FuelBucket>) {
+fn write_fuel(
+    store: &mut impl wasmtime::AsContextMut,
+    fuel: u64,
+) -> std::result::Result<(), &'static str> {
+    store
+        .as_context_mut()
+        .set_fuel(fuel)
+        .map_err(|_| "set_fuel")
+}
+
+/// Charges the loan once. A bucket that is already open is left unread.
+/// A fuel error is named `get_fuel` or `set_fuel` and stored on the bucket.
+fn charge_bucket(
+    bucket: &Mutex<crate::providers::fuel_bucket::FuelBucket>,
+    store: &mut impl wasmtime::AsContextMut,
+) -> std::result::Result<bool, &'static str> {
+    let mut slot = bucket.lock().expect("fuel");
+    if let Some(name) = slot.fault {
+        return Err(name);
+    }
+    if slot.open {
+        return Ok(false);
+    }
+    let remaining = match read_fuel(store) {
+        Ok(value) => value,
+        Err(name) => {
+            slot.fault = Some(name);
+            return Err(name);
+        }
+    };
+    let lend = slot.settle(remaining, Instant::now()).unwrap_or(0);
+    drop(slot);
+    if let Err(name) = write_fuel(store, lend) {
+        bucket.lock().expect("fuel").fault = Some(name);
+        return Err(name);
+    }
+    Ok(true)
+}
+
+/// Clears `open` if the host future is dropped before it resumes.
+struct ResumeOnDrop(Option<Arc<Mutex<crate::providers::fuel_bucket::FuelBucket>>>);
+
+impl Drop for ResumeOnDrop {
+    fn drop(&mut self) {
+        if let Some(bucket) = self.0.take() {
+            bucket.lock().expect("fuel").resume();
+        }
+    }
+}
+
+fn resume_guard(
+    bucket: &Option<Arc<Mutex<crate::providers::fuel_bucket::FuelBucket>>>,
+) -> ResumeOnDrop {
+    ResumeOnDrop(bucket.clone())
+}
+
+fn release_bucket(bucket: &Mutex<crate::providers::fuel_bucket::FuelBucket>) {
     bucket.lock().expect("fuel").resume();
 }
 
@@ -1344,7 +1414,7 @@ fn charge_access(access: &mut impl wasmtime::AsContextMut<Data = ComponentState>
     let Some(bucket) = access.as_context().data().fuel_bucket.clone() else {
         return false;
     };
-    charge_bucket(&bucket, access)
+    charge_bucket(&bucket, access).unwrap_or(false)
 }
 
 fn release_access(access: &mut impl wasmtime::AsContextMut<Data = ComponentState>) {
@@ -1969,18 +2039,20 @@ impl v2::elastos::bus::clock::HostWithStore<ComponentState> for HasSelf<Componen
         accessor: &wasmtime::component::Accessor<ComponentState, Self>,
         deadline_ms: u64,
     ) {
-        let (wait, cancel, stop) = accessor.with(|mut access| {
+        let (wait, cancel, stop, bucket) = accessor.with(|mut access| {
             let _opened = charge_access(&mut access);
+            let bucket = access.get().fuel_bucket.clone();
+            if let Some(bucket) = &bucket {
+                bucket.lock().expect("fuel").park();
+            }
             let left = {
                 let state = access.get();
                 state
                     .run_deadline
                     .saturating_sub(state.run_started.elapsed().saturating_sub(state.in_bus))
             };
-            let wait = access
-                .get()
-                .fuel_bucket
-                .clone()
+            let wait = bucket
+                .as_ref()
                 .map(|bucket| bucket.lock().expect("fuel").sleep_for(deadline_ms, left))
                 .unwrap_or(Duration::ZERO);
             let state = access.get();
@@ -1988,8 +2060,10 @@ impl v2::elastos::bus::clock::HostWithStore<ComponentState> for HasSelf<Componen
                 wait,
                 state.cancel_requested.clone(),
                 state.stop_requested.clone(),
+                bucket,
             )
         });
+        let _guard = resume_guard(&bucket);
         let mut left = wait;
         while !left.is_zero() {
             if cancel.load(Ordering::Acquire) || stop.load(Ordering::Acquire) {
@@ -2029,6 +2103,7 @@ impl v2::elastos::bus::capabilities::HostWithStore<ComponentState> for HasSelf<C
     {
         let decided = accessor.with(|mut access| {
             let opened = charge_access(&mut access);
+            let _guard = opened.then(|| resume_guard(&access.get().fuel_bucket));
             let result = access.get().capability_request(
                 elastos::bus::types::CapabilityRequest {
                     resource,
@@ -2075,6 +2150,7 @@ impl v2::elastos::bus::providers::HostWithStore<ComponentState> for HasSelf<Comp
         let super::bus2_stream::PreparedRead { bytes, audit, hold } =
             accessor.with(|mut access| {
                 let opened = charge_access(&mut access);
+                let _guard = opened.then(|| resume_guard(&access.get().fuel_bucket));
                 let result = access.get().windowed_read(&request, had_body);
                 if opened {
                     release_access(&mut access);
@@ -3033,6 +3109,82 @@ mod tests {
             "spin ending was {ending}"
         );
         assert!(provider.instances.read().await.is_empty());
+    }
+
+    #[test]
+    fn a_small_bucket_survives_many_wakes_and_a_rising_burn_ends() {
+        let mut config = ComponentProvider::v2_config();
+        config.macos_use_mach_ports(false);
+        let engine = Engine::new(&config).expect("v2 engine");
+        let mut store = Store::new(&engine, ());
+        let bucket = Mutex::new(crate::providers::fuel_bucket::FuelBucket::full(
+            100_000,
+            Instant::now(),
+        ));
+        store.set_fuel(100_000).unwrap();
+        for _ in 0..40 {
+            bucket.lock().unwrap().resume();
+            let lent = bucket.lock().unwrap().lent;
+            store.set_fuel(lent.saturating_sub(1)).unwrap();
+            std::thread::sleep(Duration::from_micros(900));
+            charge_bucket(&bucket, &mut store).expect("a 0.9 ms wake charges");
+            assert!(
+                store.get_fuel().unwrap() > 1,
+                "many short wakes must not empty a small bucket"
+            );
+        }
+        let mut burn = 1_000u64;
+        for _ in 0..20 {
+            bucket.lock().unwrap().resume();
+            bucket.lock().unwrap().close_the_gap();
+            let lent = bucket.lock().unwrap().lent;
+            let step = burn.min(lent);
+            store.set_fuel(lent - step).unwrap();
+            charge_bucket(&bucket, &mut store).expect("a rising burn charges");
+            if store.get_fuel().unwrap() == 0 {
+                break;
+            }
+            burn = burn.saturating_mul(2);
+        }
+        assert_eq!(store.get_fuel().unwrap(), 0, "a rising burn ends the loan");
+    }
+
+    #[test]
+    fn fuel_errors_are_named_get_fuel_and_set_fuel() {
+        let mut config = ComponentProvider::v2_config();
+        config.consume_fuel(false);
+        config.macos_use_mach_ports(false);
+        let engine = Engine::new(&config).expect("engine");
+        let mut store = Store::new(&engine, ());
+        let bucket = Mutex::new(crate::providers::fuel_bucket::FuelBucket::full(
+            8,
+            Instant::now(),
+        ));
+        assert_eq!(
+            charge_bucket(&bucket, &mut store).expect_err("fuel is off"),
+            "get_fuel"
+        );
+        assert_eq!(bucket.lock().unwrap().fault, Some("get_fuel"));
+        assert_eq!(
+            write_fuel(&mut store, 1).expect_err("fuel is off"),
+            "set_fuel"
+        );
+    }
+
+    #[test]
+    fn a_dropped_guard_clears_an_open_bucket() {
+        let bucket = Arc::new(Mutex::new(crate::providers::fuel_bucket::FuelBucket::full(
+            8,
+            Instant::now(),
+        )));
+        {
+            bucket.lock().unwrap().open = true;
+            bucket.lock().unwrap().parked = true;
+            let _guard = resume_guard(&Some(Arc::clone(&bucket)));
+            assert!(bucket.lock().unwrap().open);
+        }
+        assert!(!bucket.lock().unwrap().open);
+        assert!(!bucket.lock().unwrap().parked);
     }
 
     fn quiet_v2_engine() -> Engine {
