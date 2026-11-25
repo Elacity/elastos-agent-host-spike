@@ -1234,6 +1234,16 @@ pub(crate) fn plant_enabled_home_with_one_agent(
         .agent_id
 }
 
+#[cfg(not(feature = "prototype-agents"))]
+#[test]
+fn a_writer_pause_is_armed_until_its_guard_drops() {
+    let dir = tempfile::tempdir().unwrap();
+    let guard = arm_agent_writer_pause(dir.path(), PAUSE_BEFORE_STORE);
+    assert!(!agent_writer_pause_arrived());
+    drop(guard);
+    assert!(!agent_writer_pause_arrived());
+}
+
 #[test]
 fn the_refusal_names_the_count_and_what_to_do() {
     assert_eq!(

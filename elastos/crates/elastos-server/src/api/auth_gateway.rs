@@ -3133,15 +3133,6 @@ pub(crate) async fn recovery_kit_import_inner(
             );
         }
     }
-    // Read before the provider wait. The count that decides is taken later,
-    // under the agent writer, after that wait has returned.
-    let replaces_root_key = !input.reassign_to_current_principal
-        && crate::auth::load_principal_root_protection(
-            &state.data_dir,
-            &kit.principal_id,
-            &kit.localhost_root,
-        )?
-        .is_some_and(|stored| stored.data_key_id != kit.data_key_id);
     let now = crate::auth::now_ts();
     let candidate_data_key = crate::auth::recovery_kit_data_key(&kit)?;
     let mut protection = protection_from_recovery_kit(
@@ -3176,12 +3167,19 @@ pub(crate) async fn recovery_kit_import_inner(
     } else {
         principal.principal_id.as_str()
     };
-    let _agent_writer = if input.reassign_to_current_principal || replaces_root_key {
+    let key_changes = principal.principal_id == next_owner_id
+        && crate::auth::load_principal_root_protection(
+            &state.data_dir,
+            &principal.principal_id,
+            &principal.localhost_root,
+        )?
+        .is_some_and(|stored| stored.data_key_id != kit.data_key_id);
+    let _agent_writer = if input.reassign_to_current_principal || key_changes {
         Some(crate::agents::hold_agent_writer_for_root_change(
             &state.data_dir,
             &principal.principal_id,
             next_owner_id,
-            &kit.data_key_id,
+            key_changes,
         )?)
     } else {
         None
