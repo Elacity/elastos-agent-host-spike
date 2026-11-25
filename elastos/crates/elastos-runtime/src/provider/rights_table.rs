@@ -121,7 +121,7 @@ impl RuntimeProviderId {
     pub(super) fn measured_syscalls(self) -> &'static str {
         match self {
             Self::Localhost => "readlink rmdir",
-            Self::Object => "flock readlink rename renameat rmdir",
+            Self::Object => "flock getpid readlink rename renameat rmdir",
             Self::Chain => "connect recvfrom sendmmsg epoll_create1 epoll_ctl epoll_pwait epoll_wait eventfd2 exit rseq rt_sigprocmask rename renameat",
             Self::Did | Self::Wallet | Self::Model => "",
         }

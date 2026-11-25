@@ -96,7 +96,11 @@ fn current_user() -> u32 {
 /// `path` is one allow-list root. It must be a real directory this user owns,
 /// and its resolved path must stay a child of `data_dir` that does not reach
 /// `identity/` or `identity/device.key`.
-fn require_real_root(data_dir: &Path, name: &str, path: &Path) -> Result<(u64, u64), String> {
+fn require_real_root(
+    data_dir: &Path,
+    name: &str,
+    path: &Path,
+) -> Result<(u64, u64, std::os::fd::OwnedFd), String> {
     let metadata = std::fs::symlink_metadata(path)
         .map_err(|_| format!("provider start is refused: {name} is missing. Create a directory named {name} that you own in the data directory, then start Home again."))?;
     if metadata.file_type().is_symlink() {
@@ -123,11 +127,29 @@ fn require_real_root(data_dir: &Path, name: &str, path: &Path) -> Result<(u64, u
             "provider start is refused: {name} resolves outside the data directory"
         ));
     }
-    // A directory swapped between create and this stat is pinned as found:
-    // render records that device and inode. Pin-to-install is enforced. The
-    // Linux child re-opens the directory, and macOS re-opens it before
-    // sandbox-exec. A mismatch starts nothing.
-    Ok((metadata.dev(), metadata.ino()))
+    // Open the directory now and hold it until the rule is added. A later
+    // name at this path is a different inode. The opened identity has to be
+    // the identity just checked.
+    use std::os::unix::ffi::OsStrExt;
+    let c_path = std::ffi::CString::new(path.as_os_str().as_bytes())
+        .map_err(|_| format!("provider start is refused: {name} contains NUL"))?;
+    let held = super::root_pin::hold_directory(&c_path).map_err(|errno| {
+        format!("provider start is refused: {name} could not be held open (errno {errno})")
+    })?;
+    let opened = std::fs::File::from(held);
+    let opened_meta = opened.metadata().map_err(|error| {
+        format!("provider start is refused: {name} could not be stated: {error}")
+    })?;
+    if opened_meta.dev() != metadata.dev() || opened_meta.ino() != metadata.ino() {
+        return Err(format!(
+            "provider start is refused: {name} changed while it was checked"
+        ));
+    }
+    Ok((
+        metadata.dev(),
+        metadata.ino(),
+        std::os::fd::OwnedFd::from(opened),
+    ))
 }
 
 fn resolve_roots(
@@ -146,12 +168,13 @@ fn resolve_roots(
     let mut resolved: Vec<super::landlock_plan::AllowRoot> = Vec::with_capacity(names.len());
     for name in names {
         let path = data_dir.join(name);
-        let (dev, ino) = require_real_root(data_dir, name, &path)?;
+        let (dev, ino, held) = require_real_root(data_dir, name, &path)?;
         resolved.push(super::landlock_plan::AllowRoot {
             name,
             path,
             dev,
             ino,
+            held: Some(held),
         });
     }
     Ok(resolved)
@@ -166,7 +189,7 @@ pub(super) fn render_with_plan(
 ) -> Result<(HelperConfinement, super::landlock_plan::Plan), String> {
     let storage = admitted.admits("storage");
     let executable_right = admitted.admits("bound-executable");
-    let roots = if storage {
+    let mut roots = if storage {
         resolve_roots(provider, data_dir)?
     } else {
         Vec::new()
@@ -197,7 +220,7 @@ pub(super) fn render_with_plan(
     let plan = super::landlock_plan::build_path_allow_plan(
         provider,
         admitted,
-        &roots,
+        &mut roots,
         executable,
         landlock_abi,
     )?;

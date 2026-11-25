@@ -5,7 +5,7 @@ use super::super::{
     landlock_plan, rights::AdmittedRights, rights_table::RuntimeProviderId,
     seccomp_list::AuditArch, seccomp_program,
 };
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::os::fd::AsRawFd;
 use std::{ffi::CString, fmt};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -195,6 +195,29 @@ pub(super) fn prepare(
     assemble(provider, admitted, plan, root_pins)
 }
 
+/// Close every descriptor from 3 up except `keep`, which is sorted and unique.
+fn close_except(keep: &[i32]) -> Result<(), i32> {
+    if keep.iter().any(|fd| *fd < 3) {
+        return Err(libc::EINVAL);
+    }
+    let mut cursor = 3i32;
+    for &fd in keep {
+        if fd > cursor
+            && unsafe { libc::syscall(libc::SYS_close_range, cursor as u32, (fd - 1) as u32, 0u32) }
+                < 0
+        {
+            return Err(unsafe { *libc::__errno_location() });
+        }
+        if fd >= cursor {
+            cursor = fd + 1;
+        }
+    }
+    if unsafe { libc::syscall(libc::SYS_close_range, cursor as u32, u32::MAX, 0u32) } < 0 {
+        return Err(unsafe { *libc::__errno_location() });
+    }
+    Ok(())
+}
+
 /// # Safety
 /// Call only in a forked child before exec. The caller owns fds 0–2, passes
 /// its open failure-record write descriptor and the verified executable
@@ -213,43 +236,21 @@ pub(super) unsafe fn install(
                 if keep < 3 || (executable != -1 && (executable < 3 || executable == keep)) {
                     return Err(libc::EINVAL);
                 }
-                let (first, second) = if executable == -1 || keep < executable {
-                    (keep, executable)
-                } else {
-                    (executable, keep)
-                };
-                if first > 3
-                    && unsafe {
-                        libc::syscall(libc::SYS_close_range, 3u32, (first - 1) as u32, 0u32)
-                    } < 0
-                {
-                    return Err(unsafe { *libc::__errno_location() });
+                let mut keep_fds = vec![keep];
+                if executable >= 0 {
+                    keep_fds.push(executable);
                 }
-                if second != -1 {
-                    if second > first + 1
-                        && unsafe {
-                            libc::syscall(
-                                libc::SYS_close_range,
-                                (first + 1) as u32,
-                                (second - 1) as u32,
-                                0u32,
-                            )
-                        } < 0
-                    {
-                        return Err(unsafe { *libc::__errno_location() });
+                for slot in &prepared.plan.held {
+                    if let Some(fd) = slot {
+                        let raw = fd.as_raw_fd();
+                        if raw >= 3 {
+                            keep_fds.push(raw);
+                        }
                     }
-                    if unsafe {
-                        libc::syscall(libc::SYS_close_range, (second + 1) as u32, u32::MAX, 0u32)
-                    } < 0
-                    {
-                        return Err(unsafe { *libc::__errno_location() });
-                    }
-                } else if unsafe {
-                    libc::syscall(libc::SYS_close_range, (first + 1) as u32, u32::MAX, 0u32)
-                } < 0
-                {
-                    return Err(unsafe { *libc::__errno_location() });
                 }
+                keep_fds.sort_unstable();
+                keep_fds.dedup();
+                close_except(&keep_fds)?;
                 0
             }
             Step::NoNewPrivileges => unsafe {
@@ -273,59 +274,26 @@ pub(super) unsafe fn install(
                 fd
             }
             Step::Add(index) => {
-                let Some(path) = prepared.paths.get(index) else {
-                    return Err(libc::EINVAL);
-                };
                 let Some(rule) = prepared.plan.rules.get(index) else {
                     return Err(libc::EINVAL);
                 };
-                let allowed = rule.2;
-                // Every directory root was opened before fork. Open it again
-                // without following a symlink and require the same device and
-                // inode. DIRECTORY_OPEN_FLAGS is
-                // O_PATH|O_CLOEXEC|O_NOFOLLOW|O_DIRECTORY on Linux.
-                let pinned = prepared
-                    .root_pins
-                    .iter()
-                    .find(|pin| pin.index == index)
-                    .copied();
-                let file_pin = prepared.plan.file_pins.get(index).copied().flatten();
-                let directory = if let Some((dev, ino)) = file_pin {
-                    match super::super::root_pin::open_pinned_regular_file(path, dev, ino) {
-                        Ok(file) => file,
-                        Err(errno) => return Err(errno),
-                    }
-                } else if let Some(pin) = pinned {
-                    match super::super::root_pin::open_pinned_directory(
-                        path,
-                        super::super::root_pin::DIRECTORY_OPEN_FLAGS,
-                        pin.dev,
-                        pin.ino,
-                    ) {
-                        Ok(directory) => directory,
-                        Err(errno) => return Err(errno),
-                    }
+                // The descriptor was opened when the path was checked. The
+                // child does not open the path again, so a swapped name is
+                // not the rule. The executable rule uses the verified
+                // descriptor when launch has one.
+                let parent_fd = if rule.0 == "PROVIDER_EXECUTABLE" && executable >= 0 {
+                    executable
                 } else {
-                    let fd = unsafe { libc::open(path.as_ptr(), libc::O_PATH | libc::O_CLOEXEC) };
-                    if fd < 0 {
-                        return Err(unsafe { *libc::__errno_location() });
+                    match prepared.plan.held.get(index).and_then(|slot| slot.as_ref()) {
+                        Some(held) => held.as_raw_fd(),
+                        None => return Err(libc::EBADF),
                     }
-                    // The descriptor was just opened and is not owned elsewhere.
-                    unsafe { OwnedFd::from_raw_fd(fd) }
                 };
                 let attr = PathAttr {
-                    allowed_access: allowed,
-                    parent_fd: directory.as_raw_fd(),
+                    allowed_access: rule.2,
+                    parent_fd,
                 };
-                let answer = unsafe {
-                    libc::syscall(libc::SYS_landlock_add_rule, ruleset, 1u32, &attr, 0u32)
-                };
-                let errno = unsafe { *libc::__errno_location() };
-                drop(directory);
-                if answer < 0 {
-                    return Err(errno);
-                }
-                answer
+                unsafe { libc::syscall(libc::SYS_landlock_add_rule, ruleset, 1u32, &attr, 0u32) }
             }
             Step::Restrict => unsafe {
                 libc::syscall(libc::SYS_landlock_restrict_self, ruleset, 0u32)
@@ -585,10 +553,9 @@ mod tests {
         );
     }
 
-    /// Linux open of a symlink with `O_PATH|O_NOFOLLOW|O_DIRECTORY` returns
-    /// `ENOTDIR`. The child exits with that errno from `Add` of the first
-    /// root, before `landlock_add_rule`. A successful install would create
-    /// `marker` and exit 0, which is the program running.
+    /// The child adds the rule from the descriptor held at the check. A name
+    /// swapped after that check is not the rule. A successful install exits 0.
+    /// The marker sits in the data directory, which is not a granted root.
     #[cfg(target_os = "linux")]
     fn install_exit(prepared: &Prepared, root_index: usize, marker: &std::ffi::CStr) -> i32 {
         let report = std::fs::File::open("/dev/null").unwrap();
@@ -624,12 +591,42 @@ mod tests {
         libc::WEXITSTATUS(status)
     }
 
+    /// Install, then open `path` and exit with that errno. Exit 91 when
+    /// install itself fails. Exit 0 when the open succeeds.
+    #[cfg(target_os = "linux")]
+    fn install_then_open(prepared: &Prepared, path: &std::ffi::CStr) -> i32 {
+        let report = std::fs::File::open("/dev/null").unwrap();
+        assert!(report.as_raw_fd() >= 3);
+        let pid = unsafe { libc::fork() };
+        assert!(pid >= 0);
+        if pid == 0 {
+            if unsafe { install(prepared, report.as_raw_fd(), -1) }.is_err() {
+                unsafe { libc::_exit(91) };
+            }
+            let opened = unsafe { libc::open(path.as_ptr(), libc::O_RDONLY) };
+            let code = if opened >= 0 {
+                unsafe { libc::close(opened) };
+                0
+            } else {
+                unsafe { *libc::__errno_location() }
+            };
+            unsafe { libc::_exit(code) };
+        }
+        let mut status = 0;
+        assert_eq!(unsafe { libc::waitpid(pid, &mut status, 0) }, pid);
+        assert!(libc::WIFEXITED(status), "wait status {status}");
+        libc::WEXITSTATUS(status)
+    }
+
     #[cfg(target_os = "linux")]
     fn chain_prepared(data: &Path) -> (super::Prepared, usize) {
         let abi = landlock_plan::kernel_abi().expect("this kernel has no Landlock");
         std::fs::create_dir(data.join("identity")).unwrap();
         std::fs::create_dir(data.join("chain-provider")).unwrap();
-        let executable = Path::new("/opt/elastos/helper-provider");
+        let executable_path = data.join("helper-provider");
+        std::fs::write(&executable_path, b"helper").unwrap();
+        std::fs::set_permissions(&executable_path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let executable = executable_path.as_path();
         let admitted = helper_grant(RuntimeProviderId::Chain);
         let (_confinement, plan) = path_allow::render_with_plan(
             RuntimeProviderId::Chain,
@@ -663,19 +660,20 @@ mod tests {
         );
         let tmp = tempfile::tempdir().unwrap();
         let data = tmp.path();
-        let (prepared, root_index) = chain_prepared(data);
+        let (prepared, _root_index) = chain_prepared(data);
         let root = data.join("chain-provider");
         std::fs::remove_dir(&root).unwrap();
         std::os::unix::fs::symlink(data.join("identity"), &root).unwrap();
-        let marker = data.join("program-ran");
-        let marker_c = std::ffi::CString::new(marker.as_os_str().as_bytes()).unwrap();
-        let code = install_exit(&prepared, root_index, &marker_c);
-        assert!(!marker.exists(), "the child never runs the program");
+        std::fs::write(data.join("identity").join("device.key"), b"device-key").unwrap();
+        let key = data.join("identity").join("device.key");
+        let key_c = std::ffi::CString::new(key.as_os_str().as_bytes()).unwrap();
+        let code = install_then_open(&prepared, &key_c);
         assert_eq!(
             code,
-            libc::ENOTDIR,
-            "a symlink swapped in is refused by the open (ENOTDIR) before any rule is loaded, and the child never runs the program (exit {code})"
+            libc::EACCES,
+            "the held directory is the original root, so the symlink target stays unreadable (exit {code})"
         );
+        assert_eq!(std::fs::read(&key).unwrap(), b"device-key");
     }
 
     #[cfg(target_os = "linux")]
@@ -699,15 +697,52 @@ mod tests {
             (swapped.dev(), swapped.ino()),
             "the renamed directory is a different directory"
         );
-        let marker = data.join("program-ran");
-        let marker_c = std::ffi::CString::new(marker.as_os_str().as_bytes()).unwrap();
-        let code = install_exit(&prepared, root_index, &marker_c);
-        assert!(!marker.exists(), "the child never runs the program");
+        let canary = root.join("canary.txt");
+        std::fs::write(&canary, b"swapped-directory").unwrap();
+        let canary_c = std::ffi::CString::new(canary.as_os_str().as_bytes()).unwrap();
+        let code = install_then_open(&prepared, &canary_c);
         assert_eq!(
             code,
-            libc::ESTALE,
-            "a different directory swapped in at the same name is refused with ESTALE, and the child never runs the program (exit {code})"
+            libc::EACCES,
+            "the held descriptor is the original directory, so the directory swapped in at the same name stays unreadable (exit {code})"
         );
+        assert_eq!(std::fs::read(&canary).unwrap(), b"swapped-directory");
+    }
+
+    /// The executable rule is the descriptor held at the check. Replacing the
+    /// helper path with a symlink to the data directory does not grant that
+    /// directory, so the child cannot read identity/device.key.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_helper_path_swapped_for_a_symlink_does_not_grant_device_key() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let data = tmp.path();
+        std::fs::create_dir(data.join("identity")).unwrap();
+        let key = data.join("identity").join("device.key");
+        std::fs::write(&key, b"device-key").unwrap();
+        for name in ["ElastOS", "Users", "UsersAI"] {
+            std::fs::create_dir(data.join(name)).unwrap();
+        }
+        let helper = data.join("object-provider");
+        std::fs::write(&helper, b"helper").unwrap();
+        std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let abi = landlock_plan::kernel_abi().expect("this kernel has no Landlock");
+        let admitted = helper_grant(RuntimeProviderId::Object);
+        let (_confinement, plan) =
+            path_allow::render_with_plan(RuntimeProviderId::Object, &admitted, data, &helper, abi)
+                .unwrap_or_else(|err| panic!("render before the swap: {err}"));
+        std::fs::remove_file(&helper).unwrap();
+        std::os::unix::fs::symlink(data, &helper).unwrap();
+        let prepared = prepare_path_allow(RuntimeProviderId::Object, &admitted, plan).unwrap();
+        let key_c = std::ffi::CString::new(key.as_os_str().as_bytes()).unwrap();
+        let code = install_then_open(&prepared, &key_c);
+        assert_eq!(
+            code,
+            libc::EACCES,
+            "a helper path swapped for a symlink to the data folder does not let the child read identity/device.key (exit {code})"
+        );
+        assert_eq!(std::fs::read(&key).unwrap(), b"device-key");
     }
 
     /// `libc::sock_filter` has no `PartialEq` in libc 0.2.189, so the Linux
@@ -1066,6 +1101,7 @@ mod tests {
                 .map(|file| file.pinned.then_some((file.dev, file.ino)))
                 .collect(),
             omitted_libraries: got.omitted,
+            held: got.files.into_iter().map(|file| file.held).collect(),
         };
         let prepared = prepare_path_allow(RuntimeProviderId::Localhost, &admitted, plan).unwrap();
         let library = CString::new(got_paths[1].as_os_str().as_bytes()).unwrap();

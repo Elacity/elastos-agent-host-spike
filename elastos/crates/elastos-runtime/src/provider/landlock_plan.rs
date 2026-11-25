@@ -1,8 +1,13 @@
 //! Landlock file decisions for one provider launch; attachment comes later.
-#![allow(dead_code)] // The spawn caller is added in a later slice.
+//!
+//! Non-Linux builds still compile the Linux-only helpers. Linux itself has
+//! no module-wide dead-code allow: an omitted library is named when the
+//! helper exits before it answers.
+#![cfg_attr(not(target_os = "linux"), allow(dead_code))]
 
 use super::rights::AdmittedRights;
 use super::rights_table::RuntimeProviderId;
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::{
     io,
     path::{Path, PathBuf},
@@ -51,6 +56,7 @@ const AARCH64_LOADERS: &[&str] = &[
 /// Inside uid of outside uid 0 on the identity map. Production Linux reads
 /// `/proc/self/uid_map` and does not assume this constant. The row that plants
 /// a file owned by this process compares that owner with this value.
+#[cfg(test)]
 const TRUSTED_LOADER_UID: u32 = 0;
 
 /// Present when the file is a trusted regular file. A missing one is not a
@@ -116,12 +122,61 @@ fn preferred_loader(arch: LoaderArch) -> &'static str {
 }
 
 #[cfg(unix)]
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Debug)]
 pub(super) struct LocatedFile {
     pub path: PathBuf,
     pub dev: u64,
     pub ino: u64,
     pub pinned: bool,
+    /// Open from the check until the rule is added. A held file's inode
+    /// cannot be reused by a path swapped in at the same name.
+    pub held: Option<OwnedFd>,
+}
+
+/// What `PT_INTERP` on the already opened executable says.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Interpreter {
+    /// No `PT_INTERP`. A static program maps no loader and no library.
+    Static,
+    /// The host glibc loader (`ld-linux-*.so`).
+    Glibc,
+    /// The host musl loader (`ld-musl-*.so.1`), and only that name.
+    Musl,
+}
+
+thread_local! {
+    static INTERPRETER_FD: std::cell::Cell<i32> = const { std::cell::Cell::new(-1) };
+    static CHECKED_DIRECTORY: std::cell::RefCell<Option<OwnedFd>> = const { std::cell::RefCell::new(None) };
+    static LAST_OMITTED: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+fn remember_omitted(omitted: &[String]) {
+    LAST_OMITTED.with(|slot| *slot.borrow_mut() = omitted.to_vec());
+}
+
+/// Optional libraries the last plan left out. The bridge names them when the
+/// helper exits before it answers.
+pub(super) fn take_omitted_libraries() -> Vec<String> {
+    LAST_OMITTED.with(|slot| std::mem::take(&mut *slot.borrow_mut()))
+}
+
+/// Read `PT_INTERP` from this descriptor while `body` plans the loaders.
+pub(super) fn with_interpreter_fd<T>(fd: i32, body: impl FnOnce() -> T) -> T {
+    INTERPRETER_FD.with(|slot| {
+        let previous = slot.replace(fd);
+        let result = body();
+        slot.set(previous);
+        result
+    })
+}
+
+/// The directory opened at the check. `build` takes it for `STORAGE_ROOT`.
+pub(super) fn set_checked_directory(directory: OwnedFd) {
+    CHECKED_DIRECTORY.with(|slot| *slot.borrow_mut() = Some(directory));
+}
+
+fn take_checked_directory() -> Option<OwnedFd> {
+    CHECKED_DIRECTORY.with(|slot| slot.borrow_mut().take())
 }
 
 #[derive(Debug)]
@@ -147,7 +202,8 @@ fn planned_from_loader_fixture(
     arch: LoaderArch,
 ) -> Option<Result<PlannedLoaders, String>> {
     let (root, uid) = LOADER_FIXTURE.with(|slot| slot.borrow().clone())?;
-    Some(resolve_loader_paths(provider, arch, &root, None, uid))
+    let interp = planned_interpreter().unwrap_or(Interpreter::Glibc);
+    Some(resolve_named(provider, arch, &root, None, uid, interp))
 }
 
 #[cfg(not(test))]
@@ -158,25 +214,138 @@ fn planned_from_loader_fixture(
     None
 }
 
+fn musl_loader_name(arch: LoaderArch) -> &'static str {
+    match arch {
+        LoaderArch::X86_64 => "ld-musl-x86_64.so.1",
+        LoaderArch::Aarch64 => "ld-musl-aarch64.so.1",
+    }
+}
+
+fn planned_interpreter() -> Result<Interpreter, String> {
+    let fd = INTERPRETER_FD.with(|slot| slot.get());
+    if fd < 0 {
+        return Ok(Interpreter::Glibc);
+    }
+    interpreter_of(fd)
+}
+
+/// `PT_INTERP` from an executable that is already open. No program header
+/// means a static ELF: no loader row and no library row. A glibc or musl
+/// basename for this architecture selects that loader. Any other interpreter
+/// is refused by the path it names.
+pub(super) fn interpreter_of(fd: i32) -> Result<Interpreter, String> {
+    let mut header = [0u8; 64];
+    pread_all(fd, &mut header, 0)?;
+    if header[0..4] != [0x7f, b'E', b'L', b'F'] || header[4] != 2 || header[5] != 1 {
+        return Err(
+            "provider start is refused: the executable is not a 64-bit little-endian ELF"
+                .to_string(),
+        );
+    }
+    let phoff = u64::from_le_bytes(header[32..40].try_into().unwrap());
+    let phentsize = u16::from_le_bytes(header[54..56].try_into().unwrap()) as u64;
+    let phnum = u16::from_le_bytes(header[56..58].try_into().unwrap()) as u64;
+    if phnum == 0 {
+        return Ok(Interpreter::Static);
+    }
+    if phentsize < 56 || phnum > 128 {
+        return Err(
+            "provider start is refused: the executable program headers are not usable".to_string(),
+        );
+    }
+    for index in 0..phnum {
+        let mut program = [0u8; 56];
+        pread_all(fd, &mut program, phoff + index * phentsize)?;
+        let kind = u32::from_le_bytes(program[0..4].try_into().unwrap());
+        if kind != 3 {
+            continue;
+        }
+        let offset = u64::from_le_bytes(program[8..16].try_into().unwrap());
+        let size = u64::from_le_bytes(program[32..40].try_into().unwrap()) as usize;
+        if size == 0 || size > 4096 {
+            return Err(
+                "provider start is refused: the executable interpreter path is invalid".to_string(),
+            );
+        }
+        let mut bytes = vec![0u8; size];
+        pread_all(fd, &mut bytes, offset)?;
+        if bytes.last() == Some(&0) {
+            bytes.pop();
+        }
+        let path = String::from_utf8(bytes).map_err(|_| {
+            "provider start is refused: the executable interpreter path is not utf-8".to_string()
+        })?;
+        return classify_interpreter(&path);
+    }
+    Ok(Interpreter::Static)
+}
+
+fn classify_interpreter(path: &str) -> Result<Interpreter, String> {
+    let base = path.rsplit('/').next().unwrap_or(path);
+    if base == loader_name(LoaderArch::host()) {
+        return Ok(Interpreter::Glibc);
+    }
+    if base == musl_loader_name(LoaderArch::host()) {
+        return Ok(Interpreter::Musl);
+    }
+    Err(format!("provider start is refused: interpreter {path}"))
+}
+
+fn pread_all(fd: i32, buf: &mut [u8], offset: u64) -> Result<(), String> {
+    let mut got = 0usize;
+    while got < buf.len() {
+        let read = unsafe {
+            libc::pread(
+                fd,
+                buf[got..].as_mut_ptr().cast(),
+                buf.len() - got,
+                offset.saturating_add(got as u64) as i64,
+            )
+        };
+        if read < 0 {
+            return Err(format!(
+                "provider start is refused: the executable could not be read: {}",
+                io::Error::last_os_error()
+            ));
+        }
+        if read == 0 {
+            return Err(
+                "provider start is refused: the executable is not a 64-bit little-endian ELF"
+                    .to_string(),
+            );
+        }
+        got += read as usize;
+    }
+    Ok(())
+}
+
 fn plan_loaders(provider: RuntimeProviderId, arch: LoaderArch) -> Result<PlannedLoaders, String> {
     // The host arch is the machine that will open the files. The other arch
     // stays the Debian row: one machine does not hold both sysroots. That
     // static row still carries the historical `libm` paths. The host arch
     // adds `libm` and the other optional libraries only when they are present
     // and trusted.
-    // A musl build is still this Linux fence (`target_os = "linux"` and
-    // x86_64 or aarch64). It does not have a second start. The names below
-    // are the glibc loader and `libc.so.6`. Musl's `ld-musl-*.so.1` is not
-    // one of them, so the start refuses by the glibc loader's name and the
-    // directory list. The musl tree in `loader_paths_follow_the_fixed_directory_list`
-    // pins that.
+    // A static ELF has no `PT_INTERP`, so it maps no loader and no library.
+    // `ld-musl-*.so.1` is resolved only when the interpreter names it, from
+    // the same fixed directory list. Anything else is refused by that name.
+    let interp = planned_interpreter()?;
     if let Some(planned) = planned_from_loader_fixture(provider, arch) {
         return planned;
+    }
+    if interp == Interpreter::Static {
+        return Ok(PlannedLoaders {
+            files: Vec::new(),
+            omitted: Vec::new(),
+        });
     }
     #[cfg(target_os = "linux")]
     if arch == LoaderArch::host() {
         let uid = trusted_loader_uid()?;
-        return resolve_loader_paths(provider, arch, Path::new("/"), None, uid);
+        return resolve_named(provider, arch, Path::new("/"), None, uid, interp);
+    }
+    if arch == LoaderArch::host() && interp == Interpreter::Musl {
+        let uid = unsafe { libc::geteuid() };
+        return resolve_named(provider, arch, Path::new("/"), None, uid, interp);
     }
     Ok(PlannedLoaders {
         files: static_loader_paths(provider, arch)
@@ -186,6 +355,7 @@ fn plan_loaders(provider: RuntimeProviderId, arch: LoaderArch) -> Result<Planned
                 dev: 0,
                 ino: 0,
                 pinned: false,
+                held: None,
             })
             .collect(),
         omitted: Vec::new(),
@@ -227,7 +397,7 @@ fn uid_mapped_from_outside_root(text: &str) -> Option<u32> {
 /// same directories. The returned path is the path that existed. Owner, mode,
 /// and device and inode come from the opened handle of the resolved file.
 /// A parent writable by group or other refuses. The walk stops at `root`.
-#[cfg(unix)]
+#[cfg(all(unix, test))]
 pub(super) fn resolve_loader_paths(
     provider: RuntimeProviderId,
     arch: LoaderArch,
@@ -235,7 +405,31 @@ pub(super) fn resolve_loader_paths(
     directories: Option<&[&str]>,
     trust_uid: u32,
 ) -> Result<PlannedLoaders, String> {
+    resolve_named(
+        provider,
+        arch,
+        root,
+        directories,
+        trust_uid,
+        Interpreter::Glibc,
+    )
+}
+
+fn resolve_named(
+    provider: RuntimeProviderId,
+    arch: LoaderArch,
+    root: &Path,
+    directories: Option<&[&str]>,
+    trust_uid: u32,
+    interp: Interpreter,
+) -> Result<PlannedLoaders, String> {
     let _ = provider;
+    if interp == Interpreter::Static {
+        return Ok(PlannedLoaders {
+            files: Vec::new(),
+            omitted: Vec::new(),
+        });
+    }
     let standard;
     let dirs: &[&str] = if let Some(dirs) = directories {
         dirs
@@ -243,9 +437,14 @@ pub(super) fn resolve_loader_paths(
         standard = loader_dirs(arch);
         &standard
     };
+    let required: Vec<&str> = match interp {
+        Interpreter::Static => Vec::new(),
+        Interpreter::Glibc => vec![loader_name(arch), "libc.so.6", "libgcc_s.so.1"],
+        Interpreter::Musl => vec![musl_loader_name(arch)],
+    };
     let mut files = Vec::new();
     let mut omitted = Vec::new();
-    for name in [loader_name(arch), "libc.so.6", "libgcc_s.so.1"] {
+    for name in required {
         let preferred = (name == loader_name(arch)).then_some(preferred_loader(arch));
         match locate(root, dirs, name, preferred, trust_uid) {
             Ok(file) => files.push(file),
@@ -257,7 +456,7 @@ pub(super) fn resolve_loader_paths(
             Ok(file) => files.push(file),
             Err(LocateFail::Missing) => {}
             Err(LocateFail::Refused { tried }) => {
-                omitted.push(format!("provider start is refused: {name}, tried {tried}"))
+                omitted.push(format!("omitted library {name}, tried {tried}"))
             }
         }
     }
@@ -304,9 +503,9 @@ fn locate(
 
 #[cfg(unix)]
 fn inspect_loader(candidate: &Path, root: &Path, trust_uid: u32) -> Result<LocatedFile, ()> {
-    let info = open_loader_stat(candidate).map_err(|_| ())?;
+    let (info, held) = open_loader_stat(candidate).map_err(|_| ())?;
     let regular = info.st_mode & libc::S_IFMT == libc::S_IFREG;
-    let owner = info.st_uid as u32 == trust_uid;
+    let owner = info.st_uid == trust_uid;
     let private_file = info.st_mode & 0o022 == 0;
     if !regular || !owner || !private_file || !parents_are_private(root, candidate) {
         return Err(());
@@ -322,6 +521,7 @@ fn inspect_loader(candidate: &Path, root: &Path, trust_uid: u32) -> Result<Locat
                 dev,
                 ino,
                 pinned: true,
+                held: Some(held),
             })
         }
         Err(_) => Err(()),
@@ -329,10 +529,12 @@ fn inspect_loader(candidate: &Path, root: &Path, trust_uid: u32) -> Result<Locat
 }
 
 #[cfg(unix)]
-fn open_loader_stat(path: &Path) -> std::io::Result<libc::stat> {
+fn open_loader_stat(path: &Path) -> std::io::Result<(libc::stat, OwnedFd)> {
     use std::os::unix::ffi::OsStrExt;
     let c_path = std::ffi::CString::new(path.as_os_str().as_bytes())
         .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "nul"))?;
+    // Follow a loader symlink once. The descriptor stays open, so a later
+    // name at this path is a different inode and is not the rule.
     #[cfg(target_os = "linux")]
     let flags = libc::O_PATH | libc::O_CLOEXEC;
     #[cfg(not(target_os = "linux"))]
@@ -341,13 +543,78 @@ fn open_loader_stat(path: &Path) -> std::io::Result<libc::stat> {
     if fd < 0 {
         return Err(std::io::Error::last_os_error());
     }
+    let held = unsafe { OwnedFd::from_raw_fd(fd) };
     let mut info = std::mem::MaybeUninit::<libc::stat>::uninit();
-    let rc = unsafe { libc::fstat(fd, info.as_mut_ptr()) };
-    unsafe { libc::close(fd) };
-    if rc < 0 {
+    if unsafe { libc::fstat(held.as_raw_fd(), info.as_mut_ptr()) } < 0 {
         return Err(std::io::Error::last_os_error());
     }
-    Ok(unsafe { info.assume_init() })
+    Ok((unsafe { info.assume_init() }, held))
+}
+
+/// A regular file opened without following a symlink. The executable rule
+/// uses the verified descriptor when launch has one; this hold is the
+/// descriptor for a plan built before that launch.
+fn hold_regular_nofollow(path: &Path) -> Option<OwnedFd> {
+    use std::os::unix::ffi::OsStrExt;
+    let Ok(c_path) = std::ffi::CString::new(path.as_os_str().as_bytes()) else {
+        return None;
+    };
+    let flags = libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NOFOLLOW;
+    let fd = unsafe { libc::open(c_path.as_ptr(), flags) };
+    if fd < 0 {
+        return None;
+    }
+    let held = unsafe { OwnedFd::from_raw_fd(fd) };
+    let mut info = std::mem::MaybeUninit::<libc::stat>::uninit();
+    if unsafe { libc::fstat(held.as_raw_fd(), info.as_mut_ptr()) } < 0 {
+        return None;
+    }
+    let info = unsafe { info.assume_init() };
+    (info.st_mode & libc::S_IFMT == libc::S_IFREG).then_some(held)
+}
+
+/// Follow the final symlink once and hold that regular file. Chain's
+/// resolver names are often symlinks; the rule is the held target.
+fn hold_regular_follow(path: &Path) -> Option<OwnedFd> {
+    use std::os::unix::ffi::OsStrExt;
+    let Ok(c_path) = std::ffi::CString::new(path.as_os_str().as_bytes()) else {
+        return None;
+    };
+    #[cfg(target_os = "linux")]
+    let flags = libc::O_PATH | libc::O_CLOEXEC;
+    #[cfg(not(target_os = "linux"))]
+    let flags = libc::O_RDONLY | libc::O_CLOEXEC;
+    let fd = unsafe { libc::open(c_path.as_ptr(), flags) };
+    if fd < 0 {
+        return None;
+    }
+    let held = unsafe { OwnedFd::from_raw_fd(fd) };
+    let mut info = std::mem::MaybeUninit::<libc::stat>::uninit();
+    if unsafe { libc::fstat(held.as_raw_fd(), info.as_mut_ptr()) } < 0 {
+        return None;
+    }
+    let info = unsafe { info.assume_init() };
+    (info.st_mode & libc::S_IFMT == libc::S_IFREG).then_some(held)
+}
+
+fn hold_directory_path(path: &Path) -> Option<OwnedFd> {
+    use std::os::unix::ffi::OsStrExt;
+    let c_path = std::ffi::CString::new(path.as_os_str().as_bytes()).ok()?;
+    #[cfg(target_os = "linux")]
+    let flags = libc::O_PATH | libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_DIRECTORY;
+    #[cfg(not(target_os = "linux"))]
+    let flags = libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_DIRECTORY;
+    let fd = unsafe { libc::open(c_path.as_ptr(), flags) };
+    if fd < 0 {
+        return None;
+    }
+    let held = unsafe { OwnedFd::from_raw_fd(fd) };
+    let mut info = std::mem::MaybeUninit::<libc::stat>::uninit();
+    if unsafe { libc::fstat(held.as_raw_fd(), info.as_mut_ptr()) } < 0 {
+        return None;
+    }
+    let info = unsafe { info.assume_init() };
+    (info.st_mode & libc::S_IFMT == libc::S_IFDIR).then_some(held)
 }
 
 #[cfg(unix)]
@@ -427,7 +694,7 @@ fn under_root(root: &Path, absolute: &str) -> PathBuf {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct PathRule(pub &'static str, pub PathBuf, pub u64);
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug)]
 pub(super) struct Plan {
     pub abi: u32,
     pub handled: u64,
@@ -445,7 +712,26 @@ pub(super) struct Plan {
     /// Optional libraries that existed and were left out because they were
     /// not a trusted regular file. A missing optional library is not here.
     pub omitted_libraries: Vec<String>,
+    /// The descriptor opened at the check, one per rule. The child adds the
+    /// Landlock rule from this descriptor and does not open the path again.
+    pub held: Vec<Option<OwnedFd>>,
 }
+
+impl PartialEq for Plan {
+    fn eq(&self, other: &Self) -> bool {
+        self.abi == other.abi
+            && self.handled == other.handled
+            && self.rules == other.rules
+            && self.storage_dev == other.storage_dev
+            && self.storage_ino == other.storage_ino
+            && self.root_dev == other.root_dev
+            && self.root_ino == other.root_ino
+            && self.file_pins == other.file_pins
+            && self.omitted_libraries == other.omitted_libraries
+    }
+}
+
+impl Eq for Plan {}
 
 /// The storage directory opened before launch, with that directory's identity.
 #[cfg(target_os = "linux")]
@@ -549,6 +835,7 @@ fn build_for_arch(
     let abi = require_abi(provider, admitted, Ok(abi))?;
     let mut rules = Vec::new();
     let mut file_pins = Vec::new();
+    let mut held = Vec::new();
     // Path rules come from the admitted rows. Loader paths stay with the provider.
     for row in admitted.rows() {
         for form in row.rules {
@@ -561,6 +848,10 @@ fn build_for_arch(
                         STORAGE,
                     ));
                     file_pins.push(None);
+                    held.push(
+                        take_checked_directory()
+                            .or_else(|| hold_directory_path(&bindings.storage_root)),
+                    );
                 }
                 r#"(allow process-exec (literal (param "PROVIDER_EXECUTABLE")))"# => {
                     rules.push(PathRule(
@@ -569,6 +860,7 @@ fn build_for_arch(
                         BINARY,
                     ));
                     file_pins.push(None);
+                    held.push(hold_regular_nofollow(&bindings.provider_executable));
                 }
                 // macOS probe X4's Metal bundle, X5 and X6 have no Linux path decision.
                 r#"(allow file-read* (regex "^/System/Library/Extensions/AGXMetal[A-Za-z0-9_]+\\.bundle(/.*)?$"))"#
@@ -584,8 +876,9 @@ fn build_for_arch(
         let pin = file.pinned.then_some((file.dev, file.ino));
         rules.push(PathRule("LANDLOCK_LOADER_PATHS", file.path, BINARY));
         file_pins.push(pin);
+        held.push(file.held);
     }
-    Ok(Plan {
+    let plan = Plan {
         abi,
         handled: handled_fs(abi),
         rules,
@@ -595,7 +888,10 @@ fn build_for_arch(
         root_ino: Vec::new(),
         file_pins,
         omitted_libraries: planned.omitted,
-    })
+        held,
+    };
+    remember_omitted(&plan.omitted_libraries);
+    Ok(plan)
 }
 
 /// One helper directory, with the device and inode of that directory.
@@ -604,12 +900,14 @@ pub(super) struct AllowRoot {
     pub path: PathBuf,
     pub dev: u64,
     pub ino: u64,
+    /// Opened at the check and held until the rule is added.
+    pub held: Option<OwnedFd>,
 }
 
 pub(super) fn build_path_allow_plan(
     provider: RuntimeProviderId,
     admitted: &AdmittedRights,
-    roots: &[AllowRoot],
+    roots: &mut [AllowRoot],
     executable: &Path,
     abi: u32,
 ) -> Result<Plan, String> {
@@ -620,11 +918,12 @@ pub(super) fn build_path_allow_plan(
     }
     let mut rules = Vec::with_capacity(roots.len() + 4);
     let mut file_pins = Vec::with_capacity(roots.len() + 4);
+    let mut held = Vec::with_capacity(roots.len() + 4);
     let mut root_dev = Vec::with_capacity(roots.len());
     let mut root_ino = Vec::with_capacity(roots.len());
     let mut omitted_libraries = Vec::new();
     if storage {
-        for root in roots {
+        for root in roots.iter_mut() {
             if !root.path.is_absolute() {
                 return Err(format!(
                     "provider start is refused: {} is not an absolute Landlock root",
@@ -633,6 +932,7 @@ pub(super) fn build_path_allow_plan(
             }
             rules.push(PathRule(root.name, root.path.clone(), STORAGE));
             file_pins.push(None);
+            held.push(root.held.take());
             root_dev.push(root.dev);
             root_ino.push(root.ino);
         }
@@ -650,27 +950,31 @@ pub(super) fn build_path_allow_plan(
             BINARY,
         ));
         file_pins.push(None);
+        held.push(hold_regular_nofollow(executable));
         let planned = plan_loaders(provider, LoaderArch::host())?;
         for file in planned.files {
             let pin = file.pinned.then_some((file.dev, file.ino));
             rules.push(PathRule("LANDLOCK_LOADER_PATHS", file.path, BINARY));
             file_pins.push(pin);
+            held.push(file.held);
         }
         omitted_libraries = planned.omitted;
     }
     if matches!(provider, RuntimeProviderId::Chain) {
         for path in CHAIN_RESOLVER_FILES {
-            // Follow the symlink for existence, and store the literal path.
-            // The installer opens that literal with O_PATH, which lands on the target inode.
-            if std::fs::metadata(path).is_ok() {
+            // Open once, follow a final symlink, and hold that file. The
+            // child adds the rule from the descriptor and does not open the
+            // name again.
+            if let Some(fd) = hold_regular_follow(Path::new(path)) {
                 rules.push(PathRule("READ_ONLY_FILE", (*path).into(), READ_FILE));
                 file_pins.push(None);
+                held.push(Some(fd));
             }
         }
     }
     let storage_dev = root_dev.first().copied().unwrap_or(0);
     let storage_ino = root_ino.first().copied().unwrap_or(0);
-    Ok(Plan {
+    let plan = Plan {
         abi,
         handled: handled_fs(abi),
         rules,
@@ -680,7 +984,10 @@ pub(super) fn build_path_allow_plan(
         root_ino,
         file_pins,
         omitted_libraries,
-    })
+        held,
+    };
+    remember_omitted(&plan.omitted_libraries);
+    Ok(plan)
 }
 
 #[cfg(test)]
@@ -812,9 +1119,12 @@ mod tests {
             path: "/data/ElastOS".into(),
             dev: 1,
             ino: 2,
+            held: None,
         };
         for abi in [1, 2] {
-            let err = build_path_allow_plan(Localhost, &admitted, &[root()], exe, abi).unwrap_err();
+            let mut roots = [root()];
+            let err =
+                build_path_allow_plan(Localhost, &admitted, &mut roots, exe, abi).unwrap_err();
             assert!(
                 err.contains(&format!("this kernel reports Landlock ABI {abi}")),
                 "{err}"
@@ -826,7 +1136,8 @@ mod tests {
             Err("linux confinement refused: the kernel has no Landlock".to_string())
         );
         for (abi, mask) in [(3, 0x7fff_u64), (4, 0x7fff), (5, 0xffff), (6, 0xffff)] {
-            let plan = build_path_allow_plan(Localhost, &admitted, &[root()], exe, abi).unwrap();
+            let mut roots = [root()];
+            let plan = build_path_allow_plan(Localhost, &admitted, &mut roots, exe, abi).unwrap();
             assert_eq!(plan.abi, abi);
             assert_eq!(plan.handled, mask, "abi {abi}");
             assert_eq!(plan.handled, handled_fs(abi));
@@ -975,8 +1286,24 @@ mod tests {
                 } else {
                     assert_eq!(got_paths, expect_paths, "{name} {arch:?} paths");
                 }
-                if got_paths.len() == expect_paths.len() {
-                    assert_eq!(plan.rules.iter().map(|rule| (rule.0, rule.2)).collect::<Vec<_>>(), expected.iter().map(|rule| (rule.0, rule.2)).collect::<Vec<_>>(), "{name} {arch:?} masks");
+                for rule in &plan.rules {
+                    if let Some(expected_rule) = expected
+                        .iter()
+                        .find(|expected_rule| expected_rule.1 == rule.1)
+                    {
+                        assert_eq!(rule.2, expected_rule.2, "{name} {arch:?} {}", rule.1.display());
+                    } else {
+                        let file = rule
+                            .1
+                            .file_name()
+                            .and_then(|file| file.to_str())
+                            .unwrap_or("");
+                        assert!(
+                            OPTIONAL_LIBRARIES.contains(&file),
+                            "{name} {arch:?} unexpected mask row {file}"
+                        );
+                        assert_eq!(rule.2, executable_mask, "{name} {arch:?} {file}");
+                    }
                 }
                 assert_eq!(plan.handled, handled, "{name} {arch:?} handled");
                 assert_eq!(plan.file_pins.len(), plan.rules.len());
@@ -992,16 +1319,17 @@ mod tests {
 
     #[test]
     fn chain_read_only_files_are_the_three_resolver_paths() {
-        let root = AllowRoot {
+        let mut root = [AllowRoot {
             name: "chain-provider",
             path: "/data/chain-provider".into(),
             dev: 1,
             ino: 2,
-        };
+            held: None,
+        }];
         let plan = build_path_allow_plan(
             Chain,
             &super::super::rights::admit_runtime_grant(Chain),
-            &[root],
+            &mut root,
             Path::new("/bin/chain-provider"),
             5,
         )
@@ -1022,16 +1350,17 @@ mod tests {
             assert!(!path.contains("identity") && !path.contains("gai.conf"));
             assert!(!path.contains("host.conf") && !path.contains("ld.so"));
         }
-        let local = AllowRoot {
+        let mut local = [AllowRoot {
             name: "ElastOS",
             path: "/data/ElastOS".into(),
             dev: 1,
             ino: 2,
-        };
+            held: None,
+        }];
         let local_plan = build_path_allow_plan(
             Localhost,
             &super::super::rights::admit_runtime_grant(Localhost),
-            &[local],
+            &mut local,
             Path::new("/bin/localhost-provider"),
             5,
         )
@@ -1072,6 +1401,7 @@ mod tests {
             .collect()
     }
 
+    /// The busybox:glibc row proves the planted /lib folder layout only.
     /// Debian's resolved paths are today's row when only those files exist.
     /// Fedora and Arch take the first later directory. busybox:glibc keeps
     /// glibc (`libc.so.6`) in `/lib`. Musl's names are a different tree and
@@ -1443,7 +1773,7 @@ mod tests {
         assert!(planned
             .omitted
             .iter()
-            .all(|line| !line.contains("libanl.so.1")));
+            .all(|line| line.starts_with("omitted library ") && !line.contains("refused")));
     }
 
     #[cfg(unix)]
@@ -1488,15 +1818,17 @@ mod tests {
                     && !path.to_string_lossy().contains("linux-gnu")),
             "{loaders:?}"
         );
+        let mut allow_roots = [AllowRoot {
+            name: "data",
+            path: bindings.storage_root.clone(),
+            dev: 1,
+            ino: 2,
+            held: None,
+        }];
         let allow = build_path_allow_plan(
             Localhost,
             &admitted,
-            &[AllowRoot {
-                name: "data",
-                path: bindings.storage_root.clone(),
-                dev: 1,
-                ino: 2,
-            }],
+            &mut allow_roots,
             &bindings.provider_executable,
             5,
         )
@@ -1543,6 +1875,19 @@ mod tests {
             accept.contains("child_confinement_refusal"),
             "the parent accepts a child only after NoNewPrivs and Seccomp"
         );
+        let after_accept = launch.split("return Ok(pid)").nth(1).unwrap();
+        assert!(
+            after_accept.contains("reap_unconfined"),
+            "deleting the kill and wait leaves this row red"
+        );
+        let reap = source
+            .split("fn reap_unconfined")
+            .nth(1)
+            .unwrap()
+            .split("fn launch")
+            .next()
+            .unwrap();
+        assert!(reap.contains("libc::kill") && reap.contains("libc::waitpid"));
     }
 
     #[test]
@@ -1551,8 +1896,129 @@ mod tests {
         let install = source.split("unsafe fn install(").nth(1).unwrap();
         let body = install.split("\n#[cfg(test)]").next().unwrap();
         assert!(
-            body.contains("open_pinned_regular_file"),
-            "the child must open the planned file, not a swapped path"
+            body.contains("plan.held"),
+            "the child adds the rule from the descriptor held at the check"
+        );
+        assert!(
+            !body.contains("open_pinned_regular_file"),
+            "the child does not reopen the planned file by name"
+        );
+    }
+
+    #[cfg(unix)]
+    fn elf_file(interp: Option<&str>) -> std::fs::File {
+        use std::io::Write;
+        let text = interp.unwrap_or("");
+        let bytes = text.as_bytes();
+        let mut buf = vec![
+            0u8;
+            64 + if interp.is_some() {
+                56 + bytes.len() + 1
+            } else {
+                0
+            }
+        ];
+        buf[0..4].copy_from_slice(&[0x7f, b'E', b'L', b'F']);
+        buf[4] = 2;
+        buf[5] = 1;
+        if interp.is_some() {
+            buf[32..40].copy_from_slice(&64u64.to_le_bytes());
+            buf[54..56].copy_from_slice(&56u16.to_le_bytes());
+            buf[56..58].copy_from_slice(&1u16.to_le_bytes());
+            buf[64..68].copy_from_slice(&3u32.to_le_bytes());
+            let offset = 120u64;
+            buf[72..80].copy_from_slice(&offset.to_le_bytes());
+            buf[96..104].copy_from_slice(&((bytes.len() + 1) as u64).to_le_bytes());
+            buf[120..120 + bytes.len()].copy_from_slice(bytes);
+        }
+        let mut file = tempfile::tempfile().unwrap();
+        file.write_all(&buf).unwrap();
+        file
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_interpreter_selects_static_glibc_musl_or_refuses_the_name() {
+        use std::os::fd::AsRawFd;
+        use std::os::unix::fs::PermissionsExt;
+        let static_elf = elf_file(None);
+        assert_eq!(
+            interpreter_of(static_elf.as_raw_fd()).unwrap(),
+            Interpreter::Static
+        );
+        let bindings = Bindings {
+            storage_root: PathBuf::from("/provider/static"),
+            provider_executable: PathBuf::from("/bin/static-helper"),
+            storage_dev: 1,
+            storage_ino: 2,
+        };
+        let admitted = super::super::rights::admit_runtime_grant(RuntimeProviderId::Did);
+        let static_plan = with_interpreter_fd(static_elf.as_raw_fd(), || {
+            build(RuntimeProviderId::Did, &admitted, &bindings, 5).unwrap()
+        });
+        assert!(static_plan
+            .rules
+            .iter()
+            .all(|rule| rule.0 != "LANDLOCK_LOADER_PATHS"));
+
+        let arch = LoaderArch::host();
+        let glibc = tempfile::tempdir().unwrap();
+        let uid = unsafe { libc::geteuid() };
+        for name in [loader_name(arch), "libc.so.6", "libgcc_s.so.1"] {
+            plant(glibc.path(), &format!("/lib/{name}"), 0o755);
+        }
+        let glibc_elf = elf_file(Some(&format!("/lib/{}", loader_name(arch))));
+        struct Clear;
+        impl Drop for Clear {
+            fn drop(&mut self) {
+                set_loader_fixture(None);
+            }
+        }
+        let _clear = Clear;
+        set_loader_fixture(Some((glibc.path().to_path_buf(), uid)));
+        let glibc_plan = with_interpreter_fd(glibc_elf.as_raw_fd(), || {
+            build(RuntimeProviderId::Did, &admitted, &bindings, 5).unwrap()
+        });
+        let glibc_names: Vec<_> = glibc_plan
+            .rules
+            .iter()
+            .filter(|rule| rule.0 == "LANDLOCK_LOADER_PATHS")
+            .map(|rule| rule.1.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert!(glibc_names.iter().any(|name| name == loader_name(arch)));
+        assert!(glibc_names.iter().any(|name| name == "libc.so.6"));
+
+        let musl = tempfile::tempdir().unwrap();
+        let musl_name = musl_loader_name(arch);
+        plant(musl.path(), &format!("/lib/{musl_name}"), 0o755);
+        plant(musl.path(), "/lib/libc.so.6", 0o755);
+        std::fs::set_permissions(
+            musl.path().join("lib").join("libc.so.6"),
+            std::fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
+        set_loader_fixture(Some((musl.path().to_path_buf(), uid)));
+        let musl_elf = elf_file(Some(&format!("/lib/{musl_name}")));
+        let musl_plan = with_interpreter_fd(musl_elf.as_raw_fd(), || {
+            build(RuntimeProviderId::Did, &admitted, &bindings, 5).unwrap()
+        });
+        let musl_names: Vec<_> = musl_plan
+            .rules
+            .iter()
+            .filter(|rule| rule.0 == "LANDLOCK_LOADER_PATHS")
+            .map(|rule| rule.1.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(musl_names, vec![musl_name.to_string()]);
+
+        let lying = "/tmp/not-a-loader.so";
+        let lying_elf = elf_file(Some(lying));
+        let err = with_interpreter_fd(lying_elf.as_raw_fd(), || {
+            build(RuntimeProviderId::Did, &admitted, &bindings, 5).unwrap_err()
+        });
+        assert!(err.contains(lying), "{err}");
+        assert!(
+            err.contains("provider start is refused: interpreter"),
+            "{err}"
         );
     }
 }

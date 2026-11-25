@@ -413,4 +413,24 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    fn object_writes_keep_getpid() {
+        let admitted = super::super::rights::admit_runtime_grant(RuntimeProviderId::Object);
+        for arch in [AuditArch::X86_64, AuditArch::Aarch64] {
+            let names = linux_seccomp_list(RuntimeProviderId::Object, &admitted, arch);
+            assert!(
+                names.contains(&"getpid"),
+                "{arch:?} object list: {names:?}"
+            );
+        }
+        let writer = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../elastos-server/src/auth_state_files.rs"
+        ));
+        assert!(
+            writer.contains("std::process::id()"),
+            "object writes the auth-state file with the process id"
+        );
+    }
 }

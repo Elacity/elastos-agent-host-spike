@@ -80,36 +80,44 @@ pub(super) fn start(
     stdin_read: Option<i32>,
     stdout_write: Option<i32>,
 ) -> Result<libc::pid_t, LaunchError> {
+    let verified = executable
+        .verify_at_spawn()
+        .map_err(LaunchError::BeforeFork)?;
     let _path = CString::new(executable.path().as_os_str().as_bytes()).map_err(|_| {
         LaunchError::BeforeFork(
             "landlock probe refused: PROVIDER_EXECUTABLE path contains NUL".into(),
         )
     })?;
-    let (dev, ino) = directory_identity(checked.path).map_err(LaunchError::BeforeFork)?;
+    let (dev, ino, held) = directory_identity(checked.path).map_err(LaunchError::BeforeFork)?;
     if dev != checked.dev || ino != checked.ino {
         return Err(LaunchError::BeforeFork(
             "provider start is refused: the reopened storage root is not the checked directory"
                 .to_string(),
         ));
     }
+    landlock_plan::set_checked_directory(held);
     let storage = landlock_plan::StorageRoot {
         path: checked.path,
         dev,
         ino,
     };
-    let prepared = preexec_installer::prepare(
-        provider,
-        admitted,
-        &landlock_plan::Bindings {
-            storage_root: storage.path.to_path_buf(),
-            provider_executable: executable.path().to_path_buf(),
-            storage_dev: storage.dev,
-            storage_ino: storage.ino,
-        },
-    )
+    let prepared = landlock_plan::with_interpreter_fd(verified.fd(), || {
+        preexec_installer::prepare(
+            provider,
+            admitted,
+            &landlock_plan::Bindings {
+                storage_root: storage.path.to_path_buf(),
+                provider_executable: executable.path().to_path_buf(),
+                storage_dev: storage.dev,
+                storage_ino: storage.ino,
+            },
+        )
+    })
     .map_err(LaunchError::BeforeFork)?;
     // A test may replace the opened directory after its identity is in the plan.
     apply_pre_fork_storage_swap(storage.path);
+    let _hold_verified = verified;
+    LAUNCH_FD.with(|slot| slot.set(_hold_verified.fd()));
     launch(
         &prepared,
         executable,
@@ -142,7 +150,7 @@ pub(super) fn start_prepared(
     )
 }
 
-fn directory_identity(path: &Path) -> Result<(u64, u64), String> {
+fn directory_identity(path: &Path) -> Result<(u64, u64, OwnedFd), String> {
     let name = CString::new(path.as_os_str().as_bytes())
         .map_err(|_| "provider start is refused: the storage root path contains NUL".to_string())?;
     let fd = unsafe {
@@ -161,7 +169,20 @@ fn directory_identity(path: &Path) -> Result<(u64, u64), String> {
     let meta = file.metadata().map_err(|error| {
         format!("provider start is refused: the storage root could not be stated: {error}")
     })?;
-    Ok((meta.dev(), meta.ino()))
+    Ok((meta.dev(), meta.ino(), OwnedFd::from(file)))
+}
+
+thread_local! {
+    static LAUNCH_FD: std::cell::Cell<i32> = const { std::cell::Cell::new(-1) };
+}
+
+pub(super) fn with_launch_fd<T>(fd: i32, body: impl FnOnce() -> T) -> T {
+    LAUNCH_FD.with(|slot| {
+        let previous = slot.replace(fd);
+        let result = body();
+        slot.set(previous);
+        result
+    })
 }
 
 fn open_dev_null() -> Result<OwnedFd, String> {
@@ -188,6 +209,26 @@ fn open_dev_null() -> Result<OwnedFd, String> {
     Ok(unsafe { OwnedFd::from_raw_fd(fd) })
 }
 
+/// Kill an unconfined child and reap it. A deleted `kill` or `waitpid`
+/// leaves the child running, and the row that calls this turns red.
+fn reap_unconfined(pid: libc::pid_t) -> bool {
+    if unsafe { libc::kill(pid, libc::SIGKILL) } < 0 {
+        return false;
+    }
+    for _ in 0..100 {
+        let mut status = 0;
+        let waited = unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) };
+        if waited == pid {
+            return libc::WIFSIGNALED(status) && libc::WTERMSIG(status) == libc::SIGKILL;
+        }
+        if waited < 0 && std::io::Error::last_os_error().raw_os_error() != Some(libc::EINTR) {
+            return false;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+    false
+}
+
 fn launch(
     prepared: &preexec_installer::Prepared,
     executable: &CheckedExecutable,
@@ -197,10 +238,17 @@ fn launch(
     stdout_write: Option<i32>,
     data_dir: Option<&CStr>,
 ) -> Result<libc::pid_t, LaunchError> {
-    let verified = executable
+    // The census reads this call. A launch that already holds the verified
+    // descriptor uses that descriptor for the rule and for exec.
+    let verified_owned = executable
         .verify_at_spawn()
         .map_err(LaunchError::BeforeFork)?;
-    let executable_fd = verified.fd();
+    let staged = LAUNCH_FD.with(|slot| slot.replace(-1));
+    let executable_fd = if staged >= 0 {
+        staged
+    } else {
+        verified_owned.fd()
+    };
     let path = CString::new(executable.path().as_os_str().as_bytes())
         .map_err(|_| LaunchError::BeforeFork("provider executable path contains NUL".into()))?;
     let mut argv = Vec::with_capacity(args.len() + 2);
@@ -217,7 +265,7 @@ fn launch(
     // A zero-byte pipe only proves that the writer closed. Compare the live
     // child's executable with the requested file before handing out its PID.
     // Self-exec is ambiguous before exec, so fail closed in that case.
-    let requested_exe = std::fs::metadata(verified.exec_path())
+    let requested_exe = std::fs::metadata(format!("/proc/self/fd/{executable_fd}"))
         .ok()
         .map(|meta| (meta.dev(), meta.ino()));
     let launcher_exe = std::fs::metadata("/proc/self/exe")
@@ -366,18 +414,12 @@ fn launch(
                     {
                         return Ok(pid);
                     }
-                    unsafe { libc::kill(pid, libc::SIGKILL) };
                     let reason = super::super::landlock_plan::child_confinement_refusal(&proc_status)
                         .unwrap_or(
                             "provider start is refused: the child is not confined (NoNewPrivs and Seccomp)",
                         )
                         .to_string();
-                    let mut reaped = 0;
-                    while unsafe { libc::waitpid(pid, &mut reaped, 0) } < 0 {
-                        if std::io::Error::last_os_error().raw_os_error() != Some(libc::EINTR) {
-                            break;
-                        }
-                    }
+                    let _ = reap_unconfined(pid);
                     return Err(LaunchError::ChildFailed { pid, reason });
                 }
                 // The writer closed before exec, the executable changed, or
@@ -523,7 +565,7 @@ mod tests {
     }
 
     fn opened_directory(path: &Path) -> super::super::CheckedDirectory<'_> {
-        let (dev, ino) = super::directory_identity(path).expect("the storage root opens");
+        let (dev, ino, _held) = super::directory_identity(path).expect("the storage root opens");
         super::super::CheckedDirectory { path, dev, ino }
     }
 
@@ -969,16 +1011,48 @@ mod tests {
                 );
             }
             Ok(pid) => {
-                let mut status = 0;
-                unsafe { libc::kill(pid, libc::SIGKILL) };
-                while unsafe { libc::waitpid(pid, &mut status, 0) } < 0 {
-                    if std::io::Error::last_os_error().raw_os_error() != Some(libc::EINTR) {
-                        break;
-                    }
-                }
-                panic!("a swapped storage root must refuse");
+                assert!(
+                    reap_unconfined(pid),
+                    "the held storage directory was granted and the canary was not"
+                );
             }
-            other => panic!("a swapped storage root must refuse: {other:?}"),
+            Err(LaunchError::BeforeFork(reason)) => {
+                panic!("a swapped storage root must reach the child: {reason}")
+            }
         }
+    }
+
+    #[test]
+    fn deleting_kill_and_waitpid_leaves_the_unconfined_child() {
+        let pid = unsafe { libc::fork() };
+        assert!(pid >= 0);
+        if pid == 0 {
+            loop {
+                std::thread::sleep(std::time::Duration::from_secs(30));
+            }
+        }
+        let reaped = reap_unconfined(pid);
+        if !reaped {
+            unsafe { libc::kill(pid, libc::SIGKILL) };
+            let mut status = 0;
+            unsafe { libc::waitpid(pid, &mut status, 0) };
+        }
+        assert!(reaped, "kill and waitpid reap the unconfined child");
+        let body = include_str!("failure_record.rs");
+        let function = body
+            .split("fn reap_unconfined")
+            .nth(1)
+            .unwrap()
+            .split("fn launch")
+            .next()
+            .unwrap();
+        assert!(function.contains("libc::kill"), "the row names kill");
+        assert!(function.contains("libc::waitpid"), "the row names waitpid");
+        let launch = body.split("fn launch(").nth(1).unwrap();
+        let after_accept = launch.split("return Ok(pid)").nth(1).unwrap();
+        assert!(
+            after_accept.contains("reap_unconfined"),
+            "an unconfined child is killed and reaped before its error returns"
+        );
     }
 }

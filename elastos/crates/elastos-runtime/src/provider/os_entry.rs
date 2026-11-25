@@ -47,6 +47,9 @@ pub(super) struct Launched {
     pub pid: libc::pid_t,
     pub to_child: OwnedFd,
     pub from_child: OwnedFd,
+    /// Optional libraries the plan left out. The bridge names them when the
+    /// helper exits before it answers.
+    pub omitted_libraries: Vec<String>,
     /// The verified copy sandbox-exec runs. The bridge holds it while the
     /// provider lives, so the checked bytes are the bytes that start.
     #[cfg(all(not(elastos_unsupported_os_check), target_os = "macos"))]
@@ -147,14 +150,20 @@ fn start_path_allow_os(
         any(target_arch = "x86_64", target_arch = "aarch64")
     ))]
     {
+        let verified = executable.verify_at_spawn()?;
         let abi = super::landlock_plan::kernel_abi()?;
-        let (_confinement, plan) = super::path_allow::render_with_plan(
-            provider,
-            admitted,
-            data_dir,
-            executable.path(),
-            abi,
-        )?;
+        let (_confinement, plan) =
+            super::landlock_plan::with_interpreter_fd(verified.fd(), || {
+                super::path_allow::render_with_plan(
+                    provider,
+                    admitted,
+                    data_dir,
+                    executable.path(),
+                    abi,
+                )
+            })?;
+        let omitted_libraries = plan.omitted_libraries.clone();
+        let _ = super::landlock_plan::take_omitted_libraries();
         let prepared = preexec_installer::prepare_path_allow(provider, admitted, plan)?;
         let data = data_dir
             .to_str()
@@ -162,13 +171,15 @@ fn start_path_allow_os(
         let env = std::ffi::CString::new(format!("ELASTOS_DATA_DIR={data}")).map_err(|_| {
             "provider start is refused: the data directory path contains NUL".to_string()
         })?;
-        let pid = failure_record::start_prepared(
-            &prepared,
-            executable,
-            Some(stdio.stdin),
-            Some(stdio.stdout),
-            Some(&env),
-        )
+        let pid = failure_record::with_launch_fd(verified.fd(), || {
+            failure_record::start_prepared(
+                &prepared,
+                executable,
+                Some(stdio.stdin),
+                Some(stdio.stdout),
+                Some(&env),
+            )
+        })
         .map_err(|error| match error {
             failure_record::LaunchError::BeforeFork(reason) => reason,
             failure_record::LaunchError::ChildFailed { reason, .. } => reason,
@@ -177,6 +188,7 @@ fn start_path_allow_os(
             pid,
             to_child: stdio.to_child,
             from_child: stdio.from_child,
+            omitted_libraries,
         })
     }
     #[cfg(all(not(elastos_unsupported_os_check), target_os = "macos"))]
@@ -276,6 +288,7 @@ fn launch_macos_path_allow(
         .iter()
         .map(|(name, path)| (name.as_str(), path.as_path()))
         .collect();
+    let omitted_libraries = plan.omitted_libraries.clone();
     confirm_allow_list_roots(plan)?;
     let mut command = macos_sandbox_command(
         Path::new("/usr/bin/sandbox-exec"),
@@ -291,7 +304,7 @@ fn launch_macos_path_allow(
     // this launch does not re-stat the directory: a same-user swap of it is
     // the root gap above, not a second grant.
     command.current_dir(data_dir);
-    macos_launch(command, stdio, prepared)
+    macos_launch(command, stdio, prepared, omitted_libraries)
 }
 
 fn require_grant(admitted: &AdmittedRights) -> Result<(), String> {
@@ -335,6 +348,7 @@ fn dispatch(
         pid,
         to_child: stdio.to_child,
         from_child: stdio.from_child,
+        omitted_libraries: super::landlock_plan::take_omitted_libraries(),
     })
 }
 
@@ -419,7 +433,7 @@ fn macos_start(
         parent,
         &storage,
     )?;
-    macos_launch(command, stdio, prepared)
+    macos_launch(command, stdio, prepared, Vec::new())
 }
 
 #[cfg(all(not(elastos_unsupported_os_check), target_os = "macos"))]
@@ -427,6 +441,7 @@ fn macos_launch(
     mut command: std::process::Command,
     stdio: ChildStdio,
     prepared: super::checked_executable::PreparedExecutable,
+    omitted_libraries: Vec<String>,
 ) -> Result<Launched, String> {
     use std::os::fd::FromRawFd;
     use std::os::unix::process::CommandExt;
@@ -485,6 +500,7 @@ fn macos_launch(
         pid,
         to_child: stdio.to_child,
         from_child: stdio.from_child,
+        omitted_libraries,
         prepared,
     })
 }

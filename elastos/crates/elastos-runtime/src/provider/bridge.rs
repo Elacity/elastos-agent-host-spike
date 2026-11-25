@@ -454,6 +454,9 @@ pub struct ProviderBridge {
     /// Timeout applied to each shutdown settle stage (protocol request,
     /// child wait, force reap). Tests inject a short value.
     shutdown_timeout: std::time::Duration,
+    /// Optional libraries the plan left out. Named when init sees the helper
+    /// exit before it answers.
+    omitted_libraries: std::sync::Mutex<Vec<String>>,
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     _local_brokers: Mutex<BrokerTasks>,
     #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -1718,6 +1721,7 @@ impl ProviderBridge {
             helper_owner: Mutex::new(None),
             shutdown_completed: std::sync::atomic::AtomicBool::new(false),
             shutdown_timeout: SHUTDOWN_TIMEOUT,
+            omitted_libraries: std::sync::Mutex::new(launched.omitted_libraries),
             #[cfg(any(target_os = "macos", target_os = "linux"))]
             _local_ipc_dir: Mutex::new(None),
             #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -2619,6 +2623,7 @@ impl ProviderBridge {
             helper_owner: Mutex::new(helper_owner),
             shutdown_completed: std::sync::atomic::AtomicBool::new(false),
             shutdown_timeout,
+            omitted_libraries: std::sync::Mutex::new(Vec::new()),
             #[cfg(any(target_os = "macos", target_os = "linux"))]
             _local_ipc_dir: Mutex::new(None),
             #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -2696,6 +2701,17 @@ impl ProviderBridge {
         });
     }
 
+    /// Name omitted optional libraries when the helper exits before it answers.
+    /// An empty list stays the plain process-exited text.
+    pub(super) fn early_exit_detail(error: &BridgeError, omitted: &[String]) -> String {
+        let mut detail = error.to_string();
+        if matches!(error, BridgeError::ProcessExited) && !omitted.is_empty() {
+            detail.push_str("; ");
+            detail.push_str(&omitted.join("; "));
+        }
+        detail
+    }
+
     /// The one Init implementation: send `Init`, bound by `init_timeout`, and
     /// settle a failed start through `shutdown`.
     async fn init_provider(
@@ -2708,11 +2724,18 @@ impl ProviderBridge {
             Ok(Ok(response)) => response,
             Ok(Err(error)) => {
                 let shutdown_error = self.shutdown().await.err().map(|err| err.to_string());
+                let named = Self::early_exit_detail(
+                    &error,
+                    &self
+                        .omitted_libraries
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner()),
+                );
                 let detail = match shutdown_error {
                     Some(shutdown_error) => {
-                        format!("{error}; failed to settle provider child: {shutdown_error}")
+                        format!("{named}; failed to settle provider child: {shutdown_error}")
                     }
-                    None => error.to_string(),
+                    None => named,
                 };
                 return Err(BridgeError::InitFailed(detail));
             }
@@ -2767,6 +2790,7 @@ impl ProviderBridge {
             helper_owner: Mutex::new(None),
             shutdown_completed: std::sync::atomic::AtomicBool::new(false),
             shutdown_timeout: SHUTDOWN_TIMEOUT,
+            omitted_libraries: std::sync::Mutex::new(Vec::new()),
             #[cfg(any(target_os = "macos", target_os = "linux"))]
             _local_ipc_dir: Mutex::new(None),
             #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -6491,5 +6515,23 @@ int main(void) {
                 "{text}"
             );
         }
+    }
+
+    #[test]
+    fn an_early_exit_names_each_omitted_optional_library() {
+        let named = ProviderBridge::early_exit_detail(
+            &BridgeError::ProcessExited,
+            &["omitted library libm.so.6, tried /lib/libm.so.6".to_string()],
+        );
+        assert!(named.contains("libm.so.6"), "{named}");
+        assert!(named.contains("omitted library"), "{named}");
+        assert!(
+            !named.contains("refused"),
+            "an omitted optional library is not a refusal: {named}"
+        );
+        assert_eq!(
+            ProviderBridge::early_exit_detail(&BridgeError::ProcessExited, &[]),
+            "provider process exited unexpectedly"
+        );
     }
 }

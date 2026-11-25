@@ -27,6 +27,7 @@ fn last_errno() -> i32 {
     }
 }
 
+#[cfg(any(test, target_os = "macos"))]
 fn stat_identity(info: &libc::stat) -> (u64, u64) {
     #[cfg(target_os = "linux")]
     let dev = info.st_dev;
@@ -35,12 +36,33 @@ fn stat_identity(info: &libc::stat) -> (u64, u64) {
     (dev, info.st_ino)
 }
 
+/// Open `path` as a directory and keep the descriptor.
+///
+/// `DIRECTORY_OPEN_FLAGS` does not follow a symlink. The caller holds this
+/// descriptor until the rule is added, so the inode cannot be reused.
+pub(super) fn hold_directory(path: &CStr) -> Result<OwnedFd, i32> {
+    let fd = unsafe { libc::open(path.as_ptr(), DIRECTORY_OPEN_FLAGS) };
+    if fd < 0 {
+        return Err(last_errno());
+    }
+    let directory = unsafe { OwnedFd::from_raw_fd(fd) };
+    let mut info = MaybeUninit::<libc::stat>::uninit();
+    if unsafe { libc::fstat(directory.as_raw_fd(), info.as_mut_ptr()) } < 0 {
+        return Err(last_errno());
+    }
+    let info = unsafe { info.assume_init() };
+    if info.st_mode & libc::S_IFMT != libc::S_IFDIR {
+        return Err(libc::ENOTDIR);
+    }
+    Ok(directory)
+}
+
 /// Open the file the plan checked and require that same device and inode.
 ///
 /// The open follows a symlink, because the plan recorded the resolved file.
 /// A directory, or a different file swapped in after the plan, is not that
 /// inode. The caller refuses by the library name.
-#[cfg(any(test, target_os = "linux"))]
+#[cfg(test)]
 pub(super) fn open_pinned_regular_file(path: &CStr, dev: u64, ino: u64) -> Result<OwnedFd, i32> {
     #[cfg(target_os = "linux")]
     let flags = libc::O_PATH | libc::O_CLOEXEC;
@@ -71,6 +93,7 @@ pub(super) fn open_pinned_regular_file(path: &CStr, dev: u64, ino: u64) -> Resul
 /// The caller passes [`DIRECTORY_OPEN_FLAGS`]. The returned descriptor is the
 /// directory those flags opened. A mismatch returns [`libc::ESTALE`] and does
 /// not leave the descriptor open.
+#[cfg(any(test, target_os = "macos"))]
 pub(super) fn open_pinned_directory(
     path: &CStr,
     flags: libc::c_int,
@@ -196,24 +219,26 @@ mod tests {
 
         let installer = include_str!("preexec_installer.rs");
         let add = installer
-            .split_once("else if let Some(pin) = pinned")
-            .expect("pinned root open")
-            .1;
-        let add = add
-            .split_once("SYS_landlock_add_rule")
-            .expect("landlock add")
+            .split_once("unsafe fn install(")
+            .expect("install")
+            .1
+            .split_once("Step::Add(index) =>")
+            .expect("add step")
+            .1
+            .split_once("Step::Restrict")
+            .expect("restrict step")
             .0;
         assert!(
-            add.contains("open_pinned_directory"),
-            "every pinned root is identified before its Landlock rule is added"
+            add.contains("plan.held"),
+            "the child adds the rule from the descriptor held at the check"
         );
         assert!(
-            add.contains("DIRECTORY_OPEN_FLAGS"),
-            "the installer opens pinned roots with the no-follow directory flags"
+            !add.contains("libc::open"),
+            "the child does not reopen a path by name"
         );
         assert!(
-            !add.contains("STORAGE_ROOT"),
-            "the identity check is every pinned root, not only STORAGE_ROOT"
+            !add.contains("open_pinned_directory"),
+            "a pinned directory is the held descriptor, not a second open"
         );
         let flags = include_str!("root_pin.rs");
         assert!(
@@ -287,6 +312,40 @@ mod tests {
         )
         .expect_err("a changed root_dev is refused");
         assert_eq!(error, libc::ESTALE, "errno {error}");
+    }
+
+    /// The descriptor opened at the check stays that file after the path
+    /// becomes a symlink. macOS sandbox-exec still rechecks directory paths
+    /// by name while this descriptor is held, so a reused inode cannot pass
+    /// that compare. APFS did not recycle the inode in the Studio run.
+    #[test]
+    fn a_held_file_stays_the_checked_file_when_its_path_becomes_a_symlink() {
+        use std::os::fd::{AsRawFd, FromRawFd};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("helper");
+        std::fs::write(&path, b"helper").unwrap();
+        let name = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
+        let fd = unsafe {
+            libc::open(
+                name.as_ptr(),
+                libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+            )
+        };
+        assert!(fd >= 0);
+        let held = unsafe { std::os::fd::OwnedFd::from_raw_fd(fd) };
+        std::fs::remove_file(&path).unwrap();
+        std::os::unix::fs::symlink(dir.path(), &path).unwrap();
+        let mut info = std::mem::MaybeUninit::<libc::stat>::uninit();
+        assert_eq!(
+            unsafe { libc::fstat(held.as_raw_fd(), info.as_mut_ptr()) },
+            0
+        );
+        let info = unsafe { info.assume_init() };
+        assert_eq!(info.st_mode & libc::S_IFMT, libc::S_IFREG);
+        assert!(std::fs::symlink_metadata(&path)
+            .unwrap()
+            .file_type()
+            .is_symlink());
     }
 
     #[test]
