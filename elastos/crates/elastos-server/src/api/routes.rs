@@ -97,6 +97,9 @@ pub(crate) async fn resident_frame(
     headers: HeaderMap,
     axum::extract::Query(query): axum::extract::Query<ResidentFrameQuery>,
 ) -> axum::response::Response {
+    if let Some(guests) = runtime.component_guests() {
+        guests.reap_joined_residents().await;
+    }
     let Some(token) = frame_bearer(&headers) else {
         return (StatusCode::UNAUTHORIZED, "no session").into_response();
     };
