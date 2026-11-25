@@ -613,6 +613,37 @@ pub(crate) fn clear_plan_dispatch_wait_for_test(request_id: &str) {
         .remove(request_id);
 }
 
+#[cfg(test)]
+fn plan_settle_faults() -> &'static std::sync::Mutex<Vec<&'static str>> {
+    static FAULTS: std::sync::OnceLock<std::sync::Mutex<Vec<&'static str>>> =
+        std::sync::OnceLock::new();
+    FAULTS.get_or_init(|| std::sync::Mutex::new(Vec::new()))
+}
+
+/// The next settle fails at `which`: `"record"` or `"audit"`.
+#[cfg(test)]
+pub(crate) fn arm_plan_settle_fault(which: &'static str) {
+    plan_settle_faults()
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+        .push(which);
+}
+
+fn take_plan_settle_fault(which: &str) -> bool {
+    #[cfg(test)]
+    {
+        let mut faults = plan_settle_faults()
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        if let Some(pos) = faults.iter().rposition(|fault| *fault == which) {
+            faults.swap_remove(pos);
+            return true;
+        }
+    }
+    let _ = which;
+    false
+}
+
 fn settle_agent_plan_dispatch(
     data_dir: &FsPath,
     mut record: InspectActionRequestRecord,
@@ -626,11 +657,24 @@ fn settle_agent_plan_dispatch(
             return Ok("Agent plan dispatch unknown.".to_string());
         }
     }
+    // The stored record is the answer. A failed record write returns Err and
+    // leaves the previous record, and the flight stays held. A failed audit
+    // append does not change that answer: the record already states the
+    // outcome, so this call still returns Ok.
     record.status = status.to_string();
     record.result = Some(result);
     record.updated_at = now_ts();
+    if take_plan_settle_fault("record") {
+        anyhow::bail!("injected plan record write failure");
+    }
     write_inspect_action_record(data_dir, &record)?;
-    append_agent_plan_dispatch_audit(data_dir, &record, status)?;
+    if take_plan_settle_fault("audit") {
+        tracing::warn!(
+            "agent plan dispatch audit was not stored: injected plan audit write failure"
+        );
+    } else if let Err(err) = append_agent_plan_dispatch_audit(data_dir, &record, status) {
+        tracing::warn!("agent plan dispatch audit was not stored: {err}");
+    }
     Ok(format!("Agent plan dispatch {status}."))
 }
 

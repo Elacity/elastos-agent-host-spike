@@ -3188,3 +3188,44 @@ async fn stop_cannot_say_stopped_while_the_record_is_dispatching() {
         .expect("the effect did not settle");
     finished.expect("dispatch task").expect("dispatch");
 }
+
+/// The stored record is the answer. An audit write that fails still answers
+/// with the status the record holds. A record write that fails answers with
+/// an error and leaves the previous record, and the flight stays held.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_failed_settle_write_matches_the_stored_record() {
+    let audit = plant_approved(49, false, |_, target| {
+        json!({"steps": [{"scheme": "localhost", "operation": "write", "request": {
+            "path": target, "content": [112, 108, 97, 110]
+        }}]})
+    })
+    .await;
+    super::gateway_inspect_actions::arm_plan_settle_fault("audit");
+    let answer = dispatch_planted(&audit)
+        .await
+        .expect("a failed audit still answers with the stored outcome");
+    assert!(
+        answer.contains("completed"),
+        "the answer disagreed with the record: {answer}"
+    );
+    let record = read_record(audit.dir.path(), &audit.id);
+    assert_eq!(record["status"], "completed", "{record}");
+    assert!(!audit.runtime.plan_effect_inflight(&audit.session));
+
+    let missed = plant_approved(50, false, |_, target| {
+        json!({"steps": [{"scheme": "localhost", "operation": "write", "request": {
+            "path": target, "content": [112, 108, 97, 110]
+        }}]})
+    })
+    .await;
+    super::gateway_inspect_actions::arm_plan_settle_fault("record");
+    let refused = dispatch_planted(&missed).await;
+    assert!(
+        refused.is_err(),
+        "a failed record write answered success: {refused:?}"
+    );
+    let record = read_record(missed.dir.path(), &missed.id);
+    assert_eq!(record["status"], "dispatching", "{record}");
+    assert!(missed.runtime.plan_effect_inflight(&missed.session));
+}
