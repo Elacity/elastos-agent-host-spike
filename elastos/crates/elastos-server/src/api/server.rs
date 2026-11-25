@@ -83,6 +83,9 @@ pub struct ServerConfig {
     /// Optional admitted public data-capsule tree served at `/capsule-data/`.
     /// Runtime data roots stay private and are never mounted here.
     pub data_dir: Option<PathBuf>,
+    /// Home folder for the local-apps refusal. `data_dir` is the public tree
+    /// and is a different folder on `elastos run` and the MicroVM serve path.
+    pub local_apps_dir: Option<PathBuf>,
     pub tls_config: Option<axum_server::tls_rustls::RustlsConfig>,
     /// Capsule supervisor for VM-based capsule lifecycle (supervisor path only)
     pub supervisor: Option<Arc<crate::supervisor::Supervisor>>,
@@ -183,6 +186,7 @@ pub(crate) fn build_router(config: ServerConfig) -> anyhow::Result<Router> {
         addr,
         capsule_dir,
         data_dir,
+        local_apps_dir,
         tls_config,
         supervisor,
         ready_tx: _,
@@ -393,9 +397,10 @@ pub(crate) fn build_router(config: ServerConfig) -> anyhow::Result<Router> {
 
     // File-backed localhost routes (require valid session, optional - only if provider_registry is provided)
     // Public contract: rooted `localhost://...` paths.
+    let refusal_dir = local_apps_dir.or(data_dir.clone()).unwrap_or_default();
     let storage_routes = if let Some(registry) = provider_registry {
         let storage_state = handlers::storage::ProviderStorageState {
-            data_dir: data_dir.clone().unwrap_or_default(),
+            data_dir: refusal_dir.clone(),
             registry: registry.clone(),
             audit_log: audit_log.clone(),
             capability_manager: Some(capability_manager.clone()),
@@ -404,7 +409,7 @@ pub(crate) fn build_router(config: ServerConfig) -> anyhow::Result<Router> {
 
         // Generic provider proxy: POST /api/provider/:scheme/:op
         let proxy_state = handlers::provider::ProviderProxyState {
-            data_dir: data_dir.clone().unwrap_or_default(),
+            data_dir: refusal_dir,
             registry,
             capability_manager: Some(capability_manager.clone()),
         };
@@ -635,6 +640,7 @@ pub(crate) mod tests {
             docs_dir: None,
             addr: "127.0.0.1:0".to_string(),
             capsule_dir: None,
+            local_apps_dir: data_dir.clone(),
             data_dir,
             tls_config: None,
             supervisor: None,
@@ -684,6 +690,19 @@ pub(crate) mod tests {
             }
         }
         assert!(wrong.is_empty(), "{wrong:#?}");
+    }
+
+    #[test]
+    fn the_local_apps_refusal_uses_the_home_before_the_public_tree() {
+        let source = include_str!("server.rs");
+        let start = source
+            .find("let refusal_dir = ")
+            .expect("build_router names the home for the refusal");
+        let line = source[start..].lines().next().unwrap();
+        assert_eq!(
+            line.trim(),
+            "let refusal_dir = local_apps_dir.or(data_dir.clone()).unwrap_or_default();"
+        );
     }
 
     #[tokio::test]

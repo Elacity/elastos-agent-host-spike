@@ -4,6 +4,10 @@ pub async fn run_gateway(
     cache_dir: Option<std::path::PathBuf>,
     publish: Option<std::path::PathBuf>,
 ) -> anyhow::Result<()> {
+    // Before verify_auth_audit_chain_ready creates ElastOS/System/Auth.
+    crate::localhost_file_migration::prepare_localhost_files(
+        &elastos_server::sources::default_data_dir(),
+    )?;
     elastos_server::gateway_cmd::run_gateway_direct(
         addr,
         public,
@@ -22,6 +26,10 @@ pub async fn run_browser_home() -> anyhow::Result<()> {
     elastos_server::update_controller::refuse_browser_home_port_in_use(
         &elastos_server::sources::default_data_dir(),
         port,
+    )?;
+    // Before verify_auth_audit_chain_ready creates ElastOS/System/Auth.
+    crate::localhost_file_migration::prepare_localhost_files(
+        &elastos_server::sources::default_data_dir(),
     )?;
     elastos_server::gateway_cmd::run_gateway_direct_with_ready(
         format!("localhost:{port}"),

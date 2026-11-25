@@ -1380,6 +1380,13 @@ fn rows() -> Vec<HeldRow> {
         mark("open", "device private key", "localhost provider", "On Unix the localhost encryption field is the HKDF file key `elastos-localhost-file-v1`, not the raw device key. On Windows this slice does not rewrite files, and that same localhost field is the device key. The object provider config does not carry the device key. The localhost child is unconfined and `base_path` is the data directory, so it can open `identity/device.key`. The object process has that same file-read. The row stays open until slice C."),
     ),
     row(
+        "elastos-server/src/localhost_file_migration.rs",
+        "prepare_localhost_files",
+        "load_or_create_device_key",
+        1,
+        mark("home-own", "device key", "Home", "Before startup creates the five roots, Home loads this device key and decides the localhost marker"),
+    ),
+    row(
         "elastos-server/src/server_infra.rs",
         "register_chain_provider_plane",
         "load_or_create_device_key",

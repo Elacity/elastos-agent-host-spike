@@ -2098,6 +2098,7 @@ async fn serve_web_capsule(
         addr: addr.to_string(),
         capsule_dir: Some(serve_dir),
         data_dir,
+        local_apps_dir: Some(elastos_server::sources::default_data_dir()),
         tls_config: None,
         supervisor: None,
         ready_tx: None,

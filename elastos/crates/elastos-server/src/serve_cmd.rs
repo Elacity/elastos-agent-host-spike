@@ -231,6 +231,7 @@ pub async fn run_serve(
                 let capability_store = infra.capability_store;
                 let host_helpers = infra.host_helpers;
 
+                let local_apps_dir = data_dir.clone();
                 let api_handle = tokio::spawn({
                     let runtime = runtime_arc.clone();
                     let session_registry = session_registry.clone();
@@ -259,6 +260,7 @@ pub async fn run_serve(
                                 addr: api_bind_addr,
                                 capsule_dir: None,
                                 data_dir: None,
+                                local_apps_dir: Some(local_apps_dir),
                                 tls_config,
                                 supervisor: None,
                                 ready_tx: None,
@@ -515,6 +517,7 @@ pub async fn run_serve(
             addr,
             capsule_dir: None,
             data_dir: Some(data_dir.clone()),
+            local_apps_dir: Some(data_dir.clone()),
             tls_config: None,
             supervisor: sup,
             ready_tx: None,

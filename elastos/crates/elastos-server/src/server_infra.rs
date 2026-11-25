@@ -1032,6 +1032,9 @@ async fn setup_server_infrastructure_impl(
     ipfs_role: elastos_server::ipfs::IpfsHostRole,
 ) -> anyhow::Result<ServerInfrastructure> {
     let data_dir = default_data_dir();
+    // Before ensure_file_backed_roots recreates AppCapsules, ElastOS, Local,
+    // Users, and UsersAI. Gateway calls the same function before its auth lock.
+    crate::localhost_file_migration::prepare_localhost_files(&data_dir)?;
     let carrier_bind_addr = configured_carrier_bind_addr(&data_dir)?;
     let _ = ownership::repair_path_recursive(&data_dir);
     let collaboration_configuration =
@@ -5806,6 +5809,25 @@ mod tests {
         )
     }
 
+    fn home_is_up(root: &std::path::Path) {
+        assert!(elastos_server::local_apps::local_apps_refusal(root).is_none());
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let body = elastos_server::api::routes::health().await;
+            assert_eq!(serde_json::to_value(body.0).unwrap()["status"], "ok");
+        });
+    }
+
+    fn assert_read_refused_by_name(path: &std::path::Path, key: &[u8; 32], name: &str) {
+        let err = localhost_provider::read_sealed_localhost_file(key, path, name).unwrap_err();
+        let text = err.to_string();
+        assert!(text.contains(name), "{text}");
+        assert!(text.contains("larger than 32 MiB"), "{text}");
+    }
+
     #[test]
     fn each_migration_cause_keeps_home_healthy_and_a_restart_migrates() {
         use std::os::unix::fs::{FileTypeExt, PermissionsExt};
@@ -5928,19 +5950,31 @@ mod tests {
             .unwrap()
             .set_len(32 * 1024 * 1024 + 1)
             .unwrap();
-        expect_refusal(
-            huge.path(),
-            &device_key,
-            &sentence("Users/over.bin", "larger than 32 MiB"),
-            false,
+        let _ = take_localhost_migration_bytes_read();
+        migrate_again(huge.path(), &device_key);
+        assert_eq!(
+            take_localhost_migration_bytes_read(),
+            0,
+            "the next start read an over-cap file"
         );
+        home_is_up(huge.path());
+        assert_read_refused_by_name(&over, &file_key, "Users/over.bin");
+        assert_read_refused_by_name(&big, &file_key, "Users/big.bin");
         assert_eq!(fs::metadata(&over).unwrap().len(), 32 * 1024 * 1024 + 1);
-        fs::remove_file(&over).unwrap();
+        let mut prefix = vec![0u8; envelope.len()];
+        std::io::Read::read_exact(&mut std::fs::File::open(&over).unwrap(), &mut prefix).unwrap();
+        assert_eq!(prefix, envelope);
         let small = huge.path().join("Users/small.bin");
         plant_device_envelope(&small, &device_key, b"small");
         migrate_again(huge.path(), &device_key);
         assert_envelope_opens_with_exactly_one_key(&small, b"small", &device_key, &file_key);
+        assert_eq!(
+            localhost_provider::read_sealed_localhost_file(&file_key, &small, "Users/small.bin")
+                .unwrap(),
+            b"small"
+        );
         assert!(fs::read(&big).unwrap().starts_with(b"plain-video"));
+        home_is_up(huge.path());
 
         let fifo_root = TempDir::new().unwrap();
         let pipe = fifo_root.path().join("Users/pipe");
@@ -6047,6 +6081,71 @@ mod tests {
             .path()
             .join("identity/localhost-file-key.lock")
             .exists());
+    }
+
+    #[test]
+    fn startup_decides_the_marker_before_it_recreates_the_five_roots() {
+        let _guard = LocalAppsGuard::lock();
+        let old_key = [0xc1; 32];
+        let new_key = [0xc2; 32];
+        let old_file_key = expected_localhost_file_key(&old_key);
+        let root = TempDir::new().unwrap();
+        let note = root.path().join("Users/note.bin");
+        plant_device_envelope(&note, &old_key, b"kept");
+        localhost_provider_bridge_config(root.path(), &old_key).unwrap();
+        let sealed = fs::read(&note).unwrap();
+        plant_device_key(root.path(), &new_key);
+        fs::set_permissions(
+            root.path().join("identity/device.key"),
+            fs::Permissions::from_mode(0o600),
+        )
+        .unwrap();
+        let aside = root.path().join("Users.aside");
+        fs::rename(root.path().join("Users"), &aside).unwrap();
+        crate::localhost_file_migration::prepare_localhost_files(root.path()).unwrap();
+        assert_current_marker(root.path(), &new_key);
+        assert!(!root.path().join("Users").exists());
+        ensure_file_backed_roots(root.path()).unwrap();
+        let auth = root.path().join("ElastOS/System/Auth");
+        fs::create_dir_all(&auth).unwrap();
+        let lock = auth.join("audit-chain-required.json.lock");
+        fs::write(&lock, b"lock").unwrap();
+        match localhost_bringup(root.path(), &new_key) {
+            LocalhostBringup::Start(_) => {}
+            LocalhostBringup::Refuse(got) => {
+                panic!("startup recreated the roots before the marker decision: {got}")
+            }
+        }
+        home_is_up(root.path());
+        assert_current_marker(root.path(), &new_key);
+        assert_eq!(fs::read(&lock).unwrap(), b"lock");
+        assert_eq!(fs::read(aside.join("note.bin")).unwrap(), sealed);
+        assert_eq!(
+            localhost_provider::decrypt_bytes(&old_file_key, &sealed).unwrap(),
+            b"kept"
+        );
+
+        let left = TempDir::new().unwrap();
+        plant_device_key(left.path(), &new_key);
+        fs::create_dir_all(left.path().join("Users")).unwrap();
+        let marker_path = left.path().join("identity/localhost-file-key-v1");
+        fs::write(
+            &marker_path,
+            crate::localhost_file_migration::localhost_marker_record(&expected_localhost_file_key(
+                &old_key,
+            )),
+        )
+        .unwrap();
+        let marker_before = fs::read(&marker_path).unwrap();
+        crate::localhost_file_migration::prepare_localhost_files(left.path()).unwrap();
+        ensure_file_backed_roots(left.path()).unwrap();
+        match localhost_bringup(left.path(), &new_key) {
+            LocalhostBringup::Refuse(got) => {
+                assert!(got.contains("does not match this Home"), "{got}");
+            }
+            LocalhostBringup::Start(_) => panic!("an empty root left in place started empty"),
+        }
+        assert_eq!(fs::read(&marker_path).unwrap(), marker_before);
     }
 
     #[test]
@@ -6173,6 +6272,7 @@ mod tests {
 
     #[test]
     fn a_large_plain_file_is_left_alone_and_an_over_cap_envelope_is_refused() {
+        let _guard = LocalAppsGuard::lock();
         let device_key = [0x94; 32];
         let file_key = expected_localhost_file_key(&device_key);
         let temp = TempDir::new().unwrap();
@@ -6186,7 +6286,13 @@ mod tests {
             .unwrap()
             .set_len(32 * 1024 * 1024 + 1)
             .unwrap();
+        let _ = take_localhost_migration_bytes_read();
         localhost_provider_bridge_config(root, &device_key).unwrap();
+        assert_eq!(
+            take_localhost_migration_bytes_read(),
+            0,
+            "the first start read an over-cap plain file"
+        );
         let mut head = [0u8; 4];
         std::io::Read::read_exact(&mut std::fs::File::open(&plain).unwrap(), &mut head).unwrap();
         assert_eq!(&head, b"ftyp");
@@ -6201,11 +6307,6 @@ mod tests {
             .unwrap()
             .set_len(32 * 1024 * 1024 + 1)
             .unwrap();
-        let err = localhost_provider_bridge_config(root, &device_key).unwrap_err();
-        assert!(err.to_string().contains("Users/brace.bin"), "{}", err);
-        assert!(err.to_string().contains("larger than 32 MiB"), "{err}");
-        fs::remove_file(&brace).unwrap();
-
         let over = root.join("Users/over.bin");
         let envelope = localhost_provider::encrypt_bytes(&device_key, b"too-big").unwrap();
         fs::write(&over, &envelope).unwrap();
@@ -6215,19 +6316,31 @@ mod tests {
             .unwrap()
             .set_len(32 * 1024 * 1024 + 1)
             .unwrap();
-        let err = localhost_provider_bridge_config(root, &device_key).unwrap_err();
-        let text = err.to_string();
-        assert!(text.contains("Users/over.bin"), "{text}");
-        assert!(text.contains("larger than 32 MiB"), "{text}");
+        let _ = take_localhost_migration_bytes_read();
+        localhost_provider_bridge_config(root, &device_key).unwrap();
+        assert_eq!(
+            take_localhost_migration_bytes_read(),
+            0,
+            "the next start read an over-cap file"
+        );
+        home_is_up(root);
+        assert_read_refused_by_name(&brace, &file_key, "Users/brace.bin");
+        assert_read_refused_by_name(&over, &file_key, "Users/over.bin");
+        assert_read_refused_by_name(&plain, &file_key, "Users/video.bin");
         assert_eq!(fs::metadata(&over).unwrap().len(), 32 * 1024 * 1024 + 1);
         let mut prefix = vec![0u8; envelope.len()];
         std::io::Read::read_exact(&mut std::fs::File::open(&over).unwrap(), &mut prefix).unwrap();
         assert_eq!(prefix, envelope);
-        fs::remove_file(&over).unwrap();
         let small = root.join("Users/small.bin");
         plant_device_envelope(&small, &device_key, b"small");
         localhost_provider_bridge_config(root, &device_key).unwrap();
         assert_envelope_opens_with_exactly_one_key(&small, b"small", &device_key, &file_key);
+        assert_eq!(
+            localhost_provider::read_sealed_localhost_file(&file_key, &small, "Users/small.bin")
+                .unwrap(),
+            b"small"
+        );
+        home_is_up(root);
     }
 
     #[test]
@@ -6598,11 +6711,12 @@ mod tests {
                 ("seventeen.bin", 0x5au8, 17 * 1024 * 1024),
                 ("hundred.bin", 0x11u8, 100 * 1024 * 1024),
             ] {
-                let plain = localhost_provider::decrypt_bytes(
+                let plain = localhost_provider::read_sealed_localhost_file(
                     &file_key,
-                    &fs::read(root.join("Users").join(name)).unwrap(),
+                    &root.join("Users").join(name),
+                    &format!("Users/{name}"),
                 )
-                .unwrap();
+                .unwrap_or_else(|err| panic!("{name} was refused on read: {err}"));
                 assert_eq!(plain.len(), len, "{name}");
                 assert!(plain.iter().all(|item| *item == byte), "{name}");
             }
@@ -6610,43 +6724,73 @@ mod tests {
         }
 
         let device_key = [0x26; 32];
+        let _guard = LocalAppsGuard::lock();
+        let file_key = expected_localhost_file_key(&device_key);
         let migrating = TempDir::new().unwrap();
         let old = migrating.path().join("Users/old.bin");
         fs::create_dir_all(old.parent().unwrap()).unwrap();
         let old_plain = vec![0x22u8; 17 * 1024 * 1024];
-        fs::write(
-            &old,
-            localhost_provider::encrypt_bytes(&device_key, &old_plain).unwrap(),
-        )
-        .unwrap();
-        assert!(fs::metadata(&old).unwrap().len() > 32 * 1024 * 1024);
-        let err = localhost_provider_bridge_config(migrating.path(), &device_key).unwrap_err();
-        assert!(err.to_string().contains("larger than 32 MiB"), "{err}");
-        let aside = migrating.path().with_file_name(format!(
-            "{}-aside-old",
-            migrating.path().file_name().unwrap().to_string_lossy()
-        ));
-        fs::create_dir(&aside).unwrap();
-        fs::rename(&old, aside.join("old.bin")).unwrap();
+        let old_bytes = localhost_provider::encrypt_bytes(&device_key, &old_plain).unwrap();
+        fs::write(&old, &old_bytes).unwrap();
+        assert!(old_bytes.len() as u64 > 32 * 1024 * 1024);
+        let small_old = migrating.path().join("Users/small.bin");
+        plant_device_envelope(&small_old, &device_key, b"small");
+        let _ = take_localhost_migration_bytes_read();
         match localhost_bringup(migrating.path(), &device_key) {
             LocalhostBringup::Start(_) => {}
-            LocalhostBringup::Refuse(got) => panic!("moving the file out did not restart: {got}"),
+            LocalhostBringup::Refuse(got) => {
+                panic!("one old over-cap file turned local apps off: {got}")
+            }
         }
-        assert!(elastos_server::local_apps::local_apps_refusal(migrating.path()).is_none());
+        let read = take_localhost_migration_bytes_read();
+        assert!(
+            read < 64 * 1024,
+            "the walk read the old over-cap body: {read}"
+        );
+        home_is_up(migrating.path());
+        assert_eq!(fs::read(&old).unwrap(), old_bytes);
         assert_eq!(
-            localhost_provider::decrypt_bytes(
-                &device_key,
-                &fs::read(aside.join("old.bin")).unwrap()
-            )
-            .unwrap(),
+            localhost_provider::decrypt_bytes(&device_key, &fs::read(&old).unwrap()).unwrap(),
             old_plain
         );
-        fs::remove_dir_all(&aside).unwrap();
+        assert_read_refused_by_name(&old, &file_key, "Users/old.bin");
+        assert_envelope_opens_with_exactly_one_key(&small_old, b"small", &device_key, &file_key);
+        assert_current_marker(migrating.path(), &device_key);
+        let later = migrating.path().join("Users/later.bin");
+        fs::write(&later, &old_bytes).unwrap();
+        let _ = take_localhost_migration_bytes_read();
+        match localhost_bringup(migrating.path(), &device_key) {
+            LocalhostBringup::Start(_) => {}
+            LocalhostBringup::Refuse(got) => {
+                panic!("a later over-cap file turned local apps off: {got}")
+            }
+        }
+        let read = take_localhost_migration_bytes_read();
+        let small_len = fs::metadata(&small_old).unwrap().len();
+        assert!(
+            read <= small_len,
+            "the later walk read the over-cap body: {read}"
+        );
+        home_is_up(migrating.path());
+        assert_eq!(fs::read(&later).unwrap(), old_bytes);
+        assert_eq!(
+            localhost_provider::decrypt_bytes(&device_key, &fs::read(&later).unwrap()).unwrap(),
+            old_plain
+        );
+        assert_read_refused_by_name(&later, &file_key, "Users/later.bin");
+        assert_eq!(
+            localhost_provider::read_sealed_localhost_file(
+                &file_key,
+                &small_old,
+                "Users/small.bin"
+            )
+            .unwrap(),
+            b"small"
+        );
 
         let kept = TempDir::new().unwrap();
         plant_device_envelope(&kept.path().join("Users/small.bin"), &device_key, b"small");
         localhost_provider_bridge_config(kept.path(), &device_key).unwrap();
-        let file_key = expected_localhost_file_key(&device_key);
         for (name, byte, len) in [
             ("seventeen.bin", 0x5au8, 17 * 1024 * 1024),
             ("hundred.bin", 0x11u8, 100 * 1024 * 1024),

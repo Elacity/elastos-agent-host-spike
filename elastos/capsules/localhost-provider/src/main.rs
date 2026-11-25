@@ -5,7 +5,7 @@
 //! When an encryption key is provided, files are encrypted at rest with AES-256-GCM.
 
 use elastos_guest::prelude::*;
-use localhost_provider::{decrypt_bytes, encrypt_bytes};
+use localhost_provider::{encrypt_bytes, read_sealed_localhost_file};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::{self, BufRead, Read, Write};
@@ -389,7 +389,8 @@ impl LocalProvider {
             ));
         }
 
-        // With encryption: read entire file, decrypt, then apply offset/length
+        // With encryption: open the sealed file, then apply offset and length.
+        // A file over the cap is refused by name unless this key opens it.
         if let Some(ref key) = self.encryption_key {
             if Self::is_plaintext_path(path) {
                 let mut file = fs::File::open(&full_path)?;
@@ -411,8 +412,7 @@ impl LocalProvider {
                 return Ok(buffer);
             }
 
-            let raw = fs::read(&full_path)?;
-            let plaintext = decrypt_bytes(key, &raw)?;
+            let plaintext = read_sealed_localhost_file(key, &full_path, path)?;
 
             let off = offset.unwrap_or(0) as usize;
             if off >= plaintext.len() {
@@ -487,8 +487,7 @@ impl LocalProvider {
 
             let plaintext = if append && full_path.exists() {
                 // Read-decrypt-append-re-encrypt
-                let raw = fs::read(&full_path)?;
-                let mut existing = decrypt_bytes(key, &raw)?;
+                let mut existing = read_sealed_localhost_file(key, &full_path, path)?;
                 existing.extend_from_slice(content);
                 existing
             } else {
@@ -1412,6 +1411,45 @@ mod tests {
             .read_file("secret.txt", "token", None, None)
             .unwrap();
         assert_eq!(content, b"sensitive data");
+    }
+
+    #[test]
+    fn an_over_cap_file_is_refused_by_name_and_a_small_file_still_reads() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir(dir.path().join("Users")).unwrap();
+        let provider = make_encrypted_provider(&dir);
+        provider
+            .write_file("Users/small.bin", "token", b"small", false)
+            .unwrap();
+
+        let video = dir.path().join("Users/video.bin");
+        fs::write(&video, b"ftyp").unwrap();
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&video)
+            .unwrap()
+            .set_len(32 * 1024 * 1024 + 1)
+            .unwrap();
+        let err = provider
+            .read_file("Users/video.bin", "token", None, None)
+            .unwrap_err();
+        let text = err.to_string();
+        assert!(text.contains("Users/video.bin"), "{text}");
+        assert!(text.contains("larger than 32 MiB"), "{text}");
+        assert_eq!(
+            provider
+                .read_file("Users/small.bin", "token", None, None)
+                .unwrap(),
+            b"small"
+        );
+        let append = provider
+            .write_file("Users/video.bin", "token", b"more", true)
+            .unwrap_err();
+        assert!(append.to_string().contains("Users/video.bin"), "{append}");
+        assert!(
+            append.to_string().contains("larger than 32 MiB"),
+            "{append}"
+        );
     }
 
     #[test]

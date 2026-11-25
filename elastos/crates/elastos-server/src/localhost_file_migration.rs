@@ -12,17 +12,20 @@
 //! matching identity/device.key makes that fingerprint match again, and the
 //! files stay. Moving AppCapsules, ElastOS, Local, Users, and UsersAI aside,
 //! so those roots are absent, makes the next start write a marker for this
-//! device key and turn local apps on with an empty store. An empty root that
+//! device key and turn local apps on with an empty store. That decision runs
+//! in `prepare_localhost_files` before startup creates the roots: gateway and
+//! `home --browser` call it before the auth lock under `ElastOS`, and serve
+//! calls it before `ensure_file_backed_roots`. When any of the five is already
+//! present, that call does not walk. An empty root that
 //! is still present is not moved aside. A matching marker still walks, so an
 //! older build's later device-key file is rewritten. A file is an envelope only when
 //! `is_encrypted_envelope` accepts it, in any field order. The walk reads a short
-//! header first at every size. If that header cannot start an envelope, the file
-//! is left alone and its body is not read. On a later start, when the marker
-//! matches, a file larger than 32 MiB is left alone without being read, including
-//! an envelope this build's file key already wrote. On the first migration, a file
-//! larger than 32 MiB whose header can start an envelope is refused by name and
-//! its body is not read. Moving that file out of the folder, then restarting,
-//! turns local apps on. The walk logs a count every few seconds. A waiter on
+//! header first at every size at or under 32 MiB. If that header cannot start an
+//! envelope, the file is left alone and its body is not read. A file larger than
+//! 32 MiB is left alone on every start, including the first migration, and its
+//! body is not read. Home and the other files keep working. A later read of that
+//! file is refused by name, unless the file key opens it: an envelope this key
+//! already wrote stays readable. The walk logs a count every few seconds. A waiter on
 //! `identity/localhost-file-key.lock` logs that. The walk runs from
 //! `setup_server_infrastructure`. `elastos serve` runs it and then spawns the
 //! helper (`spawn_host_providers`). `elastos serve`
@@ -74,7 +77,7 @@ const LOCALHOST_MIGRATION_RECORD: &[u8] = b"elastos-localhost-file-v1\n";
 #[cfg(unix)]
 const LOCALHOST_REWRITE_SUFFIX: &str = ".elastos-localhost-file-key-v1.tmp";
 #[cfg(unix)]
-const LOCALHOST_ENVELOPE_LIMIT: u64 = 32 * 1024 * 1024;
+const LOCALHOST_ENVELOPE_LIMIT: u64 = localhost_provider::ENVELOPE_BYTE_LIMIT;
 #[cfg(unix)]
 const ENVELOPE_HEADER: usize = 64;
 #[cfg(unix)]
@@ -589,26 +592,11 @@ fn opened_file_still_matches(path: &Path, opened: &OpenedIdentity) -> anyhow::Re
     Ok(())
 }
 
-/// A header rules an envelope out only when it cannot be the start of one.
-/// All whitespace, or `{`, can still be an envelope. Any other first byte cannot.
-#[cfg(unix)]
-fn header_rules_out_envelope(header: &[u8]) -> bool {
-    let start = header
-        .iter()
-        .position(|byte| !byte.is_ascii_whitespace())
-        .unwrap_or(header.len());
-    match header.get(start) {
-        None | Some(b'{') => false,
-        Some(_) => true,
-    }
-}
-
 #[cfg(unix)]
 fn migrate_localhost_envelope(
     path: &Path,
     device_key: &[u8; 32],
     file_key: &[u8; 32],
-    leave_over_cap: bool,
 ) -> anyhow::Result<()> {
     use std::io::Read;
     use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
@@ -626,9 +614,9 @@ fn migrate_localhost_envelope(
     if pre.nlink() > 1 {
         return Err(localhost_refused(path, "is linked from another path"));
     }
-    // A file the new key already wrote is never refused for its size. The
-    // later walk stats it and does not read it.
-    if leave_over_cap && pre.len() > LOCALHOST_ENVELOPE_LIMIT {
+    // One file over the cap never turns local apps off. The walk does not
+    // read it. A later read refuses it by name unless the file key opens it.
+    if pre.len() > LOCALHOST_ENVELOPE_LIMIT {
         return Ok(());
     }
     let mut file = std::fs::OpenOptions::new()
@@ -656,12 +644,9 @@ fn migrate_localhost_envelope(
         .with_context(|| localhost_refused(path, "cannot be read"))?;
     note_bytes_read(read);
     if opened.len > LOCALHOST_ENVELOPE_LIMIT {
-        if header_rules_out_envelope(&header[..read]) {
-            return Ok(());
-        }
-        return Err(localhost_refused(path, "larger than 32 MiB"));
+        return Ok(());
     }
-    if header_rules_out_envelope(&header[..read]) {
+    if localhost_provider::header_rules_out_envelope(&header[..read]) {
         return Ok(());
     }
     let mut bytes = header[..read].to_vec();
@@ -675,7 +660,7 @@ fn migrate_localhost_envelope(
         bytes.extend(rest);
     }
     if bytes.len() as u64 > LOCALHOST_ENVELOPE_LIMIT {
-        return Err(localhost_refused(path, "larger than 32 MiB"));
+        return Ok(());
     }
     run_before_replace(path);
     opened_file_still_matches(path, &opened)?;
@@ -723,7 +708,6 @@ fn migrate_localhost_tree(
     dir: &Path,
     device_key: &[u8; 32],
     file_key: &[u8; 32],
-    leave_over_cap: bool,
 ) -> anyhow::Result<()> {
     let names = directory_names(dir)?;
     for name in &names {
@@ -741,7 +725,7 @@ fn migrate_localhost_tree(
             continue;
         }
         if file_type.is_dir() {
-            migrate_localhost_tree(&path, device_key, file_key, leave_over_cap)?;
+            migrate_localhost_tree(&path, device_key, file_key)?;
             continue;
         }
         if !file_type.is_file() {
@@ -750,7 +734,7 @@ fn migrate_localhost_tree(
         if std::os::unix::fs::MetadataExt::nlink(&meta) > 1 {
             return Err(localhost_refused(&path, "is linked from another path"));
         }
-        migrate_localhost_envelope(&path, device_key, file_key, leave_over_cap)?;
+        migrate_localhost_envelope(&path, device_key, file_key)?;
     }
     let again = directory_names(dir)?;
     if without_rewrite_temps(&names) != without_rewrite_temps(&again) {
@@ -981,7 +965,6 @@ fn migrate_localhost_files_to_file_key(
     let _lock = acquire_migration_lock(data_dir)?;
     let plan = plan_for_this_home(data_dir, &marker, &file_key)?;
     sweep_rewrite_temp(&marker)?;
-    let leave_over_cap = matches!(plan, MarkerPlan::Keep);
     for root in LOCALHOST_ENCRYPTED_ROOTS {
         let path = data_dir.join(root);
         match std::fs::symlink_metadata(&path) {
@@ -989,7 +972,7 @@ fn migrate_localhost_files_to_file_key(
                 return Err(localhost_refused(&path, "is a link"));
             }
             Ok(meta) if meta.is_dir() => {
-                migrate_localhost_tree(&path, device_key, &file_key, leave_over_cap)?;
+                migrate_localhost_tree(&path, device_key, &file_key)?;
             }
             Ok(_) => return Err(localhost_refused(&path, "is not a directory")),
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
@@ -1057,4 +1040,27 @@ pub(crate) fn localhost_bringup(data_dir: &Path, device_key: &[u8; 32]) -> Local
             LocalhostBringup::Refuse(sentence)
         }
     }
+}
+
+/// Decide a mismatched marker before startup creates the five roots.
+///
+/// When any of AppCapsules, ElastOS, Local, Users, or UsersAI is already
+/// present, this returns without a walk. The later bringup walks once.
+/// When all five are absent, this rewrites the marker for this device key
+/// before gateway creates `ElastOS/System/Auth` or serve creates the roots.
+/// An empty root the person left in place is still present.
+pub(crate) fn prepare_localhost_files(data_dir: &Path) -> anyhow::Result<()> {
+    #[cfg(unix)]
+    {
+        if !encrypted_roots_absent(data_dir)? {
+            return Ok(());
+        }
+        let device_key = elastos_identity::load_or_create_device_key(data_dir)?;
+        let _ = localhost_bringup(data_dir, &device_key);
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = data_dir;
+    }
+    Ok(())
 }

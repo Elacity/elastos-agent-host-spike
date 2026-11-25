@@ -148,10 +148,16 @@ pub async fn provider_proxy(
     let response = match response {
         Ok(value) => value,
         Err(e) => {
+            let message = e.to_string();
+            if let Some((_, sentence)) =
+                message.split_once(crate::local_apps::LOCAL_APPS_REFUSAL_MARK)
+            {
+                return Err((StatusCode::SERVICE_UNAVAILABLE, sentence.to_string()));
+            }
             return Ok(Json(serde_json::json!({
                 "status": "error",
                 "code": "provider_error",
-                "message": e.to_string(),
+                "message": message,
             })));
         }
     };
@@ -372,6 +378,60 @@ mod tests {
     use elastos_runtime::session::SessionType;
     use tokio::sync::Mutex;
     use tower::ServiceExt;
+
+    #[tokio::test]
+    async fn a_localhost_refusal_is_503_when_the_public_tree_is_not_the_home() {
+        let _guard = crate::local_apps::lock_local_apps_for_test();
+        let home = tempfile::tempdir().unwrap();
+        let public_tree = tempfile::tempdir().unwrap();
+        let sentence = "Users/secret.bin is not readable. Make it readable or move it out of the folder, then restart.";
+        crate::local_apps::set_local_apps_refusal(home.path(), Some(sentence.to_string()));
+        let missed = provider_proxy(
+            State(ProviderProxyState {
+                registry: Arc::new(ProviderRegistry::new()),
+                capability_manager: None,
+                data_dir: home.path().to_path_buf(),
+            }),
+            Extension(Session::new(SessionType::Shell, None)),
+            Path(("localhost".to_string(), "read".to_string())),
+            HeaderMap::new(),
+            String::new(),
+        )
+        .await;
+        match missed {
+            Err((status, body)) => {
+                assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+                assert_eq!(body, sentence);
+            }
+            Ok(json) => panic!("the home refusal came back as HTTP 200: {json:?}"),
+        }
+
+        let registry = Arc::new(ProviderRegistry::new());
+        registry
+            .register(Arc::new(crate::local_apps::RefusingLocalhostProvider::new(
+                sentence.to_string(),
+            )))
+            .await;
+        let forwarded = provider_proxy(
+            State(ProviderProxyState {
+                registry,
+                capability_manager: None,
+                data_dir: public_tree.path().to_path_buf(),
+            }),
+            Extension(Session::new(SessionType::Shell, None)),
+            Path(("localhost".to_string(), "read".to_string())),
+            HeaderMap::new(),
+            r#"{"path":"Users/secret.bin"}"#.to_string(),
+        )
+        .await;
+        match forwarded {
+            Err((status, body)) => {
+                assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+                assert_eq!(body, sentence);
+            }
+            Ok(json) => panic!("a missed home lookup returned HTTP 200: {json:?}"),
+        }
+    }
 
     #[tokio::test]
     async fn session_proxy_http_refuses_object_before_body_parse_for_all_sessions() {

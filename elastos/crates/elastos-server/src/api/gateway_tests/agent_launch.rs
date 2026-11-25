@@ -487,6 +487,7 @@ async fn serve_runtime(data: &std::path::Path) -> RuntimeHost {
         addr: "127.0.0.1:0".to_string(),
         capsule_dir: None,
         data_dir: Some(data.to_path_buf()),
+        local_apps_dir: Some(data.to_path_buf()),
         tls_config: None,
         supervisor: None,
         ready_tx: None,
