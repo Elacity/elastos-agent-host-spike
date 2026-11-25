@@ -1299,27 +1299,33 @@ fn a_capsule_the_bridge_holds_no_ceiling_for_gets_the_empty_one() {
     // The lookup lives in the one function both hostcalls use. The v1
     // wrapper only runs that function's future on the caller thread.
     let start = source
-        .find("let manifest_capabilities = host_manifest_capabilities")
+        .find("let manifest_capabilities = tables")
         .expect("ceiling lookup");
     let handler = &source[start..];
     let handler = &handler[..handler.find("\n    }\n").expect("end of bridge context")];
-    let lookup = "let manifest_capabilities = host_manifest_capabilities\n            \
+    let lookup = "let manifest_capabilities = tables\n            \
+                  .manifest_capabilities\n            \
                   .read()\n            \
                   .ok()\n            \
                   .and_then(|guard| guard.get(capsule_id).cloned())\n            \
                   .unwrap_or_default();";
     assert_eq!(source.matches(lookup).count(), 1);
     assert_eq!(handler.matches(lookup).count(), 1);
-    assert_eq!(handler.matches("host_manifest_capabilities").count(), 1);
+    assert_eq!(handler.matches(".manifest_capabilities").count(), 1);
     assert_eq!(handler.matches("manifest_capabilities,\n").count(), 1);
-    let held = "let launch = host_launch_contents\n            \
+    let held = "let launch = tables\n            \
+                .launch_contents\n            \
                 .read()\n            \
                 .unwrap_or_else(|it| it.into_inner())\n            \
                 .get(capsule_id)\n            \
                 .cloned();";
     assert_eq!(handler.matches(held).count(), 1);
-    assert_eq!(handler.matches("host_launch_contents").count(), 1);
+    assert_eq!(handler.matches(".launch_contents").count(), 1);
     assert_eq!(handler.matches("launch,\n").count(), 1);
+    assert_eq!(
+        source.matches("let tables = ComponentBridgeTables").count(),
+        1
+    );
     assert_eq!(source.matches("Self::component_bridge_context(").count(), 1);
     let sync = &source[source.find("component.set_bus_hostcall(Arc::new(").unwrap()..];
     let sync = &sync[..sync.find("\n            }));\n").unwrap()];

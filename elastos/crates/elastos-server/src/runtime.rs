@@ -1107,6 +1107,27 @@ pub(crate) struct BridgeTables {
     pub stop: Option<Arc<crate::resource_bridge::ActivationStopFlag>>,
 }
 
+/// The tables both bridge hostcalls read. Built once where those closures
+/// are installed, and captured there. A call looks its own capsule id up
+/// and drops the locks before the bridge runs.
+struct ComponentBridgeTables {
+    registry: Arc<ProviderRegistry>,
+    capability_manager: Arc<elastos_runtime::capability::CapabilityManager>,
+    pending_store: Arc<elastos_runtime::capability::pending::PendingRequestStore>,
+    data_dir: PathBuf,
+    manifest_capabilities: Arc<StdRwLock<HashMap<String, Vec<AuthorityBound>>>>,
+    model_token_ceilings: Arc<StdRwLock<HashMap<String, AgentModelCeiling>>>,
+    model_budget: Arc<ModelBudget>,
+    model_offer_bounds: Arc<StdRwLock<HashMap<String, crate::resource_bridge::ModelOfferBound>>>,
+    activation_stops: Arc<StdRwLock<HashMap<String, Arc<ActivationStop>>>>,
+    launch_contents: Arc<StdRwLock<HashMap<String, Arc<LaunchContent>>>>,
+}
+
+/// Return type of `component_bridge_context`. The function's opening brace
+/// is not a second construction. The one construction is the struct literal
+/// in the function body, which the source pin counts.
+type ComponentBridgeContext = crate::resource_bridge::BridgeContext;
+
 impl Runtime {
     /// The v2 guests this runtime hosts. The owner's revoke routes tell them.
     pub(crate) fn component_guests(&self) -> Option<Arc<ComponentProvider>> {
@@ -1212,26 +1233,14 @@ impl Runtime {
 
     /// The ceiling and the launch content for one bridge call, looked up by
     /// that caller's own capsule id. Both hostcalls use this. The locks end
-    /// here, before the call. The arguments are the tables the caller already
-    /// holds; one struct would only rename them.
-    #[allow(clippy::too_many_arguments)]
+    /// here, before the call.
     fn component_bridge_context(
-        host_reg: &Arc<ProviderRegistry>,
-        host_cap_mgr: &Arc<elastos_runtime::capability::CapabilityManager>,
-        host_pending: &Arc<elastos_runtime::capability::pending::PendingRequestStore>,
-        host_data_dir: &Path,
-        host_manifest_capabilities: &StdRwLock<HashMap<String, Vec<AuthorityBound>>>,
-        host_model_token_ceilings: &StdRwLock<HashMap<String, AgentModelCeiling>>,
-        host_model_budget: &Arc<ModelBudget>,
-        host_model_offer_bounds: &Arc<
-            StdRwLock<HashMap<String, crate::resource_bridge::ModelOfferBound>>,
-        >,
-        host_activation_stops: &StdRwLock<HashMap<String, Arc<ActivationStop>>>,
-        host_launch_contents: &StdRwLock<HashMap<String, Arc<LaunchContent>>>,
+        tables: &ComponentBridgeTables,
         capsule_id: &str,
         principal_id: Option<&str>,
-    ) -> crate::resource_bridge::BridgeContext {
-        let manifest_capabilities = host_manifest_capabilities
+    ) -> ComponentBridgeContext {
+        let manifest_capabilities = tables
+            .manifest_capabilities
             .read()
             .ok()
             .and_then(|guard| guard.get(capsule_id).cloned())
@@ -1240,26 +1249,28 @@ impl Runtime {
         // a content launch: looked up by its own id, as its ceiling is, and
         // nobody else's. A poisoned lock still holds the table. The read
         // guard ends with this statement: it is not held across the call.
-        let launch = host_launch_contents
+        let launch = tables
+            .launch_contents
             .read()
             .unwrap_or_else(|it| it.into_inner())
             .get(capsule_id)
             .cloned();
         let (model_token_ceiling, model_budget) = Self::model_dispatch_budget(
             capsule_id,
-            host_model_token_ceilings,
-            host_model_budget,
-            host_model_offer_bounds,
+            &tables.model_token_ceilings,
+            &tables.model_budget,
+            &tables.model_offer_bounds,
         );
-        let stop = host_activation_stops
+        let stop = tables
+            .activation_stops
             .read()
             .unwrap_or_else(|it| it.into_inner())
             .get(capsule_id)
             .map(|stop| stop.flag.clone());
         crate::resource_bridge::BridgeContext {
-            provider_registry: host_reg.clone(),
-            capability_manager: host_cap_mgr.clone(),
-            pending_store: host_pending.clone(),
+            provider_registry: tables.registry.clone(),
+            capability_manager: tables.capability_manager.clone(),
+            pending_store: tables.pending_store.clone(),
             capsule_id: capsule_id.to_string(),
             // The provider minted this id for the one activation, so the
             // Runtime session is the activation, taken from the hostcall
@@ -1267,7 +1278,7 @@ impl Runtime {
             session_id: capsule_id.to_string(),
             principal_id: principal_id.map(ToOwned::to_owned),
             manifest_capabilities,
-            data_dir: Some(host_data_dir.to_path_buf()),
+            data_dir: Some(tables.data_dir.clone()),
             launch,
             model_token_ceiling,
             model_budget,
@@ -1298,33 +1309,22 @@ impl Runtime {
             data_dir: data_dir.clone(),
         });
         if let Some(ref component) = self.component_provider {
-            let host_reg = registry.clone();
-            let host_cap_mgr = capability_manager.clone();
-            let host_pending = pending_store.clone();
-            let host_data_dir = data_dir.clone();
-            let host_manifest_capabilities = self.bridge_manifest_capabilities.clone();
-            let host_model_token_ceilings = self.bridge_model_token_ceilings.clone();
-            let host_model_budget = self.model_budget.clone();
-            let host_model_offer_bounds = self.model_offer_bounds.clone();
-            let host_activation_stops = self.activation_stops.clone();
-            let host_launch_contents = self.launch_contents.clone();
+            let tables = ComponentBridgeTables {
+                registry: registry.clone(),
+                capability_manager: capability_manager.clone(),
+                pending_store: pending_store.clone(),
+                data_dir: data_dir.clone(),
+                manifest_capabilities: self.bridge_manifest_capabilities.clone(),
+                model_token_ceilings: self.bridge_model_token_ceilings.clone(),
+                model_budget: self.model_budget.clone(),
+                model_offer_bounds: self.model_offer_bounds.clone(),
+                activation_stops: self.activation_stops.clone(),
+                launch_contents: self.launch_contents.clone(),
+            };
             let host_handle = tokio::runtime::Handle::current();
             let bridge_call: BridgeHostcallAsync =
                 Arc::new(move |line, capsule_id, principal_id| {
-                    let ctx = Self::component_bridge_context(
-                        &host_reg,
-                        &host_cap_mgr,
-                        &host_pending,
-                        &host_data_dir,
-                        &host_manifest_capabilities,
-                        &host_model_token_ceilings,
-                        &host_model_budget,
-                        &host_model_offer_bounds,
-                        &host_activation_stops,
-                        &host_launch_contents,
-                        capsule_id,
-                        principal_id,
-                    );
+                    let ctx = Self::component_bridge_context(&tables, capsule_id, principal_id);
                     let line = line.to_string();
                     Box::pin(async move {
                         let response =
@@ -3652,9 +3652,9 @@ fn table_holds<T>(table: &StdRwLock<HashMap<String, T>>, id: &str) -> bool {
 fn live_thread_count() -> u32 {
     #[cfg(target_os = "linux")]
     {
-        return std::fs::read_dir("/proc/self/task")
+        std::fs::read_dir("/proc/self/task")
             .map(|entries| entries.filter(|entry| entry.is_ok()).count() as u32)
-            .unwrap_or(0);
+            .unwrap_or(0)
     }
     #[cfg(target_os = "macos")]
     {
