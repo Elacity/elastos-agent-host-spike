@@ -788,8 +788,9 @@ struct OneUseGrantRace {
     pending_id: Arc<Mutex<Option<String>>>,
 }
 
+/// One race per request. A second plant's arm does not replace the first.
 #[cfg(all(test, unix))]
-static ONE_USE_GRANT_RACE: Mutex<Option<OneUseGrantRace>> = Mutex::new(None);
+static ONE_USE_GRANT_RACE: Mutex<Vec<OneUseGrantRace>> = Mutex::new(Vec::new());
 
 /// Lets a test grant the pending record before this registration does.
 #[cfg(all(test, unix))]
@@ -813,14 +814,14 @@ impl OneUseGrantPause {
 impl Drop for OneUseGrantPause {
     fn drop(&mut self) {
         self.release.notify_one();
-        let mut slot = ONE_USE_GRANT_RACE
+        let mut races = ONE_USE_GRANT_RACE
             .lock()
             .unwrap_or_else(|err| err.into_inner());
-        if slot
-            .as_ref()
-            .is_some_and(|race| Arc::ptr_eq(&race.pending_id, &self.pending_id))
+        if let Some(pos) = races
+            .iter()
+            .rposition(|race| Arc::ptr_eq(&race.pending_id, &self.pending_id))
         {
-            *slot = None;
+            races.swap_remove(pos);
         }
     }
 }
@@ -830,14 +831,15 @@ pub(crate) fn arm_one_use_grant_race(request_id: &str) -> OneUseGrantPause {
     let entered = Arc::new(tokio::sync::Notify::new());
     let release = Arc::new(tokio::sync::Notify::new());
     let pending_id = Arc::new(Mutex::new(None));
-    *ONE_USE_GRANT_RACE
+    ONE_USE_GRANT_RACE
         .lock()
-        .unwrap_or_else(|err| err.into_inner()) = Some(OneUseGrantRace {
-        request_id: request_id.to_string(),
-        entered: Arc::clone(&entered),
-        release: Arc::clone(&release),
-        pending_id: Arc::clone(&pending_id),
-    });
+        .unwrap_or_else(|err| err.into_inner())
+        .push(OneUseGrantRace {
+            request_id: request_id.to_string(),
+            entered: Arc::clone(&entered),
+            release: Arc::clone(&release),
+            pending_id: Arc::clone(&pending_id),
+        });
     OneUseGrantPause {
         entered,
         release,
@@ -848,16 +850,13 @@ pub(crate) fn arm_one_use_grant_race(request_id: &str) -> OneUseGrantPause {
 #[cfg(all(test, unix))]
 async fn wait_one_use_grant_race(request_id: &str, pending_id: &str) {
     let race = {
-        let mut slot = ONE_USE_GRANT_RACE
+        let mut races = ONE_USE_GRANT_RACE
             .lock()
             .unwrap_or_else(|err| err.into_inner());
-        match slot.take() {
-            Some(race) if race.request_id == request_id => race,
-            other => {
-                *slot = other;
-                return;
-            }
-        }
+        let Some(pos) = races.iter().rposition(|race| race.request_id == request_id) else {
+            return;
+        };
+        races.swap_remove(pos)
     };
     *race
         .pending_id
@@ -875,6 +874,7 @@ struct AbandonedPlanGrant {
     /// Set when the dispatch is dropped. The spend path refuses this token
     /// until the revoke below removes the entry.
     refused: bool,
+    revoking: bool,
 }
 
 /// The one-use grant for a dispatch that has not finished. Dropping the
@@ -948,6 +948,7 @@ pub(crate) fn park_abandoned_grant_for_test(
                 token,
                 pending_id,
                 refused: false,
+                revoking: false,
             },
         );
 }
@@ -971,6 +972,99 @@ fn plan_grant_spend_is_refused(token_id: &elastos_runtime::capability::token::To
         .any(|grant| grant.refused && grant.token.id() == token_id)
 }
 
+#[cfg(test)]
+struct AbandonedRevokeGate {
+    entered: Arc<std::sync::atomic::AtomicUsize>,
+    skipped: Arc<std::sync::atomic::AtomicUsize>,
+    progress: Arc<tokio::sync::Notify>,
+    release: Arc<tokio::sync::Notify>,
+}
+
+#[cfg(test)]
+static ABANDONED_REVOKE_GATE: Mutex<Vec<(String, AbandonedRevokeGate)>> = Mutex::new(Vec::new());
+
+/// Holds the first revoke open so a second caller is measured against it.
+#[cfg(all(test, unix))]
+pub(crate) struct AbandonedRevokePause {
+    pub(crate) entered: Arc<std::sync::atomic::AtomicUsize>,
+    pub(crate) skipped: Arc<std::sync::atomic::AtomicUsize>,
+    pub(crate) progress: Arc<tokio::sync::Notify>,
+    release: Arc<tokio::sync::Notify>,
+}
+
+#[cfg(all(test, unix))]
+impl AbandonedRevokePause {
+    pub(crate) fn release_for_test(&self) {
+        self.release.notify_waiters();
+    }
+}
+
+#[cfg(all(test, unix))]
+pub(crate) fn arm_abandoned_revoke_overlap(request_id: &str) -> AbandonedRevokePause {
+    let entered = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let skipped = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let progress = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    ABANDONED_REVOKE_GATE
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+        .push((
+            request_id.to_string(),
+            AbandonedRevokeGate {
+                entered: Arc::clone(&entered),
+                skipped: Arc::clone(&skipped),
+                progress: Arc::clone(&progress),
+                release: Arc::clone(&release),
+            },
+        ));
+    AbandonedRevokePause {
+        entered,
+        skipped,
+        progress,
+        release,
+    }
+}
+
+#[cfg(all(test, unix))]
+impl Drop for AbandonedRevokePause {
+    fn drop(&mut self) {
+        self.release.notify_waiters();
+    }
+}
+
+#[cfg(test)]
+fn note_abandoned_revoke_skipped(request_id: &str) {
+    let gates = ABANDONED_REVOKE_GATE
+        .lock()
+        .unwrap_or_else(|err| err.into_inner());
+    if let Some((_, gate)) = gates.iter().find(|(id, _)| id == request_id) {
+        gate.skipped
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        gate.progress.notify_waiters();
+    }
+}
+
+#[cfg(test)]
+async fn pause_abandoned_revoke(request_id: &str) {
+    let (entered, progress, release) = {
+        let gates = ABANDONED_REVOKE_GATE
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        let Some((_, gate)) = gates.iter().find(|(id, _)| id == request_id) else {
+            return;
+        };
+        (
+            Arc::clone(&gate.entered),
+            Arc::clone(&gate.progress),
+            Arc::clone(&gate.release),
+        )
+    };
+    let waiting = release.notified();
+    entered.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    progress.notify_waiters();
+    waiting.await;
+}
+
 pub(crate) async fn revoke_abandoned_plan_grant(request_id: &str) {
     let held = {
         let mut grants = abandoned_plan_grants()
@@ -979,6 +1073,12 @@ pub(crate) async fn revoke_abandoned_plan_grant(request_id: &str) {
         let Some(grant) = grants.get_mut(request_id) else {
             return;
         };
+        if grant.revoking {
+            #[cfg(test)]
+            note_abandoned_revoke_skipped(request_id);
+            return;
+        }
+        grant.revoking = true;
         grant.refused = true;
         (
             Arc::clone(&grant.manager),
@@ -987,6 +1087,8 @@ pub(crate) async fn revoke_abandoned_plan_grant(request_id: &str) {
             grant.pending_id.clone(),
         )
     };
+    #[cfg(test)]
+    pause_abandoned_revoke(request_id).await;
     revoke_plan_grant(
         &held.0,
         &held.1,
@@ -1262,6 +1364,7 @@ pub(crate) async fn dispatch_agent_plan_step(
             token,
             pending_id,
             refused: false,
+            revoking: false,
         }),
     });
     #[cfg(all(test, unix))]

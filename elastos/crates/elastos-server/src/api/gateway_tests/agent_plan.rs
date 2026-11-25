@@ -2168,7 +2168,7 @@ async fn assert_plan_grant_closed(
 async fn bare_runtime(dir: &std::path::Path) -> Arc<crate::runtime::Runtime> {
     let storage = dir.join("cap-storage");
     std::fs::create_dir_all(&storage).unwrap();
-    Arc::new(crate::runtime::Runtime::with_providers_and_component(
+    let runtime = Arc::new(crate::runtime::Runtime::with_providers_and_component(
         Arc::new(
             elastos_storage::providers::LocalFSProvider::new(storage)
                 .await
@@ -2178,7 +2178,9 @@ async fn bare_runtime(dir: &std::path::Path) -> Arc<crate::runtime::Runtime> {
         Some(Arc::new(
             elastos_compute::providers::ComponentProvider::new(),
         )),
-    ))
+    ));
+    runtime.set_plant_dir_for_test(dir);
+    runtime
 }
 
 struct PlantedEffect {
@@ -2707,6 +2709,99 @@ async fn a_panic_in_dispatch_records_unknown() {
     assert_eq!(named.len(), 1);
     assert_eq!(named[0].request_id, plant.id);
     assert!(plant.runtime.plan_book_is_empty());
+}
+
+/// Drop and the task error arm both revoke. One audit is written.
+#[cfg(unix)]
+#[tokio::test]
+async fn two_callers_revoke_an_abandoned_grant_once() {
+    let audit = Arc::new(elastos_runtime::primitives::audit::AuditLog::new());
+    let manager = Arc::new(elastos_runtime::capability::CapabilityManager::new(
+        Arc::new(elastos_runtime::capability::CapabilityStore::new()),
+        audit,
+        Arc::new(elastos_runtime::primitives::metrics::MetricsManager::new()),
+    ));
+    let store = Arc::new(
+        elastos_runtime::capability::pending::PendingRequestStore::new(manager.audit_log().clone()),
+    );
+    let resource = elastos_runtime::capability::ResourceId::new("elastos://availability/status");
+    let token = manager.grant(
+        "capsule:revoke-once",
+        resource.clone(),
+        elastos_runtime::capability::Action::Read,
+        elastos_runtime::capability::TokenConstraints::default(),
+        None,
+    );
+    let pending = store
+        .create_request(
+            elastos_runtime::session::SessionId::from_string("capsule:revoke-once"),
+            resource,
+            elastos_runtime::capability::Action::Read,
+        )
+        .await;
+    let pending_id = pending.id.as_str().to_string();
+    store
+        .grant_request(
+            &pending_id,
+            token.clone(),
+            elastos_runtime::capability::pending::GrantDuration::Session,
+        )
+        .await
+        .unwrap();
+    crate::resource_bridge::park_abandoned_grant_for_test(
+        "revoke-once",
+        Arc::clone(&manager),
+        store,
+        token,
+        pending_id,
+    );
+    let overlap = crate::resource_bridge::arm_abandoned_revoke_overlap("revoke-once");
+    let left = tokio::spawn(crate::resource_bridge::revoke_abandoned_plan_grant(
+        "revoke-once",
+    ));
+    let right = tokio::spawn(crate::resource_bridge::revoke_abandoned_plan_grant(
+        "revoke-once",
+    ));
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    loop {
+        let seen = overlap.entered.load(std::sync::atomic::Ordering::SeqCst)
+            + overlap.skipped.load(std::sync::atomic::Ordering::SeqCst);
+        if seen >= 2 || std::time::Instant::now() >= deadline {
+            break;
+        }
+        let wait = overlap.progress.notified();
+        let seen = overlap.entered.load(std::sync::atomic::Ordering::SeqCst)
+            + overlap.skipped.load(std::sync::atomic::Ordering::SeqCst);
+        if seen >= 2 {
+            break;
+        }
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        if left.is_zero() {
+            break;
+        }
+        let _ = tokio::time::timeout(left, wait).await;
+    }
+    assert_eq!(
+        overlap.entered.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "both callers revoked"
+    );
+    overlap.release_for_test();
+    left.await.unwrap();
+    right.await.unwrap();
+    let revokes = manager
+        .audit_log()
+        .recent_events(40)
+        .into_iter()
+        .filter(|event| {
+            matches!(
+                event,
+                elastos_runtime::primitives::audit::AuditEvent::CapabilityRevoke { reason, .. }
+                    if reason == "plan dispatch abandoned"
+            )
+        })
+        .count();
+    assert_eq!(revokes, 1, "two callers each audited the revoke");
 }
 
 /// A late store after unknown is the same effect. The record stays unknown,
@@ -3266,7 +3361,7 @@ async fn a_failed_settle_write_matches_the_stored_record() {
         }}]})
     })
     .await;
-    super::gateway_inspect_actions::arm_plan_settle_fault("audit");
+    super::gateway_inspect_actions::arm_plan_settle_fault(&audit.id, "audit");
     let answer = dispatch_planted(&audit)
         .await
         .expect("a failed audit still answers with the stored outcome");
@@ -3284,7 +3379,7 @@ async fn a_failed_settle_write_matches_the_stored_record() {
         }}]})
     })
     .await;
-    super::gateway_inspect_actions::arm_plan_settle_fault("record");
+    super::gateway_inspect_actions::arm_plan_settle_fault(&missed.id, "record");
     let answer = dispatch_planted(&missed)
         .await
         .expect("one record fault is retried");
@@ -3302,7 +3397,7 @@ async fn a_failed_settle_write_matches_the_stored_record() {
         }}]})
     })
     .await;
-    super::gateway_inspect_actions::arm_plan_settle_faults("record", 3);
+    super::gateway_inspect_actions::arm_plan_settle_faults(&stuck.id, "record", 3);
     let refused = dispatch_planted(&stuck).await;
     assert!(
         refused.is_err(),

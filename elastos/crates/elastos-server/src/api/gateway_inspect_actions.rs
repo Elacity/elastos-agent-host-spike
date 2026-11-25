@@ -804,41 +804,54 @@ async fn wait_plan_task_gate(request_id: &str) {
 }
 
 #[cfg(test)]
-fn plan_settle_faults() -> &'static std::sync::Mutex<Vec<&'static str>> {
-    static FAULTS: std::sync::OnceLock<std::sync::Mutex<Vec<&'static str>>> =
+struct PlanSettleFault {
+    request_id: String,
+    which: &'static str,
+}
+
+/// Faults for one request. Another request's settle does not take them.
+#[cfg(test)]
+fn plan_settle_faults() -> &'static std::sync::Mutex<Vec<PlanSettleFault>> {
+    static FAULTS: std::sync::OnceLock<std::sync::Mutex<Vec<PlanSettleFault>>> =
         std::sync::OnceLock::new();
     FAULTS.get_or_init(|| std::sync::Mutex::new(Vec::new()))
 }
 
-/// The next settle fails at `which`: `"record"` or `"audit"`.
+/// The next settle of `request_id` fails at `which`: `"record"` or `"audit"`.
 #[cfg(all(test, unix))]
-pub(crate) fn arm_plan_settle_fault(which: &'static str) {
-    arm_plan_settle_faults(which, 1);
+pub(crate) fn arm_plan_settle_fault(request_id: &str, which: &'static str) {
+    arm_plan_settle_faults(request_id, which, 1);
 }
 
-/// `count` failures of `which`, consumed one per settle attempt.
+/// `count` failures of `which` for `request_id`, consumed one per attempt.
 #[cfg(all(test, unix))]
-pub(crate) fn arm_plan_settle_faults(which: &'static str, count: usize) {
+pub(crate) fn arm_plan_settle_faults(request_id: &str, which: &'static str, count: usize) {
     let mut faults = plan_settle_faults()
         .lock()
         .unwrap_or_else(|err| err.into_inner());
     for _ in 0..count {
-        faults.push(which);
+        faults.push(PlanSettleFault {
+            request_id: request_id.to_string(),
+            which,
+        });
     }
 }
 
-fn take_plan_settle_fault(which: &str) -> bool {
+fn take_plan_settle_fault(request_id: &str, which: &str) -> bool {
     #[cfg(test)]
     {
         let mut faults = plan_settle_faults()
             .lock()
             .unwrap_or_else(|err| err.into_inner());
-        if let Some(pos) = faults.iter().rposition(|fault| *fault == which) {
+        if let Some(pos) = faults
+            .iter()
+            .rposition(|fault| fault.request_id == request_id && fault.which == which)
+        {
             faults.swap_remove(pos);
             return true;
         }
     }
-    let _ = which;
+    let _ = (request_id, which);
     false
 }
 
@@ -867,7 +880,7 @@ fn settle_agent_plan_dispatch(
     // is the last write) and the caller resolves the flight as unknown.
     let mut wrote = false;
     for _ in 0..3 {
-        if take_plan_settle_fault("record") {
+        if take_plan_settle_fault(&record.request_id, "record") {
             continue;
         }
         if write_inspect_action_record(data_dir, &record).is_ok() {
@@ -878,7 +891,7 @@ fn settle_agent_plan_dispatch(
     if !wrote {
         anyhow::bail!("plan record write failed");
     }
-    if take_plan_settle_fault("audit") {
+    if take_plan_settle_fault(&record.request_id, "audit") {
         tracing::warn!(
             "agent plan dispatch audit was not stored: injected plan audit write failure"
         );
