@@ -1234,13 +1234,16 @@ jobs:
             test ! -L "$directory"
             mkdir -m 700 "$directory"
           done
-      # Helper fence rows on the ubuntu-22.04-arm job only. The Mac source-home
-      # job measured about 70 minutes for this cold shape (25 localhost, 20
-      # object, 5 chain, 20 tests). That figure is the Mac measurement, not a
-      # time measured on this ARM runner. This step uses its own target
-      # directories so it does not replace the job's fresh build artifacts.
+      # Helper fence rows on the ubuntu-22.04-arm runner, and only after a
+      # merge: push, schedule and workflow_dispatch. A pull request skips
+      # them. The Mac source-home job measured about 70 minutes for this
+      # cold shape (25 localhost, 20 object, 5 chain, 20 tests). That figure
+      # is the Mac measurement, not a time measured on this ARM runner. The
+      # x86_64 job does not run this step, so its source-home rows stay on
+      # every pull request. The script uses its own target directories and
+      # does not replace the job's fresh build artifacts.
       - name: helper fence rows
-        if: matrix.os == 'ubuntu-22.04-arm'
+        if: matrix.os == 'ubuntu-22.04-arm' && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
         timeout-minutes: 100
         env:
           CARGO_BUILD_JOBS: "3"
@@ -1474,11 +1477,11 @@ jobs:
     runs-on: ${{ matrix.os }}
     # Lane PRs (spark/*) run only the quick checks; the full CI runs on the twice-daily batch PR (batch/*).
     if: (needs.installed-app-paths.outputs.run != 'false') && !(github.event_name == 'pull_request' && startsWith(github.head_ref, 'spark/'))
-    # The helper fence rows are the Mac step's shape, about 70 minutes
-    # (25 localhost, 20 object, 5 chain, 20 tests). That figure is the Mac
-    # measurement, not a time measured on this ARM runner. 180 leaves room
-    # for the source-home journey beside that step.
-    timeout-minutes: 180
+    # A pull request runs the source-home journey and skips the helper fence
+    # rows, so it keeps the 90 minute cap from before those rows. Push,
+    # schedule and workflow_dispatch run the rows (about 70 minutes on the
+    # Mac measurement) and keep 180 for the journey beside them.
+    timeout-minutes: ${{ (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && 180 || 90 }}
     needs: [installed-app-paths, engine-llama-arm64]
     env:
       CI_APT_PACKAGES: coturn e2fsprogs ffmpeg musl-tools nasm pkg-config
