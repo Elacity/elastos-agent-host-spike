@@ -377,6 +377,10 @@ These limits are part of the property:
   makes existing agent data unopenable on this Home. The row covers an active
   agent and a retired agent.
 - A replaced, rolled-back or deleted agent file is not detected on load yet.
+- An agent-file write raises the sequence by one. The audit hash is that
+  write, with the confirmation mark clear. The same sequence is written
+  again once the row has landed, with the mark set. The sequence does not
+  rise for the second write.
 - The sealed file holds none of the object's content in plaintext. This
   protection makes no claim against a process of the same operating-system
   user outside the agent's sandbox.
@@ -462,9 +466,10 @@ keys.
 Two standing conditions are named here so later work can close them:
 
 - Home's signed history holds start requested and completed, every grant and
-  plan approval and denial, every dispatch outcome (`completed`, `refused`,
-  `unresolved`), and stop requested and stopped. The rows are written by the
-  existing audit writer.
+  plan approval and denial, and stop requested and stopped, when that append
+  lands. A dispatch outcome (`completed`, `refused`, `unresolved`) is the
+  stored plan record. Its signed row is written when the append lands.
+  The rows are written by the existing audit writer.
 - Condition 7 is this section: the interim above, and the confined worker as
   the named next step. A later slice does not owe this statement again.
 

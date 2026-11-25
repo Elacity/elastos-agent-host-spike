@@ -1185,6 +1185,8 @@ include!("support_providers.rs");
 include!("support_runtime.rs");
 
 #[cfg(all(unix, feature = "prototype-agents"))]
+mod agent_host_wait;
+#[cfg(all(unix, feature = "prototype-agents"))]
 mod agent_launch;
 mod agent_plan;
 #[cfg(all(unix, feature = "prototype-agents"))]
@@ -1224,6 +1226,8 @@ mod remote_engine;
 mod remote_model;
 mod room;
 mod s5_fences;
+#[cfg(test)]
+pub(crate) mod seams;
 mod site_publication;
 mod wallet;
 

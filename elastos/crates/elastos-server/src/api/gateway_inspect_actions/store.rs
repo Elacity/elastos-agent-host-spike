@@ -139,9 +139,9 @@ pub(super) fn claim_pending_inspect_action_record(
 
 /// Claims one pending agent plan for its owner under the store lock. The card's
 /// whole binding must equal both the stored and the recomputed one, so a changed
-/// plan becomes stale and claims nothing. On the success path the caller writes
-/// the signed row before the passkey is spent. A failed row leaves the record
-/// pending and the passkey unused. A changed card spends the passkey and stays
+/// plan becomes stale and claims nothing. On the success path the caller spends
+/// the passkey before the signed row. A failed row leaves the record pending
+/// and that passkey spent. A changed card spends the passkey and stays
 /// stale, so that token cannot approve the new bytes.
 pub(super) fn claim_pending_agent_plan_for_owner(
     data_dir: &Path,
@@ -183,8 +183,8 @@ pub(super) fn claim_pending_agent_plan_for_owner(
         write_inspect_action_record_unlocked(data_dir, &record)?;
         anyhow::bail!(message);
     }
-    // The signed row comes first. A failed append leaves the card pending
-    // and does not spend the passkey, so the owner can approve again.
+    // The passkey is spent in `commit` before the approval row. A failed
+    // append leaves the card pending and costs one re-verification.
     let mut approved = record.clone();
     approved.status = "approved".to_string();
     approved.updated_at = updated_at;
@@ -894,8 +894,8 @@ mod tests {
         );
     }
 
-    /// The signed approval is written before the card becomes approved.
-    /// A failed append leaves the card pending and does not spend the passkey.
+    /// The passkey is spent before the approval row. A failed append leaves
+    /// the card pending and that passkey spent.
     #[test]
     fn a_failed_approval_audit_leaves_the_card_pending_and_the_passkey() {
         let dir = tempfile::tempdir().unwrap();
@@ -924,10 +924,10 @@ mod tests {
             &binding,
             2,
             |_, audit_first| {
+                spent = true;
                 if audit_first {
                     anyhow::bail!("injected agent plan approval audit failure");
                 }
-                spent = true;
                 Ok(())
             },
         )
@@ -938,7 +938,7 @@ mod tests {
                 .contains("injected agent plan approval audit failure"),
             "{error}"
         );
-        assert!(!spent, "a failed approval audit spent the passkey");
+        assert!(spent, "a failed approval row still spent the passkey");
         assert_eq!(
             super::read_inspect_action_record(dir.path(), &request_id)
                 .unwrap()
@@ -961,7 +961,7 @@ mod tests {
             },
         )
         .unwrap();
-        assert!(spent, "the passkey is spent only after the audit lands");
+        assert!(spent, "the passkey is spent before the approval row");
         assert_eq!(approved.status, "approved");
         assert_eq!(
             super::read_inspect_action_record(dir.path(), &request_id)

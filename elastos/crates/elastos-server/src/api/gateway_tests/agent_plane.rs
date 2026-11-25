@@ -1605,3 +1605,319 @@ async fn the_owner_answer_is_refused_at_the_inbox_route() {
     assert_eq!(status, 200, "{body}");
     plane.shutdown().await;
 }
+
+async fn http_approve(addr: &str, token: &str, request_id: &str) -> (u16, String) {
+    let response = reqwest::Client::new()
+        .post(format!("http://{addr}/api/apps/inbox/actions"))
+        .header("host", addr)
+        .header("origin", "null")
+        .header("x-elastos-home-token", token)
+        .header("content-type", "application/json")
+        .body(
+            json!({
+                "action_id": format!("capability-approve-request:agent:{request_id}"),
+            })
+            .to_string(),
+        )
+        .send()
+        .await
+        .unwrap();
+    let status = response.status().as_u16();
+    let text = response.text().await.unwrap();
+    (status, text)
+}
+
+fn grant_audit(data: &Path, request_id: &str) -> Vec<(String, String)> {
+    crate::auth::load_auth_state(data)
+        .unwrap()
+        .audit
+        .into_iter()
+        .filter(|event| {
+            event.challenge_id.as_deref() == Some(request_id)
+                && event.event_type.starts_with("agent.grant.")
+        })
+        .map(|event| (event.event_type, event.result))
+        .collect()
+}
+
+async fn usable_grant(data: &Path, request_id: &str) -> bool {
+    let Some(runtime) = crate::api::agent_plane::plane_runtime(data) else {
+        return false;
+    };
+    let Some((store, manager, _)) = runtime.instance_authority_plane() else {
+        return false;
+    };
+    let Some(request) = store.get_request(request_id).await else {
+        return false;
+    };
+    let Some(token) = request.granted_token() else {
+        return false;
+    };
+    request.is_granted() && manager.can_still_validate(token).await
+}
+
+async fn plant_pending(home: &Home, session: &str, agent_id: &str) -> String {
+    let runtime = crate::api::agent_plane::plane_runtime(&home.data).expect("plane");
+    runtime
+        .insert_agent_session_for_test(crate::runtime::AgentSessionRecord {
+            agent_id: agent_id.to_string(),
+            owner: home.owner.clone(),
+            host_cid: REGISTRY_CID.to_string(),
+            launch_id: format!("launch-{session}"),
+            session_id: session.to_string(),
+        })
+        .await;
+    let root = crate::auth::stored_principal_record(&home.data, agent_id)
+        .unwrap()
+        .unwrap()
+        .localhost_root;
+    let (store, _, _) = runtime.instance_authority_plane().unwrap();
+    let request = store
+        .create_request_with_reason(
+            elastos_runtime::session::SessionId::from_string(session),
+            elastos_runtime::capability::ResourceId::new(format!("{root}/.AppData/journal")),
+            elastos_runtime::capability::Action::Write,
+            "write the journal".to_string(),
+        )
+        .await;
+    request.id.to_string()
+}
+
+#[tokio::test]
+async fn an_audit_failure_on_the_inbox_mints_nothing() {
+    let home = Home::open();
+    let agent = home.create_agent("Notes", "bafkreiauditfail");
+    let gateway = Gateway::start(&home.data).await;
+    let request_id = plant_pending(&home, "capsule:audit-fail", &agent).await;
+    let token = inbox_token(&home.data, &home.owner, &home.proof);
+    super::seams::arm_grant_fault(&home.data, false);
+    let (status, body) = http_approve(&gateway.addr, &token, &request_id).await;
+    assert_ne!(status, 200, "{body}");
+    assert!(
+        body.contains("injected agent grant audit failure"),
+        "{body}"
+    );
+    assert!(
+        grant_audit(&home.data, &request_id).is_empty(),
+        "a failed approval row must not exist"
+    );
+    assert!(!usable_grant(&home.data, &request_id).await);
+    let (store, _, _) = crate::api::agent_plane::plane_runtime(&home.data)
+        .unwrap()
+        .instance_authority_plane()
+        .unwrap();
+    assert!(store.get_request(&request_id).await.unwrap().is_pending());
+    gateway.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_crash_between_the_row_and_the_mint_leaves_no_grant() {
+    let home = Home::open();
+    let agent = home.create_agent("Notes", "bafkreicrashmint");
+    let gateway = Gateway::start(&home.data).await;
+    let request_id = plant_pending(&home, "capsule:crash-mint", &agent).await;
+    let token = inbox_token(&home.data, &home.owner, &home.proof);
+    super::seams::arm_grant_fault(&home.data, true);
+    let (status, body) = http_approve(&gateway.addr, &token, &request_id).await;
+    assert_ne!(status, 200, "{body}");
+    assert!(body.contains("crash before the mint"), "{body}");
+    let rows = grant_audit(&home.data, &request_id);
+    assert_eq!(
+        rows,
+        vec![("agent.grant.approved".to_string(), "approved".to_string())],
+        "{rows:?}"
+    );
+    assert!(!usable_grant(&home.data, &request_id).await);
+    super::super::gateway_inbox::settle_unminted_agent_grants(&home.data)
+        .await
+        .unwrap();
+    let rows = grant_audit(&home.data, &request_id);
+    assert!(
+        rows.iter().any(|row| row.0 == "agent.grant.not_granted"),
+        "{rows:?}"
+    );
+    assert!(!usable_grant(&home.data, &request_id).await);
+    super::super::gateway_inbox::settle_unminted_agent_grants(&home.data)
+        .await
+        .unwrap();
+    let again = grant_audit(&home.data, &request_id);
+    assert_eq!(
+        again
+            .iter()
+            .filter(|row| row.0 == "agent.grant.not_granted")
+            .count(),
+        1,
+        "{again:?}"
+    );
+    gateway.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_plane_refusal_signs_that_the_grant_was_not_given() {
+    let home = Home::open();
+    let agent = home.create_agent("Notes", "bafkreirefused");
+    let gateway = Gateway::start(&home.data).await;
+    let request_id = plant_pending(&home, "capsule:not-live-inbox", &agent).await;
+    let token = inbox_token(&home.data, &home.owner, &home.proof);
+    let (status, body) = http_approve(&gateway.addr, &token, &request_id).await;
+    assert_eq!(status, 409, "{body}");
+    let rows = grant_audit(&home.data, &request_id);
+    assert!(rows.iter().any(|row| row.1 == "approved"), "{rows:?}");
+    assert!(rows.iter().any(|row| row.1 == "not_granted"), "{rows:?}");
+    assert!(!usable_grant(&home.data, &request_id).await);
+    gateway.shutdown().await;
+}
+
+#[tokio::test]
+async fn two_inbox_approvals_mint_one_grant() {
+    let home = Home::open();
+    let dir = home._temp.path().join("probe");
+    let cid = sign_probe(&dir);
+    let agent = home.create_agent("Notes", &cid);
+    let gateway = Gateway::start(&home.data).await;
+    let session = home.launch(&agent, &dir).await;
+    let request_id = plant_pending(&home, &session, &agent).await;
+    let token = inbox_token(&home.data, &home.owner, &home.proof);
+    let first = http_approve(&gateway.addr, &token, &request_id);
+    let second = http_approve(&gateway.addr, &token, &request_id);
+    let (left, right) = tokio::join!(first, second);
+    let statuses = [left.0, right.0];
+    assert!(
+        statuses.contains(&200),
+        "neither approval minted: {left:?} {right:?}"
+    );
+    assert!(
+        statuses.iter().any(|status| *status != 200),
+        "both approvals minted: {left:?} {right:?}"
+    );
+    let rows = grant_audit(&home.data, &request_id);
+    assert_eq!(
+        rows.iter().filter(|row| row.1 == "approved").count(),
+        1,
+        "{rows:?}"
+    );
+    assert!(
+        !rows.iter().any(|row| row.1 == "not_granted"),
+        "the live grant was marked not granted: {rows:?}"
+    );
+    assert!(
+        usable_grant(&home.data, &request_id).await,
+        "the one grant is not usable"
+    );
+    assert_eq!(
+        rows.iter().filter(|row| row.1 == "minted").count(),
+        1,
+        "{rows:?}"
+    );
+    gateway.shutdown().await;
+    let restarted = Gateway::start(&home.data).await;
+    let kept = grant_audit(&home.data, &request_id);
+    assert_eq!(
+        kept.iter().filter(|row| row.1 == "minted").count(),
+        1,
+        "{kept:?}"
+    );
+    assert!(
+        !kept.iter().any(|row| row.1 == "not_granted"),
+        "a minted grant was settled as not granted: {kept:?}"
+    );
+    restarted.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_restart_settles_an_approved_grant_that_was_never_minted() {
+    let home = Home::open();
+    crate::auth::append_audit_event(
+        &home.data,
+        elastos_runtime::auth::RuntimeAuditEventV1 {
+            schema: elastos_runtime::auth::RuntimeAuditEventV1::SCHEMA.to_string(),
+            event_id: "audit:plant-unminted".to_string(),
+            event_type: "agent.grant.approved".to_string(),
+            principal_id: Some(home.owner.clone()),
+            proof_binding_id: None,
+            session_id: Some("agent-plant".to_string()),
+            challenge_id: Some("req-unminted".to_string()),
+            capsule_id: Some("agent-plant".to_string()),
+            result: "approved".to_string(),
+            reason: "approved before the mint".to_string(),
+            occurred_at: 1,
+            signer_did: None,
+            signature: None,
+        },
+    )
+    .unwrap();
+    let gateway = Gateway::start(&home.data).await;
+    let rows = grant_audit(&home.data, "req-unminted");
+    assert_eq!(
+        rows.iter().filter(|row| row.1 == "not_granted").count(),
+        1,
+        "{rows:?}"
+    );
+    gateway.shutdown().await;
+}
+
+#[tokio::test]
+async fn an_effect_held_across_turn_off_is_not_signed_ok() {
+    let home = Home::open();
+    let plane = home.plane().await;
+    let runtime = plane.runtime();
+    runtime.bind_plan_instance("session-held", "agent-held");
+    let guard = crate::runtime::Runtime::try_enter_plan_effect(
+        &runtime.plan_book(),
+        "session-held",
+        "agent-held",
+        "step-held",
+    )
+    .expect("the effect hold");
+    crate::auth::append_audit_event(
+        &home.data,
+        elastos_runtime::auth::RuntimeAuditEventV1 {
+            schema: elastos_runtime::auth::RuntimeAuditEventV1::SCHEMA.to_string(),
+            event_id: "audit:stopping-held".to_string(),
+            event_type: "agent.stopped".to_string(),
+            principal_id: Some(home.owner.clone()),
+            proof_binding_id: None,
+            session_id: Some("session-held".to_string()),
+            challenge_id: None,
+            capsule_id: None,
+            result: "stopping".to_string(),
+            reason: "effect held".to_string(),
+            occurred_at: 1,
+            signer_did: None,
+            signature: None,
+        },
+    )
+    .unwrap();
+    crate::api::agent_plane::stop_running(&home.data).await;
+    assert!(
+        crate::api::agent_plane::plane_runtime(&home.data).is_some(),
+        "the plane left while the effect was in flight"
+    );
+    super::super::gateway_agents::confirm_stopping_rows(&home.data)
+        .await
+        .unwrap();
+    let oks = |data: &Path| {
+        crate::auth::load_auth_state(data)
+            .unwrap()
+            .audit
+            .into_iter()
+            .filter(|event| {
+                event.event_type == "agent.stopped"
+                    && event.result == "ok"
+                    && event.session_id.as_deref() == Some("session-held")
+            })
+            .count()
+    };
+    assert_eq!(
+        oks(&home.data),
+        0,
+        "ok was signed while the effect was held"
+    );
+    assert!(runtime.plan_effect_inflight("session-held"));
+    guard.release();
+    super::super::gateway_agents::confirm_stopping_rows(&home.data)
+        .await
+        .unwrap();
+    assert_eq!(oks(&home.data), 1);
+    assert!(crate::api::agent_plane::plane_runtime(&home.data).is_none());
+}

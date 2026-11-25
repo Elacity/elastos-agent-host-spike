@@ -63,9 +63,9 @@ const names = [
   "step_up_approve", "one_authorised_write", "owner_document_unchanged",
   "one_result_and_receipt", "signed_start_audit", "signed_completion_audit",
   "card_removed", "replay_zero", "restart_zero",
-  "install_with_hashes_key_deleted", "u4_unknown_agent_refused", "u4_two_agents_one_host",
+  "install_with_hashes_key_deleted", "u4_unknown_agent_refused", "u4_second_start_refused",
   "card_step_up_approve_one_write_one_receipt", "owner_denial_signed_row",
-  "stop_during_step", "agents_off_during_run",
+  "stop_after_the_note_lands", "agents_off_during_run",
   "home_restart_history",
 ];
 
@@ -1287,9 +1287,10 @@ function gitFields() {
 
 function coveredByUnitRow() {
   const row = "a_panicking_host_call_leaves_the_session_and_home_up";
+  const mid = "a_stop_while_the_effect_is_held";
   const args = [
     "test", "-p", "elastos-server", "--lib", "--features", "prototype-agents",
-    "--offline", "--locked", "--", row,
+    "--offline", "--locked", "--", row, mid,
   ];
   const cwd = path.join(root || path.resolve(path.dirname(fileURLToPath(import.meta.url)), ".."), "elastos");
   const result = spawnSync("cargo", args, {
@@ -1303,13 +1304,14 @@ function coveredByUnitRow() {
     timeout: 600000,
   });
   const output = `${result.stdout || ""}\n${result.stderr || ""}`.slice(-6000);
-  const passed = result.status === 0 && output.includes("test result: ok");
+  const passed = result.status === 0 && output.includes(`test ${row} ... ok`) && output.includes(`test ${mid} ... ok`);
   return {
     row,
     command: `cargo ${args.join(" ")}`,
     source_commit: process.env.A15R_SOURCE_COMMIT || "",
     result: passed ? "pass" : "fail",
     output,
+    "mid-step stop covered by a unit row, not installed": mid,
   };
 }
 
@@ -1348,7 +1350,7 @@ function writeReceipt() {
   const body = redactDidAndAddress(JSON.stringify(receipt, null, 2) + "\n");
   fs.writeFileSync(path.join(out, "receipt.json"), body);
   const gitDirty = !gitAfter.ok || String(process.env.A15R_GIT_BEFORE || "").length > 0;
-  return gitDirty || assertions.some((item) => item.status !== "pass") ? 1 : 0;
+  return gitDirty || assertions.some((item) => item.status !== "pass") || unitRow.result !== "pass" ? 1 : 0;
 }
 
 async function main() {
@@ -1601,13 +1603,13 @@ async function main() {
   })();
   const already = secondStart.status === 409 && String(secondStart.text).includes("already running");
   if (!already || state.rootA === state.rootB) {
-    halt("u4_two_agents_one_host", {
+    halt("u4_second_start_refused", {
       status: secondStart.status,
       body: String(secondStart.text).slice(0, 240),
       roots: [state.rootA, state.rootB],
     });
   }
-  pass("u4_two_agents_one_host", {
+  pass("u4_second_start_refused", {
     source_commit: process.env.A15R_SOURCE_COMMIT || "",
     host: "signed package",
     a: state.agentA,
@@ -1717,6 +1719,7 @@ async function main() {
     halt("one_pending_record", pending.map((record) => ({ id: record.request_id, status: record.status })));
   }
   pass("one_pending_record", state.requestId);
+  const cardAt = Date.now();
 
   const refused = await call("POST", "/api/apps/inbox/actions", state.inboxToken, {
     action_id: state.card.action_id,
@@ -1728,6 +1731,13 @@ async function main() {
   pass("approve_without_step_up_refused", refused.text.slice(0, 180));
   const stillPending = inspectRecords().filter((record) => record.status === "pending");
   if (stillPending.length !== 1) halt("approve_without_step_up_refused", "pending count changed");
+  const waitMs = 31000 - (Date.now() - cardAt);
+  if (waitMs > 0) await sleep(waitMs);
+  timings.approval_after_card_ms = Date.now() - cardAt;
+  const stillDeciding = liveSessions(await capsules(), [state.launchA]);
+  if (stillDeciding.length !== 1) {
+    halt("step_up_approve", "the guest ended before the owner used the approval time");
+  }
 
   const keep = (name, ok, detail) => {
     mark(name, ok ? "pass" : "fail", detail);
@@ -1745,11 +1755,9 @@ async function main() {
   }
   let stopDuringStep = null;
   if (state.approveBody) {
-    // The note write and the guest's exit are one short step. A Stop sent
-    // with the approve refuses that write. A Stop sent after the approve
-    // response finds the session already gone. This Stop goes out in the
-    // same moment the note file lands, while that agent's step is the one
-    // that just ran.
+    // The installed Stop is sent once the note file is on disk. Holding the
+    // write open needs a pause the release does not have. Mid-step stop is
+    // the unit row, not this installed row.
     const approvedPromise = call("POST", "/api/apps/inbox/actions", state.inboxToken, state.approveBody);
     const stopDeadline = Date.now() + 20000;
     while (Date.now() < stopDeadline) {
@@ -1790,14 +1798,14 @@ async function main() {
     event.result === "ok" || event.result === "failed" || event.result === "stopping"
   ));
   if ((stopDuringStep?.status === 200 || stopDuringStep?.status === 202) && namedStop && stepOutcome) {
-    pass("stop_during_step", {
+    pass("stop_after_the_note_lands", {
       http: stopDuringStep.status,
       session_id: namedStop.session_id,
       stop_result: namedStop.result,
       step_outcome: stepOutcome,
     });
   } else {
-    mark("stop_during_step", "fail", {
+    mark("stop_after_the_note_lands", "fail", {
       http: stopDuringStep?.status || 0,
       body: String(stopDuringStep?.text || "").slice(0, 240),
       step_outcome: stepOutcome,
@@ -2964,6 +2972,7 @@ function readAgentsInGateway() {
   return agentsInGatewayChange(
     fs.readFileSync(path.join(repo, "elastos/crates/elastos-server/src/api/gateway.rs"), "utf8"),
     fs.readFileSync(path.join(repo, "elastos/crates/elastos-server/src/api/gateway_agents.rs"), "utf8"),
+    fs.readFileSync(path.join(repo, "elastos/crates/elastos-server/src/api/gateway_home_runtime.rs"), "utf8"),
   );
 }
 

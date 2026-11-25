@@ -2392,6 +2392,10 @@ impl Runtime {
             .any(|flight| flight.session_id == session_id)
     }
 
+    pub(crate) fn any_plan_effect_inflight(&self) -> bool {
+        !plan_book(&self.plan_book).inflight.is_empty()
+    }
+
     pub(crate) fn inflight_plan_sessions(&self, agent_id: &str) -> Vec<String> {
         let mut sessions: Vec<String> = plan_book(&self.plan_book)
             .inflight

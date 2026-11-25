@@ -104,6 +104,7 @@ fn append_agent_lifecycle_audit(
 pub(in crate::api) async fn confirm_stopping_rows(
     data_dir: &std::path::Path,
 ) -> anyhow::Result<()> {
+    crate::api::agent_plane::release_idle_retiring(data_dir).await;
     let open = crate::agent_record_audit::open_stopping_sessions(data_dir)?;
     let mut ended = std::collections::HashSet::new();
     for session in open {

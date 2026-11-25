@@ -21,9 +21,10 @@
 //!   A file that fails any rule makes agents unavailable, with a named
 //!   reason; it is never rewritten or deleted, and the owner's own sign-in
 //!   file is read exactly as before.
-//! - A write holds the agent lock, raises `sequence` by exactly one, replaces
-//!   the file in one step at mode 0600, and then appends one audit event to
-//!   the owner's audit chain.
+//! - A write holds the agent lock and raises `sequence` by exactly one. It
+//!   stores the file at mode 0600 with the confirmation clear, appends one
+//!   audit event of that write, then stores the same sequence again with the
+//!   confirmation set. The second store does not raise the sequence.
 //! - Every write is one of a closed list of operations, and each operation
 //!   may change only what `permits` lists for it.
 //! - This module never holds the owner's data key. It asks `auth` for a key
@@ -553,12 +554,8 @@ struct Opened {
 
 /// Loads both files, under the agent lock when the operation will write.
 /// Refuses when the agent file fails a rule.
-/// Test seam: the next agent-file write stores the bytes and returns before
+/// Test seam: the next write of this Home stores the bytes and returns before
 /// the audit row. The following open under the agent lock appends that row.
-#[cfg(test)]
-pub(crate) static FAIL_RECORD_AUDIT: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
-
 fn open(data_dir: &Path, for_write: bool) -> anyhow::Result<Opened> {
     let lock = match for_write {
         true => Some(lock_for_write(data_dir)?),
@@ -640,7 +637,7 @@ fn write(
     let bytes = serde_json::to_vec_pretty(&recorded)?;
     crate::auth::atomic_write(&agent_file_path(data_dir)?, &bytes)?;
     #[cfg(test)]
-    if FAIL_RECORD_AUDIT.swap(false, std::sync::atomic::Ordering::SeqCst) {
+    if crate::api::gateway::seams::take_record_audit(data_dir) {
         anyhow::bail!("injected agent record audit failure");
     }
     let digest = hex::encode(Sha256::digest(&bytes));
@@ -665,6 +662,7 @@ fn write(
     if let Some(audit) = recorded.last_audit.as_mut() {
         audit.confirmed = true;
     }
+    // Same sequence as the audited write. The hash in the row is the first file.
     let confirmed = serde_json::to_vec_pretty(&recorded)?;
     crate::auth::atomic_write(&agent_file_path(data_dir)?, &confirmed)?;
     Ok(())
@@ -676,7 +674,10 @@ fn write(
 /// file is that case: opening it would refuse the ask when the Home's sign-in
 /// file is absent, and a person's capsule would change.
 pub(crate) fn refuse_inactive_agent(data_dir: &Path, principal_id: &str) -> anyhow::Result<()> {
-    if principal_id.is_empty() || !build_allows_for_home(data_dir) {
+    if principal_id.is_empty()
+        || !build_allows_for_home(data_dir)
+        || crate::auth::validate_agent_id(principal_id).is_err()
+    {
         return Ok(());
     }
     let path = match agent_file_path(data_dir) {

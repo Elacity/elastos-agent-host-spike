@@ -518,19 +518,28 @@ test("full mode notice names the missing agents-in-gateway route", () => {
   assert.match(FULL_MODE_NOTICE, /not proof of anything until/);
   const gateway = fs.readFileSync(new URL("../elastos/crates/elastos-server/src/api/gateway.rs", import.meta.url), "utf8");
   const launch = fs.readFileSync(new URL("../elastos/crates/elastos-server/src/api/gateway_agents.rs", import.meta.url), "utf8");
-  const detected = agentsInGatewayChange(gateway, launch);
+  const homeRuntime = fs.readFileSync(new URL("../elastos/crates/elastos-server/src/api/gateway_home_runtime.rs", import.meta.url), "utf8");
+  const detected = agentsInGatewayChange(gateway, launch, homeRuntime);
   assert.equal(detected.ok, true, detected.reason);
   assert.equal(detected.route, "/api/apps/system/agents/launch");
   const child = agentsInGatewayChange(
     'route("/api/apps/system/agents/launch", post(agents_launch))',
     "launch_runtime_agent();",
+    "async fn launch_runtime_agent",
   );
   assert.equal(child.ok, false);
   const ready = agentsInGatewayChange(
     'route("/api/apps/system/agents/launch", post(agents_launch))',
     "agent_plane::ensure_running(); launch_runtime_agent();",
+    "async fn launch_runtime_agent() {}",
   );
   assert.equal(ready.ok, true);
+  const noHop = agentsInGatewayChange(
+    'route("/api/apps/system/agents/launch", post(agents_launch))',
+    "agent_plane::ensure_running(); launch_runtime_agent();",
+    "fn something_else() {}",
+  );
+  assert.equal(noHop.ok, false);
 });
 
 test("playwright pin is the version in test-behaviour.sh", () => {

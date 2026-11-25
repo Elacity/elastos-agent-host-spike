@@ -8,9 +8,10 @@ use std::path::Path;
 use elastos_runtime::auth::RuntimeAuditEventV1;
 use sha2::{Digest, Sha256};
 
-/// The file write stores the operation and then appends its audit row. If
-/// that append fails, the next open under the agent lock appends the row for
-/// this sequence's operation and subject once. A later open that already
+/// The file write stores the operation with the confirmation clear, then
+/// appends the audit row of those bytes. A second write of the same sequence
+/// sets the confirmation. If the append fails, the next open under the agent
+/// lock appends the row for this sequence once. A later open that already
 /// finds the row only marks the file confirmed.
 pub(crate) fn repair_recorded_audit(
     data_dir: &Path,

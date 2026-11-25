@@ -364,7 +364,6 @@ mod tests {
                 Box::new(ShellPassthroughVerifier),
                 audit,
             )),
-            agent_home: None,
         }
     }
 

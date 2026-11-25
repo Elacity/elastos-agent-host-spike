@@ -289,10 +289,49 @@ pub(crate) async fn revoke_agent_grants(data_dir: &Path, agent_id: &str) {
     }
 }
 
+static RETIRING: OnceLock<Mutex<HashMap<PathBuf, Arc<crate::runtime::Runtime>>>> = OnceLock::new();
+
+fn retiring() -> &'static Mutex<HashMap<PathBuf, Arc<crate::runtime::Runtime>>> {
+    RETIRING.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn retiring_runtime(data_dir: &Path) -> Option<Arc<crate::runtime::Runtime>> {
+    retiring()
+        .lock()
+        .ok()
+        .and_then(|held| held.get(data_dir).map(Arc::clone))
+}
+
+async fn runtime_busy(runtime: &crate::runtime::Runtime) -> bool {
+    if runtime.any_plan_effect_inflight() {
+        return true;
+    }
+    runtime
+        .list_capsules()
+        .await
+        .iter()
+        .any(|info| info.ended_at.is_none())
+}
+
+pub(crate) async fn release_idle_retiring(data_dir: &Path) {
+    let Some(runtime) = retiring_runtime(data_dir) else {
+        return;
+    };
+    if runtime_busy(&runtime).await {
+        return;
+    }
+    if let Ok(mut held) = retiring().lock() {
+        held.remove(data_dir);
+    }
+}
+
 /// The agent Runtime this process is running for `data_dir`, when it has one.
 pub(crate) fn plane_runtime(data_dir: &Path) -> Option<Arc<crate::runtime::Runtime>> {
-    let held = planes().lock().ok()?;
-    held.get(data_dir).map(|plane| Arc::clone(&plane.runtime))
+    planes()
+        .lock()
+        .ok()
+        .and_then(|held| held.get(data_dir).map(|plane| Arc::clone(&plane.runtime)))
+        .or_else(|| retiring_runtime(data_dir))
 }
 
 /// Whether a `stopping` row may be closed. No plane in this process means the
@@ -318,8 +357,17 @@ pub(crate) async fn stop_running(data_dir: &Path) -> Vec<EndedGuest> {
         .ok()
         .and_then(|mut held| held.remove(data_dir));
     if let Some(plane) = plane {
+        let runtime = Arc::clone(&plane.runtime);
+        if let Ok(mut held) = retiring().lock() {
+            held.insert(data_dir.to_path_buf(), Arc::clone(&runtime));
+        }
         let dir = plane.data_dir.clone();
         let ended = plane.shutdown().await;
+        if !runtime_busy(&runtime).await {
+            if let Ok(mut held) = retiring().lock() {
+                held.remove(data_dir);
+            }
+        }
         let _ = crate::api::gateway::close_home_plans(&dir, "agents off");
         crate::resource_bridge::notify_plan_waiters();
         return ended;
@@ -359,6 +407,11 @@ async fn grant_if_asker_is_live(
 }
 
 /// The routes a stored agent uses. A guest, app, or native start is not mounted.
+/// A POST to the revoke path is not a route. Delete is the revoke.
+async fn capability_post_is_absent() -> StatusCode {
+    StatusCode::NOT_FOUND
+}
+
 pub(crate) fn router(config: ServerConfig) -> anyhow::Result<Router> {
     let runtime = config.runtime.clone();
     let session_registry = config.session_registry.clone();
@@ -380,7 +433,6 @@ pub(crate) fn router(config: ServerConfig) -> anyhow::Result<Router> {
             Box::new(elastos_runtime::capability::evaluator::ShellPassthroughVerifier),
             config.capability_manager.audit_log().clone(),
         )),
-        agent_home: data_dir.clone(),
     };
     let mut capsules = Router::new()
         .route("/api/capsules", get(crate::api::routes::list_capsules))
@@ -398,6 +450,11 @@ pub(crate) fn router(config: ServerConfig) -> anyhow::Result<Router> {
     let asks = Router::new()
         .route("/api/capability/pending", get(list_owner_pending))
         .route("/api/capability/grant", post(grant_if_asker_is_live))
+        .route(
+            "/api/capability/:id",
+            axum::routing::delete(crate::api::handlers::revoke_capability)
+                .post(capability_post_is_absent),
+        )
         .route(
             "/api/capability/deny",
             post(crate::api::handlers::deny_request),

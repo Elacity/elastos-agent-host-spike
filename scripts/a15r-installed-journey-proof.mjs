@@ -269,15 +269,18 @@ export function judgeCreatingOwner(input) {
 
 // The launch route is the agents-in-gateway change when the gateway starts
 // the guest through the in-process agent plane.
-export function agentsInGatewayChange(gatewaySource, launchSource) {
+export function agentsInGatewayChange(gatewaySource, launchSource, homeRuntimeSource) {
   const route = "/api/apps/system/agents/launch";
   const registered = String(gatewaySource || "").includes(`"${route}"`);
   const text = String(launchSource || "");
   const asksPlane = text.includes("launch_runtime_agent") && text.includes("agent_plane::");
-  const ok = registered && asksPlane;
+  const home = String(homeRuntimeSource || "");
+  const hop = home.includes("async fn launch_runtime_agent");
+  const ok = registered && asksPlane && hop;
   let reason = "";
   if (!registered) reason = "the launch route is not registered";
   else if (!asksPlane) reason = "the launch route does not start the agent on the in-process plane";
+  else if (!hop) reason = "gateway_home_runtime.rs does not define launch_runtime_agent";
   return { ok, route, reason };
 }
 

@@ -30,10 +30,6 @@ pub struct CapabilityState {
     /// The same store `capability_manager` holds: revocations, use counts, epoch.
     pub capability_store: Arc<CapabilityStore>,
     pub policy_evaluator: Arc<PolicyEvaluator>,
-    /// The agent plane sets this to the Home folder. An inactive agent is
-    /// refused before a pending request is created. Other callers leave it
-    /// unset, and a person is never an agent principal.
-    pub agent_home: Option<std::path::PathBuf>,
 }
 
 // === Request Capability ===
@@ -145,18 +141,6 @@ pub async fn request_capability(
             token: None,
             reason: Some(reason),
         }));
-    }
-
-    if let Some(dir) = state.agent_home.as_deref() {
-        let principal = session.vm_id.as_deref().unwrap_or("");
-        if let Err(error) = crate::agents::refuse_inactive_agent(dir, principal) {
-            return Ok(Json(RequestCapabilityOutput {
-                status: "denied".to_string(),
-                request_id: None,
-                token: None,
-                reason: Some(error.to_string()),
-            }));
-        }
     }
 
     let resource = ResourceId::new(&input.resource);
@@ -396,11 +380,17 @@ pub async fn grant_request(
     );
 
     // Mark request as granted
-    state
+    if let Err(error) = state
         .pending_store
         .grant_request(&input.request_id, token.clone(), duration)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    {
+        let _ = state
+            .capability_manager
+            .revoke(*token.id(), "the grant was not stored")
+            .await;
+        return Err((StatusCode::INTERNAL_SERVER_ERROR, error));
+    }
 
     Ok(Json(GrantRequestOutput {
         success: true,
@@ -1181,7 +1171,6 @@ mod tests {
                 Box::new(elastos_runtime::capability::evaluator::ShellPassthroughVerifier),
                 audit_log,
             )),
-            agent_home: None,
         }
     }
 
@@ -1784,7 +1773,6 @@ mod tests {
                 Box::new(elastos_runtime::capability::evaluator::ShellPassthroughVerifier),
                 audit_log,
             )),
-            agent_home: None,
         };
         (state, key)
     }

@@ -421,14 +421,6 @@ pub(super) fn approve_agent_plan_request(
         card_binding,
         now_ts(),
         |record, audit_first| {
-            if audit_first {
-                append_agent_plan_decision_audit(
-                    &state.data_dir,
-                    record,
-                    "agent.plan.approved",
-                    "approved",
-                )?;
-            }
             let token = step_up_token.ok_or_else(|| {
                 anyhow::anyhow!("fresh passkey is required to approve an agent plan")
             })?;
@@ -439,7 +431,16 @@ pub(super) fn approve_agent_plan_request(
                 180,
                 "agent_plan.approve",
                 &serde_json::json!({ "request_id": record.request_id }),
-            )
+            )?;
+            if audit_first {
+                append_agent_plan_decision_audit(
+                    &state.data_dir,
+                    record,
+                    "agent.plan.approved",
+                    "approved",
+                )?;
+            }
+            Ok(())
         },
     )?;
     crate::resource_bridge::notify_plan_waiters();

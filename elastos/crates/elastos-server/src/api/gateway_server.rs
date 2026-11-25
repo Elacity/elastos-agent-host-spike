@@ -147,6 +147,7 @@ pub(super) async fn start_gateway_server_with_shutdown(
         );
     } else if let Err(error) = async {
         super::gateway_inspect_actions::settle_agent_plans_lost_before_start(&data_dir)?;
+        super::gateway_inbox::settle_unminted_agent_grants(&data_dir).await?;
         super::gateway_agents::confirm_stopping_rows(&data_dir).await
     }
     .await

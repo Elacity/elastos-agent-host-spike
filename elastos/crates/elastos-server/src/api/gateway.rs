@@ -112,6 +112,8 @@ pub(crate) use gateway_inspect_actions::submit_pending_agent_plan;
 pub(in crate::api) use gateway_inspect_actions::{
     clear_plan_dispatch_wait_for_test, set_plan_dispatch_wait_for_test,
 };
+#[cfg(test)]
+pub(crate) use gateway_tests::seams;
 #[path = "gateway_model_remote.rs"]
 mod gateway_model_remote;
 #[path = "gateway_model_service.rs"]

@@ -8442,7 +8442,13 @@ impl exports::elastos::bus::lifecycle::Guest for AgentHost {
             // stored and read back. It stays up and reads the owner's decision
             // through the same grant. The host parks that read. A refused
             // submit ask leaves it running.
-            let _ = submit_document_plan_and_wait(&mut WasmBus, &plan);
+            if let Err(error) = submit_document_plan_and_wait(&mut WasmBus, &plan) {
+                // A refused submit ask is not a failed run. Every other end,
+                // including the plan's own limit, is named.
+                if error != "submit grant refused" && error != "submit grant invalid" {
+                    return Err(elastos::bus::types::BusError::Invalid(error.to_string()));
+                }
+            }
         }
         Ok(())
     }

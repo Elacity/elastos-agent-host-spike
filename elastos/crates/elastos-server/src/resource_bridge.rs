@@ -602,7 +602,13 @@ pub(crate) fn hold_plan_wait_for_test(home: &Path) -> Option<PlanWaitHold> {
     try_acquire_plan_wait(home).map(|permit| PlanWaitHold { _permit: permit })
 }
 
-fn plan_park_limit() -> Duration {
+fn plan_park_limit(data_dir: &Path) -> Duration {
+    #[cfg(not(test))]
+    let _ = data_dir;
+    #[cfg(test)]
+    if let Some(ms) = crate::api::gateway::seams::plan_park_ms(data_dir) {
+        return Duration::from_millis(ms);
+    }
     Duration::from_secs(PLAN_PARK_SECS)
 }
 
@@ -726,12 +732,17 @@ fn plan_result_value(
             "type": "resource_result",
             "result": {"status": "ok", "data": receipt},
         }),
+        Err(err) if err.to_string() == "agent plan has no settled result" => serde_json::json!({
+            "type": "resource_result",
+            "result": {"status": "pending", "message": "agent plan has no settled result"},
+        }),
         Err(err) => resource_error_response("agent_plan_result_refused", &err.to_string()),
     }
 }
 
 fn plan_result_is_unsettled(value: &serde_json::Value) -> bool {
-    value["message"].as_str() == Some("agent plan has no settled result")
+    value["result"]["status"] == "pending"
+        && value["result"]["message"] == "agent plan has no settled result"
 }
 
 /// Park the status read until the row changes, the guest is stopped, or the
@@ -770,7 +781,7 @@ fn park_for_agent_plan_result(
     let Some(_permit) = try_acquire_plan_wait(data_dir) else {
         return resource_error_response("plan_wait_full", PLAN_WAIT_FULL);
     };
-    let deadline = Instant::now() + plan_park_limit();
+    let deadline = Instant::now() + plan_park_limit(data_dir);
     loop {
         let generation = plan_waits().generation.get(data_dir).copied().unwrap_or(0);
         let current = read();
@@ -9498,8 +9509,18 @@ pub(crate) mod tests {
             "a submission asks for no grant"
         );
         let query = serde_json::json!({"request_id": request_id});
+        let park_home = ctx
+            .data_dir
+            .clone()
+            .unwrap_or_else(|| home.path().to_path_buf());
+        crate::api::gateway::seams::set_plan_park_ms(&park_home, 5);
         let pending = submit_with_write(&ctx, 78, &query).await;
-        assert_eq!(pending["response"]["code"], "agent_plan_result_refused");
+        crate::api::gateway::seams::set_plan_park_ms(&park_home, 0);
+        assert_eq!(pending["response"]["result"]["status"], "pending");
+        assert_eq!(
+            pending["response"]["result"]["message"],
+            "agent plan has no settled result"
+        );
         let mut settled = stored.clone();
         settled["status"] = serde_json::json!("completed");
         settled["result"] = serde_json::json!({"status": "ok", "data": {"done": true}});

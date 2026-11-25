@@ -329,6 +329,35 @@ fn a_missing_file_means_no_agents() {
     assert!(!home.agent_file().exists(), "a load creates nothing");
 }
 
+/// The audit hash is the first write of this sequence, confirmation clear.
+/// The file on disk is the second write: the same sequence, mark set.
+fn promised_audit_reason(home: &Home, sequence: u64) -> String {
+    let mut file = loaded(home);
+    assert_eq!(
+        file.sequence, sequence,
+        "the confirmation does not raise the sequence"
+    );
+    let audit = file
+        .last_audit
+        .as_ref()
+        .expect("the sequence records its audit");
+    assert!(audit.confirmed);
+    assert_eq!(audit.sequence, sequence);
+    let stored = home.agent_bytes();
+    if let Some(audit) = file.last_audit.as_mut() {
+        audit.confirmed = false;
+    }
+    let promised = serde_json::to_vec_pretty(&file).unwrap();
+    assert_ne!(
+        promised, stored,
+        "the confirmation is a second write of the same sequence"
+    );
+    format!(
+        "seq={sequence} sha256={}",
+        hex::encode(Sha256::digest(&promised))
+    )
+}
+
 #[test]
 fn a_write_appends_one_audit_event_and_leaves_the_owner_file_otherwise_unchanged() {
     let home = Home::new();
@@ -337,7 +366,6 @@ fn a_write_appends_one_audit_event_and_leaves_the_owner_file_otherwise_unchanged
 
     enable(&home);
 
-    let bytes = home.agent_bytes();
     assert!(matches!(home.load(), AgentFile::Loaded(file) if file.sequence == 1));
     use std::os::unix::fs::PermissionsExt;
     let mode = std::fs::metadata(home.agent_file())
@@ -352,10 +380,7 @@ fn a_write_appends_one_audit_event_and_leaves_the_owner_file_otherwise_unchanged
     assert_eq!(event.event_type, "agent.records.enable");
     assert_eq!(event.principal_id.as_deref(), Some(OWNER_ID));
     assert_eq!(event.session_id.as_deref(), Some(SESSION_ID));
-    assert_eq!(
-        event.reason,
-        format!("seq=1 sha256={}", hex::encode(Sha256::digest(&bytes)))
-    );
+    assert_eq!(event.reason, promised_audit_reason(&home, 1));
     assert_eq!(
         home.owner_json_without_audit(),
         owner_before,
@@ -1303,8 +1328,7 @@ fn a_create_leaves_one_record_and_one_protection_in_the_agent_file_only() {
         Some(home.owner.proof_binding_id.as_str())
     );
     assert_eq!(event.session_id.as_deref(), Some(SESSION_ID));
-    let digest = hex::encode(Sha256::digest(home.agent_bytes()));
-    assert_eq!(event.reason, format!("seq=2 sha256={digest}"));
+    assert_eq!(event.reason, promised_audit_reason(&home, 2));
     assert_eq!(events.len(), 2, "one event for enable and one for create");
 }
 
@@ -1632,7 +1656,7 @@ fn a_lost_retire_row_is_appended_once_on_the_next_open() {
     let home = Home::new();
     turn_on(&home);
     let agent = create_one(&home, "request-lost-retire");
-    crate::agents::FAIL_RECORD_AUDIT.store(true, std::sync::atomic::Ordering::SeqCst);
+    crate::api::gateway::seams::arm_record_audit(home.path());
     let failed = retire_in_any_build(home.path(), &home.caller(), &agent.agent_id, 11);
     assert!(failed.is_err(), "the injected append failure must surface");
     assert!(
@@ -1675,7 +1699,7 @@ fn a_lost_retire_repairs_the_agent_that_lost_its_row() {
                 && event.principal_id.as_deref() == Some(first.agent_id.as_str())
         })
         .count();
-    crate::agents::FAIL_RECORD_AUDIT.store(true, std::sync::atomic::Ordering::SeqCst);
+    crate::api::gateway::seams::arm_record_audit(home.path());
     let failed = retire_in_any_build(home.path(), &home.caller(), &second.agent_id, 12);
     assert!(failed.is_err(), "the injected append failure must surface");
     let again = retire_in_any_build(home.path(), &home.caller(), &second.agent_id, 13);

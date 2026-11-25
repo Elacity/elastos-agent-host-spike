@@ -2090,7 +2090,6 @@ pub(crate) mod tests {
                     Box::new(ShellPassthroughVerifier),
                     self.audit_log.clone(),
                 )),
-                agent_home: None,
             }
         }
 

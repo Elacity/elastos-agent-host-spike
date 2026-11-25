@@ -1967,6 +1967,19 @@ async fn an_approved_step_does_not_write_after_the_instance_ends() {
     }
 }
 
+/// Stop while the write is held. The record is `dispatching`, the effect is
+/// in flight, and the step's bytes are not in the file yet.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_stop_while_the_effect_is_held() {
+    plan_inflight_row(
+        crate::resource_bridge::PlanDispatchPoint::InEffect,
+        PlanRowEnd::Stop,
+        4242,
+    )
+    .await;
+}
+
 async fn plan_inflight_row(
     point: crate::resource_bridge::PlanDispatchPoint,
     end: PlanRowEnd,
@@ -2119,6 +2132,12 @@ async fn plan_inflight_row(
             plan_bytes(dir.path(), &agent, &root, &target),
             b"before",
             "{point:?} {end:?} wrote before Stop answered"
+        );
+        let held = read_record(dir.path(), &id);
+        assert_eq!(held["status"], "dispatching", "{held}");
+        assert!(
+            runtime.plan_effect_inflight(&session),
+            "Stop answered after the effect had left"
         );
     } else {
         match end {

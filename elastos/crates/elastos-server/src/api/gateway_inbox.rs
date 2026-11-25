@@ -1015,6 +1015,7 @@ struct PlaneStatus {
 
 impl std::fmt::Display for PlaneStatus {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let _ = self.code;
         formatter.write_str(&self.message)
     }
 }
@@ -1114,44 +1115,57 @@ async fn answer_agent_ask(
         anyhow::bail!("{}", not_owner(caller, &agent.name));
     }
     if let Err(error) = crate::agents::stored_agent(data_dir, caller, &ask.agent_id) {
-        let _ = sign_agent_grant(data_dir, caller, ask, request_id, false);
+        let _ = sign_agent_grant(data_dir, caller, ask, request_id, "denied");
         let _ = decide_capability(&coords, request_id, false).await;
         return Err(error);
     }
     if ask.resource.starts_with("localhost://") && own_rest(&ask.resource, &agent.root).is_none() {
-        sign_agent_grant(data_dir, caller, ask, request_id, false)?;
+        sign_agent_grant(data_dir, caller, ask, request_id, "denied")?;
         decide_capability(&coords, request_id, false).await?;
         anyhow::bail!("a path outside the agent's own folder is not pending");
     }
-    // The plane answers first. A 409 is a refusal row, never an approval.
-    // An approval row is signed only after the plane accepts. If that sign
-    // fails, the grant is denied so the mint does not stand.
-    let decided = decide_capability(&coords, request_id, approve).await;
-    match decided {
-        Err(error) => {
-            if plane_conflict(&error) {
-                let _ = sign_agent_grant(data_dir, caller, ask, request_id, false);
-            }
-            Err(error)
-        }
+    // One answer at a time, so two approvals of one ask mint one grant.
+    let _gate = grant_answer_gate().lock().await;
+    if !approve {
+        sign_agent_grant(data_dir, caller, ask, request_id, "denied")?;
+        return decide_capability(&coords, request_id, false).await;
+    }
+    let again = read_pending(&coords).await?;
+    let Some(row) = again.iter().find(|item| item.request_id == request_id) else {
+        anyhow::bail!("that request is no longer pending");
+    };
+    // The signed approval exists before the mint. A crash here leaves the
+    // row and no grant; the next start settles that row by name.
+    sign_agent_grant(data_dir, caller, row, request_id, "approved")?;
+    #[cfg(test)]
+    if super::gateway_tests::seams::take_grant_fault(data_dir, true) {
+        anyhow::bail!("crash before the mint");
+    }
+    // `minted` closes the approval. The next start settles an approval that
+    // never got that row: the crash was before the mint, or the mint failed
+    // and its not-granted row did not land.
+    let minted = match decide_capability(&coords, request_id, true).await {
         Ok(answered) => {
-            if let Err(error) = sign_agent_grant(data_dir, caller, ask, request_id, approve) {
-                if approve {
-                    let _ = decide_capability(&coords, request_id, false).await;
-                }
-                return Err(error);
-            }
-            Ok(answered)
+            sign_agent_grant(data_dir, caller, row, request_id, "minted").map(|()| answered)
+        }
+        Err(error) => Err(error),
+    };
+    match minted {
+        Ok(answered) => Ok(answered),
+        Err(error) => {
+            revoke_capability(&coords, request_id).await;
+            let _ = sign_agent_grant(data_dir, caller, row, request_id, "not_granted");
+            Err(error)
         }
     }
 }
 
-/// Set by a test before `sign_agent_grant`. The sign fails and writes nothing,
-/// so a caller that minted already has to take the grant back.
-#[cfg(test)]
-pub(crate) static FAIL_GRANT_AUDIT: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
+fn grant_answer_gate() -> &'static tokio::sync::Mutex<()> {
+    static GATE: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
+    GATE.get_or_init(|| tokio::sync::Mutex::new(()))
+}
 
+#[cfg(test)]
 fn plane_conflict(error: &anyhow::Error) -> bool {
     error
         .downcast_ref::<PlaneStatus>()
@@ -1163,36 +1177,76 @@ fn sign_agent_grant(
     caller: &str,
     ask: &RuntimeCapabilityPendingRequest,
     request_id: &str,
-    approve: bool,
+    kind: &str,
 ) -> anyhow::Result<()> {
     #[cfg(test)]
-    if FAIL_GRANT_AUDIT.swap(false, std::sync::atomic::Ordering::SeqCst) {
+    if super::gateway_tests::seams::take_grant_fault(data_dir, false) {
         anyhow::bail!("injected agent grant audit failure");
     }
-    let event_type = if approve {
-        "agent.grant.approved"
-    } else {
-        "agent.grant.denied"
-    };
-    let result = if approve { "approved" } else { "denied" };
     crate::auth::append_audit_event(
         data_dir,
         elastos_runtime::auth::RuntimeAuditEventV1 {
             schema: elastos_runtime::auth::RuntimeAuditEventV1::SCHEMA.to_string(),
             event_id: format!("audit:{}", super::gateway_home_token::uuid_like_token()),
-            event_type: event_type.to_string(),
+            event_type: format!("agent.grant.{kind}"),
             principal_id: Some(caller.to_string()),
             proof_binding_id: None,
             session_id: Some(ask.agent_id.clone()),
             challenge_id: Some(request_id.to_string()),
             capsule_id: Some(ask.agent_id.clone()),
-            result: result.to_string(),
-            reason: format!("{result} {}", ask.resource),
+            result: kind.to_string(),
+            reason: format!("{kind} {}", ask.resource),
             occurred_at: now_ts(),
             signer_did: None,
             signature: None,
         },
     )
+}
+
+async fn revoke_capability(coords: &crate::runtime_control::RuntimeCoords, request_id: &str) {
+    let Ok(client) = reqwest::Client::builder()
+        .timeout(Duration::from_secs(3))
+        .build()
+    else {
+        return;
+    };
+    let Ok(shell) = home_attach_shell(&client, &coords.api_url, &coords.attach_secret).await else {
+        return;
+    };
+    let url = format!("{}/api/capability/{request_id}", coords.api_url);
+    let _ = client
+        .delete(url)
+        .header(AUTHORIZATION, format!("Bearer {shell}"))
+        .send()
+        .await;
+}
+
+/// An approved row with no later minted or not-granted row is settled once, by name.
+pub(crate) async fn settle_unminted_agent_grants(data_dir: &std::path::Path) -> anyhow::Result<()> {
+    let state = crate::auth::load_auth_state(data_dir)?;
+    let mut open = Vec::new();
+    for event in &state.audit {
+        let Some(id) = event.challenge_id.clone() else {
+            continue;
+        };
+        match event.event_type.as_str() {
+            "agent.grant.not_granted" | "agent.grant.minted" => {
+                open.retain(|row: &String| row != &id);
+            }
+            "agent.grant.approved" if !open.contains(&id) => open.push(id),
+            _ => {}
+        }
+    }
+    if let Some(coords) = crate::api::agent_plane::live_coords(data_dir).await {
+        for id in &open {
+            revoke_capability(&coords, id).await;
+        }
+    }
+    for id in &open {
+        let ask = RuntimeCapabilityPendingRequest::default();
+        sign_agent_grant(data_dir, "", &ask, id, "not_granted")?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1373,20 +1427,26 @@ mod tests {
 
     #[test]
     fn an_injected_grant_audit_failure_writes_no_row() {
-        FAIL_GRANT_AUDIT.store(true, std::sync::atomic::Ordering::SeqCst);
+        let home = std::path::Path::new("/no/such/home");
+        super::gateway_tests::seams::arm_grant_fault(home, false);
         let error = sign_agent_grant(
-            std::path::Path::new("/no/such/home"),
+            home,
             "person:owner",
             &ask("elastos://inspect/submit_agent_plan", "write"),
             "req-1",
-            true,
+            "approved",
         )
         .expect_err("the injected failure refuses the grant row");
         assert_eq!(error.to_string(), "injected agent grant audit failure");
-        assert!(
-            !FAIL_GRANT_AUDIT.load(std::sync::atomic::Ordering::SeqCst),
-            "the failure is used once"
-        );
+        let again = sign_agent_grant(
+            home,
+            "person:owner",
+            &ask("elastos://inspect/submit_agent_plan", "write"),
+            "req-1",
+            "approved",
+        )
+        .expect_err("the failure is used once");
+        assert_ne!(again.to_string(), "injected agent grant audit failure");
     }
 
     #[test]
