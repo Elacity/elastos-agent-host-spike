@@ -4902,8 +4902,12 @@ mod tests {
             !message.contains(temp.path().to_str().unwrap()),
             "{message}"
         );
-        assert!(message.contains("not decryptable"), "{message}");
-        assert!(message.contains("Remove it, then restart."), "{message}");
+        assert!(message.contains("does not decrypt"), "{message}");
+        assert!(
+            message.contains("Restore identity/device.key, or move the file aside, then restart."),
+            "{message}"
+        );
+        assert!(!message.contains("Remove it"), "{message}");
         assert_eq!(fs::read(&path).unwrap(), corrupt);
         assert!(!temp.path().join("identity/localhost-file-key-v1").exists());
         let names: Vec<_> = fs::read_dir(path.parent().unwrap())
@@ -5573,10 +5577,7 @@ mod tests {
         )
         .unwrap_err()
         .to_string();
-        assert_eq!(
-            foreign_open,
-            "Users/foreign.bin is not decryptable. Remove it."
-        );
+        assert_eq!(foreign_open, "Users/foreign.bin does not decrypt.");
         let cut_open =
             localhost_provider::read_sealed_localhost_file(&file_key, &cut, "Users/cut.bin")
                 .unwrap_err()
@@ -6455,11 +6456,15 @@ mod tests {
     }
 
     fn sentence(relative: &str, cause: &str) -> String {
+        if cause == "does not decrypt" {
+            return format!(
+                "{relative} does not decrypt. Restore identity/device.key, or move the file aside, then restart."
+            );
+        }
         let remedy = match cause {
             "not readable" => "Make it readable, then restart.",
             "linked" => "Replace the link with a regular file, then restart.",
             "changed while read" => "Leave it unchanged, then restart.",
-            "not decryptable" => "Remove it, then restart.",
             "not a regular file" => "Replace it with a regular file, then restart.",
             "larger than this process can read" => "Move it out of the folder, then restart.",
             other => panic!("no remedy for {other}"),
@@ -6570,7 +6575,7 @@ mod tests {
         expect_refusal(
             foreign.path(),
             &device_key,
-            &sentence("Users/bad.bin", "not decryptable"),
+            &sentence("Users/bad.bin", "does not decrypt"),
             true,
         );
         assert_eq!(fs::read(&bad).unwrap(), sealed);
@@ -6895,7 +6900,12 @@ mod tests {
         let err = localhost_provider_bridge_config(root, &device_key).unwrap_err();
         let text = err.to_string();
         assert!(text.contains("Users/named.json"), "{text}");
-        assert!(text.contains("not decryptable"), "{text}");
+        assert!(text.contains("does not decrypt"), "{text}");
+        assert!(
+            text.contains("Restore identity/device.key, or move the file aside, then restart."),
+            "{text}"
+        );
+        assert!(!text.contains("Remove it"), "{text}");
         assert_eq!(fs::read(&look).unwrap(), look_bytes);
         assert_eq!(fs::read(&named).unwrap(), named_bytes);
         assert!(!root.join("identity/localhost-file-key-v1").exists());
@@ -7050,7 +7060,7 @@ mod tests {
         );
         assert!(text.contains("No space left on device"), "{text}");
         assert!(
-            text.contains("Free space, or the folder's permissions, then restart."),
+            text.contains("Free space, or fix the folder's permissions, then restart."),
             "{text}"
         );
         assert!(!text.contains("is not readable"), "{text}");
@@ -7086,7 +7096,7 @@ mod tests {
         );
         assert!(text.contains("Permission denied"), "{text}");
         assert!(
-            text.contains("Free space, or the folder's permissions, then restart."),
+            text.contains("Free space, or fix the folder's permissions, then restart."),
             "{text}"
         );
         assert!(!text.contains("is not readable"), "{text}");
@@ -7123,7 +7133,7 @@ mod tests {
         assert!(text.contains("identity could not be written"), "{text}");
         assert!(text.contains("Permission denied"), "{text}");
         assert!(
-            text.contains("Free space, or the folder's permissions, then restart."),
+            text.contains("Free space, or fix the folder's permissions, then restart."),
             "{text}"
         );
         assert!(!text.contains("is not readable"), "{text}");
@@ -7148,7 +7158,7 @@ mod tests {
         );
         assert!(text.contains("Permission denied"), "{text}");
         assert!(
-            text.contains("Free space, or the folder's permissions, then restart."),
+            text.contains("Free space, or fix the folder's permissions, then restart."),
             "{text}"
         );
         assert!(!text.contains("is not readable"), "{text}");
@@ -7185,7 +7195,7 @@ mod tests {
         assert!(text.contains("identity could not be written"), "{text}");
         assert!(text.contains("No space left on device"), "{text}");
         assert!(
-            text.contains("Free space, or the folder's permissions, then restart."),
+            text.contains("Free space, or fix the folder's permissions, then restart."),
             "{text}"
         );
         assert!(!text.contains("is not readable"), "{text}");
@@ -7213,7 +7223,7 @@ mod tests {
         );
         assert!(text.contains("No space left on device"), "{text}");
         assert!(
-            text.contains("Free space, or the folder's permissions, then restart."),
+            text.contains("Free space, or fix the folder's permissions, then restart."),
             "{text}"
         );
         assert!(!text.contains("is not readable"), "{text}");
@@ -7623,7 +7633,7 @@ mod tests {
     }
 
     #[test]
-    fn prepare_refusal_forged_marker_keeps_home_up() {
+    fn prepare_refusal_forged_marker_leaves_elastos_unmade() {
         let _guard = LocalAppsGuard::lock();
         let root = TempDir::new().unwrap();
         plant_key_0600(root.path(), &[0xd1; 32]);
@@ -7643,7 +7653,7 @@ mod tests {
     }
 
     #[test]
-    fn prepare_refusal_symlink_marker_keeps_home_up() {
+    fn prepare_refusal_symlink_marker_leaves_elastos_unmade() {
         let _guard = LocalAppsGuard::lock();
         let root = TempDir::new().unwrap();
         plant_key_0600(root.path(), &[0xd2; 32]);
@@ -7665,7 +7675,7 @@ mod tests {
     }
 
     #[test]
-    fn prepare_refusal_unwritable_identity_keeps_home_up() {
+    fn prepare_refusal_unwritable_identity_leaves_elastos_unmade() {
         use std::os::unix::fs::PermissionsExt;
 
         let _guard = LocalAppsGuard::lock();
@@ -7688,7 +7698,7 @@ mod tests {
     }
 
     #[test]
-    fn prepare_refusal_unreadable_data_dir_keeps_home_up() {
+    fn prepare_refusal_unreadable_data_dir_leaves_elastos_unmade() {
         use std::os::unix::fs::PermissionsExt;
 
         let _guard = LocalAppsGuard::lock();
@@ -7709,6 +7719,35 @@ mod tests {
             "{sentence}"
         );
         assert!(sentence.contains("AppCapsules"), "{sentence}");
+    }
+
+    #[test]
+    fn a_mode_0000_home_exits_before_health() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = TempDir::new().unwrap();
+        struct RestoreMode(std::path::PathBuf);
+        impl Drop for RestoreMode {
+            fn drop(&mut self) {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = fs::set_permissions(&self.0, fs::Permissions::from_mode(0o755));
+            }
+        }
+        let _restore = RestoreMode(root.path().to_path_buf());
+        fs::set_permissions(root.path(), fs::Permissions::from_mode(0o000)).unwrap();
+        let err = elastos_server::host_lock::acquire_host_process_lock(
+            root.path(),
+            "serve",
+            "127.0.0.1:1",
+        )
+        .unwrap_err();
+        let text = format!("{err:#}");
+        eprintln!("SL_R17_0000={text}");
+        assert!(
+            text.contains("Permission denied") || text.contains("os error 13"),
+            "{text}"
+        );
+        assert!(!text.contains("status"), "{text}");
     }
 
     #[test]
@@ -7826,7 +7865,7 @@ mod tests {
     }
 
     #[test]
-    fn a_socket_lock_says_remove_the_pipe() {
+    fn a_socket_lock_says_remove_the_socket() {
         let _guard = LocalAppsGuard::lock();
         let device_key = [0x4c; 32];
         let file_key = expected_localhost_file_key(&device_key);
@@ -7839,7 +7878,7 @@ mod tests {
         expect_refusal(
             root.path(),
             &device_key,
-            "identity/localhost-file-key.lock is a pipe. Remove the pipe, then restart.",
+            "identity/localhost-file-key.lock is a socket. Remove the socket, then restart.",
             true,
         );
         drop(listener);
@@ -7915,10 +7954,11 @@ mod tests {
             LocalhostBringup::Start(_) => panic!("a socket seen file started local apps"),
         };
         assert!(
-            sentence.contains("is a pipe. Remove the pipe, then restart."),
+            sentence.contains("is a socket. Remove the socket, then restart."),
             "{sentence}"
         );
         assert!(!sentence.contains("Remove the directory"), "{sentence}");
+        assert!(!sentence.contains("is a pipe"), "{sentence}");
         assert!(
             sentence.contains("localhost-file-key-v1.seen"),
             "{sentence}"
@@ -7926,6 +7966,160 @@ mod tests {
         fs::remove_file(&seen).unwrap();
         migrate_again(seen_root.path(), &device_key);
         assert_envelope_opens_with_exactly_one_key(&seen_note, b"note", &device_key, &file_key);
+    }
+
+    fn file_identity(path: &std::path::Path) -> (u64, u64, i64, i64, u64, i64, i64) {
+        use std::os::unix::fs::MetadataExt;
+        let meta = fs::metadata(path).unwrap();
+        (
+            meta.dev(),
+            meta.ino(),
+            meta.ctime(),
+            meta.ctime_nsec(),
+            meta.len(),
+            meta.mtime(),
+            meta.mtime_nsec(),
+        )
+    }
+
+    fn restore_mtime(path: &std::path::Path, mtime: i64, mtime_nsec: i64) {
+        let when = std::time::UNIX_EPOCH
+            + std::time::Duration::new(
+                u64::try_from(mtime).unwrap(),
+                u32::try_from(mtime_nsec).unwrap(),
+            );
+        fs::File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_times(fs::FileTimes::new().set_modified(when))
+            .unwrap();
+    }
+
+    fn settle_until_quiet(
+        root: &std::path::Path,
+        device_key: &[u8; 32],
+        name: &str,
+        plain: &[u8],
+    ) -> std::path::PathBuf {
+        let path = root.join(name);
+        plant_device_envelope(&path, device_key, plain);
+        migrate_again(root, device_key);
+        let _ = take_localhost_migration_opens();
+        migrate_again(root, device_key);
+        assert_eq!(
+            take_localhost_migration_opens(),
+            0,
+            "{name} was opened after it settled"
+        );
+        path
+    }
+
+    fn assert_same_length_and_mtime_but_not_the_same_file(
+        before: (u64, u64, i64, i64, u64, i64, i64),
+        after: (u64, u64, i64, i64, u64, i64, i64),
+    ) {
+        assert_eq!(after.4, before.4, "length changed");
+        assert_eq!(after.5, before.5, "mtime seconds changed");
+        assert_eq!(after.6, before.6, "mtime nanoseconds changed");
+        assert!(
+            (after.0, after.1, after.2, after.3) != (before.0, before.1, before.2, before.3),
+            "device, inode, and ctime all matched, so a length-and-mtime skip would be right"
+        );
+    }
+
+    #[test]
+    fn a_preserved_mtime_copy_and_a_tar_extract_are_opened_again() {
+        let _guard = LocalAppsGuard::lock();
+        let device_key = [0x17; 32];
+        let file_key = expected_localhost_file_key(&device_key);
+        let root = TempDir::new().unwrap();
+        let copied = settle_until_quiet(root.path(), &device_key, "Users/copy.bin", b"alpha");
+        let archived = settle_until_quiet(root.path(), &device_key, "Users/tar.bin", b"alpha");
+        let copy_before = file_identity(&copied);
+        let tar_before = file_identity(&archived);
+        let replacement = localhost_provider::encrypt_bytes(&device_key, b"bravo").unwrap();
+        assert_eq!(replacement.len() as u64, copy_before.4);
+        assert_eq!(replacement.len() as u64, tar_before.4);
+
+        let staged = root.path().join("staged-copy.bin");
+        fs::write(&staged, &replacement).unwrap();
+        restore_mtime(&staged, copy_before.5, copy_before.6);
+        let copied_status = Command::new("cp")
+            .args(["-p", staged.to_str().unwrap(), copied.to_str().unwrap()])
+            .status()
+            .unwrap();
+        assert!(copied_status.success(), "cp -p failed");
+        assert_same_length_and_mtime_but_not_the_same_file(copy_before, file_identity(&copied));
+
+        let stage = root.path().join("stage/Users");
+        fs::create_dir_all(&stage).unwrap();
+        let staged_tar = stage.join("tar.bin");
+        fs::write(&staged_tar, &replacement).unwrap();
+        restore_mtime(&staged_tar, tar_before.5, tar_before.6);
+        let archive = root.path().join("swap.tar");
+        let packed = Command::new("tar")
+            .args([
+                "-cf",
+                archive.to_str().unwrap(),
+                "-C",
+                root.path().join("stage").to_str().unwrap(),
+                "Users/tar.bin",
+            ])
+            .status()
+            .unwrap();
+        assert!(packed.success(), "tar create failed");
+        let extracted = Command::new("tar")
+            .args([
+                "-xf",
+                archive.to_str().unwrap(),
+                "-C",
+                root.path().to_str().unwrap(),
+            ])
+            .status()
+            .unwrap();
+        assert!(extracted.success(), "tar extract failed");
+        let tar_after = file_identity(&archived);
+        if tar_after.5 != tar_before.5 || tar_after.6 != tar_before.6 {
+            restore_mtime(&archived, tar_before.5, tar_before.6);
+        }
+        assert_same_length_and_mtime_but_not_the_same_file(tar_before, file_identity(&archived));
+
+        let _ = take_localhost_migration_opens();
+        migrate_again(root.path(), &device_key);
+        assert!(
+            take_localhost_migration_opens() >= 2,
+            "a preserved-mtime replacement was skipped"
+        );
+        assert_envelope_opens_with_exactly_one_key(&copied, b"bravo", &device_key, &file_key);
+        assert_envelope_opens_with_exactly_one_key(&archived, b"bravo", &device_key, &file_key);
+    }
+
+    #[test]
+    fn a_same_second_write_with_the_mtime_restored_is_opened_again() {
+        use std::os::unix::fs::MetadataExt;
+
+        let _guard = LocalAppsGuard::lock();
+        let device_key = [0x18; 32];
+        let file_key = expected_localhost_file_key(&device_key);
+        let root = TempDir::new().unwrap();
+        let path = settle_until_quiet(root.path(), &device_key, "Users/same.bin", b"alpha");
+        let before = file_identity(&path);
+        let before_ino = fs::metadata(&path).unwrap().ino();
+        let replacement = localhost_provider::encrypt_bytes(&device_key, b"bravo").unwrap();
+        assert_eq!(replacement.len() as u64, before.4);
+        fs::write(&path, &replacement).unwrap();
+        restore_mtime(&path, before.5, before.6);
+        let after = file_identity(&path);
+        assert_eq!(fs::metadata(&path).unwrap().ino(), before_ino);
+        assert_same_length_and_mtime_but_not_the_same_file(before, after);
+        let _ = take_localhost_migration_opens();
+        migrate_again(root.path(), &device_key);
+        assert!(
+            take_localhost_migration_opens() >= 1,
+            "a same-second rewrite was skipped"
+        );
+        assert_envelope_opens_with_exactly_one_key(&path, b"bravo", &device_key, &file_key);
     }
 
     #[test]
@@ -8727,6 +8921,75 @@ mod tests {
         let line = stderr
             .lines()
             .find(|line| line.contains("SEALED_PEAK_OVER="))
+            .expect("child printed its peak");
+        eprintln!("{line}");
+    }
+
+    #[test]
+    fn a_600_mib_sealed_read_stays_under_one_point_three_times_the_file() {
+        const PLAIN_LEN: usize = 300 * 1024 * 1024;
+        if std::env::var("ELASTOS_SEALED_600_CHILD").as_deref() == Ok("1") {
+            let path = std::path::PathBuf::from(std::env::var("ELASTOS_SEALED_600_PATH").unwrap());
+            let file_len: i64 = std::env::var("ELASTOS_SEALED_600_LEN")
+                .unwrap()
+                .parse()
+                .unwrap();
+            let raw = hex::decode(std::env::var("ELASTOS_SEALED_600_KEY").unwrap()).unwrap();
+            let mut key = [0u8; 32];
+            key.copy_from_slice(&raw);
+            let _ = localhost_provider::take_sealed_read_bytes();
+            let before = resident_peak();
+            let plain =
+                localhost_provider::read_sealed_localhost_file(&key, &path, "Users/sealed.bin")
+                    .unwrap_or_else(|err| panic!("sealed open refused: {err}"));
+            let delta = resident_peak().saturating_sub(before);
+            let read = localhost_provider::take_sealed_read_bytes();
+            eprintln!("SL_R17_600_DELTA={delta} FILE={file_len} READ={read}");
+            assert_eq!(plain.len(), PLAIN_LEN);
+            assert!(plain.iter().all(|byte| *byte == 0x5a));
+            assert_eq!(read, file_len as u64, "a sealed read opened the file twice");
+            let limit = file_len.saturating_mul(13) / 10;
+            assert!(
+                delta < limit,
+                "peak {delta} is not under 1.3 times the file {file_len} (limit {limit})"
+            );
+            return;
+        }
+
+        let key = [0x61; 32];
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("sealed.bin");
+        let plain = vec![0x5au8; PLAIN_LEN];
+        let sealed = localhost_provider::encrypt_file_key_bytes(&key, &plain).unwrap();
+        let file_len = sealed.len();
+        assert!(
+            file_len > 590 * 1024 * 1024 && file_len < 610 * 1024 * 1024,
+            "file is {file_len}, not about 600 MiB"
+        );
+        fs::write(&path, &sealed).unwrap();
+        drop(sealed);
+        drop(plain);
+        let test = format!(
+            "{}::a_600_mib_sealed_read_stays_under_one_point_three_times_the_file",
+            module_path!().split_once("::").unwrap().1
+        );
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .env("ELASTOS_SEALED_600_CHILD", "1")
+            .env("ELASTOS_SEALED_600_PATH", &path)
+            .env("ELASTOS_SEALED_600_KEY", hex::encode(key))
+            .env("ELASTOS_SEALED_600_LEN", file_len.to_string())
+            .args(["--exact", test.as_str(), "--nocapture", "--test-threads=1"])
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success(),
+            "600 MiB child failed\nstdout {stdout}\nstderr {stderr}"
+        );
+        let line = stderr
+            .lines()
+            .find(|line| line.contains("SL_R17_600_DELTA="))
             .expect("child printed its peak");
         eprintln!("{line}");
     }

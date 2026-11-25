@@ -371,6 +371,7 @@ impl LocalProvider {
     }
 
     /// Read file contents
+    #[rustfmt::skip]
     pub fn read_file(
         &self,
         path: &str,
@@ -410,16 +411,7 @@ impl LocalProvider {
                 return Ok(buffer);
             }
 
-            if localhost_provider::is_plain_localhost_file(&full_path)? {
-                return localhost_provider::read_plain_localhost_range(
-                    &full_path,
-                    path,
-                    offset.unwrap_or(0),
-                    length,
-                );
-            }
-
-            let plaintext = read_sealed_localhost_file(key, &full_path, path)?;
+            let plaintext = read_sealed_localhost_file(key, &full_path, path).or_else(|err| if err.to_string().contains("process can read") && localhost_provider::is_plain_localhost_file(&full_path)? { localhost_provider::read_plain_localhost_range(&full_path, path, offset.unwrap_or(0), length) } else { Err(err) })?;
 
             let off = offset.unwrap_or(0) as usize;
             if off >= plaintext.len() {
@@ -1787,5 +1779,120 @@ mod tests {
                 .unwrap(),
             prefix
         );
+    }
+
+    #[test]
+    fn a_small_sealed_read_opens_the_file_once() {
+        let dir = setup_test_dir();
+        fs::create_dir(dir.path().join("Users")).unwrap();
+        let provider = make_encrypted_provider(&dir);
+        let key = test_key();
+        let path = dir.path().join("Users/once.bin");
+        let sealed = localhost_provider::encrypt_file_key_bytes(&key, b"hello").unwrap();
+        fs::write(&path, &sealed).unwrap();
+        let _ = localhost_provider::take_sealed_read_bytes();
+        assert_eq!(
+            provider
+                .read_file("Users/once.bin", "token", None, None)
+                .unwrap(),
+            b"hello"
+        );
+        assert_eq!(
+            localhost_provider::take_sealed_read_bytes(),
+            sealed.len() as u64
+        );
+    }
+
+    #[test]
+    fn a_cut_off_old_header_under_32_mib_uses_the_cut_off_sentence() {
+        let dir = setup_test_dir();
+        fs::create_dir(dir.path().join("Users")).unwrap();
+        let provider = make_encrypted_provider(&dir);
+        let sealed = localhost_provider::encrypt_bytes(&test_key(), b"sealed-old").unwrap();
+        assert!(localhost_provider::header_is_device_key_envelope(&sealed));
+        assert!(
+            sealed.len() > 80 && (sealed.len() as u64) <= localhost_provider::ENVELOPE_BYTE_LIMIT
+        );
+        let cut = &sealed[..80];
+        assert!(localhost_provider::header_is_device_key_envelope(cut));
+        fs::write(dir.path().join("Users/old-cut.bin"), cut).unwrap();
+        assert_eq!(
+            refusal(&provider, "Users/old-cut.bin", None, None),
+            "Users/old-cut.bin is cut off. Remove it."
+        );
+    }
+
+    #[test]
+    fn a_plain_file_past_the_hard_limit_is_sliced_without_loading_it() {
+        let dir = setup_test_dir();
+        fs::create_dir(dir.path().join("Users")).unwrap();
+        let provider = make_encrypted_provider(&dir);
+        let path = dir.path().join("Users/huge-plain.bin");
+        fs::write(&path, b"{over").unwrap();
+        fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_len(localhost_provider::SEALED_READ_HARD_LIMIT + 1)
+            .unwrap();
+        assert_eq!(
+            provider
+                .read_file("Users/huge-plain.bin", "token", Some(0), Some(5))
+                .unwrap(),
+            b"{over"
+        );
+    }
+
+    fn reorder_envelope(sealed: &[u8]) -> Vec<u8> {
+        let value: serde_json::Value = serde_json::from_slice(sealed).unwrap();
+        format!(
+            "{{\"ciphertext\":{},\"nonce\":{},\"version\":{}}}",
+            value["ciphertext"], value["nonce"], value["version"]
+        )
+        .into_bytes()
+    }
+
+    #[test]
+    fn a_reordered_envelope_over_32_mib_opens_once_and_a_bad_tag_does_not_decrypt() {
+        let dir = setup_test_dir();
+        fs::create_dir(dir.path().join("Users")).unwrap();
+        let provider = make_encrypted_provider(&dir);
+        let key = test_key();
+        let plain = vec![0x11u8; 16 * 1024 * 1024];
+        let sealed = localhost_provider::encrypt_file_key_bytes(&key, &plain).unwrap();
+        let reordered = reorder_envelope(&sealed);
+        assert!(reordered.len() as u64 > localhost_provider::ENVELOPE_BYTE_LIMIT);
+        let path = dir.path().join("Users/reordered.bin");
+        fs::write(&path, &reordered).unwrap();
+        let _ = localhost_provider::take_sealed_read_bytes();
+        assert_eq!(
+            provider
+                .read_file("Users/reordered.bin", "token", None, None)
+                .unwrap(),
+            plain
+        );
+        let read = localhost_provider::take_sealed_read_bytes();
+        assert!(
+            read > reordered.len() as u64,
+            "the body was not scanned: {read}"
+        );
+        assert!(
+            read < reordered.len() as u64 * 5 / 2,
+            "the file was scanned more than once: {read}"
+        );
+
+        let mut bad = reordered;
+        let marker = br#""ciphertext":""#;
+        let at = bad
+            .windows(marker.len())
+            .position(|window| window == marker)
+            .unwrap()
+            + marker.len();
+        bad[at] = if bad[at] == b'0' { b'1' } else { b'0' };
+        fs::write(&path, &bad).unwrap();
+        let err = refusal(&provider, "Users/reordered.bin", None, None);
+        assert!(err.contains("does not decrypt"), "{err}");
+        assert!(!err.contains("larger than 32 MiB"), "{err}");
+        assert!(!err.contains("Remove it"), "{err}");
     }
 }

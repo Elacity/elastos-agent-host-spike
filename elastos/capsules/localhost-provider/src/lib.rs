@@ -16,7 +16,7 @@ use std::path::Path;
 pub const ENVELOPE_BYTE_LIMIT: u64 = 32 * 1024 * 1024;
 /// Largest envelope [`read_sealed_localhost_file`] loads.
 ///
-/// Ciphertext is decoded in the file `Vec` and decryption allocates the plaintext.
+/// Ciphertext is decoded in the file `Vec` and decryption stays in that `Vec`.
 pub const SEALED_READ_HARD_LIMIT: u64 = 1024 * 1024 * 1024;
 const ENVELOPE_HEADER: usize = 64;
 const FILE_KEY_ENVELOPE_VERSION: u8 = 2;
@@ -79,55 +79,41 @@ pub fn header_is_device_key_envelope(header: &[u8]) -> bool {
         && matches!(header[digit_at], b'0'..=b'9' | b'a'..=b'f')
 }
 
+#[rustfmt::skip]
 fn open_new_format(key: &[u8; 32], bytes: Vec<u8>, name: &str) -> io::Result<Vec<u8>> {
-    let cause = match ciphertext_in_place(bytes) {
-        None => "cut off",
-        Some((ciphertext, nonce)) => match decrypt_parts(key, &nonce, &ciphertext) {
-            Ok(plain) => return Ok(plain),
-            Err(_) => "not decryptable",
-        },
+    let Some((mut body, nonce)) = ciphertext_in_place(bytes) else {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, format!("{name} is cut off. Remove it.")));
     };
-    Err(io::Error::new(
-        io::ErrorKind::InvalidData,
-        format!("{name} is {cause}. Remove it."),
-    ))
+    Aes256Gcm::new_from_slice(key).map_err(|e| io::Error::other(format!("AES key init: {e}")))?
+        .decrypt_in_place(&Nonce::from(nonce), b"", &mut body)
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, format!("{name} does not decrypt.")))?;
+    Ok(body)
 }
 
-#[cfg(test)]
 thread_local! {
     static SEALED_BYTES_READ: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
 fn note_sealed_bytes(n: u64) {
-    #[cfg(test)]
     SEALED_BYTES_READ.with(|slot| slot.set(slot.get().saturating_add(n)));
-    #[cfg(not(test))]
-    let _ = n;
 }
 
 /// Bytes `read_sealed_localhost_file` took from the file since the last take.
-#[cfg(test)]
 pub fn take_sealed_read_bytes() -> u64 {
     SEALED_BYTES_READ.with(|slot| slot.replace(0))
 }
 
-fn read_body_within_hard_limit(
-    file: &mut std::fs::File,
-    header: &[u8],
-    len: u64,
-    name: &str,
-) -> io::Result<Vec<u8>> {
-    if len > SEALED_READ_HARD_LIMIT {
-        return Err(hard_limit_refusal(name));
-    }
-    let mut bytes = header.to_vec();
-    let had = bytes.len() as u64;
-    let room = SEALED_READ_HARD_LIMIT.saturating_sub(had).saturating_add(1);
-    file.by_ref().take(room).read_to_end(&mut bytes)?;
-    note_sealed_bytes(bytes.len() as u64 - had);
-    if bytes.len() as u64 > SEALED_READ_HARD_LIMIT {
-        return Err(hard_limit_refusal(name));
-    }
+#[rustfmt::skip]
+fn read_body_within_hard_limit(file: &mut std::fs::File, header: &[u8], len: u64, name: &str) -> io::Result<Vec<u8>> {
+    if len > SEALED_READ_HARD_LIMIT { return Err(hard_limit_refusal(name)); }
+    let Ok(n) = usize::try_from(len) else { return Err(hard_limit_refusal(name)); };
+    if header.len() > n { return Err(io::Error::new(io::ErrorKind::InvalidData, format!("{name} is cut off. Remove it."))); }
+    let mut bytes = Vec::new();
+    if bytes.try_reserve_exact(n).is_err() { return Err(hard_limit_refusal(name)); }
+    bytes.resize(n, 0);
+    bytes[..header.len()].copy_from_slice(header);
+    file.read_exact(&mut bytes[header.len()..]).map_err(|_| io::Error::new(io::ErrorKind::InvalidData, format!("{name} is cut off. Remove it.")))?;
+    note_sealed_bytes((n - header.len()) as u64);
     Ok(bytes)
 }
 
@@ -291,7 +277,7 @@ pub fn read_sealed_localhost_file(key: &[u8; 32], path: &Path, name: &str) -> io
         if raw.len() as u64 > ENVELOPE_BYTE_LIMIT {
             return Err(over_cap_refusal(name));
         }
-        if header_is_file_key_envelope(&raw) {
+        if header_is_file_key_envelope(&raw) || header_is_device_key_envelope(&raw) {
             return open_new_format(key, raw, name);
         }
         return decrypt_bytes(key, &raw);
@@ -306,11 +292,7 @@ pub fn read_sealed_localhost_file(key: &[u8; 32], path: &Path, name: &str) -> io
             name,
         );
     }
-    let bytes = read_body_within_hard_limit(&mut file, header, len, name)?;
-    match decrypt_bytes(key, &bytes) {
-        Ok(plain) => Ok(plain),
-        Err(_) => Err(over_cap_refusal(name)),
-    }
+    open_new_format(key, read_body_within_hard_limit(&mut file, header, len, name)?, name)
 }
 
 /// Version 1, a 12-byte hex nonce, and hex ciphertext of at least 16 bytes.

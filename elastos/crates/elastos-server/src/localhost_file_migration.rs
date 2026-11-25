@@ -321,7 +321,11 @@ fn localhost_refused(path: &Path, why: &str) -> anyhow::Error {
     } else if why.contains("marker link") {
         ("linked", "Remove the link, then restart.")
     } else if why.contains("decrypt") {
-        ("not decryptable", "Remove it, then restart.")
+        return anyhow::anyhow!(
+            "{rel} does not decrypt. Restore identity/device.key, or move the file aside, then restart."
+        );
+    } else if why.contains("socket") {
+        ("a socket", "Remove the socket, then restart.")
     } else if why.contains("not a directory") {
         (
             "not a directory",
@@ -353,7 +357,7 @@ fn localhost_refused(path: &Path, why: &str) -> anyhow::Error {
 fn localhost_write_refused(path: &Path, io_text: &str) -> anyhow::Error {
     let rel = relative_path(path);
     anyhow::anyhow!(
-        "{rel} could not be written ({io_text}). Free space, or the folder's permissions, then restart."
+        "{rel} could not be written ({io_text}). Free space, or fix the folder's permissions, then restart."
     )
 }
 
@@ -594,6 +598,7 @@ struct SeenFile {
     len: u64,
     mtime: i64,
     mtime_nsec: i64,
+    stamp: (u64, u64, i64, i64),
     hard: bool,
 }
 
@@ -610,20 +615,26 @@ fn seen_file(meta: &std::fs::Metadata, hard: bool) -> SeenFile {
         len: meta.len(),
         mtime: meta.mtime(),
         mtime_nsec: meta.mtime_nsec(),
+        stamp: (meta.dev(), meta.ino(), meta.ctime(), meta.ctime_nsec()),
         hard,
     }
 }
 
 #[cfg(unix)]
+#[rustfmt::skip]
 fn parse_seen(bytes: &[u8]) -> std::collections::HashMap<String, SeenFile> {
     let mut seen = std::collections::HashMap::new();
     let mut lines = std::str::from_utf8(bytes).unwrap_or("").lines();
-    if lines.next() != Some("2") {
+    if lines.next() != Some("3") {
         return seen;
     }
     for line in lines {
-        let mut parts = line.splitn(5, ' ');
-        let (Some(len), Some(mtime), Some(mtime_nsec), Some(flag), Some(hex_rel)) = (
+        let mut parts = line.splitn(9, ' ');
+        let (Some(len), Some(mtime), Some(mtime_nsec), Some(dev), Some(ino), Some(ctime), Some(ctime_nsec), Some(flag), Some(hex_rel)) = (
+            parts.next().and_then(|text| text.parse().ok()),
+            parts.next().and_then(|text| text.parse().ok()),
+            parts.next().and_then(|text| text.parse().ok()),
+            parts.next().and_then(|text| text.parse().ok()),
             parts.next().and_then(|text| text.parse().ok()),
             parts.next().and_then(|text| text.parse().ok()),
             parts.next().and_then(|text| text.parse().ok()),
@@ -647,6 +658,7 @@ fn parse_seen(bytes: &[u8]) -> std::collections::HashMap<String, SeenFile> {
                 len,
                 mtime,
                 mtime_nsec,
+                stamp: (dev, ino, ctime, ctime_nsec),
                 hard: flag == "h",
             },
         );
@@ -691,12 +703,12 @@ fn write_seen(
 ) -> anyhow::Result<()> {
     let mut keys: Vec<&String> = seen.keys().collect();
     keys.sort();
-    let mut text = String::from("2\n");
+    let mut text = String::from("3\n");
     for key in keys {
         let item = &seen[key];
         let flag = if item.hard { "h" } else { "s" };
         let coded = hex::encode(key.as_bytes());
-        let line = format!("{} {} {} {} {}\n", item.len, item.mtime, item.mtime_nsec, flag, coded);
+        let line = format!("{} {} {} {} {} {} {} {} {}\n", item.len, item.mtime, item.mtime_nsec, item.stamp.0, item.stamp.1, item.stamp.2, item.stamp.3, flag, coded);
         if text.len() + line.len() > localhost_provider::ENVELOPE_BYTE_LIMIT as usize { break; }
         text.push_str(&line);
     }
@@ -845,7 +857,7 @@ fn migrate_localhost_envelope(
     if plain || localhost_provider::header_is_file_key_envelope(&header[..read]) {
         return Ok(MigratedFile::Settled);
     }
-    if extra > 0 { std::io::Seek::seek(&mut file, std::io::SeekFrom::Start(read as u64))?; }
+    if extra > 0 { std::io::Seek::seek(&mut file, std::io::SeekFrom::Start(read as u64)).map_err(|_| localhost_refused(path, "cannot be read"))?; }
     if opened.len > localhost_provider::SEALED_READ_HARD_LIMIT {
         return Ok(MigratedFile::OverHard);
     }
@@ -932,8 +944,9 @@ fn migrate_localhost_tree(
             };
             return Err(localhost_refused(&path, why));
         }
-        if file_type.is_fifo() {
-            return Err(localhost_refused(&path, "is a pipe"));
+        if file_type.is_fifo() || file_type.is_socket() {
+            let why = ["is a pipe", "is a socket"][usize::from(file_type.is_socket())];
+            return Err(localhost_refused(&path, why));
         }
         if file_type.is_dir() {
             migrate_localhost_tree(&path, device_key, file_key, seen, next, over_hard)?;
@@ -950,6 +963,7 @@ fn migrate_localhost_tree(
             if old.len == meta.len()
                 && old.mtime == meta.mtime()
                 && old.mtime_nsec == meta.mtime_nsec()
+                && old.stamp == (meta.dev(), meta.ino(), meta.ctime(), meta.ctime_nsec())
             {
                 if old.hard {
                     over_hard.push(rel.clone());
@@ -1350,7 +1364,7 @@ fn refuse_special(path: &Path, meta: &std::fs::Metadata, link: &str) -> anyhow::
     let why = if kind.is_symlink() {
         link
     } else if kind.is_fifo() || kind.is_socket() {
-        "is a pipe"
+        ["is a pipe", "is a socket"][usize::from(kind.is_socket())]
     } else if kind.is_dir() {
         "is not a file"
     } else if kind.is_file() {
@@ -1374,6 +1388,7 @@ mod tests {
             len: 1,
             mtime: 2,
             mtime_nsec: 3,
+            stamp: (4, 5, 6, 7),
             hard: false,
         };
         seen.insert("Users/a.bin".to_string(), kept.clone());
