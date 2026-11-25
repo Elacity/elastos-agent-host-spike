@@ -21,7 +21,7 @@ const READ_FILE: u64 = 4;
 const CHAIN_RESOLVER_FILES: &[&str] = &["/etc/nsswitch.conf", "/etc/hosts", "/etc/resolv.conf"];
 const NO_LANDLOCK: &str = "linux confinement refused: the kernel has no Landlock";
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum LoaderArch {
     X86_64,
     Aarch64,
@@ -48,7 +48,10 @@ const AARCH64_LOADERS: &[&str] = &[
     "/lib/aarch64-linux-gnu/libgcc_s.so.1",
 ];
 
-fn loader_paths(provider: RuntimeProviderId, arch: LoaderArch) -> Vec<&'static str> {
+/// A loader file is trusted only when root owns the resolved file.
+const TRUSTED_LOADER_UID: u32 = 0;
+
+fn static_loader_paths(provider: RuntimeProviderId, arch: LoaderArch) -> Vec<&'static str> {
     let mut paths = match arch {
         LoaderArch::X86_64 => X86_64_LOADERS.to_vec(),
         LoaderArch::Aarch64 => AARCH64_LOADERS.to_vec(),
@@ -63,6 +66,143 @@ fn loader_paths(provider: RuntimeProviderId, arch: LoaderArch) -> Vec<&'static s
         _ => {}
     }
     paths
+}
+
+fn loader_dirs(arch: LoaderArch) -> [&'static str; 6] {
+    match arch {
+        LoaderArch::X86_64 => [
+            "/lib/x86_64-linux-gnu",
+            "/usr/lib/x86_64-linux-gnu",
+            "/lib64",
+            "/usr/lib64",
+            "/lib",
+            "/usr/lib",
+        ],
+        LoaderArch::Aarch64 => [
+            "/lib/aarch64-linux-gnu",
+            "/usr/lib/aarch64-linux-gnu",
+            "/lib64",
+            "/usr/lib64",
+            "/lib",
+            "/usr/lib",
+        ],
+    }
+}
+
+fn loader_name(arch: LoaderArch) -> &'static str {
+    match arch {
+        LoaderArch::X86_64 => "ld-linux-x86-64.so.2",
+        LoaderArch::Aarch64 => "ld-linux-aarch64.so.1",
+    }
+}
+
+fn preferred_loader(arch: LoaderArch) -> &'static str {
+    match arch {
+        LoaderArch::X86_64 => "/lib64/ld-linux-x86-64.so.2",
+        LoaderArch::Aarch64 => "/lib/ld-linux-aarch64.so.1",
+    }
+}
+
+fn plan_loaders(provider: RuntimeProviderId, arch: LoaderArch) -> Result<Vec<PathBuf>, String> {
+    // The host arch is the machine that will open the files. The other arch
+    // stays the Debian row: one machine does not hold both sysroots.
+    #[cfg(target_os = "linux")]
+    if arch == LoaderArch::host() {
+        return resolve_loader_paths(provider, arch, Path::new("/"), None, TRUSTED_LOADER_UID);
+    }
+    Ok(static_loader_paths(provider, arch)
+        .into_iter()
+        .map(PathBuf::from)
+        .collect())
+}
+
+/// First existing file in `directories`, or the fixed six when `directories`
+/// is `None`. The dynamic loader tries its traditional path first, then the
+/// same directories. Symlinks are resolved for the owner and mode check. The
+/// returned path is the path that existed, one file.
+#[cfg(unix)]
+fn resolve_loader_paths(
+    provider: RuntimeProviderId,
+    arch: LoaderArch,
+    root: &Path,
+    directories: Option<&[&str]>,
+    trust_uid: u32,
+) -> Result<Vec<PathBuf>, String> {
+    let standard;
+    let dirs: &[&str] = if let Some(dirs) = directories {
+        dirs
+    } else {
+        standard = loader_dirs(arch);
+        &standard
+    };
+    let mut names = vec![loader_name(arch), "libc.so.6", "libgcc_s.so.1"];
+    if matches!(
+        (provider, arch),
+        (RuntimeProviderId::Model, LoaderArch::X86_64)
+            | (
+                RuntimeProviderId::Model | RuntimeProviderId::Wallet,
+                LoaderArch::Aarch64
+            )
+    ) {
+        names.push("libm.so.6");
+    }
+    names
+        .into_iter()
+        .map(|name| {
+            let preferred = (name == loader_name(arch)).then_some(preferred_loader(arch));
+            locate(root, dirs, name, preferred, trust_uid)
+        })
+        .collect()
+}
+
+#[cfg(unix)]
+fn locate(
+    root: &Path,
+    dirs: &[&str],
+    name: &str,
+    preferred: Option<&str>,
+    trust_uid: u32,
+) -> Result<PathBuf, String> {
+    use std::os::unix::fs::MetadataExt;
+    let mut tried = Vec::new();
+    if let Some(path) = preferred {
+        tried.push(path.to_string());
+    }
+    for dir in dirs {
+        let path = format!("{dir}/{name}");
+        if !tried.contains(&path) {
+            tried.push(path);
+        }
+    }
+    for rel in &tried {
+        let candidate = under_root(root, rel);
+        if std::fs::symlink_metadata(&candidate).is_err() {
+            continue;
+        }
+        let canonical = std::fs::canonicalize(&candidate)
+            .map_err(|_| format!("provider start is refused: {name}"))?;
+        let meta = std::fs::metadata(&canonical)
+            .map_err(|_| format!("provider start is refused: {name}"))?;
+        // A directory or other inode at the library name is not that file.
+        if meta.uid() == trust_uid && meta.mode() & 0o022 == 0 && meta.is_file() {
+            return Ok(candidate);
+        }
+        return Err(format!("provider start is refused: {name}"));
+    }
+    Err(format!(
+        "provider start is refused: {name} was not in {}",
+        tried.join(", ")
+    ))
+}
+
+#[cfg(unix)]
+fn under_root(root: &Path, absolute: &str) -> PathBuf {
+    let rel = absolute.trim_start_matches('/');
+    if root == Path::new("/") {
+        PathBuf::from(format!("/{rel}"))
+    } else {
+        root.join(rel)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -186,8 +326,8 @@ fn build_for_arch(
             }
         }
     }
-    for path in loader_paths(provider, arch) {
-        rules.push(PathRule("LANDLOCK_LOADER_PATHS", path.into(), BINARY));
+    for path in plan_loaders(provider, arch)? {
+        rules.push(PathRule("LANDLOCK_LOADER_PATHS", path, BINARY));
     }
     Ok(Plan {
         abi,
@@ -248,8 +388,8 @@ pub(super) fn build_path_allow_plan(
             executable.to_path_buf(),
             BINARY,
         ));
-        for path in loader_paths(provider, LoaderArch::host()) {
-            rules.push(PathRule("LANDLOCK_LOADER_PATHS", path.into(), BINARY));
+        for path in plan_loaders(provider, LoaderArch::host())? {
+            rules.push(PathRule("LANDLOCK_LOADER_PATHS", path, BINARY));
         }
     }
     if matches!(provider, RuntimeProviderId::Chain) {
@@ -604,5 +744,293 @@ mod tests {
             .rules
             .iter()
             .all(|rule| rule.0 != "READ_ONLY_FILE"));
+    }
+
+    #[cfg(unix)]
+    fn plant(root: &std::path::Path, rel: &str, mode: u32) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let path = under_root(root, rel);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, b"library").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
+        path
+    }
+
+    #[cfg(unix)]
+    fn names_for(provider: RuntimeProviderId, arch: LoaderArch) -> Vec<&'static str> {
+        static_loader_paths(provider, arch)
+            .into_iter()
+            .map(|path| path.rsplit('/').next().unwrap())
+            .collect()
+    }
+
+    /// Debian's resolved paths are today's row. Fedora, Arch, and busybox take
+    /// the first later directory. A missing library names the list. A
+    /// group-writable file, a user-owned file, and a bad symlink target are
+    /// refused by the library name. The rule is that one file.
+    #[cfg(unix)]
+    #[test]
+    fn loader_paths_follow_the_fixed_directory_list() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+        use RuntimeProviderId::*;
+        let uid = unsafe { libc::geteuid() };
+        assert_eq!(TRUSTED_LOADER_UID, 0);
+        let providers = [Did, Wallet, Model, Localhost, Object, Chain];
+        for arch in [LoaderArch::X86_64, LoaderArch::Aarch64] {
+            let debian = tempfile::tempdir().unwrap();
+            for provider in providers {
+                for path in static_loader_paths(provider, arch) {
+                    plant(debian.path(), path, 0o755);
+                }
+            }
+            // The real Debian loader also sits in the multiarch directory.
+            // The traditional path stays the row.
+            plant(
+                debian.path(),
+                &format!(
+                    "/lib/{}/{}",
+                    match arch {
+                        LoaderArch::X86_64 => "x86_64-linux-gnu",
+                        LoaderArch::Aarch64 => "aarch64-linux-gnu",
+                    },
+                    loader_name(arch)
+                ),
+                0o755,
+            );
+            for provider in providers {
+                let got = resolve_loader_paths(provider, arch, debian.path(), None, uid).unwrap();
+                let expect: Vec<_> = static_loader_paths(provider, arch)
+                    .into_iter()
+                    .map(|path| under_root(debian.path(), path))
+                    .collect();
+                assert_eq!(got, expect, "{provider:?} {arch:?} left today's row");
+                assert!(got.iter().all(|path| path.is_file()), "{got:?}");
+            }
+        }
+
+        let fedora = tempfile::tempdir().unwrap();
+        for name in names_for(Model, LoaderArch::X86_64) {
+            plant(fedora.path(), &format!("/lib64/{name}"), 0o755);
+        }
+        let got =
+            resolve_loader_paths(Model, LoaderArch::X86_64, fedora.path(), None, uid).unwrap();
+        assert!(
+            got.iter()
+                .all(|path| path.starts_with(fedora.path().join("lib64"))),
+            "{got:?}"
+        );
+
+        let arch_root = tempfile::tempdir().unwrap();
+        for name in names_for(Chain, LoaderArch::X86_64) {
+            plant(arch_root.path(), &format!("/usr/lib64/{name}"), 0o755);
+        }
+        let got =
+            resolve_loader_paths(Chain, LoaderArch::X86_64, arch_root.path(), None, uid).unwrap();
+        assert!(
+            got.iter()
+                .all(|path| path.starts_with(arch_root.path().join("usr/lib64"))),
+            "{got:?}"
+        );
+
+        for (arch, loader) in [
+            (LoaderArch::X86_64, "ld-linux-x86-64.so.2"),
+            (LoaderArch::Aarch64, "ld-linux-aarch64.so.1"),
+        ] {
+            let busy = tempfile::tempdir().unwrap();
+            for provider in providers {
+                for name in names_for(provider, arch) {
+                    plant(busy.path(), &format!("/lib/{name}"), 0o755);
+                }
+            }
+            let got = resolve_loader_paths(Localhost, arch, busy.path(), None, uid).unwrap();
+            assert_eq!(got[0], under_root(busy.path(), &format!("/lib/{loader}")));
+            assert!(
+                got.iter()
+                    .all(|path| !path.to_string_lossy().contains("linux-gnu")),
+                "{got:?}"
+            );
+        }
+
+        let missing = tempfile::tempdir().unwrap();
+        let err = resolve_loader_paths(Localhost, LoaderArch::X86_64, missing.path(), None, uid)
+            .unwrap_err();
+        assert!(
+            err.starts_with("provider start is refused: ld-linux-x86-64.so.2 was not in "),
+            "{err}"
+        );
+        for dir in loader_dirs(LoaderArch::X86_64) {
+            assert!(err.contains(dir), "{err}");
+        }
+        let beside = tempfile::tempdir().unwrap();
+        for path in static_loader_paths(Localhost, LoaderArch::X86_64) {
+            if !path.ends_with("libc.so.6") {
+                plant(beside.path(), path, 0o755);
+            }
+        }
+        plant(beside.path(), "/opt/chain-provider/libc.so.6", 0o755);
+        let err = resolve_loader_paths(Localhost, LoaderArch::X86_64, beside.path(), None, uid)
+            .unwrap_err();
+        assert!(err.contains("libc.so.6 was not in "), "{err}");
+        assert!(!err.contains("/opt"), "{err}");
+
+        let loose = tempfile::tempdir().unwrap();
+        for path in static_loader_paths(Localhost, LoaderArch::X86_64) {
+            plant(
+                loose.path(),
+                path,
+                if path.ends_with("libc.so.6") {
+                    0o664
+                } else {
+                    0o755
+                },
+            );
+        }
+        let err = resolve_loader_paths(Localhost, LoaderArch::X86_64, loose.path(), None, uid)
+            .unwrap_err();
+        assert_eq!(err, "provider start is refused: libc.so.6");
+
+        // A planted file is owned by this process. The root-owner row runs
+        // when this process is not root, which is the only uid this row can plant.
+        if uid != TRUSTED_LOADER_UID {
+            let owned = tempfile::tempdir().unwrap();
+            for path in static_loader_paths(Localhost, LoaderArch::X86_64) {
+                plant(owned.path(), path, 0o755);
+            }
+            let err = resolve_loader_paths(
+                Localhost,
+                LoaderArch::X86_64,
+                owned.path(),
+                None,
+                TRUSTED_LOADER_UID,
+            )
+            .unwrap_err();
+            assert_eq!(err, "provider start is refused: ld-linux-x86-64.so.2");
+        }
+        let directory = tempfile::tempdir().unwrap();
+        for path in static_loader_paths(Localhost, LoaderArch::X86_64) {
+            if path.ends_with("libc.so.6") {
+                let dir = under_root(directory.path(), path);
+                std::fs::create_dir_all(&dir).unwrap();
+                std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+            } else {
+                plant(directory.path(), path, 0o755);
+            }
+        }
+        let err = resolve_loader_paths(Localhost, LoaderArch::X86_64, directory.path(), None, uid)
+            .unwrap_err();
+        assert_eq!(err, "provider start is refused: libc.so.6");
+
+        let linked = tempfile::tempdir().unwrap();
+        for path in static_loader_paths(Localhost, LoaderArch::X86_64) {
+            if path.ends_with("libc.so.6") {
+                let final_file = plant(linked.path(), "/final/libc.so.6", 0o755);
+                let mid = under_root(linked.path(), "/lib/x86_64-linux-gnu/mid");
+                std::fs::create_dir_all(mid.parent().unwrap()).unwrap();
+                symlink(&final_file, &mid).unwrap();
+                symlink("mid", under_root(linked.path(), path)).unwrap();
+            } else {
+                plant(linked.path(), path, 0o755);
+            }
+        }
+        let got =
+            resolve_loader_paths(Localhost, LoaderArch::X86_64, linked.path(), None, uid).unwrap();
+        let libc = under_root(linked.path(), "/lib/x86_64-linux-gnu/libc.so.6");
+        assert_eq!(
+            got.iter().find(|path| path.ends_with("libc.so.6")),
+            Some(&libc)
+        );
+        assert_ne!(std::fs::canonicalize(&libc).unwrap(), libc);
+        std::fs::set_permissions(
+            under_root(linked.path(), "/final/libc.so.6"),
+            std::fs::Permissions::from_mode(0o664),
+        )
+        .unwrap();
+        let err = resolve_loader_paths(Localhost, LoaderArch::X86_64, linked.path(), None, uid)
+            .unwrap_err();
+        assert_eq!(err, "provider start is refused: libc.so.6");
+    }
+
+    /// A copied tree under the test root, found through an injected directory
+    /// list that is not the multiarch directory. The child installs that one
+    /// file rule and can open the file.
+    #[cfg(all(target_os = "linux", not(elastos_unsupported_os_check)))]
+    #[test]
+    fn a_linux_child_opens_a_library_found_outside_the_multiarch_directory() {
+        let root = tempfile::tempdir().unwrap();
+        let uid = unsafe { libc::geteuid() };
+        let mut paths = Vec::new();
+        for name in names_for(Localhost, LoaderArch::host()) {
+            paths.push(plant(root.path(), &format!("/lib/{name}"), 0o755));
+        }
+        let got = resolve_loader_paths(
+            Localhost,
+            LoaderArch::host(),
+            root.path(),
+            Some(&["/lib"]),
+            uid,
+        )
+        .unwrap();
+        assert_eq!(got, paths);
+        assert!(got
+            .iter()
+            .all(|path| !path.to_string_lossy().contains("linux-gnu")));
+        let abi = kernel_abi().expect("this kernel has no Landlock");
+        let admitted = super::super::rights::admit_runtime_grant(Localhost);
+        let plan = Plan {
+            abi,
+            handled: handled_fs(abi),
+            rules: got
+                .iter()
+                .map(|path| PathRule("LANDLOCK_LOADER_PATHS", path.clone(), BINARY))
+                .collect(),
+            storage_dev: 0,
+            storage_ino: 0,
+            root_dev: Vec::new(),
+            root_ino: Vec::new(),
+        };
+        // The child calls the installer directly, as the installer's own tests do.
+        use super::super::preexec_installer::{install, prepare_path_allow};
+        let prepared = prepare_path_allow(Localhost, &admitted, plan).unwrap();
+        use std::os::fd::AsRawFd;
+        use std::os::unix::ffi::OsStrExt;
+        let library = std::ffi::CString::new(got[1].as_os_str().as_bytes()).unwrap();
+        let hidden = plant(root.path(), "/lib/hidden.so", 0o755);
+        let hidden = std::ffi::CString::new(hidden.as_os_str().as_bytes()).unwrap();
+        let report = std::fs::File::open("/dev/null").unwrap();
+        assert!(
+            report.as_raw_fd() > 3,
+            "the report fd must survive close_range"
+        );
+        let pid = unsafe { libc::fork() };
+        assert!(pid >= 0);
+        if pid == 0 {
+            let code = match unsafe { install(&prepared, report.as_raw_fd(), -1) } {
+                Err(_) => 80,
+                Ok(()) => {
+                    // The filter admits openat and answers any other open with
+                    // EACCES, the same errno Landlock uses for a missing rule.
+                    let allowed =
+                        unsafe { libc::openat(libc::AT_FDCWD, library.as_ptr(), libc::O_RDONLY) };
+                    let denied =
+                        unsafe { libc::openat(libc::AT_FDCWD, hidden.as_ptr(), libc::O_RDONLY) };
+                    let denied_errno = unsafe { *libc::__errno_location() };
+                    if allowed >= 0 {
+                        unsafe { libc::close(allowed) };
+                    }
+                    if allowed >= 0 && denied < 0 && denied_errno == libc::EACCES {
+                        0
+                    } else {
+                        81
+                    }
+                }
+            };
+            unsafe { libc::_exit(code) };
+        }
+        let mut status = 0;
+        assert_eq!(unsafe { libc::waitpid(pid, &mut status, 0) }, pid);
+        assert!(
+            libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0,
+            "status {status}"
+        );
     }
 }
