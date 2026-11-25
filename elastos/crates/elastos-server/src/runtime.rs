@@ -855,8 +855,7 @@ impl ActivationStop {
             .get_or_insert_with(|| format!("{CAPSULE_STOPPED}: {reason}"));
         calls.committed = calls.committed.saturating_add(1);
         self.flag.requested.store(true, Ordering::Release);
-        let idle = calls.open.is_empty();
-        if idle {
+        if calls.open.is_empty() {
             self.settled.notify_one();
         }
     }
@@ -873,8 +872,7 @@ impl ActivationStop {
             calls.cause = None;
             self.flag.requested.store(false, Ordering::Release);
         }
-        let idle = calls.open.is_empty();
-        if idle {
+        if calls.open.is_empty() {
             self.settled.notify_one();
         }
     }

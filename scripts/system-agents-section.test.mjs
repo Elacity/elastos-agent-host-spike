@@ -499,6 +499,50 @@ test("stop posts the agent id and does not ask for the passkey", async () => {
   assert.equal(steps, 0);
 });
 
+test("a stop shows each unknown step by request id and outcome", async () => {
+  const ui = mount((path, init = {}) => {
+    if ((init.method || "GET") === "GET") {
+      return Promise.resolve({
+        agents: [{ agent_id: AGENT_ID, display_name: "Helper", active: true }],
+      });
+    }
+    return Promise.resolve({
+      agent_id: AGENT_ID,
+      stopped: [{ session_id: "session-1", status: "stopped" }],
+      unknown: [
+        { session_id: "session-1", request_id: "step-9", outcome: "unknown" },
+        { session_id: "session-1", request_id: "step-10", outcome: "unknown" },
+      ],
+    });
+  });
+  await ui.load();
+  ui.button("Stop").click();
+  await flush();
+  await flush();
+  assert.equal(ui.state(AGENT_ID), "Unknown step: step-9 unknown, step-10 unknown");
+});
+
+test("a stop that is still stopping names the unknown step as well", async () => {
+  const ui = mount((path, init = {}) => {
+    if ((init.method || "GET") === "GET") {
+      return Promise.resolve({
+        agents: [{ agent_id: AGENT_ID, display_name: "Helper", active: true }],
+      });
+    }
+    return Promise.resolve({
+      agent_id: AGENT_ID,
+      stopped: [],
+      stopping: [{ session_id: "session-1", status: "stopping" }],
+      unknown: [{ session_id: "session-1", request_id: "step-9", outcome: "unknown" }],
+    });
+  });
+  await ui.load();
+  ui.button("Stop").click();
+  await flush();
+  await flush();
+  assert.equal(ui.state(AGENT_ID), "Stopping. Unknown step: step-9 unknown");
+});
+
 test("a stop that is still stopping stays Stopping and Start is disabled", async () => {
   const calls = [];
   const ui = mount((path, init = {}) => {
