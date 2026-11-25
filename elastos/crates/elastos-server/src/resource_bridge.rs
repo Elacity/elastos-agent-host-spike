@@ -1112,6 +1112,14 @@ async fn authorize_and_dispatch_resource_invoke(
         return finish_component_invoke(bridge_ctx, &audit_id, &dispatch, "denied", refusal);
     }
 
+    // An agent whose launch released its account is refused by name before the
+    // hosted-run gate and before any send. A person with neither still runs.
+    if dispatch.scheme == "model" {
+        if let Some(refusal) = agent_run_without_account(bridge_ctx, &dispatch.operation) {
+            return finish_component_invoke(bridge_ctx, &audit_id, &dispatch, "denied", refusal);
+        }
+    }
+
     // A model run is bound to this bridge's caller, never to the body.
     if dispatch.scheme == "model" && dispatch.operation != "offers_list" {
         match crate::api::gateway::bus_model_provider_request(
@@ -1180,10 +1188,7 @@ async fn authorize_and_dispatch_resource_invoke(
                     &audit_id,
                     &dispatch,
                     "denied",
-                    resource_error_response(
-                        "denied",
-                        "model_budget_exceeded: agent account unavailable",
-                    ),
+                    resource_error_response("denied", AGENT_ACCOUNT_UNAVAILABLE),
                 );
             }
             if let Some(ref budget) = bridge_ctx.model_budget {
@@ -1670,6 +1675,31 @@ impl ModelBudgetRefusal {
     }
 }
 
+const AGENT_ACCOUNT_UNAVAILABLE: &str = "model_budget_exceeded: agent account unavailable";
+
+/// An admitted agent whose launch holds neither a ceiling nor an account.
+/// A person, or an id that is not a stored agent, is not this refusal.
+fn agent_run_without_account(ctx: &BridgeContext, operation: &str) -> Option<serde_json::Value> {
+    if operation != "runs_create" {
+        return None;
+    }
+    if ctx.model_token_ceiling.is_some() || ctx.model_budget.is_some() {
+        return None;
+    }
+    let (Some(data_dir), Some(principal_id)) =
+        (ctx.data_dir.as_deref(), ctx.principal_id.as_deref())
+    else {
+        return None;
+    };
+    let Ok(Some(stored)) = crate::auth::stored_principal_record(data_dir, principal_id) else {
+        return None;
+    };
+    if stored.kind != crate::auth::PrincipalKind::Agent {
+        return None;
+    }
+    Some(resource_error_response("denied", AGENT_ACCOUNT_UNAVAILABLE))
+}
+
 /// Refuse a model invoke when the admitted agent's signed ceiling is 0.
 /// `None` means this capsule is not an admitted agent: there is no ceiling
 /// entry, and the model rule does not apply. The request is not an argument.
@@ -1788,15 +1818,19 @@ fn budget_refusal_response(refusal: BudgetRefusal) -> serde_json::Value {
             &format!("model_budget_exceeded: run needs {asked} tokens; {held} of {ceiling} held"),
         ),
         BudgetRefusal::Record(name) => record_refusal_response(name),
-        _ => resource_error_response("denied", "model_budget_exceeded: agent account unavailable"),
+        BudgetRefusal::HoldsFull => {
+            resource_error_response("denied", "model_budget_exceeded: holds are full")
+        }
+        BudgetRefusal::HostedRun => resource_error_response(
+            crate::api::gateway::HOSTED_AGENT_RUN_REFUSED,
+            crate::api::gateway::HOSTED_AGENT_RUN_SENTENCE,
+        ),
+        _ => resource_error_response("denied", AGENT_ACCOUNT_UNAVAILABLE),
     }
 }
 
 /// A stored-record refusal. `LOCK_ORDER` stays an internal sentence.
 fn record_refusal_response(name: &'static str) -> serde_json::Value {
-    if name == crate::api::gateway::HOSTED_AGENT_RUN_SENTENCE {
-        return resource_error_response(crate::api::gateway::HOSTED_AGENT_RUN_REFUSED, name);
-    }
     if name == crate::agents::LOCK_ORDER {
         return resource_error_response(
             "agent_record_unavailable",
@@ -9149,6 +9183,43 @@ pub(crate) mod tests {
         assert_eq!(provider.requests.lock().await.len(), 1);
     }
 
+    /// The ceiling is held, the capabilities are already copied, then the launch
+    /// drops the ceiling before the account read. The agent run is refused by
+    /// the account sentence, and the hosted gate does not answer.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_released_launch_refuses_an_agent_run_before_the_gate() {
+        let (mut ctx, provider, temp) = model_bus(Some(ALICE), "capsule-released").await;
+        let agent = crate::agents::tests::plant_for_dispatch(temp.path(), ALICE, ALICE);
+        ctx.principal_id = Some(agent.clone());
+        assert!(
+            !ctx.manifest_capabilities.is_empty(),
+            "capabilities were copied before the account read"
+        );
+        let planted =
+            crate::runtime::tests::plant_held_model_launch("capsule-released", &agent, 64);
+        crate::runtime::tests::arm_launch_release_plant("capsule-released");
+        let (ceiling, budget) = crate::runtime::tests::read_planted_model_launch(&planted);
+        assert!(ceiling.is_none(), "the plant left the ceiling in the read");
+        assert!(budget.is_none(), "the plant left the account in the read");
+        ctx.model_token_ceiling = ceiling;
+        ctx.model_budget = budget;
+        let response = model_invoke(
+            &ctx,
+            "runs_create",
+            Action::Execute,
+            model_create("model:openrouter"),
+        )
+        .await;
+        let message = response["response"]["message"].as_str().unwrap_or("");
+        assert!(message.contains(AGENT_ACCOUNT_UNAVAILABLE), "{response}");
+        assert_ne!(response["response"]["code"], "hosted_agent_run_refused");
+        assert!(
+            provider.requests.lock().await.is_empty(),
+            "the provider was asked"
+        );
+    }
+
     /// Hosted agent rows. The body is a test file the feature reader skips.
     /// The next module is the row a build without agents lists, with the reason.
     mod hosted_agent_rows;
@@ -9228,6 +9299,22 @@ pub(crate) mod tests {
         assert!(!message.contains("agent file lock"));
         assert!(!message.contains("budget mutex"));
         assert!(!message.contains("model_budget_exceeded"));
+        let named_sentence = budget_refusal_response(crate::model_budget::Refusal::Record(
+            crate::api::gateway::HOSTED_AGENT_RUN_SENTENCE,
+        ));
+        assert_eq!(named_sentence["code"], "agent_record_unavailable");
+        let hosted = budget_refusal_response(crate::model_budget::Refusal::HostedRun);
+        assert_eq!(
+            hosted["code"],
+            crate::api::gateway::HOSTED_AGENT_RUN_REFUSED
+        );
+        assert_eq!(
+            hosted["message"],
+            crate::api::gateway::HOSTED_AGENT_RUN_SENTENCE
+        );
+        let full = budget_refusal_response(crate::model_budget::Refusal::HoldsFull);
+        assert_eq!(full["code"], "denied");
+        assert_eq!(full["message"], "model_budget_exceeded: holds are full");
     }
 
     /// The gateway walker keeps production code written after a `tests`

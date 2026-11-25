@@ -1173,6 +1173,15 @@ impl Runtime {
         Option<u64>,
         Option<crate::resource_bridge::ModelDispatchBudget>,
     ) {
+        // A test plants the launch release here, after the capability read and
+        // before this ceiling read. The copied capabilities stay; the account does not.
+        #[cfg(test)]
+        if tests::consume_launch_release_plant(capsule_id) {
+            ceilings
+                .write()
+                .unwrap_or_else(|err| err.into_inner())
+                .remove(capsule_id);
+        }
         let held = ceilings
             .read()
             .unwrap_or_else(|it| it.into_inner())
@@ -3599,6 +3608,74 @@ pub(crate) mod tests {
         Component, ComponentImportSection, ComponentTypeRef as EncodedComponentTypeRef,
         ComponentTypeSection, InstanceType,
     };
+
+    static LAUNCH_RELEASE_PLANT: StdMutex<Option<String>> = StdMutex::new(None);
+
+    /// The next ceiling read for `capsule_id` drops that entry first.
+    pub(crate) fn arm_launch_release_plant(capsule_id: &str) {
+        *LAUNCH_RELEASE_PLANT
+            .lock()
+            .unwrap_or_else(|err| err.into_inner()) = Some(capsule_id.to_string());
+    }
+
+    pub(crate) fn consume_launch_release_plant(capsule_id: &str) -> bool {
+        let mut planted = LAUNCH_RELEASE_PLANT
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        if planted.as_deref() == Some(capsule_id) {
+            *planted = None;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// A ceiling held for `capsule_id`, so a later read can release it.
+    pub(crate) struct PlantedModelLaunch {
+        capsule_id: String,
+        ceilings: Arc<StdRwLock<HashMap<String, AgentModelCeiling>>>,
+        account: Arc<ModelBudget>,
+        offers: Arc<StdRwLock<HashMap<String, crate::resource_bridge::ModelOfferBound>>>,
+    }
+
+    pub(crate) fn plant_held_model_launch(
+        capsule_id: &str,
+        agent_id: &str,
+        ceiling: u64,
+    ) -> PlantedModelLaunch {
+        let ceilings = Arc::new(StdRwLock::new(HashMap::new()));
+        ceilings
+            .write()
+            .unwrap_or_else(|err| err.into_inner())
+            .insert(
+                capsule_id.to_string(),
+                AgentModelCeiling {
+                    ceiling,
+                    key: AgentKey::for_test(agent_id),
+                },
+            );
+        PlantedModelLaunch {
+            capsule_id: capsule_id.to_string(),
+            ceilings,
+            account: Arc::new(ModelBudget::new()),
+            offers: Arc::new(StdRwLock::new(HashMap::new())),
+        }
+    }
+
+    /// The account read the hostcall uses, including a planted release.
+    pub(crate) fn read_planted_model_launch(
+        planted: &PlantedModelLaunch,
+    ) -> (
+        Option<u64>,
+        Option<crate::resource_bridge::ModelDispatchBudget>,
+    ) {
+        Runtime::model_dispatch_budget(
+            &planted.capsule_id,
+            &planted.ceilings,
+            &planted.account,
+            &planted.offers,
+        )
+    }
 
     impl Runtime {
         /// How many per-agent turns this runtime still holds.
