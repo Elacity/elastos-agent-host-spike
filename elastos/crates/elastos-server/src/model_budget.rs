@@ -243,6 +243,7 @@ impl ModelBudget {
     /// cannot leave a charge without its run key, which is what makes ignoring
     /// a poisoned mutex safe. A hold of zero is stored as zero; an identical
     /// retry returns that zero hold.
+    #[cfg(test)]
     pub(crate) fn reserve(
         &self,
         agent: &AgentKey,
