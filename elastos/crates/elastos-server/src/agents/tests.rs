@@ -1677,6 +1677,63 @@ fn an_off_agent_is_not_stored_for_its_root() {
     assert!(crate::agents::refuse_inactive_agent(home.path(), &agent.agent_id).is_err());
 }
 
+/// A signed `stopping` row is still in the file after the process that wrote
+/// it is gone. The next read appends one `agent.stopped` result `ok` for that
+/// session, and a second read does not append another.
+#[test]
+fn a_stopping_row_is_confirmed_once_from_the_file() {
+    let home = Home::new();
+    let session = "session-stopping-confirm";
+    crate::auth::append_audit_event(
+        home.path(),
+        elastos_runtime::auth::RuntimeAuditEventV1 {
+            schema: elastos_runtime::auth::RuntimeAuditEventV1::SCHEMA.to_string(),
+            event_id: "audit:stop-plant:1".to_string(),
+            event_type: "agent.stopped".to_string(),
+            principal_id: Some(home.owner.principal_id.clone()),
+            proof_binding_id: Some(home.owner.proof_binding_id.clone()),
+            session_id: Some(session.to_string()),
+            challenge_id: None,
+            capsule_id: None,
+            result: "stopping".to_string(),
+            reason: "planted stopping row".to_string(),
+            occurred_at: 10,
+            signer_did: None,
+            signature: None,
+        },
+    )
+    .unwrap();
+    crate::agent_record_audit::confirm_stopping_rows(home.path()).unwrap();
+    let stopped: Vec<_> = home
+        .audit()
+        .into_iter()
+        .filter(|event| {
+            event.event_type == "agent.stopped" && event.session_id.as_deref() == Some(session)
+        })
+        .collect();
+    assert_eq!(
+        stopped.len(),
+        2,
+        "the file keeps the stopping row and one final row"
+    );
+    assert!(stopped.iter().any(|event| event.result == "stopping"));
+    assert_eq!(
+        stopped.iter().filter(|event| event.result == "ok").count(),
+        1
+    );
+    crate::agent_record_audit::confirm_stopping_rows(home.path()).unwrap();
+    let finals = home
+        .audit()
+        .into_iter()
+        .filter(|event| {
+            event.event_type == "agent.stopped"
+                && event.session_id.as_deref() == Some(session)
+                && event.result == "ok"
+        })
+        .count();
+    assert_eq!(finals, 1, "a second read does not append another final row");
+}
+
 #[test]
 fn rename_changes_display_name_only() {
     let home = Home::new();
