@@ -787,3 +787,301 @@ async fn fenced_object_library_list_gets_viewers_from_the_runtime() {
     );
     started.bridge().shutdown().await.unwrap();
 }
+
+/// Deleting the gateway's object fill (the call after `send_raw`) turns this
+/// red. The same function fills resource_bridge, the desktop list, trash
+/// roots, desktop events, and library events.
+#[test]
+fn gateway_object_reply_calls_fill_fenced_library_fields() {
+    let proxy = include_str!("api/gateway_provider_proxy.rs");
+    let object_reply = proxy
+        .split("if scheme == \"object\" {")
+        .nth(1)
+        .expect("gateway object reply");
+    let window = &object_reply[..object_reply.find("\n    if ").unwrap_or(object_reply.len())];
+    assert!(
+        window.contains("crate::library::fill_fenced_library_fields"),
+        "deleting gateway_provider_proxy's object fill turns this row red"
+    );
+    for (label, path) in [
+        ("desktop", include_str!("api/gateway_home_system.rs")),
+        ("resource_bridge", include_str!("resource_bridge.rs")),
+        ("library events", proxy),
+    ] {
+        assert!(
+            path.contains("fill_fenced_library_fields"),
+            "{label} object reply does not use the one fill"
+        );
+    }
+}
+
+/// Release musl helpers, started by `spawn_path_allow` on Linux. The CI step
+/// sets `ELASTOS_MUSL_HELPER_FENCE` and the three binary paths. A normal
+/// `cargo test` leaves the flag unset and does not look for those binaries.
+#[cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+#[tokio::test]
+async fn musl_release_helpers_start_under_the_fence() {
+    if std::env::var_os("ELASTOS_MUSL_HELPER_FENCE").is_none() {
+        return;
+    }
+    use sha2::{Digest, Sha256};
+    use std::io::Write as _;
+    use std::os::unix::fs::PermissionsExt;
+
+    fn binary(key: &str) -> PathBuf {
+        let path = std::env::var(key).unwrap_or_else(|_| panic!("{key} is unset"));
+        let path = PathBuf::from(path);
+        assert!(path.is_file(), "{} is not the musl helper", path.display());
+        path
+    }
+
+    fn pinned(path: &Path, data: &Path) -> elastos_runtime::provider::CheckedExecutable {
+        let digest = hex::encode(Sha256::digest(std::fs::read(path).unwrap()));
+        elastos_runtime::provider::CheckedExecutable::pinned(path, &format!("sha256:{digest}"))
+            .unwrap()
+            .with_home_data_dir(data)
+    }
+
+    fn authority() -> elastos_common::ProviderAuthority {
+        serde_json::from_value(serde_json::json!({
+            "reason": "runtime grant",
+            "capabilities": [],
+            "audit_events": [],
+            "rights": []
+        }))
+        .unwrap()
+    }
+
+    async fn exchange(
+        bridge: &elastos_runtime::provider::ProviderBridge,
+        request: serde_json::Value,
+    ) -> serde_json::Value {
+        bridge
+            .send_raw(&request)
+            .await
+            .unwrap_or_else(|err| panic!("{request}: {err}"))
+    }
+
+    let localhost_bin = binary("ELASTOS_MUSL_LOCALHOST");
+    let object_bin = binary("ELASTOS_MUSL_OBJECT");
+    let chain_bin = binary("ELASTOS_MUSL_CHAIN");
+
+    let home = tempfile::tempdir().unwrap();
+    let data = std::fs::canonicalize(home.path()).unwrap();
+    std::fs::set_permissions(&data, std::fs::Permissions::from_mode(0o700)).unwrap();
+    for name in elastos_common::localhost::FILE_BACKED_ROOTS {
+        let root = data.join(name);
+        std::fs::create_dir(&root).unwrap();
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    std::fs::write(data.join("ElastOS/musl-note.txt"), b"musl-localhost").unwrap();
+    let localhost = elastos_runtime::provider::ProviderBridge::spawn_path_allow(
+        "localhost-provider",
+        &authority(),
+        &pinned(&localhost_bin, &data),
+        &data,
+        elastos_runtime::provider::BridgeProviderConfig {
+            base_path: data.display().to_string(),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap_or_else(|err| panic!("musl localhost init failed: {err}"));
+    let read = exchange(
+        localhost.bridge(),
+        serde_json::json!({"op": "read", "path": "ElastOS/musl-note.txt"}),
+    )
+    .await;
+    assert_eq!(read["status"], "ok", "{read}");
+    localhost.bridge().shutdown().await.unwrap();
+
+    std::fs::remove_dir_all(data.join("ElastOS")).unwrap();
+    assert!(!data.join("ElastOS").exists());
+    let (_, did) = elastos_identity::load_or_create_did(&data).unwrap();
+    assert!(
+        !data.join("ElastOS/System").exists(),
+        "the object proof starts with no ElastOS/System directory"
+    );
+    let object = elastos_runtime::provider::ProviderBridge::spawn_path_allow(
+        "object-provider",
+        &authority(),
+        &pinned(&object_bin, &data),
+        &data,
+        elastos_runtime::provider::BridgeProviderConfig {
+            base_path: data.display().to_string(),
+            extra: serde_json::json!({ "runtime_did": did }),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap_or_else(|err| panic!("musl object init failed: {err}"));
+    assert!(
+        data.join("ElastOS/System").is_dir(),
+        "object start creates ElastOS/System when the Home has none"
+    );
+    let principal = "person:local:ada";
+    let record = crate::auth::store_test_human_principal(&data, principal);
+    let bridge = object.bridge();
+    let uri = format!("{}/note.txt", record.localhost_root);
+    let payload = base64::engine::general_purpose::STANDARD.encode(b"musl-object");
+    let wrote = exchange(
+        bridge,
+        serde_json::json!({"op": "write", "principal_id": principal, "uri": uri, "data": payload}),
+    )
+    .await;
+    assert_eq!(wrote["status"], "ok", "{wrote}");
+    let listed = exchange(
+        bridge,
+        serde_json::json!({"op": "list", "principal_id": principal, "uri": record.localhost_root}),
+    )
+    .await;
+    assert_eq!(listed["status"], "ok", "{listed}");
+    let read = exchange(
+        bridge,
+        serde_json::json!({"op": "read", "principal_id": principal, "uri": uri}),
+    )
+    .await;
+    assert_eq!(read["status"], "ok", "{read}");
+    let renamed = exchange(
+        bridge,
+        serde_json::json!({"op": "rename", "principal_id": principal, "uri": uri, "name": "renamed.txt"}),
+    )
+    .await;
+    assert_eq!(renamed["status"], "ok", "{renamed}");
+    let renamed_uri = format!("{}/renamed.txt", record.localhost_root);
+    let folder = exchange(
+        bridge,
+        serde_json::json!({
+            "op": "mkdir",
+            "principal_id": principal,
+            "parent_uri": record.localhost_root,
+            "name": "tree"
+        }),
+    )
+    .await;
+    assert_eq!(folder["status"], "ok", "{folder}");
+    let child = format!("{}/tree/child.txt", record.localhost_root);
+    let child_wrote = exchange(
+        bridge,
+        serde_json::json!({
+            "op": "write",
+            "principal_id": principal,
+            "uri": child,
+            "data": payload
+        }),
+    )
+    .await;
+    assert_eq!(child_wrote["status"], "ok", "{child_wrote}");
+    let folder_uri = format!("{}/tree", record.localhost_root);
+    let trashed = exchange(
+        bridge,
+        serde_json::json!({"op": "trash", "principal_id": principal, "uri": folder_uri}),
+    )
+    .await;
+    assert_eq!(trashed["status"], "ok", "{trashed}");
+    let trash_uri = trashed["data"]["object"]["uri"]
+        .as_str()
+        .unwrap_or_else(|| panic!("trash uri missing: {trashed}"));
+    let removed = exchange(
+        bridge,
+        serde_json::json!({
+            "op": "delete_permanently",
+            "principal_id": principal,
+            "uri": trash_uri
+        }),
+    )
+    .await;
+    assert_eq!(removed["status"], "ok", "{removed}");
+    let mut zip_bytes = Vec::new();
+    {
+        let mut writer = zip::ZipWriter::new(std::io::Cursor::new(&mut zip_bytes));
+        writer
+            .start_file("note.txt", zip::write::SimpleFileOptions::default())
+            .unwrap();
+        writer.write_all(b"preview-text").unwrap();
+        writer.finish().unwrap();
+    }
+    let archive_uri = format!("{}/notes.zip", record.localhost_root);
+    let archive_data = base64::engine::general_purpose::STANDARD.encode(&zip_bytes);
+    let archived = exchange(
+        bridge,
+        serde_json::json!({
+            "op": "write",
+            "principal_id": principal,
+            "uri": archive_uri,
+            "data": archive_data
+        }),
+    )
+    .await;
+    assert_eq!(archived["status"], "ok", "{archived}");
+    let preview = exchange(
+        bridge,
+        serde_json::json!({
+            "op": "archive_preview_entry",
+            "principal_id": principal,
+            "uri": archive_uri,
+            "entry": "note.txt"
+        }),
+    )
+    .await;
+    assert_eq!(preview["status"], "ok", "{preview}");
+    let _ = renamed_uri;
+    bridge.shutdown().await.unwrap();
+
+    let resolv = std::fs::read_to_string("/etc/resolv.conf").unwrap_or_default();
+    assert!(
+        resolv.lines().any(|line| {
+            let mut parts = line.split_whitespace();
+            parts.next() == Some("nameserver")
+                && parts.next().is_some_and(|addr| addr.starts_with("127."))
+        }),
+        "the musl fence proof needs a loopback nameserver in /etc/resolv.conf:\n{resolv}"
+    );
+    let chain = elastos_runtime::provider::ProviderBridge::spawn_path_allow(
+        "chain-provider",
+        &authority(),
+        &pinned(&chain_bin, &data),
+        &data,
+        elastos_runtime::provider::BridgeProviderConfig {
+            base_path: data.display().to_string(),
+            extra: serde_json::json!({
+                "networks": [{
+                    "id": "dns-probe",
+                    "display_name": "DNS Probe",
+                    "kind": "evm_json_rpc",
+                    "chain_id": 1,
+                    "native_symbol": "ETH",
+                    "provider": "probe",
+                    "mainnet": false,
+                    "explorer_url": null,
+                    "rpc_url": "https://musl-fence.invalid/rpc"
+                }]
+            }),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap_or_else(|err| panic!("musl chain init failed: {err}"));
+    let lookup = exchange(
+        chain.bridge(),
+        serde_json::json!({"op": "status", "network": "dns-probe"}),
+    )
+    .await;
+    let lookup_text = lookup.to_string().to_lowercase();
+    assert!(
+        !lookup_text.contains("permission denied")
+            && !lookup_text.contains("operation not permitted")
+            && !lookup_text.contains("bad system call"),
+        "chain name lookup was refused by the filter: {lookup}"
+    );
+    let again = exchange(chain.bridge(), serde_json::json!({"op": "networks"})).await;
+    assert_eq!(
+        again["status"], "ok",
+        "chain stayed up after the lookup: {again}"
+    );
+    chain.bridge().shutdown().await.unwrap();
+    eprintln!("musl helper fence: started");
+}

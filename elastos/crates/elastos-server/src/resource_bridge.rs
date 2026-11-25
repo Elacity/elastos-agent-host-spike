@@ -1204,7 +1204,12 @@ async fn authorize_and_dispatch_resource_invoke(
         .send_raw(&dispatch.scheme, &dispatch.request)
         .await
     {
-        Ok(result) => {
+        Ok(mut result) => {
+            if dispatch.scheme == "object" {
+                if let Some(data_dir) = bridge_ctx.data_dir.as_deref() {
+                    crate::library::fill_fenced_library_fields(data_dir, &mut result);
+                }
+            }
             if dispatch.scheme == "model" && dispatch.operation == "offers_list" {
                 if let Some(ref budget) = bridge_ctx.model_budget {
                     cache_model_offers(budget, &result);

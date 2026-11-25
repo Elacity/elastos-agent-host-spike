@@ -6887,7 +6887,10 @@ async fn home_desktop_objects_summary(
         "uri": uri,
     });
     let response = match registry.send_raw("object", &request).await {
-        Ok(response) => response,
+        Ok(mut response) => {
+            crate::library::fill_fenced_library_fields(&state.data_dir, &mut response);
+            response
+        }
         Err(err) => {
             return HomeDesktopObjectsSummary {
                 schema: HOME_DESKTOP_OBJECTS_SCHEMA.to_string(),
@@ -6954,7 +6957,8 @@ async fn home_trash_desktop_object(
         "op": "roots",
         "principal_id": context.principal_id(),
     });
-    let response = registry.send_raw("object", &request).await.ok()?;
+    let mut response = registry.send_raw("object", &request).await.ok()?;
+    crate::library::fill_fenced_library_fields(&state.data_dir, &mut response);
     if response.get("status").and_then(serde_json::Value::as_str) != Some("ok") {
         return None;
     }
@@ -7015,9 +7019,10 @@ async fn home_desktop_events_signature(
             "uri": uri,
             "limit": 32,
         });
-        let Ok(response) = registry.send_raw("object", &request).await else {
+        let Ok(mut response) = registry.send_raw("object", &request).await else {
             continue;
         };
+        crate::library::fill_fenced_library_fields(&state.data_dir, &mut response);
         let Some(events) = response
             .get("data")
             .and_then(|data| data.get("events"))

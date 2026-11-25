@@ -8932,7 +8932,7 @@ pub(crate) use crate::protected_content_runtime::ENABLED_CONFIG_KEY as PROTECT_H
 /// Fill `viewer`, `viewers`, and the `protect` capability on library objects
 /// the fenced object helper returned.
 ///
-/// The helper's roots are `ElastOS`, `Users`, and `UsersAI`. It does not
+/// The helper's roots are `ElastOS/System`, `Users`, and `UsersAI`. It does not
 /// receive `components.json`, `capsules`, or `config.toml`. The Runtime reads
 /// those three and writes only these fields. Every other `LibraryObject`
 /// field stays the helper's: `schema`, `uri`, `name`, `kind`, `mime`, `size`,
@@ -8947,8 +8947,12 @@ pub fn fill_fenced_library_fields(data_dir: &Path, value: &mut Value) {
             }
         }
         Value::Object(map) => {
-            if map.get("schema").and_then(Value::as_str) == Some(LIBRARY_OBJECT_SCHEMA) {
-                fill_one_fenced_library_object(data_dir, map);
+            match map.get("schema").and_then(Value::as_str) {
+                Some(LIBRARY_OBJECT_SCHEMA) => fill_one_fenced_library_object(data_dir, map),
+                Some(LIBRARY_ARCHIVE_PREVIEW_ENTRY_SCHEMA) => {
+                    fill_archive_preview_viewers(data_dir, map);
+                }
+                _ => {}
             }
             let nested: Vec<String> = map.keys().cloned().collect();
             for key in nested {
@@ -8961,13 +8965,7 @@ pub fn fill_fenced_library_fields(data_dir: &Path, value: &mut Value) {
     }
 }
 
-fn fill_one_fenced_library_object(data_dir: &Path, map: &mut serde_json::Map<String, Value>) {
-    let name = map
-        .get("uri")
-        .and_then(Value::as_str)
-        .unwrap_or("")
-        .to_string();
-    let viewers = viewer_options_for_name(data_dir, &name);
+fn write_viewer_fields(map: &mut serde_json::Map<String, Value>, viewers: &[LibraryViewerOption]) {
     if viewers.is_empty() {
         map.remove("viewer");
         map.remove("viewers");
@@ -8975,6 +8973,29 @@ fn fill_one_fenced_library_object(data_dir: &Path, map: &mut serde_json::Map<Str
         map.insert("viewer".to_string(), json!(viewers[0].id));
         map.insert("viewers".to_string(), json!(viewers));
     }
+}
+
+fn fill_archive_preview_viewers(data_dir: &Path, map: &mut serde_json::Map<String, Value>) {
+    let path = map
+        .get("entry")
+        .and_then(|entry| entry.get("path"))
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let viewers = viewer_options_for_name(data_dir, &path);
+    if let Some(entry) = map.get_mut("entry").and_then(Value::as_object_mut) {
+        write_viewer_fields(entry, &viewers);
+    }
+}
+
+fn fill_one_fenced_library_object(data_dir: &Path, map: &mut serde_json::Map<String, Value>) {
+    let name = map
+        .get("uri")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let viewers = viewer_options_for_name(data_dir, &name);
+    write_viewer_fields(map, &viewers);
     let file = map.get("kind").and_then(Value::as_str) == Some("file");
     let published = map.get("published").and_then(Value::as_bool) == Some(true);
     let blocked = map.get("blocked_reason").is_some();

@@ -2965,7 +2965,10 @@ fn main() {
             .send_raw("object", &serde_json::json!({"op": "status"}))
             .await
         {
-            Ok(value) => value.to_string(),
+            Ok(mut value) => {
+                elastos_server::library::fill_fenced_library_fields(&data_dir, &mut value);
+                value.to_string()
+            }
             Err(error) => error.to_string(),
         };
         let chain = match infrastructure
