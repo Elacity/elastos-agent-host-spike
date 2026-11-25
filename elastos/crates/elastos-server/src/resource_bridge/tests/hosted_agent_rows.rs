@@ -10,8 +10,8 @@
 //! (ubuntu-24.04), step "cargo test with prototype-agents", runs
 //! `hosted_agent_rows_stay_in_the_agents_build` and does not contain the
 //! seven rows, because each row is `target_os = "macos"`. Job
-//! `source-home-macos`, step "B4-R named localhost decision tests", does not
-//! select these rows.
+//! `source-home-macos`, step "hosted agent rows", runs these seven after
+//! merge and requires 7 passed.
 //!
 //! A row that reaches the egress broker takes its provider identity from
 //! `ProviderBridge::spawn_confined_model`. That spawn starts the existing

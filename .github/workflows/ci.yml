@@ -1557,6 +1557,23 @@ jobs:
             grep -Eq '^test result: ok\. 1 passed; 0 failed;' "$log" \
               || { echo "::error::${name} selected no test or failed"; exit 1; }
           done
+      # The seven hosted agent rows need this Mac and the agents feature.
+      # A cold library build on this runner is the 25-minute class recorded on
+      # the step above, so this stays on the post-merge job and off pull requests.
+      # The same target directory keeps the second build on that tree.
+      - name: hosted agent rows
+        timeout-minutes: 45
+        working-directory: elastos
+        env:
+          CARGO_TARGET_DIR: ${{ runner.temp }}/b4r-s4-target
+          CARGO_BUILD_BUILD_DIR: ${{ runner.temp }}/b4r-s4-build
+        run: |
+          set -euo pipefail
+          mkdir -p "$CARGO_TARGET_DIR" "$CARGO_BUILD_BUILD_DIR"
+          log="${RUNNER_TEMP}/hosted-agent-rows.log"
+          cargo test --locked -p elastos-server --lib --features prototype-agents hosted_agent_rows:: -- --test-threads=8 | tee "$log"
+          grep -Eq '^test result: ok\. 7 passed; 0 failed;' "$log" \
+            || { echo "::error::hosted agent rows did not pass 7 tests"; exit 1; }
       - name: reserve hosted Mac build and fixture capacity
         timeout-minutes: 10
         run: python3 scripts/update-hop-compare.py prepare-ci-disk
