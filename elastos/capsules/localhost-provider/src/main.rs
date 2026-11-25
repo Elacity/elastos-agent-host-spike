@@ -872,7 +872,7 @@ fn v2_read_code(err: &io::Error) -> String {
         .unwrap_or_else(|| "read_failed".to_string())
 }
 
-/// Local, MyWebSite, Public, and Users. Any other root is returned by name.
+/// Local, Public, and Users. Any other root is returned by name.
 fn offered_v2_root(path: &str) -> Result<(), String> {
     let trimmed = path
         .trim()
@@ -1845,7 +1845,13 @@ mod tests {
             other => panic!("a changed file was accepted: {other:?}"),
         }
         *REVISION_GAP.lock().expect("gap") = None;
-        for root in ["ElastOS", "AppCapsules", "UsersAI", "WebSpaces"] {
+        for root in [
+            "ElastOS",
+            "AppCapsules",
+            "MyWebSite",
+            "UsersAI",
+            "WebSpaces",
+        ] {
             let request: ProviderRequest = serde_json::from_value(serde_json::json!({
                 "op": "read",
                 "path": format!("{root}/note.txt"),
@@ -2258,7 +2264,8 @@ mod tests {
     fn v2_plain_roots_follow_the_envelope_and_a_lookalike_stays_plain() {
         let dir = setup_test_dir();
         let provider = make_encrypted_provider(&dir);
-        for root in ["Public", "MyWebSite"] {
+        {
+            let root = "Public";
             let plain = b"via-address";
             let address = format!("localhost://{root}/address.txt");
             let short = format!("{root}/address.txt");

@@ -1352,7 +1352,7 @@ fn submit_agent_plan_response(
     }
 }
 
-/// Local, MyWebSite, Public, and Users are offered. Any other root is named.
+/// Local, Public, and Users are offered. Any other root is named.
 fn unoffered_v2_read_root(resource: &str) -> Option<&str> {
     let (root, _) = elastos_common::localhost::parse_localhost_uri(resource)?;
     if elastos_common::localhost::v2_read_offers(root) {
@@ -2945,7 +2945,10 @@ pub(crate) mod tests {
     #[test]
     fn a_v2_read_names_every_localhost_root_this_path_does_not_offer() {
         assert_eq!(unoffered_v2_read_root("localhost://Local/a"), None);
-        assert_eq!(unoffered_v2_read_root("localhost://MyWebSite/a"), None);
+        assert_eq!(
+            unoffered_v2_read_root("localhost://MyWebSite/a"),
+            Some("MyWebSite")
+        );
         assert_eq!(unoffered_v2_read_root("localhost://Public/a"), None);
         assert_eq!(unoffered_v2_read_root("localhost://Users/self/a"), None);
         for root in ["ElastOS", "AppCapsules", "UsersAI", "WebSpaces"] {
@@ -4432,6 +4435,20 @@ pub(crate) mod tests {
                 rest = &rest[width..];
                 continue;
             }
+            let raw_at = if rest.starts_with("br") || rest.starts_with("cr") {
+                1
+            } else if rest.starts_with('r') {
+                0
+            } else {
+                usize::MAX
+            };
+            if raw_at != usize::MAX {
+                if let Some(end) = raw_string_end(rest, raw_at) {
+                    current.push(' ');
+                    rest = &rest[end..];
+                    continue;
+                }
+            }
             if ch == '"' || ch == '\'' {
                 current.push(ch);
                 rest = &rest[width..];
@@ -4480,6 +4497,29 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_generic_alias_is_seen_and_a_raw_string_does_not_hide_one() {
+        let text = concat!(
+            "type Alias<T> = BridgeContext;\n",
+            "type Spaced < T > = path::BridgeContext;\n",
+            "type Miss = r#\"type Hidden = BridgeContext;\"#;\n",
+            "let raw = r##\"a; type Other = BridgeContext;\"##;\n",
+            "let bytes = br#\"type Byte = BridgeContext;\"#;\n",
+            "type Also<T> = BridgeContext<T>;\n",
+        );
+        let found: Vec<_> = collapsed_statements(text)
+            .into_iter()
+            .filter(|line| bridge_context_alias_line(line))
+            .collect();
+        assert_eq!(found.len(), 3, "{found:?}");
+        assert!(found.iter().any(|line| line.contains("Alias")));
+        assert!(found.iter().any(|line| line.contains("Spaced")));
+        assert!(found.iter().any(|line| line.contains("Also")));
+        assert!(found.iter().all(|line| !line.contains("Hidden")));
+        assert!(found.iter().all(|line| !line.contains("Other")));
+        assert!(found.iter().all(|line| !line.contains("Byte")));
+    }
+
+    #[test]
     fn a_split_bridge_context_alias_is_one_statement() {
         let text = "fn f<'a>(value: &'a BridgeContext) -> &'a BridgeContext { value }\nuse crate::bus::{\n    BridgeContext as Hidden\n};\ntype Alias =\n    BridgeContext;\n";
         let found: Vec<_> = collapsed_statements(text)
@@ -4506,6 +4546,7 @@ pub(crate) mod tests {
                 continue;
             };
             let name = after[..eq].trim();
+            let name = name.split('<').next().unwrap_or(name).trim();
             let named = !name.is_empty()
                 && name
                     .chars()
