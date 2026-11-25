@@ -152,7 +152,10 @@ impl FuelBucket {
     pub(crate) fn sleep_for(&mut self, deadline_ms: u64) -> Duration {
         let wait = deadline_ms.saturating_sub(self.clock_ms);
         self.clock_ms = self.clock_ms.max(deadline_ms);
-        Duration::from_millis(wait)
+        // `from_millis` panics past this. A guest that asks for the end of
+        // time waits this long; the deadline itself is still recorded above.
+        const MAX_SLEEP_MS: u64 = u64::MAX / 1_000_000;
+        Duration::from_millis(wait.min(MAX_SLEEP_MS))
     }
 }
 

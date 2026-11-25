@@ -163,6 +163,9 @@ struct ComponentActivation {
     /// The one join of this guest's worker. A later stop waits on it and does
     /// not free the slot while the worker has not ended.
     join: Option<Arc<V2Join>>,
+    /// The join is stored and this slot counts toward the cap, before status
+    /// is Running. Set under the start lock, before that lock is dropped.
+    starting: bool,
     /// How long a stop waits for that join before it answers "still running".
     join_bound: Duration,
     /// Wakes one clock sleep. Stop and cancel store the flag, then notify.
@@ -435,12 +438,35 @@ impl ComponentProvider {
         caller: Option<&str>,
         id: &str,
     ) -> Option<crate::providers::bus2_ui::Frame> {
-        let frames = self.frames.lock().expect("frames");
-        let stored = frames.get(id)?;
-        if stored.principal.as_deref() != caller {
-            return None;
-        }
-        Some(stored.frame.clone())
+        let stored = {
+            let frames = self.frames.lock().expect("frames");
+            let stored = frames.get(id)?;
+            if stored.principal.as_deref() != caller {
+                return None;
+            }
+            stored.frame.clone()
+        };
+        // No live guest: a test frame, or one already dropped with its book.
+        let Some(book) = self.instances.try_read().ok().and_then(|instances| {
+            instances
+                .get(&elastos_common::CapsuleId::new(id))
+                .map(|instance| instance.grants.clone())
+        }) else {
+            return Some(stored);
+        };
+        let book = book.lock().expect("grant book");
+        Some(crate::providers::bus2_ui::Frame {
+            nodes: stored
+                .nodes
+                .into_iter()
+                .filter(|node| match node {
+                    crate::providers::bus2_ui::FrameNode::Text(_) => true,
+                    crate::providers::bus2_ui::FrameNode::Image { grant, .. } => {
+                        !book.blocks_read(grant)
+                    }
+                })
+                .collect(),
+        })
     }
 
     /// Stores one frame so a same-process Home test can read it back.
@@ -774,6 +800,7 @@ impl ComponentProvider {
                 task: None,
                 worker: None,
                 join: None,
+                starting: false,
                 join_bound: V2_HOST_DEADLINE,
                 wake: Arc::new(tokio::sync::Notify::new()),
                 #[cfg(test)]
@@ -831,7 +858,8 @@ impl ComponentProvider {
         let instance = entries
             .get_mut(&handle.id)
             .ok_or_else(|| ElastosError::CapsuleNotFound(handle.id.0.clone()))?;
-        if instance.status != CapsuleStatus::Loading {
+        if instance.status != CapsuleStatus::Loading || instance.starting || instance.join.is_some()
+        {
             return Err(ElastosError::Compute(
                 "v2 component is already running".into(),
             ));
@@ -940,19 +968,39 @@ impl ComponentProvider {
                 return Err(ElastosError::Compute(format!("v2 guest thread: {err}")));
             }
         };
-        // The task is in hand before the worker is published. A stop in the
-        // gap finds neither, so it cannot join a thread whose task is missing.
+        // The join owns the worker before this lock is dropped. A second start
+        // sees `starting`, and a stop in the gap joins this thread.
+        let join = {
+            let instance = entries.get_mut(&handle.id).expect("entry");
+            #[cfg(test)]
+            let refuse_spawn = instance.refuse_join_owner;
+            let join = V2Join::prepare(
+                None,
+                Some(worker),
+                instance.cancel_requested.clone(),
+                instance.wake.clone(),
+                #[cfg(test)]
+                refuse_spawn,
+            );
+            instance.join = Some(join.clone());
+            instance.starting = true;
+            join
+        };
         drop(entries);
         let abort = match abort_rx.await {
             Ok(abort) => abort,
             Err(_) => {
-                let _ = worker.join();
+                join.start();
+                let join_for_wait = join.clone();
+                let _ = tokio::task::spawn_blocking(move || join_for_wait.wait_finished()).await;
+                drop(join);
                 self.instances.write().await.remove(&handle.id);
                 return Err(ElastosError::Compute(
                     "v2 guest thread ended before it started".into(),
                 ));
             }
         };
+        join.attach_task(abort.clone());
         #[cfg(test)]
         if let Some(gate) = publish_gate {
             gate.wait();
@@ -963,15 +1011,25 @@ impl ComponentProvider {
                 drop(entries);
                 abort.abort();
                 drop(sender);
-                let _ = worker.join();
                 return Err(ElastosError::Compute(
                     "v2 guest was removed before its thread was stored".into(),
                 ));
             };
+            if instance
+                .join
+                .as_ref()
+                .is_some_and(|held| held.was_started())
+            {
+                drop(entries);
+                drop(sender);
+                return Err(ElastosError::Compute(
+                    "v2 guest was stopped before it was published".into(),
+                ));
+            }
             instance.task = Some(abort);
+            instance.starting = false;
             instance.status = CapsuleStatus::Running;
             instance.events = Some(sender);
-            instance.worker = Some(worker);
         }
 
         let id_for_end = handle.id.clone();
@@ -993,7 +1051,14 @@ impl ComponentProvider {
             let (join, exit_owns_slot) = {
                 let mut held = instances.write().await;
                 match held.get_mut(&id_for_end) {
-                    Some(instance) if instance.join.is_none() => (begin_v2_join(instance), true),
+                    Some(instance)
+                        if instance
+                            .join
+                            .as_ref()
+                            .is_none_or(|join| !join.was_started()) =>
+                    {
+                        (begin_v2_join(instance), true)
+                    }
                     _ => (None, false),
                 }
             };
@@ -1294,12 +1359,11 @@ impl ComponentProvider {
             if bucket.fault.is_some() {
                 return Ok(UpdateDeadline::Interrupt);
             }
-            // A sleep or a host await is suspended. This tick is not execution,
-            // and `parked` stays set so the wake can refill the window.
-            // `FuelBucket::wake_from_park` is the one place that refill happens.
-            if bucket.parked {
-                return Ok(UpdateDeadline::Continue(1));
-            }
+            // This callback runs only while the guest itself executes. An
+            // unawaited sleep or read is not a park: clear it and count the
+            // tick. `FuelBucket::wake_from_park` is the one refill, and only
+            // while `parked` is still set because the guest never ran.
+            bucket.parked = false;
             bucket.note_event_wait_ran();
             let used = bucket.window_ticks.saturating_add(1);
             bucket.window_ticks = used;
@@ -1484,7 +1548,7 @@ struct V2Join {
     /// The guest's clock-sleep wake. Cancel notifies it.
     wake: Arc<tokio::sync::Notify>,
     #[cfg(test)]
-    refuse_spawn: bool,
+    refuse_spawn: AtomicBool,
 }
 
 impl V2Join {
@@ -1507,8 +1571,27 @@ impl V2Join {
             inline: AtomicBool::new(false),
             wake,
             #[cfg(test)]
-            refuse_spawn,
+            refuse_spawn: AtomicBool::new(refuse_spawn),
         })
+    }
+
+    /// Stop reads the flag after start has stored this join.
+    #[cfg(test)]
+    fn note_refuse(&self, refuse: bool) {
+        self.refuse_spawn.store(refuse, Ordering::Release);
+    }
+
+    fn was_started(&self) -> bool {
+        self.started.load(Ordering::Acquire)
+    }
+
+    fn attach_task(&self, task: tokio::task::AbortHandle) {
+        if self.owning.load(Ordering::Acquire) && !task.is_finished() {
+            self.cancel.store(true, Ordering::Release);
+            self.wake.notify_one();
+            task.abort();
+        }
+        *self.task.lock().expect("join") = Some(task);
     }
 
     /// Starts the single owner thread. A second call does nothing. When the
@@ -1518,7 +1601,7 @@ impl V2Join {
             return;
         }
         #[cfg(test)]
-        let refuse = self.refuse_spawn;
+        let refuse = self.refuse_spawn.load(Ordering::Acquire);
         #[cfg(not(test))]
         let refuse = false;
         if refuse {
@@ -1603,6 +1686,13 @@ fn raise_flag(flag: &AtomicBool, wake: &tokio::sync::Notify) {
 /// already owns. `None` means there is no worker to join.
 fn begin_v2_join(instance: &mut ComponentActivation) -> Option<Arc<V2Join>> {
     if let Some(join) = instance.join.clone() {
+        instance.starting = false;
+        #[cfg(test)]
+        join.note_refuse(instance.refuse_join_owner);
+        if !join.was_started() {
+            instance.status = CapsuleStatus::Stopping;
+            join.start();
+        }
         return Some(join);
     }
     let task = instance.task.take();
@@ -1800,10 +1890,13 @@ fn bridge_failure(err: String) -> elastos::bus::types::BusError {
 /// joined. A stop/start loop cannot pass the cap by leaving the thread up.
 fn v2_slot(item: &ComponentActivation) -> bool {
     item.manifest.bus_contract.as_deref() == Some(ELASTOS_BUS_V2_CONTRACT)
-        && (matches!(
-            item.status,
-            CapsuleStatus::Running | CapsuleStatus::Stopping
-        ) || item.worker.is_some()
+        && (item.starting
+            || item.join.is_some()
+            || matches!(
+                item.status,
+                CapsuleStatus::Running | CapsuleStatus::Stopping
+            )
+            || item.worker.is_some()
             || item.task.is_some())
 }
 
@@ -2352,13 +2445,18 @@ impl ComponentState {
         {
             return Err(V2BusError::Denied("the grant book is closed".into()));
         }
-        let book = self.grants.lock().expect("grant book");
+        let mut book = self.grants.lock().expect("grant book");
         #[cfg(test)]
         if let Some(gate) = &self.present_gate {
             gate.wait();
         }
         let frame = crate::providers::bus2_ui::present_frame(media, document, &book)
             .map_err(present_error)?;
+        for node in &frame.nodes {
+            if let crate::providers::bus2_ui::FrameNode::Image { grant, .. } = node {
+                book.spend(grant);
+            }
+        }
         if self.stop_requested.load(Ordering::Acquire)
             || self.cancel_requested.load(Ordering::Acquire)
         {
@@ -2779,14 +2877,26 @@ impl v2::elastos::bus::providers::HostWithStore<ComponentState> for HasSelf<Comp
         if let Some(mut body) = body {
             let _ = accessor.with(|mut access| body.close(&mut access));
         }
-        let (opened, bucket, pending) = accessor.with(|mut access| {
-            let opened = charge_access(&mut access);
-            let bucket = access.get().fuel_bucket.clone();
-            let pending = access.get().begin_read(&request, had_body);
-            (opened, bucket, pending)
-        });
+        let (opened, bucket, pending, grants, stop_requested, cancel_requested) =
+            accessor.with(|mut access| {
+                let opened = charge_access(&mut access);
+                let bucket = access.get().fuel_bucket.clone();
+                let grants = access.get().grants.clone();
+                let stop_requested = access.get().stop_requested.clone();
+                let cancel_requested = access.get().cancel_requested.clone();
+                let pending = access.get().begin_read(&request, had_body);
+                (
+                    opened,
+                    bucket,
+                    pending,
+                    grants,
+                    stop_requested,
+                    cancel_requested,
+                )
+            });
         let _guard = arm_host_wait(opened, &bucket, pending.is_ok());
         let pending = pending?;
+        let grant_id = pending.grant.clone();
         let raw = await_v2_bridge(
             &pending.bridge.async_host,
             &pending.bridge.sync_host,
@@ -2806,9 +2916,14 @@ impl v2::elastos::bus::providers::HostWithStore<ComponentState> for HasSelf<Comp
         let (tx, rx) = tokio::sync::oneshot::channel();
         accessor
             .with(|mut access| {
+                let stop = Arc::new(move || {
+                    stop_requested.load(Ordering::Acquire)
+                        || cancel_requested.load(Ordering::Acquire)
+                        || grants.lock().expect("grant book").blocks_read(&grant_id)
+                });
                 let stream = StreamReader::new(
                     &mut access,
-                    super::bus2_stream::WindowRead::new(bytes, tx, hold),
+                    super::bus2_stream::WindowRead::new(bytes, tx, hold).stop_when(stop),
                 )?;
                 let trailer = wasmtime::component::FutureReader::new(&mut access, async move {
                     let ended = match tokio::time::timeout(V2_HOST_DEADLINE, rx).await {
@@ -2884,6 +2999,23 @@ fn drop_frame_naming(frames: &Mutex<HashMap<String, StoredFrame>>, capsule_id: &
 mod tests {
     use super::*;
     use std::sync::Mutex;
+
+    /// Linux counts the tasks in this directory. A missing directory is the
+    /// macOS path, which uses `ps -M` instead.
+    fn task_threads(dir: &std::path::Path) -> Option<usize> {
+        let count = std::fs::read_dir(dir)
+            .ok()?
+            .filter(|entry| entry.is_ok())
+            .count();
+        (count > 0).then_some(count)
+    }
+
+    #[test]
+    fn linux_task_dir_counts_threads() {
+        assert!(task_threads(std::path::Path::new("/no/such/task/dir")).is_none());
+        let here = std::env::current_dir().expect("cwd");
+        assert!(task_threads(&here).unwrap() > 0);
+    }
 
     fn json_line(line: &str) -> serde_json::Value {
         serde_json::from_str(line).expect("captured bridge line must be JSON")
@@ -4227,6 +4359,114 @@ mod tests {
             .present_document(crate::providers::bus2_ui::UI_MEDIA_TYPE, doc.as_bytes())
             .expect_err("an expired grant is not presented");
         assert!(format!("{err:?}").contains("expired"), "{err:?}");
+    }
+
+    async fn presented_image(
+        provider: &ComponentProvider,
+        id: &str,
+        grant: &str,
+        uses_left: Option<u32>,
+        expires_at_ms: Option<u64>,
+    ) {
+        let grants = provider.instances.read().await[&elastos_common::CapsuleId::new(id)]
+            .grants
+            .clone();
+        grants.lock().expect("grant book").hold_limited(
+            grant,
+            "localhost://Users/self/Pictures/a.png",
+            "read",
+            uses_left,
+            expires_at_ms,
+        );
+        let mut state = ComponentState::new(None, id.into(), None);
+        state.grants = grants;
+        state.frames = provider.frames.clone();
+        let doc = format!(r#"{{"frame":[{{"image":{{"grant":"{grant}"}}}},{{"text":"kept"}}]}}"#);
+        state
+            .present_document(crate::providers::bus2_ui::UI_MEDIA_TYPE, doc.as_bytes())
+            .expect("the live grant is presented");
+    }
+
+    fn image_count(frame: &crate::providers::bus2_ui::Frame) -> usize {
+        frame
+            .nodes
+            .iter()
+            .filter(|node| matches!(node, crate::providers::bus2_ui::FrameNode::Image { .. }))
+            .count()
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_present_then_read_drops_the_spent_once_image() {
+        let provider = ComponentProvider::new();
+        let bytes = wat::parse_str(include_str!(
+            "../../../../tests/fixtures/components/v2-resident.wat"
+        ))
+        .unwrap();
+        let handle = load_v2_fixture(&provider, bytes).await;
+        presented_image(&provider, handle.id.as_str(), "pic", Some(1), None).await;
+        assert!(provider.instances.read().await[&handle.id]
+            .grants
+            .lock()
+            .expect("grant book")
+            .blocks_read("pic"));
+        let frame = provider
+            .read_v2_frame(None, handle.id.as_str())
+            .expect("frame");
+        assert_eq!(image_count(&frame), 0);
+        assert!(matches!(
+            frame.nodes.first(),
+            Some(crate::providers::bus2_ui::FrameNode::Text(text)) if text == "kept"
+        ));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_present_then_expire_drops_the_image() {
+        let provider = ComponentProvider::new();
+        let bytes = wat::parse_str(include_str!(
+            "../../../../tests/fixtures/components/v2-resident.wat"
+        ))
+        .unwrap();
+        let handle = load_v2_fixture(&provider, bytes).await;
+        let expires = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_millis() as u64
+            + 200;
+        presented_image(&provider, handle.id.as_str(), "pic", None, Some(expires)).await;
+        let shown = provider
+            .read_v2_frame(None, handle.id.as_str())
+            .expect("frame");
+        assert_eq!(image_count(&shown), 1);
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        let later = provider
+            .read_v2_frame(None, handle.id.as_str())
+            .expect("frame");
+        assert_eq!(image_count(&later), 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn thirty_two_newer_grants_drop_a_presented_image() {
+        let provider = ComponentProvider::new();
+        let bytes = wat::parse_str(include_str!(
+            "../../../../tests/fixtures/components/v2-resident.wat"
+        ))
+        .unwrap();
+        let handle = load_v2_fixture(&provider, bytes).await;
+        presented_image(&provider, handle.id.as_str(), "pic", None, None).await;
+        let book = provider.instances.read().await[&handle.id].grants.clone();
+        for n in 0..32 {
+            book.lock().expect("grant book").hold_limited(
+                &format!("newer-{n}"),
+                "localhost://Users/self/Pictures/a.png",
+                "read",
+                None,
+                None,
+            );
+        }
+        let frame = provider
+            .read_v2_frame(None, handle.id.as_str())
+            .expect("frame");
+        assert_eq!(image_count(&frame), 0);
     }
 
     fn quiet_v2_engine() -> Engine {
@@ -6920,6 +7160,9 @@ mod tests {
     #[tokio::test]
     async fn bridge_calls_add_no_thread_across_timeouts() {
         fn threads() -> usize {
+            if let Some(count) = task_threads(std::path::Path::new("/proc/self/task")) {
+                return count;
+            }
             let output = std::process::Command::new("ps")
                 .args(["-M", &std::process::id().to_string()])
                 .output()
@@ -6927,6 +7170,7 @@ mod tests {
             String::from_utf8_lossy(&output.stdout).lines().count()
         }
         let before = threads();
+        assert!(before > 0, "this process has a thread");
         let ready: BridgeHostcallAsync =
             Arc::new(|_line, _capsule, _principal| Box::pin(async { Ok("{}".to_string()) }));
         for _ in 0..200 {
@@ -6961,11 +7205,12 @@ mod tests {
             assert!(err.contains("timeout"), "{err}");
         }
         let after = threads();
+        assert!(after > 0, "this process has a thread");
         // Eight other tests run in this process and own threads. One thread
         // per call would add 200. One thread per timeout would add 50, and
         // each of those still sleeps for 30s when this count is taken.
         const SIBLING_THREADS: usize = 24;
-        assert!(SIBLING_THREADS < 50);
+        const _: () = assert!(SIBLING_THREADS < 50);
         assert!(
             after <= before + SIBLING_THREADS,
             "thread count moved from {before} to {after}"
@@ -7040,6 +7285,8 @@ mod tests {
             let instance = &instances[&handle.id];
             assert!(instance.task.is_none());
             assert!(instance.worker.is_none());
+            assert!(instance.starting);
+            assert!(instance.join.is_some());
         }
         gate.open();
         starting.await.expect("start task").expect("start");
@@ -7047,9 +7294,161 @@ mod tests {
             let instances = provider.instances.read().await;
             let instance = &instances[&handle.id];
             assert!(instance.task.is_some());
-            assert!(instance.worker.is_some());
+            assert!(instance.worker.is_none());
+            assert!(!instance.starting);
+            assert!(instance.join.is_some());
+            assert_eq!(instance.status, CapsuleStatus::Running);
         }
         provider.stop(&handle).await.expect("stop");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_unawaited_sleep_until_max_plus_a_burn_is_ended() {
+        let provider = ComponentProvider::new();
+        let source = include_str!("../../../../tests/fixtures/components/v2-sleep.wat").replace(
+            "(func $begin (result i32)\n      (local $code i32)\n      ;; 400 ms on this guest's clock. The test's tick cap is shorter.\n      i64.const 400 call $sleep local.set $code\n      local.get $code i32.const 15 i32.and i32.const 2 i32.eq\n      if call $after-sleep return end\n      i32.const 0 global.set $phase\n      local.get $code i32.const 4 i32.shr_u call $park)",
+            "(func $begin (result i32)\n      i64.const -1 call $sleep drop\n      i32.const 0 i32.const 0 i32.const 65536 memory.fill\n      (loop $burn br $burn)\n      i32.const 0)",
+        );
+        assert!(
+            source.contains("i64.const -1 call $sleep drop"),
+            "the sleep-until u64::MAX was not patched"
+        );
+        assert!(source.contains("loop $burn"), "the burn was not patched");
+        let handle = load_v2_fixture(&provider, wat::parse_str(source).unwrap()).await;
+        provider.start(&handle).await.expect("the burner starts");
+        let ending = tokio::time::timeout(Duration::from_secs(1), v2_ending(&provider, &handle))
+            .await
+            .expect("the burn must reach the tick cap");
+        assert!(
+            ending.contains(ENDING_EPOCH_DEADLINE),
+            "an unawaited sleep left the burn running: {ending}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn two_starts_on_one_handle_the_second_is_refused() {
+        let provider = Arc::new(ComponentProvider::new());
+        let bytes = wat::parse_str(include_str!(
+            "../../../../tests/fixtures/components/v2-resident.wat"
+        ))
+        .unwrap();
+        let handle = load_v2_fixture(&provider, bytes).await;
+        let gate = TestGate::new();
+        provider
+            .instances
+            .write()
+            .await
+            .get_mut(&handle.id)
+            .unwrap()
+            .publish_gate = Some(gate.clone());
+        let starting = {
+            let provider = provider.clone();
+            let handle = handle.clone();
+            tokio::spawn(async move { provider.start(&handle).await })
+        };
+        tokio::task::spawn_blocking({
+            let gate = gate.clone();
+            move || gate.entered()
+        })
+        .await
+        .expect("entered");
+        let err = provider
+            .start(&handle)
+            .await
+            .expect_err("second start")
+            .to_string();
+        assert!(err.contains("already running"), "{err}");
+        gate.open();
+        starting.await.expect("start task").expect("first start");
+        assert_eq!(provider.threads_live.load(Ordering::Acquire), 1);
+        provider.stop(&handle).await.expect("stop");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_start_held_at_the_gate_counts_toward_the_cap() {
+        let provider = Arc::new(ComponentProvider::new());
+        let bytes = wat::parse_str(include_str!(
+            "../../../../tests/fixtures/components/v2-resident.wat"
+        ))
+        .unwrap();
+        let first = load_v2_fixture(&provider, bytes.clone()).await;
+        provider.start(&first).await.expect("first");
+        let gate = TestGate::new();
+        let second = load_v2_fixture(&provider, bytes.clone()).await;
+        provider
+            .instances
+            .write()
+            .await
+            .get_mut(&second.id)
+            .unwrap()
+            .publish_gate = Some(gate.clone());
+        let starting = {
+            let provider = provider.clone();
+            let second = second.clone();
+            tokio::spawn(async move { provider.start(&second).await })
+        };
+        tokio::task::spawn_blocking({
+            let gate = gate.clone();
+            move || gate.entered()
+        })
+        .await
+        .expect("entered");
+        let third = load_v2_fixture(&provider, bytes).await;
+        let err = provider
+            .start(&third)
+            .await
+            .expect_err("over the cap")
+            .to_string();
+        assert!(err.contains("v2 resident cap"), "{err}");
+        gate.open();
+        starting.await.expect("start task").expect("second");
+        provider.stop(&first).await.expect("stop");
+        provider.stop(&second).await.expect("stop");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_stop_in_the_publish_gap_joins_the_worker() {
+        let provider = Arc::new(ComponentProvider::new());
+        let bytes = wat::parse_str(include_str!(
+            "../../../../tests/fixtures/components/v2-resident.wat"
+        ))
+        .unwrap();
+        let handle = load_v2_fixture(&provider, bytes).await;
+        let gate = TestGate::new();
+        provider
+            .instances
+            .write()
+            .await
+            .get_mut(&handle.id)
+            .unwrap()
+            .publish_gate = Some(gate.clone());
+        let starting = {
+            let provider = provider.clone();
+            let handle = handle.clone();
+            tokio::spawn(async move { provider.start(&handle).await })
+        };
+        tokio::task::spawn_blocking({
+            let gate = gate.clone();
+            move || gate.entered()
+        })
+        .await
+        .expect("entered");
+        assert!(provider.threads_live.load(Ordering::Acquire) >= 1);
+        assert!(provider.instances.read().await[&handle.id].starting);
+        provider.stop(&handle).await.expect("stop");
+        assert_eq!(provider.threads_live.load(Ordering::Acquire), 0);
+        assert!(!provider.instances.read().await.contains_key(&handle.id));
+        gate.open();
+        let err = starting
+            .await
+            .expect("start task")
+            .expect_err("stopped")
+            .to_string();
+        assert!(
+            err.contains("stopped before it was published")
+                || err.contains("removed before its thread was stored"),
+            "{err}"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -7231,6 +7630,51 @@ mod tests {
             }
             std::thread::sleep(Duration::from_millis(10));
         }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn drop_past_the_deadline_keeps_the_map_while_the_lock_is_held() {
+        let provider = ComponentProvider::new();
+        let bytes = wat::parse_str(include_str!(
+            "../../../../tests/fixtures/components/v2-resident.wat"
+        ))
+        .unwrap();
+        let handle = load_v2_fixture(&provider, bytes).await;
+        provider.start(&handle).await.expect("start");
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while provider.threads_live.load(Ordering::Acquire) == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the worker is live");
+        let instances = provider.instances.clone();
+        let live = provider.threads_live.clone();
+        let gate = TestGate::new();
+        let reader_gate = gate.clone();
+        let reader = std::thread::spawn(move || {
+            let _lock = instances.blocking_read();
+            reader_gate.wait();
+        });
+        tokio::task::spawn_blocking({
+            let gate = gate.clone();
+            move || gate.entered()
+        })
+        .await
+        .expect("the reader holds the lock");
+        let dropping = std::thread::spawn(move || drop(provider));
+        std::thread::sleep(V2_HOST_DEADLINE + Duration::from_millis(400));
+        assert!(
+            dropping.is_finished(),
+            "drop must return once the deadline passes"
+        );
+        assert!(
+            live.load(Ordering::Acquire) >= 1,
+            "the worker stays while the forgotten map holds it"
+        );
+        dropping.join().expect("drop");
+        gate.open();
+        reader.join().expect("reader");
     }
 
     #[test]

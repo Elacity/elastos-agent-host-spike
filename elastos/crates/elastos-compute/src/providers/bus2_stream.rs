@@ -169,6 +169,9 @@ pub(crate) struct WindowRead {
     sent: usize,
     done: Option<tokio::sync::oneshot::Sender<Result<(), String>>>,
     _hold: ReadHold,
+    /// Checked before each further chunk. A revoke or a stop ends the stream
+    /// and the trailer is an error, because the guest did not receive `bytes`.
+    stop: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
 }
 
 impl WindowRead {
@@ -182,12 +185,26 @@ impl WindowRead {
             sent: 0,
             done: Some(done),
             _hold: hold,
+            stop: None,
         }
+    }
+
+    pub(crate) fn stop_when(mut self, stop: Arc<dyn Fn() -> bool + Send + Sync>) -> Self {
+        self.stop = Some(stop);
+        self
+    }
+
+    fn stopped(&self) -> bool {
+        self.stop.as_ref().is_some_and(|stop| stop())
     }
 
     /// The next guest-visible chunk. `None` ends the stream and resolves the trailer.
     pub(crate) fn pull(&mut self, limit: usize) -> Option<Vec<u8>> {
         if self.sent >= self.bytes.len() {
+            self.end_trailer();
+            return None;
+        }
+        if self.stopped() {
             self.end_trailer();
             return None;
         }
@@ -266,5 +283,42 @@ mod tests {
         );
         holds.pop();
         assert!(ReadHold::try_reserve(&budget, 1).is_some());
+    }
+
+    #[test]
+    fn a_revoked_grant_stops_the_next_chunk_of_a_16mib_read() {
+        let budget = Arc::new(ReadBudget::new());
+        let hold = ReadHold::try_reserve(&budget, HOST_MAX_READ_BYTES).expect("the 16 MiB hold");
+        let grants = Arc::new(Mutex::new(super::super::bus2_ui::GrantBook::default()));
+        assert!(grants
+            .lock()
+            .expect("grant book")
+            .hold("g", "localhost://note", "read"));
+        let grants_for_stop = grants.clone();
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let mut stream = WindowRead::new(vec![7u8; HOST_MAX_READ_BYTES], tx, hold).stop_when(
+            Arc::new(move || grants_for_stop.lock().expect("grant book").blocks_read("g")),
+        );
+        let first = stream.pull(READ_CHUNK).expect("the first chunk");
+        assert_eq!(first.len(), READ_CHUNK);
+        grants.lock().expect("grant book").revoke("g");
+        assert!(
+            stream.pull(READ_CHUNK).is_none(),
+            "a revoked grant gives no more bytes"
+        );
+        let trailer = rx.blocking_recv().expect("trailer");
+        assert!(trailer.is_err(), "the trailer is not ok: {trailer:?}");
+        drop(stream);
+
+        let hold = ReadHold::try_reserve(&budget, 8).expect("a small hold");
+        let stop = Arc::new(AtomicBool::new(false));
+        let flag = stop.clone();
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let mut stream = WindowRead::new(vec![1u8; 8], tx, hold)
+            .stop_when(Arc::new(move || flag.load(Ordering::Acquire)));
+        assert!(stream.pull(4).is_some());
+        stop.store(true, Ordering::Release);
+        assert!(stream.pull(4).is_none(), "a stop gives no more bytes");
+        assert!(rx.blocking_recv().expect("trailer").is_err());
     }
 }
