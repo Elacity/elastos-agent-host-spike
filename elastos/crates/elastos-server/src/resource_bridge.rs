@@ -9142,6 +9142,60 @@ pub(crate) mod tests {
     mod hosted_agent_rows;
     mod hosted_agent_rows_feature_off;
 
+    /// The seven macOS rows stay declared from this module. Linux CI runs this
+    /// count in job `test-elastos`, step "cargo test with prototype-agents".
+    /// A Studio receipt of
+    /// `cargo test --locked -p elastos-server --lib --features prototype-agents`
+    /// on a Mac runs the seven rows. The default Studio receipt is featureless,
+    /// so it lists the ignored row and does not run the seven. Job
+    /// `source-home-macos`, step "B4-R named localhost decision tests", does
+    /// not select these rows.
+    #[test]
+    fn hosted_agent_rows_stay_in_the_agents_build() {
+        const HOSTED_AGENT_ROWS: usize = 7;
+        const NAMES: [&str; HOSTED_AGENT_ROWS] = [
+            "fn agent_hosted_run_reaches_the_egress_broker_once",
+            "fn agent_hosted_run_without_admin_owner_is_refused",
+            "fn agent_hosted_run_over_its_ceiling_is_refused_before_dispatch",
+            "fn spent_total_survives_a_new_runtime_and_blocks_the_next_create",
+            "fn unreadable_agent_record_refuses_the_create_by_name",
+            "fn two_runtimes_refuse_from_the_stored_total_before_dispatch",
+            "fn http_caller_with_an_agent_principal_is_refused",
+        ];
+        let bridge = include_str!("resource_bridge.rs");
+        let rows = include_str!("resource_bridge/tests/hosted_agent_rows.rs");
+        assert!(
+            declares_hosted_rows_module(bridge),
+            "mod hosted_agent_rows is not declared from this file"
+        );
+        assert_eq!(NAMES.len(), HOSTED_AGENT_ROWS);
+        assert_eq!(rows.matches("#[tokio::test]").count(), HOSTED_AGENT_ROWS);
+        assert_eq!(
+            rows.matches("#![cfg(feature = \"prototype-agents\")]")
+                .count(),
+            1,
+            "the rows file is missing its one feature gate"
+        );
+        for name in NAMES {
+            let at = rows
+                .find(name)
+                .unwrap_or_else(|| panic!("{name} vanished from the agents build"));
+            let window = &rows[at.saturating_sub(240)..at];
+            assert!(
+                window.contains("target_os = \"macos\""),
+                "{name} left the macOS rows: {window}"
+            );
+        }
+    }
+
+    /// True when this file declares the hosted rows module. The needle is
+    /// built here so this test's own text is not that declaration.
+    fn declares_hosted_rows_module(source: &str) -> bool {
+        let name = format!("{}{}", "hosted_agent_", "rows");
+        let line = format!("mod {name};");
+        source.lines().any(|item| item.trim() == line)
+    }
+
     /// The gateway walker keeps production code written after a `tests`
     /// module, counts an inline call whose first argument starts right after
     /// the paren, and still drops the module body (including a brace inside a
