@@ -249,6 +249,17 @@ impl ModelBudget {
         run: &RunKey,
         tokens: u64,
     ) -> Result<Hold, Refusal> {
+        self.reserve_for_offer(agent, run, tokens, None)
+    }
+
+    /// `offer_id` is read again under the agent lock when it names a hosted offer.
+    pub(crate) fn reserve_for_offer(
+        &self,
+        agent: &AgentKey,
+        run: &RunKey,
+        tokens: u64,
+        offer_id: Option<&str>,
+    ) -> Result<Hold, Refusal> {
         refuse_agent_lock_first()?;
         let home = self.home_dir();
         let mut agents = self.agents.lock().unwrap_or_else(PoisonError::into_inner);
@@ -277,6 +288,7 @@ impl ModelBudget {
                 memory,
                 tokens,
                 account.ceiling,
+                offer_id,
             ) {
                 Ok((drawn, charged)) => {
                     account.charged = charged;

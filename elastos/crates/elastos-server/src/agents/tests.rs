@@ -2604,7 +2604,7 @@ fn an_older_build_refuses_a_spent_file_by_name_and_home_still_loads() {
         "this build accepts the field-less file"
     );
     assert_eq!(frozen_older_agent_parser(&field_less), Ok(()));
-    charge_model_spend(home.path(), OWNER_ID, &agent.agent_id, (0, 0), 1, 64).unwrap();
+    charge_model_spend(home.path(), OWNER_ID, &agent.agent_id, (0, 0), 1, 64, None).unwrap();
     let bytes = home.agent_bytes();
     assert!(std::str::from_utf8(&bytes)
         .unwrap()
@@ -2646,7 +2646,7 @@ fn an_audit_chain_holding_agent_events_checks_with_the_frozen_code() {
         slot.record.updated_at = 10;
     })
     .unwrap();
-    charge_model_spend(home.path(), OWNER_ID, &agent.agent_id, (0, 0), 1, 64).unwrap();
+    charge_model_spend(home.path(), OWNER_ID, &agent.agent_id, (0, 0), 1, 64, None).unwrap();
     rename_in_any_build(home.path(), &home.caller(), &agent.agent_id, "Helper 2", 10).unwrap();
     retire_in_any_build(home.path(), &home.caller(), &agent.agent_id, 11).unwrap();
     set_enabled_in_any_build(home.path(), &home.caller(), false, 12).unwrap();

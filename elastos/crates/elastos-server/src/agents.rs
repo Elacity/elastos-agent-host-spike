@@ -679,6 +679,15 @@ fn signed_spend_floor(data_dir: &Path, agent_id: &str) -> Result<u64, &'static s
     Ok(floor)
 }
 
+fn hosted_owner_still_approved(data_dir: &Path, agent_id: &str, offer_id: Option<&str>) -> bool {
+    match offer_id {
+        Some(offer_id) => {
+            crate::api::gateway::hosted_charge_still_approved(data_dir, agent_id, offer_id)
+        }
+        None => true,
+    }
+}
+
 fn spent_amount(reason: &str) -> Option<u64> {
     reason
         .split_whitespace()
@@ -692,6 +701,7 @@ pub(crate) fn charge_model_spend(
     memory: (u64, u64),
     add: u64,
     ceiling: u64,
+    offer_id: Option<&str>,
 ) -> Result<(u64, u64), SpendRefusal> {
     let opened = open(data_dir, true).map_err(|err| SpendRefusal::Name(reason_of(&err)))?;
     let agent = agent_of(&opened.file, agent_id, Some(owner)).map_err(SpendRefusal::Name)?;
@@ -703,6 +713,13 @@ pub(crate) fn charge_model_spend(
     let decided = crate::model_budget::block_charge(memory, stored, add, ceiling);
     let err = |held, charged| SpendRefusal::Over(add, held, charged, ceiling);
     let (next, charged, raised) = decided.map_err(|(held, charged)| err(held, charged))?;
+    // The agent lock is held. A hosted offer is read again here, before the
+    // file write and before this charge returns to the send.
+    if !hosted_owner_still_approved(data_dir, agent_id, offer_id) {
+        return Err(SpendRefusal::Name(
+            crate::api::gateway::HOSTED_AGENT_RUN_SENTENCE,
+        ));
+    }
     let Some(total) = raised else {
         return Ok((next, charged));
     };

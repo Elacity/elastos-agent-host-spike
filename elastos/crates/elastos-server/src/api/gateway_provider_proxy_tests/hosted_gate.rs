@@ -101,3 +101,66 @@ fn an_approval_already_ended_by_time_is_refused() {
     plant_offer_approval(dir.path(), OFFER, "proof-owner", now_ms().saturating_sub(1));
     assert!(!approved_for_owner(dir.path(), OFFER, "proof-owner"));
 }
+
+/// The Bus admits the agent. The owner then loses admin. The charge refuses
+/// and the spent total stays zero. Restoring admin lets the same charge proceed.
+#[test]
+fn an_owner_who_loses_admin_between_the_gate_and_the_charge_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let (owner_id, _owner_proof, agent_id) = passkey_agent(dir.path());
+    let owner = crate::auth::stored_principal_record(dir.path(), &owner_id)
+        .unwrap()
+        .unwrap();
+    plant_offer_approval(
+        dir.path(),
+        OFFER,
+        &owner.proof_binding_id,
+        now_ms() + 60_000,
+    );
+    let request = serde_json::json!({
+        "offer_id": OFFER,
+        "operation": "text.generate",
+        "input": {"prompt": "hi"},
+        "request_id": "model-v1:1700000000000:s9",
+    });
+    let bus = crate::api::gateway::bus_model_provider_request(
+        "runs_create",
+        &request,
+        Some(dir.path()),
+        Some(&agent_id),
+        "s9-session",
+        "capability:s9",
+        "s9-capsule",
+    );
+    assert!(bus.is_ok(), "{bus:?}");
+    let mut state = crate::auth::load_auth_state(dir.path()).unwrap();
+    for principal in &mut state.principals {
+        if principal.principal_id == owner_id {
+            principal.role = crate::auth::RuntimePrincipalRole::Guest;
+        }
+    }
+    crate::auth::save_auth_state(dir.path(), &state, None).unwrap();
+    let refused = crate::agents::charge_model_spend(
+        dir.path(),
+        &owner_id,
+        &agent_id,
+        (0, 0),
+        1,
+        64,
+        Some(OFFER),
+    );
+    match refused {
+        Err(crate::agents::SpendRefusal::Name(name)) => {
+            assert_eq!(name, crate::api::gateway::HOSTED_AGENT_RUN_SENTENCE);
+        }
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(
+        crate::agents::model_spend(dir.path(), &agent_id).unwrap().1,
+        0
+    );
+    crate::api::routes::tests::make_admin(dir.path(), &owner_id);
+    crate::agents::charge_model_spend(dir.path(), &owner_id, &agent_id, (0, 0), 1, 64, Some(OFFER))
+        .unwrap();
+    assert!(crate::agents::model_spend(dir.path(), &agent_id).unwrap().1 > 0);
+}

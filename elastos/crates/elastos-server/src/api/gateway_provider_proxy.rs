@@ -4067,6 +4067,25 @@ fn refusal_for_principal(principal: &crate::auth::PrincipalRecord) -> (&'static 
     }
 }
 
+/// A hosted offer is charged only while its stored owner is still an admin
+/// with a current approval. Any other offer id stays with the caller.
+pub(crate) fn hosted_charge_still_approved(
+    data_dir: &std::path::Path,
+    agent_id: &str,
+    offer_id: &str,
+) -> bool {
+    if !crate::api::model_provider_config::is_hosted_offer_id(offer_id) {
+        return true;
+    }
+    let Some(agent) = crate::auth::stored_principal_record(data_dir, agent_id)
+        .ok()
+        .flatten()
+    else {
+        return false;
+    };
+    agent_owner_approved(data_dir, &agent, offer_id)
+}
+
 pub(crate) fn agent_owner_approved(
     data_dir: &std::path::Path,
     agent: &crate::auth::PrincipalRecord,

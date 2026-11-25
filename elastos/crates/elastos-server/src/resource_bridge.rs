@@ -1759,10 +1759,11 @@ fn reserve_model_create(
         .map_err(|_| invalid("invalid model run binding"))?;
     budget
         .account
-        .reserve(
+        .reserve_for_offer(
             &budget.agent,
             &RunKey::of(&binding, &bound.revision),
             bound.tokens,
+            Some(offer_id),
         )
         .map_err(budget_refusal_response)?;
     Ok(serde_json::json!({

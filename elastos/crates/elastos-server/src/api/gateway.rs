@@ -118,7 +118,9 @@ mod gateway_provider_proxy;
 #[cfg(all(test, unix))]
 #[path = "gateway_provider_proxy_tests/hosted_gate.rs"]
 mod hosted_gate;
-pub(crate) use gateway_provider_proxy::{HOSTED_AGENT_RUN_REFUSED, HOSTED_AGENT_RUN_SENTENCE};
+pub(crate) use gateway_provider_proxy::{
+    hosted_charge_still_approved, HOSTED_AGENT_RUN_REFUSED, HOSTED_AGENT_RUN_SENTENCE,
+};
 #[path = "gateway_room.rs"]
 mod gateway_room;
 #[path = "gateway_server.rs"]
