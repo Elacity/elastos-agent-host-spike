@@ -557,6 +557,16 @@ jobs:
         run: |
           cargo test --locked --lib
           cargo test --locked --test standin_contract
+      # A14's receipt contract. demo.sh itself needs an installed Runtime binary
+      # and data folder, then runs run.sh against them; that path stays out of
+      # this job. tests/demo-gates.sh is the dry run that needs no installed
+      # Home: it uses a stub suite and a stub install. The report test runs that
+      # dry run too (demo_gates_hold_with_a_stub_suite).
+      - name: A14 report contract and demo.sh dry run
+        working-directory: lab/agent-conformance
+        run: |
+          cargo test --locked --test report
+          bash tests/demo-gates.sh "${{ runner.temp }}/a14-demo-gates"
       - name: prepare stand-in probe component
         run: |
           bash scripts/build-component-capsule.sh lab/agent-conformance/probe

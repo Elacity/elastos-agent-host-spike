@@ -589,8 +589,9 @@ pub fn reviews_file_failure(reviews: &Path, repository: &Path) -> Option<String>
 /// keeps. Only the hash chain is checked: release-head.json names the hash of
 /// release.json, which names the binary and components.json for one platform.
 /// The receipt then binds the source commit it finds to the repository commit
-/// with `release_commit_failures`. Neither signature is verified, so this shows
-/// which release the installed bytes match, not that the release is genuine.
+/// with `release_commit_failures`. Limit, not built: release signatures are
+/// not verified, so this shows which release the installed bytes match, not
+/// that the release is genuine.
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 pub struct InstalledRuntime {
     /// The installed binary path the report was given, as given. The recorded
@@ -927,9 +928,9 @@ pub fn release_platform() -> &'static str {
 /// other file. The open itself refuses the link, so there is no gap between a
 /// check and the read. The folders above the four names are not checked.
 ///
-/// What this does not check:
-/// - signatures: only hashes are compared, so a match shows which release the
-///   installed bytes belong to, not that the release is genuine;
+/// Limit, not built: release signatures are not verified. Only hashes are
+/// compared, so a match shows which release the installed bytes belong to,
+/// not that the release is genuine. What else this does not check:
 /// - the bundle's hash: the capsule bundle the demo ran is not compared with
 ///   anything installed;
 /// - that run.sh launched this path: `installed_binary_launched_failures`
