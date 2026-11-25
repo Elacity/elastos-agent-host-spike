@@ -7,9 +7,14 @@
 //!
 //! `identity/localhost-file-key-v1` is format `1` plus
 //! SHA-256(`elastos-localhost-file-key-fingerprint-v1\0` || file key). A
-//! different fingerprint leaves files untouched (restored or copied folder,
-//! changed device key). A matching marker still walks, so an older build's
-//! later device-key file is rewritten. A file is an envelope only when
+//! different fingerprint leaves files untouched while any of the five roots
+//! is present (restored or copied folder, changed device key). Restoring the
+//! matching identity/device.key makes that fingerprint match again, and the
+//! files stay. Moving AppCapsules, ElastOS, Local, Users, and UsersAI aside,
+//! so those roots are absent, makes the next start write a marker for this
+//! device key and turn local apps on with an empty store. An empty root that
+//! is still present is not moved aside. A matching marker still walks, so an
+//! older build's later device-key file is rewritten. A file is an envelope only when
 //! `is_encrypted_envelope` accepts it, in any field order. The walk does not
 //! skip on a fixed prefix. A file larger than 32 MiB is read only for a short
 //! header. If that header cannot start an envelope, the file is left alone,
@@ -645,6 +650,7 @@ fn migrate_localhost_tree(
 enum MarkerPlan {
     Write,
     Keep,
+    Mismatch,
 }
 
 #[cfg(unix)]
@@ -683,7 +689,42 @@ fn read_marker_plan(marker: &Path, file_key: &[u8; 32]) -> anyhow::Result<Marker
     if found.as_slice() == file_key_fingerprint(file_key) {
         Ok(MarkerPlan::Keep)
     } else {
-        Err(localhost_refused(marker, "mismatch"))
+        Ok(MarkerPlan::Mismatch)
+    }
+}
+
+#[cfg(unix)]
+fn encrypted_roots_absent(data_dir: &Path) -> anyhow::Result<bool> {
+    for root in LOCALHOST_ENCRYPTED_ROOTS {
+        let path = data_dir.join(root);
+        match std::fs::symlink_metadata(&path) {
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => {
+                return Err(err).with_context(|| localhost_refused(&path, "cannot be read"));
+            }
+            Ok(_) => return Ok(false),
+        }
+    }
+    Ok(true)
+}
+
+/// A mismatched marker with any root still present refuses before a write.
+/// When all five roots are absent, the marker is rewritten for this Home.
+#[cfg(unix)]
+fn plan_for_this_home(
+    data_dir: &Path,
+    marker: &Path,
+    file_key: &[u8; 32],
+) -> anyhow::Result<MarkerPlan> {
+    match read_marker_plan(marker, file_key)? {
+        MarkerPlan::Mismatch => {
+            if encrypted_roots_absent(data_dir)? {
+                Ok(MarkerPlan::Write)
+            } else {
+                Err(localhost_refused(marker, "mismatch"))
+            }
+        }
+        plan => Ok(plan),
     }
 }
 
@@ -798,9 +839,9 @@ fn migrate_localhost_files_to_file_key(
     identity_is_directory_or_absent(&identity)?;
     let file_key = zeroize::Zeroizing::new(localhost_file_key(device_key)?);
     let marker = identity.join(LOCALHOST_MIGRATION_MARKER);
-    read_marker_plan(&marker, &file_key)?;
+    plan_for_this_home(data_dir, &marker, &file_key)?;
     let _lock = acquire_migration_lock(data_dir)?;
-    let plan = read_marker_plan(&marker, &file_key)?;
+    let plan = plan_for_this_home(data_dir, &marker, &file_key)?;
     for root in LOCALHOST_ENCRYPTED_ROOTS {
         let path = data_dir.join(root);
         match std::fs::symlink_metadata(&path) {

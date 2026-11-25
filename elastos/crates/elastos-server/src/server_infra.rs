@@ -6025,6 +6025,57 @@ mod tests {
     }
 
     #[test]
+    fn mismatch_remedies_restore_the_key_or_start_empty() {
+        let _guard = LocalAppsGuard::lock();
+        let device_key = [0xb1; 32];
+        let other_key = [0xb2; 32];
+        let file_key = expected_localhost_file_key(&device_key);
+        let root = TempDir::new().unwrap();
+        let note = root.path().join("Users/note.bin");
+        plant_device_envelope(&note, &device_key, b"kept");
+        localhost_provider_bridge_config(root.path(), &device_key).unwrap();
+        let sealed = fs::read(&note).unwrap();
+        let marker_path = root.path().join("identity/localhost-file-key-v1");
+        let marker = fs::read(&marker_path).unwrap();
+        let mismatch = "identity/localhost-file-key-v1 does not match this Home (restored or copied folder, changed device key). Restore the matching identity/device.key, or move AppCapsules, ElastOS, Local, Users, and UsersAI aside to start empty, then restart.";
+
+        expect_refusal(root.path(), &other_key, mismatch, false);
+        assert_eq!(fs::read(&note).unwrap(), sealed);
+        assert_eq!(fs::read(&marker_path).unwrap(), marker);
+
+        match localhost_bringup(root.path(), &device_key) {
+            LocalhostBringup::Start(_) => {}
+            LocalhostBringup::Refuse(got) => panic!("restoring the device key refused: {got}"),
+        }
+        assert!(elastos_server::local_apps::local_apps_refusal(root.path()).is_none());
+        assert_eq!(fs::read(&note).unwrap(), sealed);
+        assert_envelope_opens_with_exactly_one_key(&note, b"kept", &device_key, &file_key);
+        assert_eq!(fs::read(&marker_path).unwrap(), marker);
+
+        fs::remove_file(&note).unwrap();
+        fs::create_dir_all(root.path().join("AppCapsules")).unwrap();
+        let lock = root.path().join("identity/localhost-file-key.lock");
+        fs::remove_file(&lock).unwrap();
+        expect_refusal(root.path(), &other_key, mismatch, false);
+        assert_eq!(fs::read(&marker_path).unwrap(), marker);
+        assert!(!lock.exists());
+
+        fs::remove_dir_all(root.path().join("Users")).unwrap();
+        expect_refusal(root.path(), &other_key, mismatch, false);
+        assert_eq!(fs::read(&marker_path).unwrap(), marker);
+        assert!(!lock.exists());
+
+        fs::remove_dir_all(root.path().join("AppCapsules")).unwrap();
+        match localhost_bringup(root.path(), &other_key) {
+            LocalhostBringup::Start(_) => {}
+            LocalhostBringup::Refuse(got) => panic!("empty start refused: {got}"),
+        }
+        assert!(elastos_server::local_apps::local_apps_refusal(root.path()).is_none());
+        assert!(!note.exists());
+        assert_current_marker(root.path(), &other_key);
+    }
+
+    #[test]
     fn plaintext_that_resembles_an_envelope_is_left_alone() {
         let device_key = [0x94; 32];
         let file_key = expected_localhost_file_key(&device_key);
