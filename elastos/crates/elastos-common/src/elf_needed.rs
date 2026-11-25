@@ -16,6 +16,21 @@ pub fn library_required(name: &str, loader: &str, needed: Option<&[String]>) -> 
         || needed.is_none() && matches!(name, "libc.so.6" | "libgcc_s.so.1")
 }
 
+/// A program-header offset that does not fit in `u64`. The sentence names the executable.
+pub const UNUSABLE_PROGRAM_HEADERS: &str =
+    "provider start is refused: the executable program headers are not usable";
+
+fn checked_offset(base: u64, index: u64, step: u64) -> Option<u64> {
+    index
+        .checked_mul(step)
+        .and_then(|scaled| base.checked_add(scaled))
+}
+
+/// File offset of one program header. Overflow is `UNUSABLE_PROGRAM_HEADERS`.
+pub fn ph_at(base: u64, index: u64, step: u64) -> Result<u64, String> {
+    checked_offset(base, index, step).ok_or_else(|| UNUSABLE_PROGRAM_HEADERS.to_string())
+}
+
 /// Read `DT_NEEDED` through `read`. `read` fills the buffer from the file
 /// offset and returns false when the bytes are not there.
 pub fn dt_needed(
@@ -47,7 +62,8 @@ pub fn dt_needed(
     let mut dynamic = None;
     for index in 0..phnum {
         let mut ph = [0u8; 56];
-        if !read(&mut ph, phoff + index * entsize) {
+        let at = checked_offset(phoff, index, entsize).ok_or_else(bad)?;
+        if !read(&mut ph, at) {
             return Err(bad());
         }
         let (kind, off, addr, filesz) = (
@@ -103,7 +119,8 @@ pub fn dt_needed(
         return Err(bad());
     };
     let mut strings = vec![0u8; strsz as usize];
-    if !read(&mut strings, load_off + (strtab - load_addr)) {
+    let at = load_off.checked_add(strtab - load_addr).ok_or_else(bad)?;
+    if !read(&mut strings, at) {
         return Err(bad());
     }
     rels.into_iter()
@@ -205,6 +222,49 @@ mod tests {
         let err = dt_needed(read_from(&bad), "the executable").unwrap_err();
         assert!(
             err.contains("the executable dynamic section is malformed"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn a_wrapping_offset_is_refused_by_name() {
+        let mut image = elf_with_needed(&["libgcc_s.so.1"]);
+        image[64 + 8..64 + 16].copy_from_slice(&(u64::MAX - 5).to_le_bytes());
+        let err = dt_needed(read_from(&image), "libgcc_s.so.1").unwrap_err();
+        assert!(
+            err.contains("libgcc_s.so.1 dynamic section is malformed"),
+            "{err}"
+        );
+
+        let header = {
+            let mut image = elf_with_needed(&["libc.so.6"]);
+            image[32..40].copy_from_slice(&(u64::MAX - 20).to_le_bytes());
+            image
+        };
+        let read = |buf: &mut [u8], off: u64| {
+            let Some(start) = usize::try_from(off).ok() else {
+                buf.fill(0);
+                return true;
+            };
+            let Some(end) = start.checked_add(buf.len()) else {
+                buf.fill(0);
+                return true;
+            };
+            if end > header.len() {
+                buf.fill(0);
+                return true;
+            }
+            buf.copy_from_slice(&header[start..end]);
+            true
+        };
+        let err = dt_needed(read, "the executable").unwrap_err();
+        assert!(
+            err.contains("the executable dynamic section is malformed"),
+            "{err}"
+        );
+        let err = super::ph_at(u64::MAX - 20, 1, 56).unwrap_err();
+        assert!(
+            err.contains("the executable program headers are not usable"),
             "{err}"
         );
     }

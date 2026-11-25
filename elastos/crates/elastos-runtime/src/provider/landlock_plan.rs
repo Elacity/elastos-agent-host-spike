@@ -5,7 +5,7 @@
 
 use super::rights::AdmittedRights;
 use super::rights_table::RuntimeProviderId;
-use elastos_common::elf_needed::{dt_needed, library_required};
+use elastos_common::elf_needed::{dt_needed, library_required, ph_at};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::{
     io,
@@ -262,13 +262,11 @@ pub(super) fn interpreter_of(fd: i32) -> Result<Interpreter, String> {
         return Ok(Interpreter::Static);
     }
     if phentsize < 56 || phnum > 128 {
-        return Err(
-            "provider start is refused: the executable program headers are not usable".to_string(),
-        );
+        return Err(elastos_common::elf_needed::UNUSABLE_PROGRAM_HEADERS.to_string());
     }
     for index in 0..phnum {
         let mut program = [0u8; 56];
-        pread_all(fd, &mut program, phoff + index * phentsize)?;
+        pread_all(fd, &mut program, ph_at(phoff, index, phentsize)?)?;
         let kind = u32::from_le_bytes(program[0..4].try_into().unwrap());
         if kind != 3 {
             continue;
@@ -1056,7 +1054,30 @@ pub(super) fn build_path_allow_plan(
 mod tests {
     use super::*;
     use std::collections::HashMap;
+    use std::os::unix::io::AsRawFd;
     use RuntimeProviderId::*;
+
+    #[test]
+    fn a_wrapping_program_header_names_the_executable() {
+        let err = elastos_common::elf_needed::ph_at(u64::MAX - 10, 1, 56).unwrap_err();
+        assert!(
+            err.contains("the executable program headers are not usable"),
+            "{err}"
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("bad.elf");
+        let mut bytes = vec![0u8; 64];
+        bytes[0..4].copy_from_slice(&[0x7f, b'E', b'L', b'F']);
+        bytes[4] = 2;
+        bytes[5] = 1;
+        bytes[32..40].copy_from_slice(&(u64::MAX - 20).to_le_bytes());
+        bytes[54..56].copy_from_slice(&56u16.to_le_bytes());
+        bytes[56..58].copy_from_slice(&2u16.to_le_bytes());
+        std::fs::write(&path, &bytes).unwrap();
+        let file = std::fs::File::open(&path).unwrap();
+        let err = interpreter_of(file.as_raw_fd()).unwrap_err();
+        assert!(err.contains("the executable"), "{err}");
+    }
 
     const LAB: &str = include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
