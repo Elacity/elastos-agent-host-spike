@@ -111,6 +111,15 @@ pub fn clear_local_apps_refusals() {
         .clear();
 }
 
+/// A refused prepare has not made `ElastOS`. The auth check must not make it.
+pub(crate) fn refusal_leaves_elastos_unmade(data_dir: &Path) -> bool {
+    LOCAL_APPS_REFUSAL
+        .lock()
+        .expect("local apps refusal")
+        .contains_key(&refusal_key(data_dir))
+        && std::fs::symlink_metadata(data_dir.join("ElastOS")).is_err()
+}
+
 pub fn local_apps_refusal(data_dir: &Path) -> Option<String> {
     if let Some(sentence) = test_override() {
         return Some(sentence);

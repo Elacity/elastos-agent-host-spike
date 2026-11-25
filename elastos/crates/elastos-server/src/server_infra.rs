@@ -6272,6 +6272,10 @@ mod tests {
         assert!(prep < roots, "roots are created before prepare returns");
         crate::localhost_file_migration::prepare_localhost_files(root)
             .expect("a refusal stopped Home");
+        // The gateway order: prepare, then the auth check, then principal roots.
+        elastos_server::auth::verify_auth_audit_chain_ready(root).expect("verify stopped Home");
+        elastos_server::api::auth_gateway::verify_configured_principal_roots_ready(root)
+            .expect("principal roots stopped Home");
         if elastos_server::local_apps::local_apps_refusal(root).is_none() {
             ensure_file_backed_roots(root).ok();
         }
@@ -7562,12 +7566,22 @@ mod tests {
         fs::remove_dir(root.path().join("Users")).unwrap();
         fs::set_permissions(&identity, fs::Permissions::from_mode(0o700)).unwrap();
         crate::localhost_file_migration::prepare_localhost_files(root.path()).unwrap();
+        elastos_server::auth::verify_auth_audit_chain_ready(root.path()).unwrap();
+        elastos_server::api::auth_gateway::verify_configured_principal_roots_ready(root.path())
+            .unwrap();
         match localhost_bringup(root.path(), &new_key) {
             LocalhostBringup::Start(_) => {}
             LocalhostBringup::Refuse(got) => panic!("after chmod: {got}"),
         }
         home_is_up(root.path());
         assert_current_marker(root.path(), &new_key);
+        assert!(elastos_server::local_apps::local_apps_refusal(root.path()).is_none());
+        let other = TempDir::new().unwrap();
+        let _ = elastos_server::auth::verify_auth_audit_chain_ready(other.path());
+        assert!(
+            other.path().join("ElastOS/System/Auth").is_dir(),
+            "a home with no refusal skipped the audit check"
+        );
     }
 
     fn plant_key_0600(root: &std::path::Path, device_key: &[u8; 32]) {

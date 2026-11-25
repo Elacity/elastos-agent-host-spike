@@ -1605,4 +1605,104 @@ mod tests {
             .unwrap();
         assert_eq!(content, b"<h1>Hello</h1>");
     }
+
+    fn plant_prefix(path: &std::path::Path, len: u64) {
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, localhost_provider::FILE_KEY_ENVELOPE_PREFIX).unwrap();
+        fs::OpenOptions::new()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_len(len)
+            .unwrap();
+    }
+
+    fn refusal(
+        provider: &LocalProvider,
+        path: &str,
+        offset: Option<u64>,
+        length: Option<u64>,
+    ) -> String {
+        provider
+            .read_file(path, "token", offset, length)
+            .unwrap_err()
+            .to_string()
+    }
+
+    #[test]
+    fn a_file_key_header_is_refused_when_cut_off_corrupt_or_over_the_limit() {
+        let dir = setup_test_dir();
+        fs::create_dir(dir.path().join("Users")).unwrap();
+        let provider = make_encrypted_provider(&dir);
+        let over = localhost_provider::ENVELOPE_BYTE_LIMIT + 1;
+        let huge = localhost_provider::SEALED_READ_HARD_LIMIT + 1;
+
+        let cut = dir.path().join("Users/cut.bin");
+        plant_prefix(&cut, over);
+        assert!(!localhost_provider::is_plain_localhost_file(&cut).unwrap());
+        assert_eq!(
+            refusal(&provider, "Users/cut.bin", None, None),
+            "Users/cut.bin is cut off. Remove it."
+        );
+        assert_eq!(
+            refusal(&provider, "Users/cut.bin", Some(0), Some(4)),
+            "Users/cut.bin is cut off. Remove it."
+        );
+        let before = fs::read(&cut).unwrap();
+        let err = provider
+            .write_file("Users/cut.bin", "token", b"more", true)
+            .unwrap_err()
+            .to_string();
+        assert_eq!(err, "Users/cut.bin is cut off. Remove it.");
+        assert_eq!(fs::read(&cut).unwrap(), before);
+
+        let bad = dir.path().join("Users/bad.bin");
+        let mut file = fs::File::create(&bad).unwrap();
+        use std::io::Write;
+        file.write_all(localhost_provider::FILE_KEY_ENVELOPE_PREFIX)
+            .unwrap();
+        file.write_all(b"g0112233445566778899aabb").unwrap();
+        file.write_all(br#"","ciphertext":""#).unwrap();
+        let chunk = [b'a'; 64 * 1024];
+        let mut left = over as usize - file.metadata().unwrap().len() as usize;
+        while left > 0 {
+            let n = left.min(chunk.len());
+            file.write_all(&chunk[..n]).unwrap();
+            left -= n;
+        }
+        file.write_all(br#""}"#).unwrap();
+        drop(file);
+        assert!(fs::metadata(&bad).unwrap().len() > localhost_provider::ENVELOPE_BYTE_LIMIT);
+        assert!(!localhost_provider::is_plain_localhost_file(&bad).unwrap());
+        assert_eq!(
+            refusal(&provider, "Users/bad.bin", None, None),
+            "Users/bad.bin is cut off. Remove it."
+        );
+        let bad_before = fs::metadata(&bad).unwrap().len();
+        let err = provider
+            .write_file("Users/bad.bin", "token", b"more", true)
+            .unwrap_err()
+            .to_string();
+        assert_eq!(err, "Users/bad.bin is cut off. Remove it.");
+        assert_eq!(fs::metadata(&bad).unwrap().len(), bad_before);
+
+        let big = dir.path().join("Users/huge.bin");
+        plant_prefix(&big, huge);
+        assert!(!localhost_provider::is_plain_localhost_file(&big).unwrap());
+        let sliced = refusal(&provider, "Users/huge.bin", Some(0), Some(8));
+        assert!(
+            sliced.contains("Users/huge.bin is larger than this process can read"),
+            "{sliced}"
+        );
+        assert!(sliced.contains("Move it out of the folder."), "{sliced}");
+        let err = provider
+            .write_file("Users/huge.bin", "token", b"more", true)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("larger than this process can read"), "{err}");
+        assert_eq!(fs::metadata(&big).unwrap().len(), huge);
+        let mut head = [0u8; 32];
+        std::io::Read::read_exact(&mut fs::File::open(&big).unwrap(), &mut head).unwrap();
+        assert!(localhost_provider::header_is_file_key_envelope(&head));
+    }
 }

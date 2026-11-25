@@ -839,12 +839,12 @@ fn migrate_localhost_envelope(
         .read(&mut header)
         .with_context(|| localhost_refused(path, "cannot be read"))?;
     note_bytes_read(read);
-    if localhost_provider::header_is_file_key_envelope(&header[..read]) {
-        return Ok(MigratedFile::Settled);
-    }
     let (plain, extra) = localhost_provider::reads_as_plain_bytes(&header[..read], opened.len, &mut file).with_context(|| localhost_refused(path, "cannot be read"))?;
     note_bytes_read(extra as usize);
-    if plain { return Ok(MigratedFile::Settled); }
+    // A file-key header is not plain, and its body stays unread at start.
+    if plain || localhost_provider::header_is_file_key_envelope(&header[..read]) {
+        return Ok(MigratedFile::Settled);
+    }
     if extra > 0 { std::io::Seek::seek(&mut file, std::io::SeekFrom::Start(read as u64))?; }
     if opened.len > localhost_provider::SEALED_READ_HARD_LIMIT {
         return Ok(MigratedFile::OverHard);

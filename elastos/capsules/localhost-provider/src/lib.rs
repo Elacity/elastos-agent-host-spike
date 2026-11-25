@@ -120,6 +120,8 @@ mod scan {
     use super::{header_rules_out_envelope, ENVELOPE_BYTE_LIMIT};
     use std::io::{self, Read};
     pub fn reads_as_plain_bytes(header: &[u8], len: u64, rest: &mut dyn Read) -> io::Result<(bool, u64)> {
+        // The header this Home writes is an envelope at every size. Do not scan the body.
+        if super::header_is_file_key_envelope(header) { return Ok((false, 0)); }
         if header_rules_out_envelope(header) || len <= ENVELOPE_BYTE_LIMIT { return Ok((header_rules_out_envelope(header), 0)); }
         let mut s = Src { rest, n: 0, b: [0; 8192], i: 0, j: header.len() };
         s.b[..header.len()].copy_from_slice(header);
@@ -519,6 +521,31 @@ mod tests {
         reads_as_plain_bytes(&bytes[..n], len, &mut &bytes[n..])
             .unwrap()
             .0
+    }
+
+    struct Boom;
+
+    impl Read for Boom {
+        fn read(&mut self, _buf: &mut [u8]) -> io::Result<usize> {
+            panic!("a file-key header was scanned");
+        }
+    }
+
+    #[test]
+    fn a_file_key_header_is_an_envelope_without_a_scan() {
+        let (plain, extra) =
+            reads_as_plain_bytes(FILE_KEY_ENVELOPE_PREFIX, ENVELOPE_BYTE_LIMIT + 1, &mut Boom)
+                .unwrap();
+        assert!(!plain);
+        assert_eq!(extra, 0);
+        let (plain, extra) = reads_as_plain_bytes(
+            FILE_KEY_ENVELOPE_PREFIX,
+            SEALED_READ_HARD_LIMIT + 1,
+            &mut Boom,
+        )
+        .unwrap();
+        assert!(!plain);
+        assert_eq!(extra, 0);
     }
 
     #[test]

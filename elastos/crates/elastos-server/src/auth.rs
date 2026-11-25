@@ -5154,6 +5154,9 @@ fn parse_auth_state(data_dir: &Path, bytes: &[u8]) -> anyhow::Result<AuthState> 
 }
 
 pub fn verify_auth_audit_chain_ready(data_dir: &Path) -> anyhow::Result<()> {
+    if crate::local_apps::refusal_leaves_elastos_unmade(data_dir) {
+        return Ok(());
+    }
     load_auth_state(data_dir).map(|_| ())
 }
 
