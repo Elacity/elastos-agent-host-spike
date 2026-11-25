@@ -1355,7 +1355,8 @@ fn release_access(access: &mut impl wasmtime::AsContextMut<Data = ComponentState
     access.as_context_mut().set_epoch_deadline(1);
 }
 
-/// Runs the bridge on another thread. The guest waits at most `deadline`.
+/// Runs a v2 bridge on another thread. The guest waits at most `deadline`.
+/// A panic is named `panicked`. Only a timeout is named `deadline`.
 fn bounded_hostcall(
     hostcall: &BridgeHostcall,
     line: &str,
@@ -1368,21 +1369,23 @@ fn bounded_hostcall(
     let line = line.to_string();
     let capsule_id = capsule_id.to_string();
     let principal = principal.map(str::to_string);
-    let started = Instant::now();
     std::thread::Builder::new()
         .name("component-bridge".into())
         .spawn(move || {
-            let result = if started.elapsed() > deadline {
-                Err("deadline".into())
-            } else {
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 hostcall(&line, &capsule_id, principal.as_deref())
+            }));
+            let result = match result {
+                Ok(value) => value,
+                Err(_) => Err("panicked".into()),
             };
             let _ = done_tx.send(result);
         })
         .map_err(|err| err.to_string())?;
     match done_rx.recv_timeout(deadline) {
         Ok(result) => result,
-        Err(_) => Err("deadline".into()),
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => Err("panicked".into()),
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Err("deadline".into()),
     }
 }
 
@@ -1663,9 +1666,12 @@ impl ComponentState {
         }
     }
 
+    /// `bounded` is the v2 path: one bridge thread and the host deadline.
+    /// v1 passes false and stays on this thread with no cap.
     fn call_bridge(
         &mut self,
         request: RuntimeRequest,
+        bounded: bool,
     ) -> std::result::Result<RuntimeResponse, elastos::bus::types::BusError> {
         if self.sealed {
             return Err(bus_error("denied", SEALED_BRIDGE));
@@ -1677,13 +1683,17 @@ impl ComponentState {
         let line = guest_bus::bridge_envelope_json(1, request)
             .map_err(|err| bus_error("internal", err.to_string()))?;
         let asked = Instant::now();
-        let raw = bounded_hostcall(
-            &hostcall,
-            &line,
-            &self.capsule_id,
-            self.principal_id.as_deref(),
-            V2_HOST_DEADLINE,
-        );
+        let raw = if bounded {
+            bounded_hostcall(
+                &hostcall,
+                &line,
+                &self.capsule_id,
+                self.principal_id.as_deref(),
+                V2_HOST_DEADLINE,
+            )
+        } else {
+            hostcall(&line, &self.capsule_id, self.principal_id.as_deref())
+        };
         self.in_bus += asked.elapsed();
         let raw = raw.map_err(|err| bus_error("internal", err))?;
         let envelope: ResponseEnvelope =
@@ -1770,17 +1780,20 @@ impl ComponentState {
         length: u64,
     ) -> V2Result<(Vec<u8>, Option<String>)> {
         let response = self
-            .call_bridge(guest_bus::invoke_request(guest_bus::InvokeRequest {
-                resource: resource.to_string(),
-                operation: "read".into(),
-                body: serde_json::json!({
-                    "path": resource,
-                    "offset": offset,
-                    "length": length,
-                    "check_revision": true,
+            .call_bridge(
+                guest_bus::invoke_request(guest_bus::InvokeRequest {
+                    resource: resource.to_string(),
+                    operation: "read".into(),
+                    body: serde_json::json!({
+                        "path": resource,
+                        "offset": offset,
+                        "length": length,
+                        "check_revision": true,
+                    }),
+                    grant: Some(grant.to_string()),
                 }),
-                grant: Some(grant.to_string()),
-            }))
+                true,
+            )
             .map_err(v2_error)?;
         let (result, audit) = match response {
             RuntimeResponse::ResourceResult { result, audit } => (result, audit),
@@ -1824,10 +1837,12 @@ impl elastos::bus::identity::Host for ComponentState {
     }
 }
 
-impl elastos::bus::capabilities::Host for ComponentState {
-    fn request(
+impl ComponentState {
+    /// `bounded` is true for a v2 call. v1 passes false: same thread, no cap.
+    fn capability_request(
         &mut self,
         request: elastos::bus::types::CapabilityRequest,
+        bounded: bool,
     ) -> std::result::Result<elastos::bus::types::CapabilityGrant, elastos::bus::types::BusError>
     {
         if request.actions.len() != 1 {
@@ -1844,6 +1859,7 @@ impl elastos::bus::capabilities::Host for ComponentState {
                 reason: request.reason,
             })
             .map_err(|err| bus_error("invalid", err))?,
+            bounded,
         )?;
         let token = match response {
             RuntimeResponse::CapabilityToken { token } => token,
@@ -1862,6 +1878,16 @@ impl elastos::bus::capabilities::Host for ComponentState {
     }
 }
 
+impl elastos::bus::capabilities::Host for ComponentState {
+    fn request(
+        &mut self,
+        request: elastos::bus::types::CapabilityRequest,
+    ) -> std::result::Result<elastos::bus::types::CapabilityGrant, elastos::bus::types::BusError>
+    {
+        self.capability_request(request, false)
+    }
+}
+
 impl elastos::bus::providers::Host for ComponentState {
     fn invoke(
         &mut self,
@@ -1874,12 +1900,15 @@ impl elastos::bus::providers::Host for ComponentState {
             ));
         };
         let body = json_body(&request.body)?;
-        let response = self.call_bridge(guest_bus::invoke_request(guest_bus::InvokeRequest {
-            resource: request.resource,
-            operation: request.operation,
-            body,
-            grant: Some(grant),
-        }))?;
+        let response = self.call_bridge(
+            guest_bus::invoke_request(guest_bus::InvokeRequest {
+                resource: request.resource,
+                operation: request.operation,
+                body,
+                grant: Some(grant),
+            }),
+            false,
+        )?;
         let (result, audit) = match response {
             RuntimeResponse::ResourceResult { result, audit } => (result, audit),
             response => return Err(response_error(&response)),
@@ -2000,13 +2029,13 @@ impl v2::elastos::bus::capabilities::HostWithStore<ComponentState> for HasSelf<C
     {
         let decided = accessor.with(|mut access| {
             let opened = charge_access(&mut access);
-            let result = elastos::bus::capabilities::Host::request(
-                access.get(),
+            let result = access.get().capability_request(
                 elastos::bus::types::CapabilityRequest {
                     resource,
                     actions,
                     reason,
                 },
+                true,
             );
             if opened {
                 release_access(&mut access);
@@ -2806,6 +2835,54 @@ mod tests {
         let err = bounded_hostcall(&slow, "", "capsule", None, Duration::from_millis(40))
             .expect_err("the guest must unblock");
         assert!(err.contains("deadline"), "{err}");
+    }
+
+    #[test]
+    fn a_panicking_bridge_is_named_panicked() {
+        let boom: BridgeHostcall = Arc::new(|_, _, _| panic!("bridge"));
+        let err = bounded_hostcall(&boom, "", "capsule", None, Duration::from_secs(2))
+            .expect_err("a panic must not look like success");
+        assert!(err.contains("panicked"), "{err}");
+        assert!(!err.contains("deadline"), "{err}");
+    }
+
+    #[test]
+    fn v1_read_slower_than_two_seconds_stays_on_the_caller_thread() {
+        let caller = std::thread::current().id();
+        let mut state = ComponentState::new(
+            Some(Arc::new(move |_, _, _| {
+                assert_eq!(
+                    std::thread::current().id(),
+                    caller,
+                    "a v1 bridge adds no thread"
+                );
+                std::thread::sleep(Duration::from_millis(2100));
+                Ok(serde_json::json!({
+                    "id": 1,
+                    "response": {
+                        "type": "resource_result",
+                        "result": { "status": "ok", "data": { "content": [7], "size": 1 } },
+                        "audit": "read-1"
+                    }
+                })
+                .to_string())
+            })),
+            "capsule".into(),
+            None,
+        );
+        let started = Instant::now();
+        let response = elastos::bus::providers::Host::invoke(
+            &mut state,
+            elastos::bus::types::InvokeRequest {
+                resource: "file".into(),
+                operation: "read".into(),
+                body: Vec::new(),
+                grant: Some("g".into()),
+            },
+        )
+        .expect("a v1 read slower than the v2 cap still succeeds");
+        assert!(started.elapsed() >= Duration::from_secs(2));
+        assert_eq!(response.status, "ok");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
