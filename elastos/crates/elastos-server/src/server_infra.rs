@@ -5736,6 +5736,7 @@ mod tests {
             .is_file());
     }
 
+    #[cfg(target_os = "macos")]
     fn prove_temp_on_the_targets_file_system(root: &std::path::Path) {
         use std::os::unix::fs::{MetadataExt, PermissionsExt};
         use std::sync::atomic::{AtomicUsize, Ordering};
