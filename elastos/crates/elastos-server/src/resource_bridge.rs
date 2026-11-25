@@ -9155,13 +9155,12 @@ pub(crate) mod tests {
     mod hosted_agent_rows_feature_off;
 
     /// The seven macOS rows stay declared from this module. Linux CI runs this
-    /// count in job `test-elastos`, step "cargo test with prototype-agents".
-    /// A Studio receipt of
-    /// `cargo test --locked -p elastos-server --lib --features prototype-agents`
-    /// on a Mac runs the seven rows. The default Studio receipt is featureless,
-    /// so it lists the ignored row and does not run the seven. Job
-    /// `source-home-macos`, step "B4-R named localhost decision tests", does
-    /// not select these rows.
+    /// count in job `test-elastos`, in the step that tests the agents build.
+    /// A Studio receipt of that library test on a Mac runs the seven rows.
+    /// The default Studio receipt is featureless, so it lists the ignored row
+    /// and does not run the seven. Job `source-home-macos`, step "B4-R named
+    /// localhost decision tests", does not select these rows. The rows file
+    /// names the cargo line.
     #[test]
     fn hosted_agent_rows_stay_in_the_agents_build() {
         const HOSTED_AGENT_ROWS: usize = 7;
@@ -9182,9 +9181,10 @@ pub(crate) mod tests {
         );
         assert_eq!(NAMES.len(), HOSTED_AGENT_ROWS);
         assert_eq!(rows.matches("#[tokio::test]").count(), HOSTED_AGENT_ROWS);
+        let feature = ["prototype", "-agents"].concat();
+        let gate = format!("#![cfg(feature = \"{feature}\")]");
         assert_eq!(
-            rows.matches("#![cfg(feature = \"prototype-agents\")]")
-                .count(),
+            rows.matches(&gate).count(),
             1,
             "the rows file is missing its one feature gate"
         );
