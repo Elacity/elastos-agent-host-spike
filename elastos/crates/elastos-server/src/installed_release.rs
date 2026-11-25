@@ -204,6 +204,12 @@ pub(crate) fn controller_restart_digest(
     source: &TrustedSource,
 ) -> Result<String> {
     let (installed, _, _) = read_signed_release_after_gate(data, binary, source, false, true)?;
+    if let Some(claimed) = crate::install_transaction::restart_claimed_digest(data, binary)? {
+        anyhow::ensure!(
+            claimed == installed.binary_sha256,
+            "restart journal digest differs from the installed signed release"
+        );
+    }
     Ok(installed.binary_sha256)
 }
 

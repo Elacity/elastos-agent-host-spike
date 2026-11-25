@@ -1856,15 +1856,27 @@ pub(crate) fn claimed_host_start_with_generation(
     } else {
         Some(entry.staged_sha256.as_str())
     };
-    if !state_matches(
-        &file_state(binary)?,
-        expected,
-        if previous {
-            entry.original_mode
-        } else {
-            Some(entry.staged_mode)
-        },
-    ) {
+    let state = file_state(binary)?;
+    let mode = if previous {
+        entry.original_mode
+    } else {
+        Some(entry.staged_mode)
+    };
+    // The installed file keeps its recorded mode. A private copy is mode
+    // 0o500; it is the same start only when its bytes are the claimed digest.
+    let owner = installed_binary(
+        data_dir,
+        crate::update_controller::installed_host_binary(data_dir)?,
+    )?
+    .unwrap_or_else(|| binary.to_path_buf());
+    let copy_bytes = !host_binary_is_owner(binary, &owner)?
+        && running_image_is_private_copy(binary)
+        && expected.is_some_and(|digest| {
+            state
+                .as_ref()
+                .is_some_and(|(actual, _, _)| actual == digest)
+        });
+    if !state_matches(&state, expected, mode) && !copy_bytes {
         bail!("claimed Runtime binary changed before startup");
     }
     Ok(true)
@@ -1898,6 +1910,63 @@ fn pending_home_recovery_hint(journal: &Journal) -> &'static str {
     }
 }
 
+/// A macOS private copy is the only non-install path that may carry the claimed bytes.
+fn running_image_is_private_copy(binary: &Path) -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        crate::setup::verified_executable::private_exec_dir(binary).is_some()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = binary;
+        false
+    }
+}
+
+/// The running image is the installed file when the directory and the name match.
+fn host_binary_is_owner(binary: &Path, owner: &Path) -> anyhow::Result<bool> {
+    let binary_parent = binary.parent().context("host binary parent missing")?;
+    let owner_parent = owner.parent().context("installed binary parent missing")?;
+    Ok(
+        fs::canonicalize(binary_parent)? == fs::canonicalize(owner_parent)?
+            && binary.file_name() == owner.file_name(),
+    )
+}
+
+/// Digest the restart journal claims for the binary that may start now.
+fn claimed_runtime_digest(journal: &Journal) -> Option<&str> {
+    let restart = journal.restart.as_ref()?;
+    let entry = journal
+        .entries
+        .iter()
+        .find(|entry| entry.id == ReleaseFile::RuntimeBinary)?;
+    match restart.phase {
+        RestartPhase::CandidateStartClaimed | RestartPhase::CandidateRunning => {
+            Some(entry.staged_sha256.as_str())
+        }
+        RestartPhase::PreviousStartClaimed | RestartPhase::PreviousRunning => {
+            entry.original_sha256.as_deref()
+        }
+        _ => None,
+    }
+}
+
+fn running_digest_is(binary: &Path, expected: &str) -> anyhow::Result<bool> {
+    Ok(file_state(binary)?.is_some_and(|(digest, _, _)| digest == expected))
+}
+
+/// The digest a pending restart claims for the binary `command` is about to start.
+/// `None` when no restart journal is pending.
+pub(crate) fn restart_claimed_digest(
+    data_dir: &Path,
+    binary: &Path,
+) -> anyhow::Result<Option<String>> {
+    let Some(journal) = read_host_start_journal(data_dir, binary)? else {
+        return Ok(None);
+    };
+    Ok(claimed_runtime_digest(&journal).map(str::to_owned))
+}
+
 fn read_host_start_journal(data_dir: &Path, binary: &Path) -> anyhow::Result<Option<Journal>> {
     let installed = installed_binary(
         data_dir,
@@ -1913,16 +1982,25 @@ fn read_host_start_journal(data_dir: &Path, binary: &Path) -> anyhow::Result<Opt
             continue;
         };
         let owner = installed.as_deref().unwrap_or(binary);
-        if fs::canonicalize(binary.parent().context("host binary parent missing")?)?
-            != fs::canonicalize(owner.parent().context("installed binary parent missing")?)?
-            || binary.file_name() != owner.file_name()
-        {
-            bail!(
-                "Home start differs from the installation retained for recovery. {}",
-                pending_home_recovery_hint(&journal)
-            );
+        if host_binary_is_owner(binary, owner)? {
+            return Ok(Some(journal));
         }
-        return Ok(Some(journal));
+        // A private copy is a different path. It is this start only when its
+        // bytes are the digest the journal claims. The directory name is not
+        // evidence: a copy of any other bytes is refused.
+        let same_bytes = match claimed_runtime_digest(&journal) {
+            Some(digest) => running_digest_is(binary, digest)?,
+            None => false,
+        };
+        // Matching bytes at an arbitrary path are not this start. Only the
+        // private copy the checked launch made can stand in for the install path.
+        if same_bytes && running_image_is_private_copy(binary) {
+            return Ok(Some(journal));
+        }
+        bail!(
+            "Home start differs from the installation retained for recovery. {}",
+            pending_home_recovery_hint(&journal)
+        );
     }
     Ok(None)
 }
@@ -2101,7 +2179,7 @@ mod restart_tests;
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use std::os::unix::fs::symlink;
+    use std::os::unix::fs::{symlink, PermissionsExt};
 
     struct LowDisk {
         parent: PathBuf,
@@ -3642,5 +3720,228 @@ pub(crate) mod tests {
         // Volume size alone never refuses; a volume reporting no size admits nothing.
         assert!(require_update_space(1 << 50, needed + reserve, needed).is_ok());
         assert!(require_update_space(0, needed + reserve, needed).is_err());
+    }
+
+    /// The checked macOS start is a private copy. Its path is not the install
+    /// path. It is admitted only when its bytes are the digest that phase claims.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_private_copy_admits_candidate_rollback_and_recovery_and_refuses_a_foreign_binary() {
+        const TEST: &str = "install_transaction::tests::macos_private_copy_admits_candidate_rollback_and_recovery_and_refuses_a_foreign_binary";
+        if std::env::var_os("ELASTOS_P28_HOST_CHILD").is_some() {
+            let exe = std::env::current_exe().unwrap();
+            if exe.file_name().and_then(|name| name.to_str()) != Some("executable") {
+                eprintln!(
+                    "child was not started from a private copy: {}",
+                    exe.display()
+                );
+                std::process::exit(3);
+            }
+            let data = crate::sources::default_data_dir();
+            let actual = fs::canonicalize(&data).unwrap_or(data);
+            let expected =
+                fs::canonicalize(std::env::var("ELASTOS_P28_EXPECT_DATA").unwrap()).unwrap();
+            if actual != expected {
+                eprintln!("data dir {} != {}", actual.display(), expected.display());
+                std::process::exit(4);
+            }
+            match crate::host_lock::authorize_host_process_start(&actual) {
+                Ok(()) => std::process::exit(0),
+                Err(error) => {
+                    let text = format!("{error:#}");
+                    eprintln!("{text}");
+                    if let Ok(path) = std::env::var("ELASTOS_P28_REFUSAL") {
+                        let _ = fs::write(path, &text);
+                    }
+                    if std::env::var("ELASTOS_P28_EXPECT").unwrap_or_default() == "refuse"
+                        && text.contains(
+                            "Home start differs from the installation retained for recovery",
+                        )
+                    {
+                        std::process::exit(2);
+                    }
+                    std::process::exit(5);
+                }
+            }
+        }
+
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().join("home");
+        let data = home.join("Library/Application Support/elastos");
+        fs::create_dir_all(data.join("bin")).unwrap();
+        let data = fs::canonicalize(&data).unwrap();
+        let binary = data.join("bin/elastos");
+        fs::write(&binary, b"installed-placeholder\n").unwrap();
+        fs::set_permissions(&binary, fs::Permissions::from_mode(0o755)).unwrap();
+        let source = crate::sources::TrustedSource {
+            name: "p28".into(),
+            publisher_dids: Vec::new(),
+            channel: "stable".into(),
+            discovery_uri: String::new(),
+            connect_ticket: String::new(),
+            gateways: Vec::new(),
+            install_path: fs::canonicalize(&binary).unwrap().display().to_string(),
+            installed_version: "0.7.0".into(),
+            head_cid: String::new(),
+            publisher_node_id: String::new(),
+            ipns_name: String::new(),
+        };
+        crate::sources::save_trusted_sources(
+            &data,
+            &crate::sources::TrustedSourcesConfig {
+                schema: "elastos.trusted-sources/v1".into(),
+                default_source: source.name.clone(),
+                sources: vec![source],
+            },
+        )
+        .unwrap();
+
+        let exe = std::env::current_exe().unwrap();
+        let mut file = File::open(&exe).unwrap();
+        let mut hasher = sha2::Sha256::new();
+        let mut buf = [0u8; 64 * 1024];
+        loop {
+            let n = std::io::Read::read(&mut file, &mut buf).unwrap();
+            if n == 0 {
+                break;
+            }
+            sha2::Digest::update(&mut hasher, &buf[..n]);
+        }
+        let real = hex::encode(sha2::Digest::finalize(hasher));
+        let fake = "ab".repeat(32);
+        let prepared = crate::setup::verified_executable::VerifiedExecutable::prepare(
+            &exe,
+            &format!("sha256:{real}"),
+        )
+        .unwrap();
+        let copy = prepared.exec_path();
+        assert_eq!(copy.file_name().unwrap(), "executable");
+        let (copy_digest, _, _) = super::file_state(copy).unwrap().unwrap();
+        assert_eq!(copy_digest, real);
+
+        let journal_path = binary
+            .parent()
+            .unwrap()
+            .join(".elastos.update-journal.json");
+        let spawn = |phase: &str,
+                     outer: &str,
+                     staged: &str,
+                     original: &str,
+                     generation: &str,
+                     expect: &str| {
+            let entries = [
+                "runtime_binary",
+                "components",
+                "sources",
+                "release_head",
+                "release_manifest",
+            ]
+            .into_iter()
+            .map(|id| {
+                serde_json::json!({
+                    "id": id,
+                    "original_sha256": original,
+                    "original_mode": 0o755,
+                    "staged_sha256": if id == "runtime_binary" { staged } else { original },
+                    "staged_mode": 0o755,
+                })
+            })
+            .collect::<Vec<_>>();
+            let journal = serde_json::json!({
+                "schema": "elastos.install-transaction/v4",
+                "transaction_id": "1".repeat(32),
+                "data_dir": &data,
+                "binary_basename": "elastos",
+                "phase": outer,
+                "entries": entries,
+                "restart": {
+                    "plan": {
+                        "request_id": "2".repeat(32),
+                        "controller_sha256": &real,
+                        "launch_plan_sha256": &real,
+                        "support_sha256": &real,
+                        "previous_version": "0.7.0",
+                        "candidate_version": "0.7.1",
+                        "previous_binary_sha256": original,
+                    },
+                    "phase": phase,
+                    "generation": generation,
+                    "pid": null,
+                    "process_start": null,
+                }
+            });
+            fs::write(&journal_path, serde_json::to_vec(&journal).unwrap()).unwrap();
+            fs::set_permissions(&journal_path, fs::Permissions::from_mode(0o600)).unwrap();
+            let refusal = root.path().join(format!("refusal-{generation}"));
+            let _ = fs::remove_file(&refusal);
+            let output = std::process::Command::new(copy)
+                .arg("--exact")
+                .arg(TEST)
+                .arg("--nocapture")
+                .env("HOME", &home)
+                .env("ELASTOS_P28_REFUSAL", &refusal)
+                .env("ELASTOS_P28_HOST_CHILD", "1")
+                .env("ELASTOS_P28_EXPECT_DATA", &data)
+                .env("ELASTOS_P28_EXPECT", expect)
+                .env("ELASTOS_UPDATE_GENERATION", generation)
+                .output()
+                .unwrap();
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            if expect == "refuse" {
+                let filed = fs::read_to_string(&refusal).unwrap_or_default();
+                assert_eq!(
+                    output.status.code(),
+                    Some(2),
+                    "{phase}: stdout {stdout} stderr {stderr} file {filed}"
+                );
+                assert!(
+                    stderr
+                        .contains("Home start differs from the installation retained for recovery")
+                        || filed.contains(
+                            "Home start differs from the installation retained for recovery"
+                        ),
+                    "{phase}: stderr {stderr} file {filed}"
+                );
+            } else {
+                assert!(
+                    output.status.success(),
+                    "{phase}: status {:?} stdout {stdout} stderr {stderr}",
+                    output.status
+                );
+            }
+        };
+        spawn(
+            "candidate_start_claimed",
+            "committed",
+            &real,
+            &fake,
+            &"f".repeat(32),
+            "ok",
+        );
+        spawn(
+            "previous_start_claimed",
+            "recovering",
+            &fake,
+            &real,
+            &"e".repeat(32),
+            "ok",
+        );
+        spawn(
+            "previous_start_claimed",
+            "recovering",
+            &fake,
+            &real,
+            &"d".repeat(32),
+            "ok",
+        );
+        spawn(
+            "candidate_start_claimed",
+            "committed",
+            &fake,
+            &fake,
+            &"c".repeat(32),
+            "refuse",
+        );
     }
 }

@@ -3489,7 +3489,7 @@ use crate::install_transaction::shell_quote;
 /// Shell lines that export `settings` and exec the real fixture Home below.
 fn fixture_home_exec(settings: &str) -> String {
     format!(
-        "export {settings}\nexec {} --exact {} --ignored --nocapture\n",
+        "started=\"$0\"\nif [ ! -f \"$started\" ]; then\n  started=\"$PWD/installed-runtime\"\nfi\nexport ELASTOS_RESTART_STARTED_EXE=\"$started\"\nexport {settings}\nexec {} --exact {} --ignored --nocapture\n",
         shell_quote(std::env::current_exe().unwrap().to_str().unwrap()),
         shell_quote(&format!(
             "{}::restart_home_fixture",
@@ -4097,8 +4097,17 @@ async fn restart_home_fixture() {
     let mut term =
         tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).unwrap();
     child::watch_parent().unwrap();
-    crate::install_transaction::authorize_host_start(&data, &data.join("installed-runtime"))
-        .unwrap();
+    // The wrapper is the program the controller started. After it execs this
+    // harness, current_exe is the harness, whose bytes are not the wrapper.
+    // Authorize the path that wrapper was started as. On macOS that path is
+    // the private copy. A descriptor path that is already gone falls back to
+    // the installed file, which is the inode the controller checked.
+    let started = std::env::var("ELASTOS_RESTART_STARTED_EXE")
+        .ok()
+        .map(std::path::PathBuf::from)
+        .filter(|path| path.is_file())
+        .unwrap_or_else(|| std::env::current_exe().unwrap());
+    crate::install_transaction::authorize_host_start(&data, &started).unwrap();
     // DID admission reads release signers while the update journal still owns
     // this Home. This restart fixture has no DID row, so it starts no helper.
     if restarting {
@@ -6012,4 +6021,89 @@ fn retained_controller_is_held_against_its_signed_receipt() {
     let error = hold_signed_controller(&fixture.controller(), &fixture.directory.join(RECEIPT))
         .unwrap_err();
     assert!(format!("{error:#}").contains("signed"), "{error:#}");
+}
+
+#[test]
+fn launch_plan_refuses_a_journal_whose_digest_is_not_the_installed_release() {
+    let fixture = PrivateFixture::new();
+    fixture.publish_installed_release();
+    let installed = digest(&fs::read(&fixture.binary).unwrap());
+    let foreign = "ab".repeat(32);
+    let launch = LaunchPlan::capture_environment(
+        std::iter::empty::<(OsString, OsString)>(),
+        fixture.data.clone(),
+    );
+    let generation = "c".repeat(32);
+    for (phase, outer, staged, original) in [
+        (
+            "candidate_start_claimed",
+            "committed",
+            foreign.as_str(),
+            installed.as_str(),
+        ),
+        (
+            "previous_start_claimed",
+            "recovering",
+            installed.as_str(),
+            foreign.as_str(),
+        ),
+    ] {
+        let entries = [
+            "runtime_binary",
+            "components",
+            "sources",
+            "release_head",
+            "release_manifest",
+        ]
+        .into_iter()
+        .map(|id| {
+            json!({
+                "id": id,
+                "original_sha256": original,
+                "original_mode": 0o755,
+                "staged_sha256": if id == "runtime_binary" { staged } else { original },
+                "staged_mode": 0o755,
+            })
+        })
+        .collect::<Vec<_>>();
+        let journal = json!({
+            "schema": "elastos.install-transaction/v4",
+            "transaction_id": "a".repeat(32),
+            "data_dir": &fixture.data,
+            "binary_basename": "installed-runtime",
+            "phase": outer,
+            "entries": entries,
+            "restart": {
+                "plan": {
+                    "request_id": "b".repeat(32),
+                    "controller_sha256": &installed,
+                    "launch_plan_sha256": &installed,
+                    "support_sha256": &installed,
+                    "previous_version": "0.7.0",
+                    "candidate_version": "0.7.1",
+                    "previous_binary_sha256": original,
+                },
+                "phase": phase,
+                "generation": &generation,
+                "pid": null,
+                "process_start": null,
+            }
+        });
+        let path = fixture
+            .binary
+            .parent()
+            .unwrap()
+            .join(".elastos.update-journal.json");
+        fs::write(&path, serde_json::to_vec(&journal).unwrap()).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        let error = launch
+            .command(&fixture.data, &fixture.binary, &generation, false)
+            .unwrap_err();
+        let text = format!("{error:#}");
+        assert!(
+            text.contains("restart journal digest differs from the installed signed release")
+                || text.contains("claimed Runtime binary changed before startup"),
+            "{phase}: {text}"
+        );
+    }
 }
