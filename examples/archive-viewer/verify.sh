@@ -118,8 +118,18 @@ if [[ $PARSER -eq 1 ]]; then
     cargo test --locked --manifest-path "${VIEWER_DIR}/Cargo.toml"
     "${VIEWER_DIR}/build.sh"
     test -f "${VIEWER_DIR}/archive-viewer.component.wasm"
-    cargo test --locked --manifest-path "${VIEWER_DIR}/host-test/Cargo.toml" \
-        --test component worst_archives_stay_under_their_fuel_ceiling -- --exact
+    # The fuel test must have run. A renamed or deleted test makes cargo exit 0
+    # with 0 passed, so the result line is part of the gate.
+    fuel="$(CARGO_TERM_COLOR=never cargo test --locked --manifest-path "${VIEWER_DIR}/host-test/Cargo.toml" \
+        --test component worst_archives_stay_under_their_fuel_ceiling -- --exact 2>&1)" || {
+        printf '%s\n' "$fuel"
+        exit 1
+    }
+    printf '%s\n' "$fuel"
+    if ! printf '%s\n' "$fuel" | grep -Eq '^test result: ok\. 1 passed; 0 failed;'; then
+        echo "archive-viewer parser: the fuel gate did not report 1 passed and 0 failed" >&2
+        exit 1
+    fi
     echo "archive-viewer parser: guest tests and fuel gate OK"
     exit 0
 fi
