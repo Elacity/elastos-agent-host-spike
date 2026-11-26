@@ -134,16 +134,19 @@ mod scan {
     use super::{header_rules_out_envelope, ENVELOPE_BYTE_LIMIT};
     use std::io::{self, Read};
     pub fn reads_as_plain_bytes(header: &[u8], len: u64, rest: &mut dyn Read) -> io::Result<(bool, u64)> {
-        // A header this Home writes, new or old, is an envelope at every size. Do not scan the body.
-        if super::header_is_file_key_envelope(header) || super::header_is_device_key_envelope(header) {
-            return Ok((false, 0));
-        }
-        if header_rules_out_envelope(header) || len <= ENVELOPE_BYTE_LIMIT { return Ok((header_rules_out_envelope(header), 0)); }
-        let mut s = Src { rest, n: 0, b: [0; 8192], i: 0, j: header.len().min(8192) };
-        s.b[..s.j].copy_from_slice(&header[..s.j]);
-        Ok((!s.open()?, s.n))
+        envelope_version(header, len, rest).map(|(version, n)| (version.is_none(), n))
     }
-    struct Src<'a> { rest: &'a mut dyn Read, n: u64, b: [u8; 8192], i: usize, j: usize }
+    /// `None` is plain. `Some(0)` is an envelope at or under 32 MiB whose version was not read.
+    pub fn envelope_version(header: &[u8], len: u64, rest: &mut dyn Read) -> io::Result<(Option<u8>, u64)> {
+        // A header this Home writes, new or old, is an envelope at every size. Do not scan the body.
+        if super::header_is_file_key_envelope(header) { return Ok((Some(2), 0)); }
+        if super::header_is_device_key_envelope(header) { return Ok((Some(1), 0)); }
+        if header_rules_out_envelope(header) || len <= ENVELOPE_BYTE_LIMIT { return Ok(((!header_rules_out_envelope(header)).then_some(0), 0)); }
+        let mut s = Src { rest, n: 0, b: [0; 8192], i: 0, j: header.len().min(8192), v: 0 };
+        s.b[..s.j].copy_from_slice(&header[..s.j]);
+        Ok((s.open()?.then_some(s.v), s.n))
+    }
+    struct Src<'a> { rest: &'a mut dyn Read, n: u64, b: [u8; 8192], i: usize, j: usize, v: u8 }
     impl Src<'_> {
         fn fill(&mut self) -> io::Result<bool> { self.i = 0; self.j = self.rest.read(&mut self.b)?; self.n += self.j as u64; Ok(self.j != 0) }
         fn byte(&mut self) -> io::Result<Option<u8>> { if self.i == self.j && !self.fill()? { return Ok(None); } self.i += 1; Ok(Some(self.b[self.i - 1])) }
@@ -192,6 +195,7 @@ mod scan {
         }
         fn ver(&mut self, lead: Option<u8>) -> io::Result<bool> {
             let good = matches!(lead, Some(b'1' | b'2'));
+            self.v = lead.map_or(0, |digit| digit.wrapping_sub(b'0'));
             let next = if good { self.byte()? } else { None };
             let bad = matches!(next, Some(b'0'..=b'9' | b'.' | b'e' | b'E' | b'+' | b'-'));
             if good && next.is_some() && !bad { self.i -= 1; }
@@ -199,7 +203,7 @@ mod scan {
         }
     }
 }
-pub use scan::reads_as_plain_bytes;
+pub use scan::{envelope_version, reads_as_plain_bytes};
 
 pub fn is_plain_localhost_file(path: &Path) -> io::Result<bool> {
     let mut file = std::fs::File::open(path)?;
@@ -635,6 +639,38 @@ mod tests {
                 !err.contains("device.key") && !err.contains("aead"),
                 "{err}"
             );
+        }
+    }
+
+    #[test]
+    fn a_new_format_header_in_any_order_or_spacing_reads_as_version_two() {
+        let over = ENVELOPE_BYTE_LIMIT + 1;
+        let nonce = "00112233445566778899aabb";
+        let body = "00".repeat(16);
+        for (text, want) in [
+            (
+                format!(r#"{{"version":2,"nonce":"{nonce}","ciphertext":"{body}"}}"#),
+                Some(2),
+            ),
+            (
+                format!(r#"{{"ciphertext":"{body}","nonce":"{nonce}","version":2}}"#),
+                Some(2),
+            ),
+            (
+                format!(r#"{{ "nonce" : "{nonce}" , "version" : 2 , "ciphertext" : "{body}" }}"#),
+                Some(2),
+            ),
+            (
+                format!(r#"{{"ciphertext":"{body}","version":1,"nonce":"{nonce}"}}"#),
+                Some(1),
+            ),
+            (r#"{"version":2,"records":[]}"#.to_string(), None),
+        ] {
+            let bytes = text.as_bytes();
+            let head = &bytes[..bytes.len().min(ENVELOPE_HEADER)];
+            let mut rest = &bytes[head.len()..];
+            let (got, _) = envelope_version(head, over, &mut rest).unwrap();
+            assert_eq!(got, want, "{text}");
         }
     }
 
