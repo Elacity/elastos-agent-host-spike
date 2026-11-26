@@ -2010,13 +2010,14 @@ pub(super) async fn gateway_provider_proxy(
         }
     }
 
-    let mut response = if scheme == "object"
-        && crate::library::library_write_refused_while_object_roots_change(&state.data_dir).is_err()
+    let mut response = if let Some(message) = (scheme == "object")
+        .then(|| crate::library::object_write_roots_change_message(&state.data_dir, &op))
+        .flatten()
     {
         serde_json::json!({
             "status": "error",
             "code": "library_error",
-            "message": "library write was not saved: retry after the object helper restarts",
+            "message": message,
         })
     } else if scheme == "object"
         && (library_operation_needs_runtime_coordinator(&op)
