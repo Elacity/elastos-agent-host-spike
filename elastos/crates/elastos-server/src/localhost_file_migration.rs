@@ -18,7 +18,7 @@
 //! calls it before `ensure_file_backed_roots`. When any of the five is already
 //! present, that call does not walk. An empty root that
 //! is still present is not moved aside. A matching marker still walks, so an
-//! older build's later device-key file is rewritten. A new-format header and a plain file are settled unread. A later
+//! older build's later device-key file is rewritten, one way: an older release cannot open it. A refused start does not rewrite an older-format file. A new-format header and a plain file are settled unread. A later
 //! start uses the size and time stored beside the marker and does not open a file
 //! that still matches. The walk logs a count every few seconds. A waiter on
 //! `identity/localhost-file-key.lock` logs that. The walk runs from
@@ -32,8 +32,7 @@
 //! `ElastOS` (`gateway_cmd.rs`). A second one of these stops with "another ElastOS
 //! host already owns". Gateway and `home --browser` call
 //! `setup_gateway_infrastructure` or `setup_control_plane_infrastructure`
-//! (`spawn_host_providers` is false). They run this same walk, so a bad file
-//! turns local apps off there too, and they register the refusing provider so
+//! (`spawn_host_providers` is false). They run this same walk. A foreign or undecryptable old-format file turns local apps off; an unparsable one is left in place and refuses on open. They register the refusing provider so
 //! System can show the sentence. They do not spawn the localhost helper.
 //! Update and the provider host take the same lock and do not run this walk.
 //! `elastos run` of a data capsule and `elastos open` call `serve_web_capsule`
@@ -254,10 +253,13 @@ fn kill_checkpoint(point: &str) {
 }
 
 #[cfg(unix)]
+#[rustfmt::skip]
 thread_local! {
     static MIGRATION_ROOT: std::cell::RefCell<std::path::PathBuf> =
         const { std::cell::RefCell::new(std::path::PathBuf::new()) };
     static PROGRESS_AT: std::cell::Cell<(u64, u64)> = const { std::cell::Cell::new((0, 0)) };
+    static CANON_ROOT: std::cell::RefCell<std::path::PathBuf> = const { std::cell::RefCell::new(std::path::PathBuf::new()) };
+    static HELD: std::cell::RefCell<Vec<(std::path::PathBuf, Vec<u8>, OpenedIdentity)>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
 #[cfg(unix)]
@@ -284,18 +286,17 @@ fn set_migration_root(root: &Path) {
 }
 
 #[cfg(unix)]
+#[rustfmt::skip]
 fn relative_path(path: &Path) -> String {
     MIGRATION_ROOT.with(|root| {
-        path.strip_prefix(root.borrow().as_path())
-            .unwrap_or(path)
-            .components()
-            .map(|component| component.as_os_str().to_string_lossy().into_owned())
-            .collect::<Vec<_>>()
-            .join("/")
+        let root = root.borrow();
+        let shown = if path == root.as_path() { root.file_name().unwrap_or(path.as_os_str()) } else { path.strip_prefix(root.as_path()).unwrap_or(path).as_os_str() };
+        std::path::Path::new(shown).components().map(|c| c.as_os_str().to_string_lossy().into_owned()).collect::<Vec<_>>().join("/")
     })
 }
 
 #[cfg(unix)]
+#[rustfmt::skip]
 fn localhost_refused(path: &Path, why: &str) -> anyhow::Error {
     let rel = relative_path(path);
     if why == "forged" {
@@ -342,6 +343,7 @@ fn localhost_refused(path: &Path, why: &str) -> anyhow::Error {
             "not a regular file",
             "Replace it with a regular file, then restart.",
         )
+    } else if why.contains("another path") { ("linked from another path", "Remove the other names for this file, or copy it to a new name and delete it, then restart.")
     } else if why.contains("link") {
         (
             "linked",
@@ -606,6 +608,7 @@ struct SeenFile {
 enum MigratedFile {
     Settled,
     OverHard,
+    Held,
 }
 
 #[cfg(unix)]
@@ -883,9 +886,8 @@ fn migrate_localhost_envelope(
         | Ok(localhost_provider::RekeyOutcome::AlreadyFileKey) => Ok(MigratedFile::Settled),
         Ok(localhost_provider::RekeyOutcome::Rewritten(sealed)) => {
             opened_file_still_matches(path, &opened)?;
-            replace_file_fsync_rename(path, &sealed, kept_mode(opened.mode), Some(&opened))
-                .map_err(|err| migration_io(path, "cannot be replaced", err))?;
-            Ok(MigratedFile::Settled)
+            HELD.with(|slot| slot.borrow_mut().push((path.to_path_buf(), sealed, opened)));
+            Ok(MigratedFile::Held)
         }
         Err(err) if err.to_string().contains("does not decrypt") => {
             Err(localhost_refused(path, "does not decrypt"))
@@ -919,6 +921,7 @@ fn sweep_rewrite_temps(dir: &Path) -> anyhow::Result<()> {
 }
 
 #[cfg(unix)]
+#[rustfmt::skip]
 fn migrate_localhost_tree(
     dir: &Path,
     device_key: &[u8; 32],
@@ -942,7 +945,9 @@ fn migrate_localhost_tree(
             } else {
                 "is a link"
             };
-            return Err(localhost_refused(&path, why));
+            let inside = std::fs::canonicalize(&path).ok().is_some_and(|t| CANON_ROOT.with(|s| t.starts_with(s.borrow().as_path())));
+            if !inside { return Err(localhost_refused(&path, why)); }
+            continue;
         }
         if file_type.is_fifo() || file_type.is_socket() {
             let why = ["is a pipe", "is a socket"][usize::from(file_type.is_socket())];
@@ -979,6 +984,7 @@ fn migrate_localhost_tree(
                     .with_context(|| localhost_refused(&path, "cannot be read"))?;
                 next.insert(rel, seen_file(&after, false));
             }
+            MigratedFile::Held => {}
             MigratedFile::OverHard => {
                 over_hard.push(rel.clone());
                 next.insert(
@@ -1044,13 +1050,15 @@ fn read_marker_plan(marker: &Path, file_key: &[u8; 32]) -> anyhow::Result<Marker
 }
 
 #[cfg(unix)]
+#[rustfmt::skip]
 fn encrypted_roots_absent(data_dir: &Path) -> anyhow::Result<bool> {
     for root in LOCALHOST_ENCRYPTED_ROOTS {
         let path = data_dir.join(root);
         match std::fs::symlink_metadata(&path) {
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
             Err(err) => {
-                return Err(err).with_context(|| localhost_refused(&path, "cannot be read"));
+                let named = path.parent().filter(|p| *p == data_dir).unwrap_or(&path);
+                return Err(err).with_context(|| localhost_refused(named, "cannot be read"));
             }
             Ok(_) => return Ok(false),
         }
@@ -1206,11 +1214,28 @@ fn write_localhost_marker(marker: &Path, record: &[u8]) -> anyhow::Result<()> {
 }
 
 #[cfg(unix)]
+#[rustfmt::skip]
+fn commit_held(next: &mut std::collections::HashMap<String, SeenFile>) -> anyhow::Result<()> {
+    for (p, b, o) in HELD.with(|s| std::mem::take(&mut *s.borrow_mut())) {
+        replace_file_fsync_rename(&p, &b, kept_mode(o.mode), Some(&o)).map_err(|e| migration_io(&p, "cannot be replaced", e))?;
+        next.insert(relative_path(&p), seen_file(&std::fs::symlink_metadata(&p).with_context(|| localhost_refused(&p, "cannot be read"))?, false));
+    }
+    Ok(())
+}
+#[cfg(unix)]
+struct ClearHeld;
+#[cfg(unix)]
+#[rustfmt::skip]
+impl Drop for ClearHeld { fn drop(&mut self) { HELD.with(|s| s.borrow_mut().clear()); } }
+
+#[cfg(unix)]
+#[rustfmt::skip]
 fn migrate_localhost_files_to_file_key(
     data_dir: &Path,
     device_key: &[u8; 32],
 ) -> anyhow::Result<()> {
     set_migration_root(data_dir);
+    let _clear_held = ClearHeld;
     let identity = data_dir.join("identity");
     identity_is_directory_or_absent(&identity)?;
     let file_key = zeroize::Zeroizing::new(localhost_file_key(device_key)?);
@@ -1234,6 +1259,8 @@ fn migrate_localhost_files_to_file_key(
                 return Err(localhost_refused(&path, "is a directory link"));
             }
             Ok(meta) if meta.is_dir() => {
+                let canon = std::fs::canonicalize(&path).map_err(|_| localhost_refused(&path, "cannot be read"))?;
+                CANON_ROOT.with(|slot| *slot.borrow_mut() = canon);
                 migrate_localhost_tree(
                     &path,
                     device_key,
@@ -1250,17 +1277,15 @@ fn migrate_localhost_files_to_file_key(
             }
         }
     }
+    if !over_hard.is_empty() { return Err(anyhow::anyhow!(over_hard_sentence(&over_hard))); }
+    commit_held(&mut next)?;
     if next != seen || !seen_path.is_file() {
         write_seen(&seen_path, &next)?;
     }
     if matches!(plan, MarkerPlan::Write) {
         write_localhost_marker(&marker, &localhost_marker_record(&file_key))?;
     }
-    if over_hard.is_empty() {
-        Ok(())
-    } else {
-        Err(anyhow::anyhow!(over_hard_sentence(&over_hard)))
-    }
+    Ok(())
 }
 
 /// Localhost-provider init config.

@@ -256,6 +256,8 @@ connection fails, the check fails.
 
 **What System shows.** System shows the new version and its release notes.
 
+**Local app files.** The first start moves files under AppCapsules, ElastOS, Local, Users, and UsersAI onto a file key. The move is one way. This release opens them. An older release cannot open them afterwards. Copy the data folder before you upgrade if you want to run the older release again.
+
 **Approve and restart.** You approve the update with your passkey for that
 exact release. The Runtime always downloads the new Runtime binary and
 `components.json` by CID over Carrier. A capsule is downloaded only when its

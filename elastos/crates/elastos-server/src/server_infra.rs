@@ -4955,7 +4955,7 @@ mod tests {
         let err = localhost_provider_bridge_config(shared.path(), &device_key).unwrap_err();
         let message = err.to_string();
         assert!(message.contains("Local/linked.bin"), "{message}");
-        assert!(message.contains(" is linked."), "{message}");
+        assert!(message.contains("linked from another path"), "{message}");
         assert_eq!(fs::read(&creds).unwrap(), original);
         assert_eq!(fs::read(&hard).unwrap(), original);
         assert!(!shared
@@ -5463,10 +5463,23 @@ mod tests {
         let hard_b = hard.path().join("Users/b.bin");
         fs::hard_link(&hard_a, &hard_b).unwrap();
         let err = localhost_provider_bridge_config(hard.path(), &device_key).unwrap_err();
-        assert!(err.to_string().contains(" is linked."), "{err}");
+        assert!(
+            err.to_string().contains(
+                "Remove the other names for this file, or copy it to a new name and delete it, then restart."
+            ),
+            "{err}"
+        );
         assert_eq!(fs::read(&hard_a).unwrap(), sealed);
         assert_eq!(fs::read(&hard_b).unwrap(), sealed);
         assert!(!hard.path().join("identity/localhost-file-key-v1").exists());
+        fs::remove_file(&hard_b).unwrap();
+        migrate_again(hard.path(), &device_key);
+        assert_envelope_opens_with_exactly_one_key(
+            &hard_a,
+            b"linked-secret",
+            &device_key,
+            &expected_localhost_file_key(&device_key),
+        );
 
         let lock_link = TempDir::new().unwrap();
         plant_device_envelope(
@@ -5484,7 +5497,10 @@ mod tests {
         .unwrap();
         let err = localhost_provider_bridge_config(lock_link.path(), &device_key).unwrap_err();
         assert!(err.to_string().contains("localhost-file-key.lock"), "{err}");
-        assert!(err.to_string().contains(" is linked."), "{err}");
+        assert!(
+            err.to_string().contains("linked from another path"),
+            "{err}"
+        );
         assert_eq!(fs::read(&creds).unwrap(), original);
         assert_eq!(
             localhost_provider::decrypt_bytes(
@@ -5494,6 +5510,85 @@ mod tests {
             .unwrap(),
             b"linked-secret"
         );
+    }
+
+    #[test]
+    fn a_refused_start_leaves_old_files_and_an_inside_link_is_followed_once() {
+        use std::os::unix::fs::symlink;
+
+        let _guard = LocalAppsGuard::lock();
+        let device_key = [0x27; 32];
+        let file_key = expected_localhost_file_key(&device_key);
+
+        let refused = TempDir::new().unwrap();
+        let early = refused.path().join("Users/a.bin");
+        let original = plant_device_envelope(&early, &device_key, b"still-old");
+        let outside = TempDir::new().unwrap();
+        fs::write(outside.path().join("out.bin"), b"out").unwrap();
+        symlink(
+            outside.path().join("out.bin"),
+            refused.path().join("Users/z-out.bin"),
+        )
+        .unwrap();
+        let err = localhost_provider_bridge_config(refused.path(), &device_key).unwrap_err();
+        let text = err.to_string();
+        assert!(text.contains("Users/z-out.bin"), "{text}");
+        assert!(text.contains(" is linked."), "{text}");
+        assert_eq!(fs::read(&early).unwrap(), original);
+
+        let foreign = TempDir::new().unwrap();
+        let first = foreign.path().join("Users/a.bin");
+        let first_bytes = plant_device_envelope(&first, &device_key, b"before-foreign");
+        fs::write(
+            foreign.path().join("Users/z.bin"),
+            localhost_provider::encrypt_bytes(&[0x42; 32], b"other").unwrap(),
+        )
+        .unwrap();
+        let err = localhost_provider_bridge_config(foreign.path(), &device_key).unwrap_err();
+        assert!(err.to_string().contains("does not decrypt"), "{err}");
+        assert_eq!(fs::read(&first).unwrap(), first_bytes);
+
+        let crossed = TempDir::new().unwrap();
+        let note = crossed.path().join("ElastOS/note.bin");
+        let note_bytes = plant_device_envelope(&note, &device_key, b"stay");
+        fs::create_dir(crossed.path().join("Users")).unwrap();
+        symlink(&note, crossed.path().join("Users/jump.bin")).unwrap();
+        let err = localhost_provider_bridge_config(crossed.path(), &device_key).unwrap_err();
+        let text = err.to_string();
+        assert!(text.contains("Users/jump.bin"), "{text}");
+        assert_eq!(fs::read(&note).unwrap(), note_bytes);
+
+        let inside = TempDir::new().unwrap();
+        let real = inside.path().join("Users/real.bin");
+        plant_device_envelope(&real, &device_key, b"followed");
+        symlink("real.bin", inside.path().join("Users/alias.bin")).unwrap();
+        let _ = take_localhost_migration_opens();
+        migrate_again(inside.path(), &device_key);
+        assert_eq!(take_localhost_migration_opens(), 1);
+        assert_envelope_opens_with_exactly_one_key(&real, b"followed", &device_key, &file_key);
+        assert!(fs::symlink_metadata(inside.path().join("Users/alias.bin"))
+            .unwrap()
+            .file_type()
+            .is_symlink());
+
+        let dir_link = TempDir::new().unwrap();
+        let nested = dir_link.path().join("Users/sub/note.bin");
+        plant_device_envelope(&nested, &device_key, b"nested");
+        symlink("sub", dir_link.path().join("Users/linked")).unwrap();
+        let _ = take_localhost_migration_opens();
+        migrate_again(dir_link.path(), &device_key);
+        assert_eq!(take_localhost_migration_opens(), 1);
+        assert_envelope_opens_with_exactly_one_key(&nested, b"nested", &device_key, &file_key);
+
+        let cycle = TempDir::new().unwrap();
+        let kept = cycle.path().join("Users/a.bin");
+        let kept_bytes = plant_device_envelope(&kept, &device_key, b"unmoved");
+        symlink("link-b", cycle.path().join("Users/link-a")).unwrap();
+        symlink("link-a", cycle.path().join("Users/link-b")).unwrap();
+        let err = localhost_provider_bridge_config(cycle.path(), &device_key).unwrap_err();
+        let text = err.to_string();
+        assert!(text.contains("Users/link-a"), "{text}");
+        assert_eq!(fs::read(&kept).unwrap(), kept_bytes);
     }
 
     #[test]
@@ -6142,7 +6237,7 @@ mod tests {
         let root = temp.path();
         let alpha = root.join("Users/a.bin");
         let beta = root.join("Users/b.bin");
-        plant_device_envelope(&alpha, &device_key, b"alpha");
+        let original_alpha = plant_device_envelope(&alpha, &device_key, b"alpha");
         let original_beta = plant_device_envelope(&beta, &device_key, b"beta");
         set_localhost_migration_before_replace(Some(Box::new(move |path: &std::path::Path| {
             if path.file_name().and_then(|name| name.to_str()) != Some("b.bin") {
@@ -6163,12 +6258,11 @@ mod tests {
             localhost_provider::decrypt_bytes(&device_key, &fs::read(&beta).unwrap()).unwrap(),
             b"changed-during-walk"
         );
-        assert_envelope_opens_with_exactly_one_key(&alpha, b"alpha", &device_key, &file_key);
+        assert_eq!(fs::read(&alpha).unwrap(), original_alpha);
         assert!(!root.join("identity/localhost-file-key-v1").exists());
-        let alpha_bytes = fs::read(&alpha).unwrap();
 
         localhost_provider_bridge_config(root, &device_key).unwrap();
-        assert_eq!(fs::read(&alpha).unwrap(), alpha_bytes);
+        assert_envelope_opens_with_exactly_one_key(&alpha, b"alpha", &device_key, &file_key);
         assert_envelope_opens_with_exactly_one_key(
             &beta,
             b"changed-during-walk",
@@ -7793,7 +7887,9 @@ mod tests {
             sentence.contains("Make it readable, then restart."),
             "{sentence}"
         );
-        assert!(sentence.contains("AppCapsules"), "{sentence}");
+        let folder = root.path().file_name().unwrap().to_string_lossy();
+        assert!(sentence.contains(folder.as_ref()), "{sentence}");
+        assert!(!sentence.contains("AppCapsules"), "{sentence}");
     }
 
     #[test]
@@ -8284,15 +8380,18 @@ mod tests {
         std::io::Read::read_exact(&mut std::fs::File::open(&video).unwrap(), &mut video_head)
             .unwrap();
         assert_eq!(&video_head, b"ftyp");
-        assert_envelope_opens_with_exactly_one_key(&small, b"small", &device_key, &file_key);
+        let small_bytes = fs::read(&small).unwrap();
+        assert_eq!(
+            localhost_provider::decrypt_bytes(&device_key, &small_bytes).unwrap(),
+            b"small"
+        );
         let _ = take_localhost_migration_opens();
         let _ = take_localhost_migration_bytes_read();
         match localhost_bringup(root.path(), &device_key) {
             LocalhostBringup::Refuse(got) => assert_eq!(got, sentence),
             LocalhostBringup::Start(_) => panic!("the named file was forgotten"),
         }
-        assert_eq!(take_localhost_migration_opens(), 0);
-        assert_eq!(take_localhost_migration_bytes_read(), 0);
+        assert_eq!(fs::read(&small).unwrap(), small_bytes);
         let outside = root.path().join("huge-out.bin");
         fs::rename(&huge, &outside).unwrap();
         match localhost_bringup(root.path(), &device_key) {

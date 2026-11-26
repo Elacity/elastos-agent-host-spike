@@ -6,6 +6,10 @@ release's Added, Changed, Fixed, Removed and Security bullets before you update;
 
 ## [Unreleased]
 
+### Changed
+
+- The first start moves local app files onto a file key. The move is one way. This release opens them. An older release cannot open them afterwards. Copy the data folder before you upgrade if you want to run the older release again.
+
 ### Fixed
 
 - Home, `elastos identity show` and Chat say when the stored nickname cannot be
