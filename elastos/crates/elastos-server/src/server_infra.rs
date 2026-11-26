@@ -9240,11 +9240,23 @@ mod tests {
         for len in 3..=62 {
             expect_cut(&sealed[..len]);
         }
-        for at in 46..=62 {
+        let marker = root.path().join("identity/localhost-file-key-v1");
+        for at in 46..62 {
+            elastos_server::local_apps::clear_local_apps_refusals();
+            let _ = fs::remove_file(&marker);
             let mut bad = sealed.clone();
             bad[at] = b'Z';
-            expect_cut(&bad);
+            fs::write(&path, &bad).unwrap();
+            match localhost_bringup(root.path(), &device_key) {
+                LocalhostBringup::Start(_) => {}
+                LocalhostBringup::Refuse(got) => panic!("byte {at} was cut off: {got}"),
+            }
+            assert_eq!(fs::read(&path).unwrap(), bad, "byte {at}");
         }
+        let _ = fs::remove_file(&marker);
+        let mut digit = sealed.clone();
+        digit[62] = b'Z';
+        expect_cut(&digit);
         let mut big = sealed.clone();
         big[50] = b'Z';
         let wide = root.path().join("Users/wide.bin");
@@ -9256,14 +9268,18 @@ mod tests {
             .set_len(40 * 1024 * 1024)
             .unwrap();
         elastos_server::local_apps::clear_local_apps_refusals();
+        let _ = fs::remove_file(&marker);
         fs::remove_file(&path).unwrap();
         match localhost_bringup(root.path(), &device_key) {
-            LocalhostBringup::Refuse(got) => assert_eq!(
-                got,
-                "Users/wide.bin is cut off or damaged. Move it out of the folder, then restart."
-            ),
-            LocalhostBringup::Start(_) => panic!("a long damaged old file was settled"),
+            LocalhostBringup::Start(_) => {}
+            LocalhostBringup::Refuse(got) => {
+                panic!("a long file with a broken field was cut off: {got}")
+            }
         }
+        assert_eq!(fs::metadata(&wide).unwrap().len(), 40 * 1024 * 1024);
+        let mut wide_head = [0u8; 64];
+        std::io::Read::read_exact(&mut fs::File::open(&wide).unwrap(), &mut wide_head).unwrap();
+        assert_eq!(wide_head[50], b'Z');
         for (name, bytes) in [
             ("brace.bin", &b"{"[..]),
             ("two.bin", &br#"{"#[..]),
@@ -9282,6 +9298,117 @@ mod tests {
                 LocalhostBringup::Refuse(got) => panic!("{name} turned local apps off: {got}"),
             }
         }
+    }
+
+    #[test]
+    fn a_spaced_or_uppercase_old_envelope_migrates_and_a_note_stays_plain() {
+        let _guard = LocalAppsGuard::lock();
+        let device_key = [0x33; 32];
+        let file_key = expected_localhost_file_key(&device_key);
+        let migrate = |bytes: &[u8], plain: &[u8], name: &str| {
+            let home = TempDir::new().unwrap();
+            let path = home.path().join("Users").join(name);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(&path, bytes).unwrap();
+            elastos_server::local_apps::clear_local_apps_refusals();
+            match localhost_bringup(home.path(), &device_key) {
+                LocalhostBringup::Start(_) => {}
+                LocalhostBringup::Refuse(got) => {
+                    panic!("{name} did not migrate: {got}");
+                }
+            }
+            let now = fs::read(&path).unwrap();
+            assert!(
+                localhost_provider::decrypt_bytes(&device_key, &now).is_err(),
+                "{name} still opens with the device key"
+            );
+            assert_eq!(
+                localhost_provider::decrypt_bytes(&file_key, &now).unwrap(),
+                plain,
+                "{name}"
+            );
+            assert_current_marker(home.path(), &device_key);
+        };
+        let sealed = localhost_provider::encrypt_bytes(&device_key, b"spaced").unwrap();
+        let needle = br#","ciphertext""#;
+        let at = sealed
+            .windows(needle.len())
+            .position(|window| window == needle)
+            .unwrap();
+        let mut spaced = sealed;
+        spaced.insert(at + 1, b' ');
+        assert_eq!(
+            localhost_provider::decrypt_bytes(&device_key, &spaced).unwrap(),
+            b"spaced"
+        );
+        migrate(&spaced, b"spaced", "spaced.bin");
+        let mut upper = None;
+        for _ in 0..64 {
+            let sealed = localhost_provider::encrypt_bytes(&device_key, b"upper").unwrap();
+            let value: serde_json::Value = serde_json::from_slice(&sealed).unwrap();
+            let text = value["ciphertext"].as_str().unwrap();
+            if !text.as_bytes()[0].is_ascii_alphabetic() {
+                continue;
+            }
+            let nonce = value["nonce"].as_str().unwrap();
+            upper = Some(
+                format!(
+                    r#"{{"version":1,"nonce":"{nonce}","ciphertext":"{}"}}"#,
+                    text.to_ascii_uppercase()
+                )
+                .into_bytes(),
+            );
+            break;
+        }
+        let upper = upper.expect("a ciphertext that starts with a letter");
+        assert_eq!(
+            localhost_provider::decrypt_bytes(&device_key, &upper).unwrap(),
+            b"upper"
+        );
+        migrate(&upper, b"upper", "upper.bin");
+        let note = r#"{"version":1,"nonce":"00112233445566778899aabb","note":"plain json stays readable past the header"}"#;
+        assert!(note.len() > 64, "{}", note.len());
+        let home = TempDir::new().unwrap();
+        let small = home.path().join("Users/note.json");
+        let wide = home.path().join("Users/wide.json");
+        fs::create_dir_all(small.parent().unwrap()).unwrap();
+        fs::write(&small, note.as_bytes()).unwrap();
+        fs::write(&wide, note.as_bytes()).unwrap();
+        fs::OpenOptions::new()
+            .write(true)
+            .open(&wide)
+            .unwrap()
+            .set_len(localhost_provider::ENVELOPE_BYTE_LIMIT + 1)
+            .unwrap();
+        elastos_server::local_apps::clear_local_apps_refusals();
+        match localhost_bringup(home.path(), &device_key) {
+            LocalhostBringup::Start(_) => {}
+            LocalhostBringup::Refuse(got) => {
+                panic!("plain note turned local apps off: {got}");
+            }
+        }
+        assert_eq!(fs::read(&small).unwrap(), note.as_bytes());
+        let err =
+            localhost_provider::read_sealed_localhost_file(&file_key, &small, "Users/note.json")
+                .unwrap_err()
+                .to_string();
+        assert!(err.contains("not an encrypted envelope"), "{err}");
+        assert!(!err.contains("cut off"), "{err}");
+        assert!(localhost_provider::is_plain_localhost_file(&wide).unwrap());
+        assert_eq!(
+            localhost_provider::read_plain_localhost_range(
+                &wide,
+                "Users/wide.json",
+                0,
+                Some(note.len() as u64)
+            )
+            .unwrap(),
+            note.as_bytes()
+        );
+        assert_eq!(
+            fs::metadata(&wide).unwrap().len(),
+            localhost_provider::ENVELOPE_BYTE_LIMIT + 1
+        );
     }
 
     #[tokio::test]

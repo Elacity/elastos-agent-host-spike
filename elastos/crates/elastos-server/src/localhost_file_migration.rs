@@ -764,13 +764,13 @@ fn migrate_localhost_envelope(
         .with_context(|| localhost_refused(path, "cannot be read"))?;
     note_bytes_read(read);
     let head = &header[..read];
-    if !localhost_provider::header_is_device_key_envelope(head)
+    let (version, extra) = localhost_provider::envelope_version(head, opened.len.max(localhost_provider::ENVELOPE_BYTE_LIMIT + 1), &mut file).with_context(|| localhost_refused(path, "cannot be read"))?;
+    note_bytes_read(extra as usize);
+    if version.is_none()
         && localhost_provider::header_looks_like_device_key_envelope_at(head, opened.len)
     {
         return Err(localhost_refused(path, "is cut off"));
     }
-    let (version, extra) = localhost_provider::envelope_version(head, opened.len.max(localhost_provider::ENVELOPE_BYTE_LIMIT + 1), &mut file).with_context(|| localhost_refused(path, "cannot be read"))?;
-    note_bytes_read(extra as usize);
     // A file-key envelope, in any key order or spacing, stays unread at start.
     if version.is_none_or(|version| version == 2) {
         return Ok(MigratedFile::Settled);

@@ -101,7 +101,7 @@ pub fn header_looks_like_device_key_envelope_at(header: &[u8], len: u64) -> bool
     let end = header.len().min(mid);
     if header[H.len()..end].iter().any(|b| !matches!(b, b'0'..=b'9' | b'a'..=b'f')) { return false; }
     if header.len() <= digit { return whole && (header.len() <= mid || M.starts_with(&header[mid..])); }
-    len > 64 || whole
+    header[mid..].starts_with(M) && (len > 64 || whole)
 }
 
 #[rustfmt::skip]
@@ -657,8 +657,9 @@ mod tests {
                 !header_is_device_key_envelope(&bad[..64]),
                 "byte {at} still looked whole"
             );
-            assert!(
+            assert_eq!(
                 header_looks_like_device_key_envelope_at(&bad[..64], bad.len() as u64),
+                at == 62,
                 "byte {at} on a {}-byte file",
                 bad.len()
             );
@@ -678,6 +679,82 @@ mod tests {
             br#"{"#,
             ENVELOPE_BYTE_LIMIT + 1
         ));
+        let note = r#"{"version":1,"nonce":"00112233445566778899aabb","note":"plain json stays readable past the header"}"#;
+        assert!(note.len() > 64, "{}", note.len());
+        assert!(!header_looks_like_device_key_envelope_at(
+            note.as_bytes(),
+            note.len() as u64
+        ));
+        assert!(
+            plain_bytes(note.as_bytes(), ENVELOPE_BYTE_LIMIT + 1),
+            "a note past the cap was an old envelope"
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("note.json");
+        std::fs::write(&path, note.as_bytes()).unwrap();
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_len(ENVELOPE_BYTE_LIMIT + 1)
+            .unwrap();
+        assert!(is_plain_localhost_file(&path).unwrap());
+        assert_eq!(
+            read_plain_localhost_range(&path, "Users/note.json", 0, Some(note.len() as u64))
+                .unwrap(),
+            note.as_bytes()
+        );
+    }
+
+    #[test]
+    fn a_spaced_or_uppercase_old_envelope_is_version_one() {
+        let key = [8u8; 32];
+        let over = ENVELOPE_BYTE_LIMIT + 1;
+        let version_of = |bytes: &[u8]| {
+            let n = bytes.len().min(ENVELOPE_HEADER);
+            envelope_version(&bytes[..n], over, &mut &bytes[n..])
+                .unwrap()
+                .0
+        };
+        let sealed = encrypt_bytes(&key, b"spaced").unwrap();
+        let needle = br#","ciphertext""#;
+        let at = sealed
+            .windows(needle.len())
+            .position(|window| window == needle)
+            .unwrap();
+        let mut spaced = sealed;
+        spaced.insert(at + 1, b' ');
+        assert_eq!(decrypt_bytes(&key, &spaced).unwrap(), b"spaced");
+        assert!(!header_is_device_key_envelope(&spaced));
+        assert!(!header_looks_like_device_key_envelope_at(
+            &spaced[..ENVELOPE_HEADER],
+            spaced.len() as u64
+        ));
+        assert_eq!(version_of(&spaced), Some(1));
+        let mut upper = None;
+        for _ in 0..64 {
+            let sealed = encrypt_bytes(&key, b"upper").unwrap();
+            let value: serde_json::Value = serde_json::from_slice(&sealed).unwrap();
+            let text = value["ciphertext"].as_str().unwrap();
+            if !text.as_bytes()[0].is_ascii_alphabetic() {
+                continue;
+            }
+            let nonce = value["nonce"].as_str().unwrap();
+            let body = format!(
+                r#"{{"version":1,"nonce":"{nonce}","ciphertext":"{}"}}"#,
+                text.to_ascii_uppercase()
+            );
+            upper = Some(body.into_bytes());
+            break;
+        }
+        let upper = upper.expect("a ciphertext that starts with a letter");
+        assert_eq!(decrypt_bytes(&key, &upper).unwrap(), b"upper");
+        assert!(!header_is_device_key_envelope(&upper));
+        assert!(header_looks_like_device_key_envelope_at(
+            &upper[..ENVELOPE_HEADER],
+            upper.len() as u64
+        ));
+        assert_eq!(version_of(&upper), Some(1));
     }
 
     #[test]

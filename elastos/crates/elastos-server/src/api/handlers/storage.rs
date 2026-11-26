@@ -608,7 +608,9 @@ pub async fn handle_get_root(
 ) -> Result<Response, StorageApiError> {
     if !query.list.unwrap_or(false) {
         if owner_shell(&session, &headers) {
-            if let Some(sentence) = crate::local_apps::local_apps_refusal(&state.data_dir) {
+            if let Some(sentence) =
+                crate::local_apps::await_local_apps_decision(&state.data_dir).await
+            {
                 return Err(StorageApiError::LocalApps(sentence));
             }
         }
@@ -1427,5 +1429,42 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(body, "Local apps are off.");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_root_read_waits_out_the_local_apps_check() {
+        let _guard = crate::local_apps::lock_local_apps_for_test();
+        let home = tempfile::tempdir().unwrap();
+        crate::local_apps::set_local_apps_refusal(
+            home.path(),
+            Some(crate::local_apps::LOCAL_APPS_CHECKING.into()),
+        );
+        let mut state = make_state(None);
+        state.data_dir = home.path().to_path_buf();
+        let state = State(state);
+        let session = Extension(make_session(SessionType::Shell));
+        let wait = tokio::spawn(async move {
+            handle_get_root(
+                state,
+                session,
+                HeaderMap::new(),
+                Query(StorageQuery {
+                    list: None,
+                    mkdir: None,
+                }),
+            )
+            .await
+        });
+        tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+        assert!(
+            !wait.is_finished(),
+            "root returned while local apps were still checking"
+        );
+        crate::local_apps::set_local_apps_refusal(home.path(), None);
+        let err = wait.await.unwrap().unwrap_err();
+        let (status, body) = refusal_body(err).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(body.contains("Cannot read root as file"), "{body}");
+        assert!(!body.contains("checking"), "{body}");
     }
 }
