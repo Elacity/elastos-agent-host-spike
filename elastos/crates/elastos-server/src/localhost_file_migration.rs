@@ -1442,7 +1442,10 @@ mod windows_header {
 
 #[cfg(all(test, unix))]
 mod tests {
-    use super::{parse_seen, write_seen, SeenFile};
+    use super::{
+        localhost_provider_bridge_config, parse_seen, take_localhost_migration_bytes_read,
+        take_localhost_migration_opens, write_seen, SeenFile,
+    };
 
     #[test]
     fn a_seen_file_stays_within_the_envelope_cap() {
@@ -1464,5 +1467,68 @@ mod tests {
         let parsed = parse_seen(&bytes);
         assert!(parsed.contains_key("Users/a.bin"));
         assert_eq!(parsed.len(), 1);
+    }
+
+    fn peak_resident_bytes() -> i64 {
+        let mut usage: libc::rusage = unsafe { std::mem::zeroed() };
+        unsafe { libc::getrusage(libc::RUSAGE_SELF, &mut usage) };
+        let raw = i64::from(usage.ru_maxrss);
+        if cfg!(target_os = "linux") {
+            raw * 1024
+        } else {
+            raw
+        }
+    }
+
+    /// Start cost on a big old Home. Run by hand, one process per step:
+    /// `SL_R23_ROOT=<dir> SL_R23_BUILD=1` plants 2,000 files (3 old files of
+    /// 100 MiB, 1,900 small old files, 90 small and 7 20 MiB plain JSON files).
+    /// Without `SL_R23_BUILD` it starts that Home twice and prints time, peak
+    /// memory, opens and bytes read.
+    #[test]
+    #[ignore = "measurement, needs SL_R23_ROOT"]
+    fn start_cost_on_a_big_old_home() {
+        let root = std::path::PathBuf::from(std::env::var("SL_R23_ROOT").unwrap());
+        let device_key = [0x23u8; 32];
+        if std::env::var("SL_R23_BUILD").is_ok() {
+            let users = root.join("Users");
+            std::fs::create_dir_all(&users).unwrap();
+            for i in 0..3 {
+                let sealed =
+                    localhost_provider::encrypt_bytes(&device_key, &vec![i; 50 << 20]).unwrap();
+                std::fs::write(users.join(format!("big-{i}.bin")), sealed).unwrap();
+            }
+            for i in 0..1900 {
+                let sealed =
+                    localhost_provider::encrypt_bytes(&device_key, &[i as u8; 2048]).unwrap();
+                std::fs::write(users.join(format!("old-{i}.bin")), sealed).unwrap();
+            }
+            for i in 0..90 {
+                std::fs::write(
+                    users.join(format!("plain-{i}.json")),
+                    format!("{{\"n\":{i}}}"),
+                )
+                .unwrap();
+            }
+            for i in 0..7 {
+                let mut body = b"{\"records\":[".to_vec();
+                body.resize(20 << 20, b'0');
+                std::fs::write(users.join(format!("plain-big-{i}.json")), body).unwrap();
+            }
+            return;
+        }
+        for run in ["first start", "second start"] {
+            let _ = take_localhost_migration_opens();
+            let _ = take_localhost_migration_bytes_read();
+            let started = std::time::Instant::now();
+            localhost_provider_bridge_config(&root, &device_key).unwrap();
+            eprintln!(
+                "SL_R23 {run}: {:?}, peak {} bytes, opens {}, bytes read {}",
+                started.elapsed(),
+                peak_resident_bytes(),
+                take_localhost_migration_opens(),
+                take_localhost_migration_bytes_read()
+            );
+        }
     }
 }
