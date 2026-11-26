@@ -728,7 +728,8 @@ mod tests {
                 // is left of one budget. That this budget is the server's,
                 // and that it only shrinks, is held by the start's own pin
                 // (`the_start_by_cid_reads_each_slot_once_and_fetches_nothing`).
-                let what_is_left = file.ends_with("runtime.rs") && line.contains("(&slot, *left)");
+                let what_is_left = file.ends_with("runtime.rs")
+                    && (line.contains("(&slot, *left)") || line.contains("(&slot, *left,"));
                 // The reported walk takes the report after the budget, so the
                 // budget is followed by a comma there and by `)` on the others.
                 let server_budget =
