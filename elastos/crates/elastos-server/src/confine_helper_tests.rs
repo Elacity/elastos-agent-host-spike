@@ -603,11 +603,14 @@ fn file_backed_roots_exist_before_the_first_helper_spawn() {
     let local = server
         .find("spawn_allow_listed_provider(\"localhost-provider\"")
         .expect("localhost");
-    let object = server
+    // Restart also calls spawn_allow_listed_provider("object-provider"); take the setup site.
+    let object = server[local..]
         .find("spawn_allow_listed_provider(\"object-provider\"")
+        .map(|i| local + i)
         .expect("object");
-    let chain = server
+    let chain = server[object..]
         .find("spawn_allow_listed_provider(\"chain-provider\"")
+        .map(|i| object + i)
         .expect("chain");
     assert!(roots < local && local < object && object < chain);
     let bridge = include_str!("../../elastos-runtime/src/provider/bridge.rs");
