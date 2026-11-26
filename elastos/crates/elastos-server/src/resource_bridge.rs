@@ -1227,6 +1227,7 @@ pub(crate) async fn dispatch_agent_plan_step(
         return resource_error_response("admission_missing", "agent plan admission is unavailable");
     };
     let ctx = held.context;
+    crate::runtime::wire_home_runtime(data_dir, ctx.plan_book.as_ref());
     if held.owner_id != owner_id
         || ctx.principal_id.as_deref() != Some(requester_id)
         || ctx.capsule_id != capsule_id

@@ -273,7 +273,7 @@ pub struct Runtime {
     /// This Runtime's plan instances and the effects that have reached their
     /// work. Another Runtime has another book, so one end cannot see the
     /// other's session.
-    plan_book: Arc<StdMutex<PlanBook>>,
+    pub(crate) plan_book: Arc<StdMutex<PlanBook>>,
     /// One live run per agent. Set when the run is admitted. Cleared when
     /// that run's ending releases it, and also when the start is dropped
     /// before the ending owns it. The token travels with the start that
@@ -449,6 +449,26 @@ fn new_plan_book() -> Arc<StdMutex<PlanBook>> {
         #[cfg(test)]
         clock: None,
     }))
+}
+
+/// One plan book for one Home. None is the gateway's claim. A second live book fails.
+pub(crate) fn wire_home_runtime(home: &Path, book: Option<&Arc<StdMutex<PlanBook>>>) {
+    type Slot = std::sync::Weak<StdMutex<PlanBook>>;
+    static HOMES: std::sync::OnceLock<StdMutex<HashMap<PathBuf, Slot>>> =
+        std::sync::OnceLock::new();
+    let key = std::fs::canonicalize(home).unwrap_or_else(|_| home.to_path_buf());
+    let mut homes = HOMES
+        .get_or_init(|| StdMutex::new(HashMap::new()))
+        .lock()
+        .unwrap_or_else(|err| err.into_inner());
+    let live = homes.get(&key).and_then(Slot::upgrade);
+    if let Some(found) = live.as_ref() {
+        if book.is_some_and(|next| !Arc::ptr_eq(found, next)) {
+            panic!("one Home runs plan dispatch and Stop on two Runtimes");
+        }
+        return;
+    }
+    homes.insert(key, book.map(Arc::downgrade).unwrap_or_default());
 }
 
 /// Request id to the book that holds its flight. Settlement of `unknown`
@@ -2076,6 +2096,7 @@ impl Runtime {
         pending_store: Arc<elastos_runtime::capability::pending::PendingRequestStore>,
         data_dir: std::path::PathBuf,
     ) {
+        wire_home_runtime(&data_dir, Some(&self.plan_book));
         #[cfg(test)]
         self.set_plant_dir_for_test(&data_dir);
         self.model_budget.bind_home(data_dir.clone());
@@ -5304,6 +5325,64 @@ pub(crate) mod tests {
             )
             .await;
         assert_eq!(runtime.model_budget.bound_home_for_test(), Some(data_dir));
+    }
+
+    /// Dispatch and Stop share one Runtime for one Home. A second book fails
+    /// closed. The gateway claims the Home, and the agent package fills it.
+    #[tokio::test]
+    async fn one_home_refuses_a_second_runtime_for_plan_dispatch_and_stop() {
+        let bridge = include_str!("resource_bridge.rs");
+        assert!(
+            bridge.contains("wire_home_runtime(data_dir, ctx.plan_book.as_ref())"),
+            "plan dispatch does not use the Home runtime"
+        );
+        let server = include_str!("api/server.rs");
+        assert!(
+            server.contains("wire_home_runtime(home, Some(&runtime.plan_book))"),
+            "Stop's router does not use the Home runtime"
+        );
+        let gateway = include_str!("api/gateway_server.rs");
+        assert!(
+            gateway.contains("wire_home_runtime(&data_dir, None)"),
+            "the gateway does not claim one Runtime for this Home"
+        );
+        let temp = tempfile::tempdir().unwrap();
+        let data_dir = temp.path().join("home");
+        std::fs::create_dir_all(&data_dir).unwrap();
+        let storage = |name: &str| {
+            let path = temp.path().join(name);
+            async move { Arc::new(LocalFSProvider::new(path).await.unwrap()) }
+        };
+        let first =
+            Runtime::with_providers_and_component(storage("storage-a").await, Vec::new(), None);
+        let second =
+            Runtime::with_providers_and_component(storage("storage-b").await, Vec::new(), None);
+        let audit_log = Arc::new(AuditLog::new());
+        let capability_manager = Arc::new(CapabilityManager::new(
+            Arc::new(CapabilityStore::new()),
+            Arc::clone(&audit_log),
+            Arc::new(MetricsManager::new()),
+        ));
+        let pending_store =
+            Arc::new(elastos_runtime::capability::pending::PendingRequestStore::new(audit_log));
+        first
+            .set_provider_registry(
+                Arc::new(ProviderRegistry::new()),
+                capability_manager,
+                pending_store,
+                data_dir.clone(),
+            )
+            .await;
+        wire_home_runtime(&data_dir, Some(&first.plan_book));
+        let split = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            wire_home_runtime(&data_dir, Some(&second.plan_book));
+        }));
+        let err = split.expect_err("a second Runtime was accepted for one Home");
+        let message = err.downcast_ref::<&str>().copied().unwrap_or("");
+        assert!(
+            message.contains("one Home runs plan dispatch and Stop on two Runtimes"),
+            "{message}"
+        );
     }
 
     impl Runtime {

@@ -24,6 +24,10 @@
 //!
 //! This module compiles only with `prototype-agents`. A build without that
 //! feature does not contain these rows.
+//!
+//! U7 is proved in one process. Its installed proof comes with the agent
+//! package, which puts the plan book, the Inbox dispatch and Stop on the
+//! gateway's one Runtime.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};

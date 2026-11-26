@@ -135,6 +135,7 @@ async fn start_gateway_server_with_shutdown(
     // The reconciler registration proves this process is the in-process Home
     // for the data directory: a second start on any port is refused there, and
     // a failed bind already returned. Settle before a request can claim a plan.
+    crate::runtime::wire_home_runtime(&data_dir, None);
     // Production callers hold this data directory's host lock before they
     // reach here. This function does not take that lock. While this process
     // holds it, leftover coordinates are not an owner. With no host lock, only
