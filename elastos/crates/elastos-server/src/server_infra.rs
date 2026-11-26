@@ -1172,7 +1172,6 @@ async fn setup_server_infrastructure_impl(
     ensure_file_backed_roots(&data_dir).ok();
     // Host creates Auth before any helper fence makes System read-only.
     elastos_server::auth::verify_auth_audit_chain_ready(&data_dir)?;
-    // Host creates Auth before any helper fence makes System read-only.
     elastos_server::protected_content_runtime::log_unresolved_runtime_releases(&data_dir);
     let provider_registry = Arc::new(provider::ProviderRegistry::new());
     let mut managed_host_processes = Vec::new();

@@ -601,14 +601,7 @@ fn inspect_loader(candidate: &Path, root: &Path, trust_uid: u32) -> Result<Locat
 }
 
 pub(super) fn last_errno() -> i32 {
-    #[cfg(target_os = "linux")]
-    unsafe {
-        *libc::__errno_location()
-    }
-    #[cfg(not(target_os = "linux"))]
-    unsafe {
-        *libc::__error()
-    }
+    std::io::Error::last_os_error().raw_os_error().unwrap_or(0)
 }
 
 /// Dup `fd` to a descriptor at or above 3 and close `fd`. A held descriptor
