@@ -1243,19 +1243,40 @@ fn decl_prefix(prefix: &str) -> bool {
 
 fn brace_body(code: &str, from: usize) -> Option<String> {
     let bytes = code.as_bytes();
-    let open = bytes[from..].iter().position(|byte| *byte == b'{')? + from;
-    let mut depth = 0usize;
-    for (at, byte) in bytes[open..].iter().enumerate() {
-        match byte {
-            b'{' => depth += 1,
-            b'}' => {
-                depth -= 1;
-                if depth == 0 {
-                    return Some(code[open..=open + at].to_string());
+    let mut depth = 0i32;
+    let mut i = from;
+    while i < bytes.len() {
+        if bytes[i..].starts_with(b"->") {
+            i += 2;
+            continue;
+        }
+        match bytes[i] {
+            b'(' | b'[' | b'<' => depth += 1,
+            b')' | b']' | b'>' if depth > 0 => depth -= 1,
+            // A signature that ends in `;` has no body. The `{` of the next
+            // item is that item's body. A `;` inside `()` or `[]` (an array
+            // length) is not the end of the signature.
+            b';' if depth == 0 => return None,
+            b'{' if depth == 0 => {
+                let open = i;
+                let mut braces = 0usize;
+                for (at, byte) in bytes[open..].iter().enumerate() {
+                    match byte {
+                        b'{' => braces += 1,
+                        b'}' => {
+                            braces -= 1;
+                            if braces == 0 {
+                                return Some(code[open..=open + at].to_string());
+                            }
+                        }
+                        _ => {}
+                    }
                 }
+                return None;
             }
             _ => {}
         }
+        i += 1;
     }
     None
 }
@@ -1265,6 +1286,9 @@ fn brace_body(code: &str, from: usize) -> Option<String> {
 fn function_index(sources: &BTreeMap<String, String>) -> BTreeMap<String, Vec<(String, String)>> {
     let mut index: BTreeMap<String, Vec<(String, String)>> = BTreeMap::new();
     for (file, text) in sources {
+        if file == WINDOWS_WALK {
+            continue;
+        }
         let code = source::code_only(text);
         let bytes = code.as_bytes();
         let mut at = 0;
@@ -1381,60 +1405,84 @@ fn reachable(
     text
 }
 
-/// The closure rows reach the one pinned walk, and the stage row reaches the
-/// report. `run_signer` refuses a loose requirement and walks the folder; it
-/// does not admit a pinned member.
-#[test]
-fn closure_and_stage_rows_bind_to_their_checks() {
-    let sources = source::production_sources();
-    let index = function_index(&sources);
-    let pinned = ".admit_closure_member(data_dir, &pinned";
-    let closure: Vec<_> = rows()
-        .into_iter()
-        .filter(|row| row.checks == "CID+DID+closure" && row.function != "run_signer")
-        .collect();
-    assert_eq!(closure.len(), 7, "a closure row was added or dropped");
-    for row in &closure {
-        let reached = reachable(&index, row.file, row.function);
-        assert!(
-            reached.contains(pinned),
-            "{}::{} does not reach the pinned member walk",
-            row.file,
-            row.function
-        );
+const WINDOWS_WALK: &str = "elastos-bundle-identity/src/windows_walk.rs";
+
+struct Bind {
+    file: &'static str,
+    function: &'static str,
+    needle: &'static str,
+}
+
+/// Every bound row and the needle its code must still hold. A function name
+/// of `""` is the whole file, which is how the Windows walk is bound.
+fn binds() -> Vec<Bind> {
+    let mut binds = Vec::new();
+    for row in rows() {
+        if row.checks == "CID+DID+closure" && row.function != "run_signer" {
+            binds.push(Bind {
+                file: row.file,
+                function: row.function,
+                needle: ".admit_closure_member(data_dir, &pinned",
+            });
+        }
     }
+    // The refusal text is a string, so code-only blanks it. `requirement.name`
+    // is the value that refusal formats.
+    for needle in ["walk_folder_start(", "requirement.name"] {
+        binds.push(Bind {
+            file: "elastos-server/src/runtime.rs",
+            function: "run_signer",
+            needle,
+        });
+    }
+    binds.push(Bind {
+        file: "elastos-server/src/runtime.rs",
+        function: "walk_folder_start",
+        needle: "checked_bundle_within(",
+    });
+    for needle in [
+        "checked_bundle_within_reported(",
+        "empty_folders",
+        "check_bundle_signature(",
+    ] {
+        binds.push(Bind {
+            file: "elastos-server/src/stage_cmd.rs",
+            function: "stage_bundle",
+            needle,
+        });
+    }
+    binds.push(Bind {
+        file: WINDOWS_WALK,
+        function: "",
+        needle: "tally.note_empty(",
+    });
+    binds
+}
+
+fn binding_sources() -> BTreeMap<String, String> {
+    let mut sources = source::production_sources();
+    let windows = fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../elastos-bundle-identity/src/windows_walk.rs"),
+    )
+    .expect("windows walk")
+    .replace("\r\n", "\n");
+    sources.insert(WINDOWS_WALK.to_string(), windows);
+    sources
+}
+
+/// One check of every bound row against its needles. Comments and strings are
+/// masked, including in `windows_walk.rs`. A miss panics.
+fn bind_closure_and_stage(sources: &BTreeMap<String, String>) {
+    let pinned = ".admit_closure_member(data_dir, &pinned";
+    let closure = binds().iter().filter(|bind| bind.needle == pinned).count();
+    assert_eq!(closure, 7, "a closure row was added or dropped");
     assert_eq!(
         rows()
             .iter()
             .filter(|row| row.function == "run_signer" && row.checks == "CID+DID+closure")
             .count(),
         1
-    );
-    let signer = reachable(&index, "elastos-server/src/runtime.rs", "run_signer");
-    assert!(
-        signer.contains("walk_folder_start("),
-        "run_signer does not walk the folder"
-    );
-    // The refusal text is a string, so the code-only walk blanks it. The
-    // enclosing function is read from the source the census keeps.
-    let runtime = &sources["elastos-server/src/runtime.rs"];
-    let runtime_code = source::code_only(runtime);
-    assert!(
-        runtime
-            .match_indices("bundle_requirement_unpinned")
-            .any(|(at, _)| source::enclosing_fn(&runtime_code, at) == "run_signer"),
-        "run_signer does not refuse a loose requirement"
-    );
-    let signer_body =
-        choose(&index, "run_signer", "elastos-server/src/runtime.rs").expect("run_signer");
-    assert!(
-        !signer_body.contains("admit_closure_member("),
-        "run_signer now admits a pinned member; bind the row to that call"
-    );
-    let folder_walk = reachable(&index, "elastos-server/src/runtime.rs", "walk_folder_start");
-    assert!(
-        folder_walk.contains("checked_bundle_within("),
-        "the folder walk dropped its budgeted walk"
     );
     assert_eq!(
         rows()
@@ -1443,22 +1491,93 @@ fn closure_and_stage_rows_bind_to_their_checks() {
             .count(),
         1
     );
-    let stage = reachable(&index, "elastos-server/src/stage_cmd.rs", "stage_bundle");
+    let index = function_index(sources);
+    for bind in binds() {
+        let haystack = if bind.function.is_empty() {
+            let text = sources
+                .get(bind.file)
+                .unwrap_or_else(|| panic!("missing {}", bind.file));
+            source::code_only(text)
+        } else {
+            reachable(&index, bind.file, bind.function)
+        };
+        assert!(
+            haystack.contains(bind.needle),
+            "{}::{} does not contain {}",
+            bind.file,
+            bind.function,
+            bind.needle
+        );
+    }
+    let signer = choose(&index, "run_signer", "elastos-server/src/runtime.rs").expect("run_signer");
     assert!(
-        stage.contains("checked_bundle_within_reported("),
-        "stage_bundle does not walk with a report"
+        !signer.contains("admit_closure_member("),
+        "run_signer now admits a pinned member; bind the row to that call"
     );
+}
+
+/// The closure rows reach the one pinned walk, and the stage row reaches the
+/// report, the empty-folder name, and the signature check. `run_signer`
+/// walks the folder and names the loose requirement; it does not admit a pin.
+#[test]
+fn closure_and_stage_rows_bind_to_their_checks() {
+    bind_closure_and_stage(&binding_sources());
+}
+
+/// Each bound needle, removed from a copy of the source, makes the binder
+/// refuse. The text stays inside a comment, so a raw search would still pass.
+#[test]
+fn each_bound_needle_stripped_from_a_copy_makes_the_binder_refuse() {
+    let sources = binding_sources();
+    let mut needles = BTreeSet::new();
+    for bind in binds() {
+        needles.insert(bind.needle);
+    }
+    assert_eq!(needles.len(), 8, "a bound needle was added or dropped");
+    for needle in needles {
+        let planted = sources
+            .iter()
+            .map(|(file, text)| (file.clone(), text.replace(needle, &format!("/*{needle}*/"))))
+            .collect();
+        let refused = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            bind_closure_and_stage(&planted);
+        }));
+        assert!(
+            refused.is_err(),
+            "binder still accepts a source whose code lost {needle}"
+        );
+    }
+}
+
+#[test]
+fn a_bodiless_signature_does_not_take_the_next_body() {
+    let mut sources = BTreeMap::new();
+    sources.insert(
+        "sample.rs".into(),
+        [
+            "trait T {",
+            "    fn foo();",
+            "    fn bar() {",
+            "        bar_body()",
+            "    }",
+            "}",
+            "fn array(x: [u8; 4]) {",
+            "    array_body()",
+            "}",
+            "fn returned() -> [u8; 4] {",
+            "    returned_body()",
+            "}",
+            "",
+        ]
+        .join("\n"),
+    );
+    let index = function_index(&sources);
     assert!(
-        stage.contains("empty_folders"),
-        "stage_bundle does not name an empty folder"
+        !index.contains_key("foo"),
+        "a bodiless signature took a body"
     );
-    let windows = fs::read_to_string(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../elastos-bundle-identity/src/windows_walk.rs"),
-    )
-    .unwrap();
-    assert!(
-        windows.contains("tally.note_empty("),
-        "Windows walk gap: an empty folder is dropped and not named"
-    );
+    assert!(index["bar"][0].1.contains("bar_body"));
+    assert!(!index["bar"][0].1.contains("array_body"));
+    assert!(index["array"][0].1.contains("array_body"));
+    assert!(index["returned"][0].1.contains("returned_body"));
 }
