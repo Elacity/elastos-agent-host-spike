@@ -206,33 +206,30 @@ test("a plane is the gateway process and its coordinates stay owner-only", () =>
   assert.equal(planeSameProcess(4, 4, true, true, 0o644), false);
 });
 
-test("the restart row needs a held stop and a held dispatching step, each settled once", () => {
+test("the restart row needs a held pending step of a live run, closed once by the restart", () => {
   const requested = { event_type: "agent.start.requested", result: "ok", session_id: "" };
-  const stopping = { event_type: "agent.stopped", result: "stopping", session_id: "s1" };
-  const ok = { event_type: "agent.stopped", result: "ok", session_id: "s1" };
-  const lost = { event_type: "agent_plan.dispatch.unresolved", result: "unresolved", challenge_id: "r2" };
-  const flying = { request_id: "r2", status: "dispatching" };
-  const unresolved = { request_id: "r2", status: "unresolved" };
-  const before = { chain: [requested, stopping], records: [flying] };
-  const both = restartHistory(before, { chain: [stopping, ok, lost], records: [unresolved] }, "s1", "r2");
-  assert.equal(both.closed, true);
+  const closed = { event_type: "agent.plan.closed", result: "instance ended", challenge_id: "r2" };
+  const pending = { request_id: "r2", status: "pending" };
+  const ended = { request_id: "r2", status: "instance ended" };
+  const before = { chain: [requested], records: [pending] };
+  assert.equal(restartHistory(before, { chain: [requested, closed], records: [ended] }, "r2", "s1").closed, true);
   assert.equal(restartHistory(
     { chain: [requested], records: [{ request_id: "r1", status: "completed" }] },
     { chain: [requested], records: [{ request_id: "r1", status: "completed" }] },
     "",
     "",
   ).closed, false, "nothing held is not a restart proof");
-  const early = restartHistory({ chain: [stopping, ok], records: [flying] }, { chain: [stopping, ok, lost], records: [unresolved] }, "s1", "r2");
-  assert.equal(early.stopping.open, false, "a stop confirmed before the restart was not held");
-  assert.equal(early.closed, false);
-  const twice = restartHistory(before, { chain: [stopping, ok, ok, lost], records: [unresolved] }, "s1", "r2");
-  assert.equal(twice.stopping.closed, false, "two ok rows are not one");
-  const approved = restartHistory({ chain: [stopping], records: [{ request_id: "r2", status: "approved" }] }, { chain: [stopping, ok, lost], records: [unresolved] }, "s1", "r2");
-  assert.equal(approved.step.open, false, "an approved step is not a held dispatch");
-  const unknown = restartHistory(before, { chain: [stopping, ok, lost], records: [{ request_id: "r2", status: "unknown" }] }, "s1", "r2");
-  assert.equal(unknown.step.closed, false, "the held step settles as unresolved");
-  const unsigned = restartHistory(before, { chain: [stopping, ok], records: [unresolved] }, "s1", "r2");
-  assert.equal(unsigned.step.closed, false, "the unresolved step has its signed row");
+  const stopped = { event_type: "agent.stopped", result: "ok", session_id: "s1" };
+  const early = restartHistory({ chain: [stopped], records: [pending] }, { chain: [stopped, closed], records: [ended] }, "r2", "s1");
+  assert.equal(early.step.open, false, "a run stopped before the restart was not held");
+  const twice = restartHistory(before, { chain: [closed, closed], records: [ended] }, "r2", "s1");
+  assert.equal(twice.step.closed, false, "two close rows are not one");
+  const approved = restartHistory({ chain: [requested], records: [{ request_id: "r2", status: "approved" }] }, { chain: [closed], records: [ended] }, "r2", "s1");
+  assert.equal(approved.step.open, false, "only a pending step is held");
+  const denied = restartHistory(before, { chain: [{ ...closed, result: "denied" }], records: [{ request_id: "r2", status: "denied" }] }, "r2", "s1");
+  assert.equal(denied.step.closed, false, "the restart closes the step as instance ended");
+  const unsigned = restartHistory(before, { chain: [requested], records: [ended] }, "r2", "s1");
+  assert.equal(unsigned.step.closed, false, "the closed step has its signed row");
 });
 
 test("each root stays in its own grant, including the planted cross-read", () => {
