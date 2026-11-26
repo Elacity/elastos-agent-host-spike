@@ -1916,6 +1916,17 @@ fn prepare_controller(
     }
 }
 
+/// True while an update can still put the previous release back: an install journal beside the
+/// installed binary, or a request the controller has not finished. An unreadable state is true.
+pub fn update_can_roll_back(data_dir: &Path) -> bool {
+    let bin = installed_writer_binary(data_dir)
+        .and_then(|kept| crate::install_transaction::installed_binary(data_dir, kept));
+    let request = fs::symlink_metadata(data_dir.join(DIRECTORY).join(ACTIVE_REQUEST));
+    let pending = InstallTransaction::has_pending_recovery;
+    bin.map_or(true, |bin| bin.as_deref().is_some_and(pending))
+        || !matches!(request, Err(error) if error.kind() == std::io::ErrorKind::NotFound)
+}
+
 /// The retained receipt locates the writer lock even during an interrupted sources rename.
 pub(crate) fn installed_writer_binary(data_dir: &Path) -> Result<Option<PathBuf>> {
     let path = data_dir.join(DIRECTORY).join(RECEIPT);

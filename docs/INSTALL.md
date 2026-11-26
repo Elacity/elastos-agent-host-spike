@@ -256,7 +256,7 @@ connection fails, the check fails.
 
 **What System shows.** System shows the new version and its release notes.
 
-**Local app files.** The first start moves files under AppCapsules, ElastOS, Local, Users, and UsersAI onto a file key. The move is one way. This release opens them. An older release cannot open them afterwards. Copy the data folder before you upgrade if you want to run the older release again. A crash in the middle of that move is finished by the next start. An old file that is cut off or damaged stays where it is: local apps stay on, and opening that file names it and says to move it aside.
+**Local app files.** The first start moves files under AppCapsules, ElastOS, Local, Users, and UsersAI onto a file key. The move is one way. This release opens them. An older release cannot open them afterwards. Copy the data folder before you upgrade if you want to run the older release again. The move starts only when the update is complete and cannot roll back. Until the move is done, Home is up and local apps are off with a sentence that says the files are moving. A crash in the middle of that move is finished by the next start. An old file that is cut off or damaged turns local apps off, and the sentence names it and says to move it aside, then restart.
 
 **Approve and restart.** You approve the update with your passkey for that
 exact release. The Runtime always downloads the new Runtime binary and

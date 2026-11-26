@@ -20,6 +20,7 @@
 //! is still present is not moved aside. A matching marker still walks, so an
 //! older build's later device-key file is rewritten, one way: an older release cannot open it. A new-format header and a plain file are settled unread.
 //! The first pass opens each old file to check it, and keeps nothing. A refusal in that pass leaves every old file in place.
+//! A start runs the first pass only. When it finds an old file, Home serves with local apps off ("Local app files are moving"), and the second pass runs in the background once no update can put the previous release back (no install journal, no active update request). A rollback or crash before then leaves every file old.
 //! The second pass walks again and rekeys one file at a time. A crash in the middle of the move is finished by the next start. A later
 //! start uses the size and time stored beside the marker and does not open a file
 //! that still matches. The walk logs a count every few seconds. A waiter on
@@ -34,7 +35,7 @@
 //! `ElastOS` (`gateway_cmd.rs`). A second one of these stops with "another ElastOS
 //! host already owns". Gateway and `home --browser` call
 //! `setup_gateway_infrastructure` or `setup_control_plane_infrastructure`
-//! (`spawn_host_providers` is false). They run this same walk. A foreign or undecryptable old-format file turns local apps off. An old-format file that is cut off or damaged is left in place: local apps stay on, and opening it names the file and says to move it aside. They register the refusing provider so
+//! (`spawn_host_providers` is false). They run this same walk. A foreign, undecryptable, cut-off or damaged old-format file turns local apps off, and the sentence names it and says to move it aside, then restart. They register the refusing provider so
 //! System can show the sentence. They do not spawn the localhost helper.
 //! Update and the provider host take the same lock and do not run this walk.
 //! `elastos run` of a data capsule and `elastos open` call `serve_web_capsule`
@@ -100,6 +101,13 @@ thread_local! {
     static PROGRESS_CLOCK: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
     static BYTES_READ: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
     static OPENS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    static RESERVE_FAILS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// The next reserve for an old file's bytes fails, as when memory runs out.
+#[cfg(all(unix, test))]
+pub(crate) fn set_localhost_migration_reserve_failure(fail: bool) {
+    RESERVE_FAILS.with(|slot| slot.set(fail));
 }
 
 /// Stops the walk after this many migration writes. `None` writes normally.
@@ -344,6 +352,7 @@ fn localhost_refused(path: &Path, why: &str) -> anyhow::Error {
             "not a regular file",
             "Replace it with a regular file, then restart.",
         )
+    } else if why.contains("cut off") { ("cut off or damaged", "Move it aside, then restart.")
     } else if why.contains("another path") { ("linked from another path", "Remove the other names for this file, or copy it to a new name and delete it, then restart.")
     } else if why.contains("link") {
         (
@@ -861,36 +870,33 @@ fn migrate_localhost_envelope(
         .read(&mut header)
         .with_context(|| localhost_refused(path, "cannot be read"))?;
     note_bytes_read(read);
-    let (plain, extra) = localhost_provider::reads_as_plain_bytes(&header[..read], opened.len.max(localhost_provider::ENVELOPE_BYTE_LIMIT + 1), &mut file).with_context(|| localhost_refused(path, "cannot be read"))?;
+    let (version, extra) = localhost_provider::envelope_version(&header[..read], opened.len.max(localhost_provider::ENVELOPE_BYTE_LIMIT + 1), &mut file).with_context(|| localhost_refused(path, "cannot be read"))?;
     note_bytes_read(extra as usize);
-    // A file-key header is not plain, and its body stays unread at start.
-    if plain || localhost_provider::header_is_file_key_envelope(&header[..read]) {
+    // A file-key envelope, in any key order or spacing, stays unread at start.
+    if version.is_none_or(|version| version == 2) {
         return Ok(MigratedFile::Settled);
     }
     if extra > 0 { std::io::Seek::seek(&mut file, std::io::SeekFrom::Start(read as u64)).map_err(|_| localhost_refused(path, "cannot be read"))?; }
     if opened.len > localhost_provider::SEALED_READ_HARD_LIMIT {
         return Ok(MigratedFile::OverHard);
     }
+    let n = opened.len as usize;
+    #[cfg(test)]
+    let n = if RESERVE_FAILS.with(|slot| slot.get()) { usize::MAX } else { n };
     let mut bytes = Vec::new();
-    if bytes.try_reserve(opened.len as usize).is_err() {
+    if bytes.try_reserve_exact(n).is_err() {
         return Ok(MigratedFile::OverHard);
     }
-    bytes.extend_from_slice(&header[..read]);
-    if opened.len > read as u64 {
-        file.by_ref()
-            .take(opened.len - read as u64)
-            .read_to_end(&mut bytes)
-            .with_context(|| localhost_refused(path, "cannot be read"))?;
-        note_bytes_read(bytes.len().saturating_sub(read));
-    }
-    if bytes.len() as u64 > localhost_provider::SEALED_READ_HARD_LIMIT {
-        return Ok(MigratedFile::OverHard);
-    }
+    bytes.resize(n, 0);
+    let head = read.min(n);
+    bytes[..head].copy_from_slice(&header[..head]);
+    file.read_exact(&mut bytes[head..]).map_err(|err| localhost_refused(path, if err.kind() == std::io::ErrorKind::UnexpectedEof { "changed while it was being read" } else { "cannot be read" }))?;
+    note_bytes_read(n - head);
     run_before_replace(path);
     opened_file_still_matches(path, &opened)?;
     match localhost_provider::rekey_device_envelope(device_key, file_key, bytes, PASS_TWO.with(|slot| slot.get())) {
-        Ok(localhost_provider::RekeyOutcome::NotEnvelope)
-        | Ok(localhost_provider::RekeyOutcome::AlreadyFileKey) => Ok(MigratedFile::Settled),
+        Ok(localhost_provider::RekeyOutcome::NotEnvelope) => Err(localhost_refused(path, "is cut off")),
+        Ok(localhost_provider::RekeyOutcome::AlreadyFileKey) => Ok(MigratedFile::Settled),
         Ok(localhost_provider::RekeyOutcome::Rewritten(sealed)) => {
             replace_file_fsync_rename(path, &sealed, kept_mode(opened.mode), Some(&opened)).map_err(|err| migration_io(path, "cannot be replaced", err))?;
             Ok(MigratedFile::Written)
@@ -1239,6 +1245,7 @@ impl Drop for ClearHeld { fn drop(&mut self) { HELD.with(|s| s.set(false)); PASS
 fn migrate_localhost_files_to_file_key(
     data_dir: &Path,
     device_key: &[u8; 32],
+    move_now: bool,
 ) -> anyhow::Result<()> {
     set_migration_root(data_dir);
     let _clear_held = ClearHeld;
@@ -1289,6 +1296,7 @@ fn migrate_localhost_files_to_file_key(
     };
     walk()?;
     if HELD.with(|slot| slot.get()) {
+        if !move_now { return Err(anyhow::anyhow!(LOCALHOST_FILES_MOVING)); }
         PASS_TWO.with(|slot| slot.set(true)); walk()?;
     }
     if next != seen || !seen_path.is_file() {
@@ -1319,7 +1327,7 @@ pub(crate) fn localhost_provider_bridge_config(
     #[cfg(unix)]
     let (device_key_hex, given_file_key) = {
         use zeroize::Zeroize;
-        migrate_localhost_files_to_file_key(data_dir, device_key)?;
+        migrate_localhost_files_to_file_key(data_dir, device_key, true)?;
         let mut file_key = localhost_file_key(device_key)?;
         let file_key_hex = hex::encode(file_key);
         file_key.zeroize();
@@ -1341,22 +1349,37 @@ pub(crate) enum LocalhostBringup {
     Refuse(String),
 }
 
+/// Local apps stay off with this sentence while old files wait for the second pass.
+pub(crate) const LOCALHOST_FILES_MOVING: &str = "Local app files are moving to the new key.";
+
 pub(crate) fn localhost_bringup(data_dir: &Path, device_key: &[u8; 32]) -> LocalhostBringup {
     match localhost_provider_bridge_config(data_dir, device_key) {
         Ok(config) => {
             elastos_server::local_apps::set_local_apps_refusal(data_dir, None);
             LocalhostBringup::Start(config)
         }
-        Err(err) => {
-            let fresh = err.to_string();
-            if elastos_server::local_apps::local_apps_refusal(data_dir).is_none() {
-                elastos_server::local_apps::set_local_apps_refusal(data_dir, Some(fresh.clone()));
-            }
-            LocalhostBringup::Refuse(
-                elastos_server::local_apps::local_apps_refusal(data_dir).unwrap_or(fresh),
-            )
-        }
+        Err(err) => refused(data_dir, err.to_string()),
     }
+}
+
+/// The first pass only: old files stay as they are, refused with [`LOCALHOST_FILES_MOVING`]. The caller
+/// runs [`localhost_bringup`] once no update can put back a release that cannot open a moved file.
+pub(crate) fn localhost_start_bringup(data_dir: &Path, device_key: &[u8; 32]) -> LocalhostBringup {
+    #[cfg(unix)]
+    if let Err(err) = migrate_localhost_files_to_file_key(data_dir, device_key, false) {
+        return refused(data_dir, err.to_string());
+    }
+    localhost_bringup(data_dir, device_key)
+}
+
+/// The first refusal stays, except the moving sentence, which a later walk replaces.
+fn refused(data_dir: &Path, fresh: String) -> LocalhostBringup {
+    let kept = elastos_server::local_apps::local_apps_refusal(data_dir)
+        .filter(|kept| kept != LOCALHOST_FILES_MOVING);
+    if kept.is_none() {
+        elastos_server::local_apps::set_local_apps_refusal(data_dir, Some(fresh.clone()));
+    }
+    LocalhostBringup::Refuse(kept.unwrap_or(fresh))
 }
 
 /// Decide a mismatched marker before startup creates the five roots.

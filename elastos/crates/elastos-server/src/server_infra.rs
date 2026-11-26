@@ -685,20 +685,60 @@ async fn register_media_provider(
 /// helper. They still run the walk. A refusal is registered so System's
 /// inspect state is that sentence.
 async fn register_localhost_without_helper(
-    registry: &provider::ProviderRegistry,
+    registry: &Arc<provider::ProviderRegistry>,
     data_dir: &Path,
     device_key: &[u8; 32],
 ) {
     if let crate::localhost_file_migration::LocalhostBringup::Refuse(sentence) =
-        crate::localhost_file_migration::localhost_bringup(data_dir, device_key)
+        crate::localhost_file_migration::localhost_start_bringup(data_dir, device_key)
     {
-        tracing::error!(target: "elastos", "{sentence}");
-        registry
-            .register(Arc::new(
-                elastos_server::local_apps::RefusingLocalhostProvider::new(sentence),
-            ))
-            .await;
+        refuse_localhost(registry, data_dir, device_key, sentence, None).await;
     }
+}
+
+/// Old files move only when no update can put the previous release back. A
+/// background walk then starts `helper`; a gateway has none and unregisters.
+async fn refuse_localhost(
+    registry: &Arc<provider::ProviderRegistry>,
+    data_dir: &Path,
+    device_key: &[u8; 32],
+    sentence: String,
+    helper: Option<provider::CheckedExecutable>,
+) {
+    use crate::localhost_file_migration::{localhost_bringup, LocalhostBringup as Bringup};
+    tracing::error!(target: "elastos", "{sentence}");
+    let moving = sentence == crate::localhost_file_migration::LOCALHOST_FILES_MOVING;
+    let refusal = elastos_server::local_apps::RefusingLocalhostProvider::new(sentence);
+    registry.register(Arc::new(refusal)).await;
+    if !moving {
+        return;
+    }
+    let (registry, data_dir) = (registry.clone(), data_dir.to_path_buf());
+    let device_key = zeroize::Zeroizing::new(*device_key);
+    tokio::spawn(async move {
+        while elastos_server::update_controller::update_can_roll_back(&data_dir) {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+        let dir = data_dir.clone();
+        let walk = tokio::task::spawn_blocking(move || localhost_bringup(&dir, &device_key));
+        let sentence = match (walk.await, helper) {
+            (Ok(Bringup::Start(_)), None) => return registry.unregister("localhost").await,
+            (Ok(Bringup::Start(config)), Some(helper)) => {
+                match provider::ProviderBridge::spawn(&helper, config).await {
+                    Ok(bridge) => {
+                        let bridge = provider::CapsuleProvider::new(Arc::new(bridge));
+                        return registry.register(Arc::new(bridge)).await;
+                    }
+                    Err(err) => format!("localhost-provider did not start ({err}). Restart Home."),
+                }
+            }
+            (Ok(Bringup::Refuse(sentence)), _) => sentence,
+            (Err(err), _) => format!("The local app file move stopped ({err}). Restart Home."),
+        };
+        elastos_server::local_apps::set_local_apps_refusal(&data_dir, Some(sentence.clone()));
+        let refusal = elastos_server::local_apps::RefusingLocalhostProvider::new(sentence);
+        registry.register(Arc::new(refusal)).await;
+    });
 }
 
 pub(crate) async fn setup_server_infrastructure() -> anyhow::Result<ServerInfrastructure> {
@@ -1150,7 +1190,7 @@ async fn setup_server_infrastructure_impl(
             hex::encode(elastos_runtime::signature::hash_content(&provider_bytes))
         );
 
-        match crate::localhost_file_migration::localhost_bringup(&data_dir, &device_key) {
+        match crate::localhost_file_migration::localhost_start_bringup(&data_dir, &device_key) {
             crate::localhost_file_migration::LocalhostBringup::Start(config) => {
                 let bridge = provider::ProviderBridge::spawn(&binary_path, config)
                     .await
@@ -1172,11 +1212,8 @@ async fn setup_server_infrastructure_impl(
                 provider_registry.register(provider).await;
             }
             crate::localhost_file_migration::LocalhostBringup::Refuse(sentence) => {
-                tracing::error!(target: "elastos", "{sentence}");
-                provider_registry
-                    .register(Arc::new(
-                        elastos_server::local_apps::RefusingLocalhostProvider::new(sentence),
-                    ))
+                let helper = Some(binary_path);
+                refuse_localhost(&provider_registry, &data_dir, &device_key, sentence, helper)
                     .await;
             }
         }
@@ -5001,6 +5038,7 @@ mod tests {
             set_localhost_migration_before_replace(None);
             set_localhost_migration_before_rename(None);
             set_localhost_migration_progress_clock(None);
+            crate::localhost_file_migration::set_localhost_migration_reserve_failure(false);
             let _ = take_localhost_migration_bytes_read();
             let _ = take_localhost_migration_opens();
         }
@@ -6939,7 +6977,14 @@ mod tests {
             .unwrap();
         let _ = take_localhost_migration_bytes_read();
         let _ = take_localhost_migration_opens();
-        migrate_again(huge.path(), &device_key);
+        elastos_server::local_apps::clear_local_apps_refusals();
+        match localhost_bringup(huge.path(), &device_key) {
+            LocalhostBringup::Refuse(got) => assert_eq!(
+                got,
+                "Users/over.bin is cut off or damaged. Move it aside, then restart."
+            ),
+            LocalhostBringup::Start(_) => panic!("a damaged old file left local apps on"),
+        }
         let read = take_localhost_migration_bytes_read();
         let opens = take_localhost_migration_opens();
         assert_eq!(
@@ -6948,12 +6993,6 @@ mod tests {
             "an old header under the hard limit was not opened once: {read}"
         );
         assert_eq!(opens, 1, "a settled file was opened: {opens}");
-        home_is_up(huge.path());
-        let _ = take_localhost_migration_bytes_read();
-        let _ = take_localhost_migration_opens();
-        migrate_again(huge.path(), &device_key);
-        assert_eq!(take_localhost_migration_bytes_read(), 0);
-        assert_eq!(take_localhost_migration_opens(), 0);
         let over_err =
             localhost_provider::read_sealed_localhost_file(&file_key, &over, "Users/over.bin")
                 .unwrap_err()
@@ -6971,6 +7010,15 @@ mod tests {
         let mut prefix = vec![0u8; envelope.len()];
         std::io::Read::read_exact(&mut std::fs::File::open(&over).unwrap(), &mut prefix).unwrap();
         assert_eq!(prefix, envelope);
+        fs::rename(&over, huge.path().join("over.bin.aside")).unwrap();
+        elastos_server::local_apps::clear_local_apps_refusals();
+        migrate_again(huge.path(), &device_key);
+        home_is_up(huge.path());
+        let _ = take_localhost_migration_bytes_read();
+        let _ = take_localhost_migration_opens();
+        migrate_again(huge.path(), &device_key);
+        assert_eq!(take_localhost_migration_bytes_read(), 0);
+        assert_eq!(take_localhost_migration_opens(), 0);
         let small = huge.path().join("Users/small.bin");
         plant_device_envelope(&small, &device_key, b"small");
         migrate_again(huge.path(), &device_key);
@@ -7331,7 +7379,13 @@ mod tests {
             .unwrap();
         let _ = take_localhost_migration_bytes_read();
         let _ = take_localhost_migration_opens();
-        localhost_provider_bridge_config(root, &device_key).unwrap();
+        let err = localhost_provider_bridge_config(root, &device_key)
+            .unwrap_err()
+            .to_string();
+        assert_eq!(
+            err,
+            "Users/over.bin is cut off or damaged. Move it aside, then restart."
+        );
         let read = take_localhost_migration_bytes_read();
         let opens = take_localhost_migration_opens();
         assert!(
@@ -7339,6 +7393,20 @@ mod tests {
             "the old header was not opened once: {read}"
         );
         assert_eq!(opens, 2, "the settled plain file was opened: {opens}");
+        let over_err =
+            localhost_provider::read_sealed_localhost_file(&file_key, &over, "Users/over.bin")
+                .unwrap_err()
+                .to_string();
+        assert_eq!(
+            over_err,
+            "Users/over.bin is cut off. Move it aside, or remove it."
+        );
+        assert_eq!(fs::metadata(&over).unwrap().len(), 32 * 1024 * 1024 + 1);
+        let mut prefix = vec![0u8; envelope.len()];
+        std::io::Read::read_exact(&mut std::fs::File::open(&over).unwrap(), &mut prefix).unwrap();
+        assert_eq!(prefix, envelope);
+        fs::rename(&over, root.join("over.bin.aside")).unwrap();
+        localhost_provider_bridge_config(root, &device_key).unwrap();
         home_is_up(root);
         let _ = take_localhost_migration_bytes_read();
         let _ = take_localhost_migration_opens();
@@ -7349,23 +7417,11 @@ mod tests {
             localhost_provider::read_sealed_localhost_file(&file_key, &brace, "Users/brace.bin")
                 .unwrap();
         assert!(brace_opened.starts_with(b"{not-an-envelope"));
-        let over_err =
-            localhost_provider::read_sealed_localhost_file(&file_key, &over, "Users/over.bin")
-                .unwrap_err()
-                .to_string();
-        assert_eq!(
-            over_err,
-            "Users/over.bin is cut off. Move it aside, or remove it."
-        );
         let plain_opened =
             localhost_provider::read_sealed_localhost_file(&file_key, &plain, "Users/video.bin")
                 .unwrap();
         assert!(plain_opened.starts_with(b"ftyp"));
         assert_eq!(plain_opened.len(), 32 * 1024 * 1024 + 1);
-        assert_eq!(fs::metadata(&over).unwrap().len(), 32 * 1024 * 1024 + 1);
-        let mut prefix = vec![0u8; envelope.len()];
-        std::io::Read::read_exact(&mut std::fs::File::open(&over).unwrap(), &mut prefix).unwrap();
-        assert_eq!(prefix, envelope);
         let small = root.join("Users/small.bin");
         plant_device_envelope(&small, &device_key, b"small");
         localhost_provider_bridge_config(root, &device_key).unwrap();
@@ -8714,7 +8770,7 @@ mod tests {
     }
 
     #[test]
-    fn a_small_plain_record_is_decided_by_its_header_and_a_cut_old_file_stays_put() {
+    fn a_small_plain_record_is_decided_by_its_header_and_pass_two_opens_only_old_files() {
         let _guard = LocalAppsGuard::lock();
         let device_key = [0x43; 32];
         let file_key = expected_localhost_file_key(&device_key);
@@ -8725,12 +8781,6 @@ mod tests {
         record.resize(20 * 1024 * 1024, b'0');
         fs::write(users.join("record.json"), &record).unwrap();
         fs::write(users.join("tiny.json"), br#"{"n":1}"#).unwrap();
-        let cut = users.join("cut.bin");
-        plant_real_old_sealed(&cut, &device_key, 100);
-        let cut_bytes = fs::read(&cut).unwrap();
-        assert!(localhost_provider::header_is_device_key_envelope(
-            &cut_bytes
-        ));
         let good = users.join("good.bin");
         plant_device_envelope(&good, &device_key, b"good");
         let _ = take_localhost_migration_bytes_read();
@@ -8741,32 +8791,29 @@ mod tests {
             read < 1024 * 1024,
             "a 20 MiB plain record was read whole: {read}"
         );
-        // Pass one opens four files. Pass two opens only the old good file again.
+        // Pass one opens three files. Pass two opens only the old good file again.
         assert_eq!(
             take_localhost_migration_opens(),
-            5,
+            4,
             "pass two opened a settled file"
         );
         home_is_up(root.path());
         assert_eq!(fs::read(users.join("record.json")).unwrap(), record);
-        assert_eq!(fs::read(&cut).unwrap(), cut_bytes);
         assert_envelope_opens_with_exactly_one_key(&good, b"good", &device_key, &file_key);
-        let err = localhost_provider::read_sealed_localhost_file(&file_key, &cut, "Users/cut.bin")
-            .unwrap_err()
-            .to_string();
-        assert_eq!(
-            err,
-            "Users/cut.bin is cut off. Move it aside, or remove it."
-        );
     }
 
     #[test]
-    fn an_old_header_that_cannot_open_under_the_hard_limit_leaves_local_apps_on() {
+    fn a_cut_or_damaged_old_file_turns_local_apps_off_until_it_is_moved_aside() {
         let _guard = LocalAppsGuard::lock();
         let device_key = [0x42; 32];
+        let file_key = expected_localhost_file_key(&device_key);
         let root = TempDir::new().unwrap();
         let cut = root.path().join("Users/cut.bin");
         plant_real_old_sealed(&cut, &device_key, 40 * 1024 * 1024);
+        let small = root.path().join("Users/small.bin");
+        plant_real_old_sealed(&small, &device_key, 100);
+        let good = root.path().join("Users/good.bin");
+        plant_device_envelope(&good, &device_key, b"good");
         let bad = root.path().join("Users/bad.bin");
         let head = br#"{"version":1,"nonce":"00112233445566778899aabb","ciphertext":"a"#;
         let tail = br#""}"#;
@@ -8782,16 +8829,34 @@ mod tests {
         assert!(localhost_provider::header_is_device_key_envelope(
             &bad_bytes
         ));
-        match localhost_bringup(root.path(), &device_key) {
-            LocalhostBringup::Start(_) => {}
-            LocalhostBringup::Refuse(got) => {
-                panic!("a cut-off old header stopped local apps: {got}")
+        let planted = [&bad, &cut, &good, &small].map(|path| fs::read(path).unwrap());
+        let aside = TempDir::new().unwrap();
+        // Each damaged file is named in turn. Following its remedy names the next one.
+        for (path, label) in [
+            (&bad, "Users/bad.bin"),
+            (&cut, "Users/cut.bin"),
+            (&small, "Users/small.bin"),
+        ] {
+            // A restart is a new process with no refusal kept.
+            elastos_server::local_apps::clear_local_apps_refusals();
+            match localhost_bringup(root.path(), &device_key) {
+                LocalhostBringup::Refuse(got) => assert_eq!(
+                    got,
+                    format!("{label} is cut off or damaged. Move it aside, then restart.")
+                ),
+                LocalhostBringup::Start(_) => panic!("{label} left local apps on"),
             }
-        }
-        home_is_up(root.path());
-        assert_eq!(fs::metadata(&cut).unwrap().len(), 40 * 1024 * 1024);
-        assert_eq!(fs::metadata(&bad).unwrap().len(), 40 * 1024 * 1024);
-        for (path, label) in [(&cut, "Users/cut.bin"), (&bad, "Users/bad.bin")] {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            let body = runtime.block_on(elastos_server::api::routes::health());
+            assert_eq!(serde_json::to_value(body.0).unwrap()["status"], "ok");
+            for (kept, bytes) in [&bad, &cut, &good, &small].iter().zip(&planted) {
+                if kept.exists() {
+                    assert_eq!(&fs::read(kept).unwrap(), bytes, "{}", kept.display());
+                }
+            }
             let err = localhost_provider::read_sealed_localhost_file(&device_key, path, label)
                 .unwrap_err()
                 .to_string();
@@ -8799,7 +8864,131 @@ mod tests {
                 err,
                 format!("{label} is cut off. Move it aside, or remove it.")
             );
+            fs::rename(path, aside.path().join(path.file_name().unwrap())).unwrap();
         }
+        migrate_again(root.path(), &device_key);
+        home_is_up(root.path());
+        assert_envelope_opens_with_exactly_one_key(&good, b"good", &device_key, &file_key);
+    }
+
+    #[tokio::test]
+    async fn an_update_before_commit_leaves_every_old_file_and_commit_moves_them() {
+        let _guard = LocalAppsGuard::lock();
+        let device_key = [0x24; 32];
+        let file_key = expected_localhost_file_key(&device_key);
+        let root = TempDir::new().unwrap();
+        let data = root.path();
+        let bin = TempDir::new().unwrap();
+        let sources = serde_json::json!({
+            "schema": "elastos.trusted-sources/v1",
+            "sources": [{ "name": "t", "install_path": bin.path().join("elastos") }],
+        });
+        fs::write(data.join("sources.json"), sources.to_string()).unwrap();
+        let journal = bin.path().join(".elastos.update-journal.json");
+        fs::write(&journal, b"{}").unwrap();
+        let request = data.join("update-controller/active-request.json");
+        fs::create_dir_all(request.parent().unwrap()).unwrap();
+        fs::write(&request, b"{}").unwrap();
+        let paths = [data.join("Users/a.bin"), data.join("Local/b.bin")];
+        let planted = paths
+            .clone()
+            .map(|path| plant_device_envelope(&path, &device_key, b"kept"));
+        let old_release_opens_every_file = || {
+            for (path, bytes) in paths.iter().zip(&planted) {
+                assert_eq!(&fs::read(path).unwrap(), bytes, "{}", path.display());
+                let opened = localhost_provider::decrypt_bytes(&device_key, bytes).unwrap();
+                assert_eq!(opened, b"kept");
+            }
+        };
+        let moving = crate::localhost_file_migration::LOCALHOST_FILES_MOVING;
+        let registry = Arc::new(provider::ProviderRegistry::new());
+        // The candidate is up. Until commit the controller can time it out and roll back.
+        register_localhost_without_helper(&registry, data, &device_key).await;
+        for _ in 0..3 {
+            let refusal = elastos_server::local_apps::local_apps_refusal(data);
+            assert_eq!(refusal.as_deref(), Some(moving));
+            assert!(registry.get("localhost").await.is_some());
+            old_release_opens_every_file();
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+        assert!(!data.join("identity/localhost-file-key-v1").exists());
+        // The release is committed, and the controller has not finished the request.
+        fs::remove_file(&journal).unwrap();
+        tokio::time::sleep(Duration::from_millis(2500)).await;
+        old_release_opens_every_file();
+        fs::remove_file(&request).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while elastos_server::local_apps::local_apps_refusal(data).is_some()
+            || registry.get("localhost").await.is_some()
+        {
+            assert!(
+                Instant::now() < deadline,
+                "local apps stayed off after commit"
+            );
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        for path in &paths {
+            assert_envelope_opens_with_exactly_one_key(path, b"kept", &device_key, &file_key);
+        }
+        assert_current_marker(data, &device_key);
+    }
+
+    #[test]
+    fn a_failed_reserve_for_an_old_file_says_too_large_not_unreadable() {
+        let _guard = LocalAppsGuard::lock();
+        let _clear = ClearLocalhostMigrationFaults;
+        let device_key = [0x45; 32];
+        let file_key = expected_localhost_file_key(&device_key);
+        let root = TempDir::new().unwrap();
+        let old = root.path().join("Users/old.bin");
+        let planted = plant_device_envelope(&old, &device_key, b"old");
+        crate::localhost_file_migration::set_localhost_migration_reserve_failure(true);
+        let got = match localhost_bringup(root.path(), &device_key) {
+            LocalhostBringup::Refuse(got) => got,
+            LocalhostBringup::Start(_) => panic!("a failed reserve started local apps"),
+        };
+        assert_eq!(
+            got,
+            "Users/old.bin is larger than this process can read. Move it out of the folder, then restart."
+        );
+        assert_eq!(fs::read(&old).unwrap(), planted);
+        crate::localhost_file_migration::set_localhost_migration_reserve_failure(false);
+        elastos_server::local_apps::clear_local_apps_refusals();
+        migrate_again(root.path(), &device_key);
+        assert_envelope_opens_with_exactly_one_key(&old, b"old", &device_key, &file_key);
+    }
+
+    #[test]
+    fn a_reordered_new_format_file_is_settled_at_start_and_refused_on_open() {
+        let _guard = LocalAppsGuard::lock();
+        let device_key = [0x46; 32];
+        let file_key = expected_localhost_file_key(&device_key);
+        let root = TempDir::new().unwrap();
+        let sealed = localhost_provider::encrypt_file_key_bytes(&file_key, b"new").unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&sealed).unwrap();
+        let nonce = value["nonce"].as_str().unwrap();
+        let mut body = value["ciphertext"].as_str().unwrap().to_string();
+        let flipped = if body.starts_with('0') { "1" } else { "0" };
+        body.replace_range(..1, flipped);
+        let spaced = root.path().join("Users/spaced.bin");
+        fs::create_dir_all(spaced.parent().unwrap()).unwrap();
+        let spaced_bytes =
+            format!(r#"{{ "ciphertext" : "{body}", "nonce" : "{nonce}", "version" : 2 }}"#);
+        fs::write(&spaced, &spaced_bytes).unwrap();
+        let old = root.path().join("Users/old.bin");
+        plant_device_envelope(&old, &device_key, b"old");
+        migrate_again(root.path(), &device_key);
+        home_is_up(root.path());
+        assert_eq!(fs::read(&spaced).unwrap(), spaced_bytes.as_bytes());
+        assert_envelope_opens_with_exactly_one_key(&old, b"old", &device_key, &file_key);
+        let err =
+            localhost_provider::read_sealed_localhost_file(&file_key, &spaced, "Users/spaced.bin")
+                .unwrap_err()
+                .to_string();
+        assert_eq!(
+            err,
+            "Users/spaced.bin is not an encrypted envelope this key opens. Move it aside, or remove it."
+        );
     }
 
     #[test]
