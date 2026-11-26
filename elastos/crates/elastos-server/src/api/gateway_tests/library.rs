@@ -7074,8 +7074,12 @@ async fn archive_content_bound_never_undercounts() {
     let stored = std::fs::metadata(rooted_localhost_fs_path(dir.path(), &note).unwrap())
         .unwrap()
         .len();
-    assert_eq!(bound(&note, key), stored / 4 * 3);
-    assert!(bound(&note, key) >= content.len() as u64);
+    let note_bound = bound(&note, key);
+    assert!(note_bound >= content.len() as u64);
+    assert!(
+        note_bound < stored / 4 * 3,
+        "the JSON envelope is not content: bound {note_bound}, file {stored}"
+    );
     // Without protection an envelope is read raw, so it counts whole.
     assert_eq!(bound(&note, None), stored);
     assert_eq!(bound(&plain, key), 12 * MIB);

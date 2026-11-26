@@ -1,8 +1,7 @@
-// DRAFT sketch for review, not a frozen ABI.
-//
-// Copied unchanged from the Bus v2 draft for the guest-side proof in
-// examples/bus2-proof. Nothing in the Runtime uses it. Proposed changes go in
-// handoff/BUS2-PROOF-REPORT.md, not here.
+// Bus v2 world. elastos-compute providers/component.rs binds this file
+// (world product-capsule-v2). elastos-common manifest.rs pins these bytes
+// with elastos_bus_v2_wit_sha256. A guest that names this world carries
+// that digest in wit_world_sha256.
 
 package elastos:bus@2.0.0;
 

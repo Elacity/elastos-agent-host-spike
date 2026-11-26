@@ -437,6 +437,7 @@ pub(in crate::api::gateway) async fn request_admission(
     let pending = crate::api::handlers::capability::create_request_retiring(
         &service.pending,
         &service.capabilities,
+        None,
         session.id.clone(),
         ResourceId::new(format!("elastos://browser/pages/{page_id}/input")),
         Action::Write,

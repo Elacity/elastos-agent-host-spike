@@ -42,6 +42,7 @@ use crate::host_lock::FileLock;
 #[cfg(any(unix, test))]
 use crate::auth_state_files::set_secret_file_permissions;
 
+mod envelope_bound;
 mod verified_launch_token_signer;
 pub(crate) use verified_launch_token_signer::{
     VerifiedLaunchTokenSigner, HOME_LAUNCH_TOKEN_DOMAIN,
@@ -7021,11 +7022,9 @@ fn read_protected_principal_root_object_file(
         .map_err(|_| damaged(damage))
 }
 
-/// The most content a Library read of this object can return, judged from
-/// its head and tail only, never its body (#481). A canonical envelope bound
-/// here under the current key opens only by decrypting, which returns less
-/// than three quarters of its length: the base64 ciphertext's share. Anything
-/// else counts its whole length, since a plaintext file is read whole.
+/// The most a Library read of this object can return, from its head and tail
+/// only, never its body (#481). A canonical envelope subtracts the 16-byte
+/// AES-GCM tag. Anything else counts its whole length.
 pub(crate) fn principal_root_object_content_bound(
     data_dir: &Path,
     principal_id: &str,
@@ -7051,7 +7050,9 @@ pub(crate) fn principal_root_object_content_bound(
     let probe = classify_principal_root_object_file(&mut file, len, &expected, &mut no_whole_reads)
         .with_context(|| format!("failed to read {path:?}"))?;
     Ok(match probe.class {
-        PrincipalRootObjectFileClass::Envelope => len / 4 * 3,
+        PrincipalRootObjectFileClass::Envelope => {
+            envelope_bound::envelope_content_bound(len, &probe.prefix)
+        }
         _ => len,
     })
 }

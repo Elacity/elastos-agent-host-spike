@@ -598,6 +598,18 @@ impl PendingRequestStore {
             }
         }
     }
+
+    /// Holds the request-map write lock until `release` is notified.
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub async fn hold_requests_write_for_test(
+        &self,
+        entered: &tokio::sync::Notify,
+        release: &tokio::sync::Notify,
+    ) {
+        let _guard = self.requests.write().await;
+        entered.notify_one();
+        release.notified().await;
+    }
 }
 
 #[cfg(test)]

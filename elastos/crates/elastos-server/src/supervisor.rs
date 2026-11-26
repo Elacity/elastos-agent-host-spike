@@ -124,6 +124,9 @@ pub struct Supervisor {
     capability_manager: Option<Arc<elastos_runtime::capability::CapabilityManager>>,
     /// Pending capability request store for shell-mediated approval.
     pending_store: Option<Arc<elastos_runtime::capability::pending::PendingRequestStore>>,
+    /// The Runtime's v2 guests. Capacity retirement on the shared pending store
+    /// consults their GrantBooks, same as the Runtime and CapabilityState paths.
+    v2_guests: Option<Arc<elastos_compute::providers::ComponentProvider>>,
     /// Optional running gateway server task.
     gateway: Arc<RwLock<Option<RunningGateway>>>,
 }
@@ -330,6 +333,7 @@ impl Supervisor {
             collaboration_discovery_service: None,
             capability_manager: None,
             pending_store: None,
+            v2_guests: None,
             gateway: Arc::new(RwLock::new(None)),
         }
     }
@@ -406,6 +410,46 @@ impl Supervisor {
         pending_store: Arc<elastos_runtime::capability::pending::PendingRequestStore>,
     ) {
         self.pending_store = Some(pending_store);
+    }
+
+    /// Attach the Runtime's v2 guests so microVM capacity retirement leaves a
+    /// grant a live guest still holds listed and revocable.
+    pub fn set_v2_guests(
+        &mut self,
+        v2_guests: Option<Arc<elastos_compute::providers::ComponentProvider>>,
+    ) {
+        self.v2_guests = v2_guests;
+    }
+
+    /// Bridge context for a supervised microVM. Shares the Runtime's pending
+    /// store and its v2 guests view with CapabilityState.
+    pub(crate) fn microvm_bridge_context(
+        &self,
+        registry: Arc<ProviderRegistry>,
+        name: &str,
+        principal_id: Option<crate::resource_bridge::BridgePrincipal>,
+        manifest: &elastos_common::CapsuleManifest,
+    ) -> Option<crate::resource_bridge::BridgeContext> {
+        match (&self.capability_manager, &self.pending_store) {
+            (Some(cap_mgr), Some(pending)) => Some(crate::resource_bridge::BridgeContext {
+                provider_registry: registry,
+                capability_manager: cap_mgr.clone(),
+                pending_store: pending.clone(),
+                capsule_id: format!("vm-{name}"),
+                session_id: format!("vm-{name}"),
+                principal_id: principal_id
+                    .map(crate::resource_bridge::BridgePrincipal::into_bridge_principal_string),
+                manifest_capabilities: manifest.resource_authority_bounds(),
+                data_dir: Some(self.data_dir.clone()),
+                launch: None,
+                model_token_ceiling: None,
+                model_budget: None,
+                stop: None,
+                v2_guests: self.v2_guests.clone(),
+                plan_book: None,
+            }),
+            _ => None,
+        }
     }
 
     /// Handle a supervisor request from the shell.
@@ -1103,24 +1147,8 @@ impl Supervisor {
             // Build BridgeContext for shell-mediated capability approval.
             // When None (gateway/infrastructure path), the bridge denies capability
             // requests — infrastructure capsules run under service authority.
-            let bridge_ctx = match (&self.capability_manager, &self.pending_store) {
-                (Some(cap_mgr), Some(pending)) => Some(crate::resource_bridge::BridgeContext {
-                    provider_registry: registry.clone(),
-                    capability_manager: cap_mgr.clone(),
-                    pending_store: pending.clone(),
-                    capsule_id: format!("vm-{}", name),
-                    session_id: format!("vm-{}", name),
-                    principal_id: principal_id
-                        .map(crate::resource_bridge::BridgePrincipal::into_bridge_principal_string),
-                    manifest_capabilities: manifest.resource_authority_bounds(),
-                    data_dir: Some(self.data_dir.clone()),
-                    launch: None,
-                    model_token_ceiling: None,
-                    model_budget: None,
-                    stop: None,
-                }),
-                _ => None,
-            };
+            let bridge_ctx =
+                self.microvm_bridge_context(registry.clone(), name, principal_id, &manifest);
             if let Err(e) = crate::resource_bridge::spawn_resource_bridge(
                 &carrier_socket,
                 registry.clone(),
