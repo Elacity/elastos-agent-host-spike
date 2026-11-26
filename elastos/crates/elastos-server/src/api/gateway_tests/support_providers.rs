@@ -4978,6 +4978,11 @@ impl RecordingWalletProvider {
             .store(true, std::sync::atomic::Ordering::Relaxed);
     }
 
+    fn release_rights_signatures(&self) {
+        self.hold_rights_signatures
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+    }
+
     fn approve_rights_signature(&self, request_id: &str) {
         self.approved_rights
             .lock()

@@ -13973,3 +13973,41 @@ async fn runtime_custody_open_for_an_agent_is_refused_before_custody() {
         "proof-bound passkey session required"
     );
 }
+
+/// Each lifetime closes the release window on its own. The round is an
+/// injected reading, so no clock or sleep is involved.
+#[test]
+fn custody_release_round_fits_each_lifetime_on_its_own() {
+    use super::{
+        custody_release_round_fits as fits, RELEASE_CONTRIBUTION_WINDOW_SECS,
+        RELEASE_ISSUE_SKEW_SECS, WHOLE_RELEASE_SECS,
+    };
+    let round = 1_000;
+    let issued = round - RELEASE_ISSUE_SKEW_SECS;
+    let rights_end = round + WHOLE_RELEASE_SECS;
+    let prepared_end = round + RELEASE_CONTRIBUTION_WINDOW_SECS;
+    let pending_end = round + 1;
+    assert!(fits(round, issued, rights_end, prepared_end, pending_end));
+    assert!(!fits(
+        round,
+        issued + 1,
+        rights_end,
+        prepared_end,
+        pending_end
+    ));
+    assert!(!fits(
+        round,
+        issued,
+        rights_end - 1,
+        prepared_end,
+        pending_end
+    ));
+    assert!(!fits(
+        round,
+        issued,
+        rights_end,
+        prepared_end - 1,
+        pending_end
+    ));
+    assert!(!fits(round, issued, rights_end, prepared_end, round));
+}

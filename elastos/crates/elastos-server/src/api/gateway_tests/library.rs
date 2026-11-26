@@ -11618,86 +11618,75 @@ mod route_17_two_person_purchases {
         );
     }
 
-    /// The last second at which the whole release still fits every lifetime
-    /// opens. One second later is refused by name before the Wallet is asked,
-    /// and that pending approval is still usable at the last good second.
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn route_17_resume_at_the_last_fitting_second_opens_and_the_next_is_refused() {
-        let _guard = protected_content_gateway_mock_test_guard().lock().await;
-        let fixture = purchase_two_people(Route17OpenClock::Wall, false).await;
-        fixture.wallet.hold_rights_signatures();
-        let latest = crate::protected_content_runtime::latest_custody_resume_offset_secs();
-        // The pending open and the refusal run before this second, so the
-        // successful resume starts as the provider stamps that second.
-        const SLACK_SECS: u64 = 45;
-        let avail = crate::auth::now_ts();
-        let last_good = avail.saturating_add(SLACK_SECS);
-        let open_at = last_good.saturating_sub(latest);
-        set_mock_published_protected_content_receipt_checked_at(avail);
-        let pending = {
-            let _clock = crate::test_clock::arm(open_at, avail);
-            player_open(
-                &fixture.app,
-                &fixture.p_player_token,
-                &fixture.mint_a_hex,
-                &fixture.p.principal_id,
-            )
-            .await
-        };
+    /// Runs one P open on scripted readings: the open, the availability check,
+    /// then the release window, and the last one repeats. The availability
+    /// receipt is stamped at the second reading. Returns the answer and the
+    /// number of readings the open used.
+    async fn route_17_open_on(
+        fixture: &Route17Fixture,
+        readings: &[u64],
+    ) -> (serde_json::Value, u64) {
+        set_mock_published_protected_content_receipt_checked_at(readings[1]);
+        let _clock = crate::test_clock::arm_steps(readings);
+        let answer = player_open(
+            &fixture.app,
+            &fixture.p_player_token,
+            &fixture.mint_a_hex,
+            &fixture.p.principal_id,
+        )
+        .await;
+        (answer, crate::test_clock::reads())
+    }
+
+    fn route_17_approval_id(pending: &serde_json::Value) -> String {
         assert_eq!(
             pending["message"],
             crate::protected_content_runtime::RUNTIME_CUSTODY_OPEN_PENDING_MESSAGE,
             "{pending}"
         );
-        let approval_id = pending["detail"]
+        pending["detail"]
             .as_str()
             .and_then(|detail| detail.split("approval_request_id=").nth(1))
-            .expect("pending approval id");
+            .expect("pending approval id")
+            .to_string()
+    }
 
-        fixture.wallet.clear_requests().await;
-        set_mock_published_protected_content_receipt_checked_at(last_good.saturating_add(1));
-        let refused = {
-            let _clock =
-                crate::test_clock::arm(last_good.saturating_add(1), last_good.saturating_add(1));
-            player_open(
-                &fixture.app,
-                &fixture.p_player_token,
-                &fixture.mint_a_hex,
-                &fixture.p.principal_id,
-            )
+    async fn route_17_rights_requests(fixture: &Route17Fixture) -> usize {
+        fixture
+            .wallet
+            .recorded_v2_operation_kinds()
             .await
-        };
-        assert_eq!(
-            refused["message"],
-            crate::protected_content_runtime::RUNTIME_CUSTODY_RELEASE_WINDOW_CLOSED_MESSAGE,
-            "{refused}"
-        );
-        let refused_kinds = fixture.wallet.recorded_v2_operation_kinds().await;
-        assert!(
-            refused_kinds
-                .iter()
-                .all(|kind| *kind != WalletOperationKind::RequestProtectedContentRightsSignature),
-            "the closed window must be refused before the Wallet is asked: {refused_kinds:?}"
-        );
+            .iter()
+            .filter(|kind| **kind == WalletOperationKind::RequestProtectedContentRightsSignature)
+            .count()
+    }
 
-        fixture.wallet.approve_rights_signature(approval_id);
+    /// The reading `latest` seconds after the pending open is the last second
+    /// the whole release fits. The pending open's reading is set back from the
+    /// wall so the resume's provider stamps (made at the real wall) land
+    /// within the response clock without any real waiting.
+    fn route_17_resume_readings(latest: u64) -> (u64, u64, u64) {
+        let wall = crate::auth::now_ts();
+        let resume_at = wall.saturating_add(2);
+        (wall, resume_at.saturating_sub(latest), resume_at)
+    }
+
+    /// The last fitting second opens the pending release.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn route_17_resume_at_the_last_fitting_second_opens() {
+        let _guard = protected_content_gateway_mock_test_guard().lock().await;
+        let fixture = purchase_two_people(Route17OpenClock::Wall, false).await;
+        fixture.wallet.hold_rights_signatures();
+        let latest = crate::protected_content_runtime::latest_custody_resume_offset_secs();
+        let (wall, open_at, last_good) = route_17_resume_readings(latest);
+        let (pending, _) = route_17_open_on(&fixture, &[open_at, wall]).await;
+        fixture
+            .wallet
+            .approve_rights_signature(&route_17_approval_id(&pending));
         fixture.wallet.clear_requests().await;
-        let now = crate::auth::now_ts();
-        if last_good > now {
-            tokio::time::sleep(std::time::Duration::from_secs(last_good - now)).await;
-        }
-        set_mock_published_protected_content_receipt_checked_at(last_good);
-        let opened = {
-            let _clock = crate::test_clock::arm(last_good, last_good);
-            player_open(
-                &fixture.app,
-                &fixture.p_player_token,
-                &fixture.mint_a_hex,
-                &fixture.p.principal_id,
-            )
-            .await
-        };
+
+        let (opened, _) = route_17_open_on(&fixture, &[last_good, last_good]).await;
         assert_eq!(opened["status"], "ok", "{opened}");
         assert_eq!(
             opened["data"]["expires_at"].as_u64(),
@@ -11706,17 +11695,112 @@ mod route_17_two_person_purchases {
             )),
             "{opened}"
         );
-        let opened_kinds = fixture.wallet.recorded_v2_operation_kinds().await;
+        assert_eq!(route_17_rights_requests(&fixture).await, 1);
+    }
+
+    /// One second later the resume is refused by name before the Wallet is
+    /// asked. That refusal clears the stale pending open, so the next open
+    /// works at once instead of meeting the same dead record.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn route_17_closed_window_resume_is_cleared_so_the_next_open_works() {
+        let _guard = protected_content_gateway_mock_test_guard().lock().await;
+        let fixture = purchase_two_people(Route17OpenClock::Wall, false).await;
+        fixture.wallet.hold_rights_signatures();
+        let latest = crate::protected_content_runtime::latest_custody_resume_offset_secs();
+        let (wall, open_at, closed_at) = route_17_resume_readings(latest.saturating_add(1));
+        let (pending, _) = route_17_open_on(&fixture, &[open_at, wall]).await;
+        route_17_approval_id(&pending);
+        fixture.wallet.clear_requests().await;
+
+        let (refused, _) = route_17_open_on(&fixture, &[closed_at, closed_at]).await;
         assert_eq!(
-            opened_kinds
-                .iter()
-                .filter(|kind| {
-                    **kind == WalletOperationKind::RequestProtectedContentRightsSignature
-                })
-                .count(),
-            1,
-            "the last fitting second asks the Wallet once: {opened_kinds:?}"
+            refused["message"],
+            crate::protected_content_runtime::RUNTIME_CUSTODY_RELEASE_WINDOW_CLOSED_MESSAGE,
+            "{refused}"
         );
+        assert!(
+            refused["message"]
+                .as_str()
+                .is_some_and(|message| message.ends_with("open it again")),
+            "the refusal must say what to do: {refused}"
+        );
+        assert_eq!(
+            route_17_rights_requests(&fixture).await,
+            0,
+            "the closed window must be refused before the Wallet is asked"
+        );
+
+        fixture.wallet.release_rights_signatures();
+        let (opened, _) = route_17_open_on(&fixture, &[closed_at, closed_at]).await;
+        assert_eq!(opened["status"], "ok", "{opened}");
+        assert_eq!(
+            opened["data"]["expires_at"].as_u64(),
+            Some(closed_at.saturating_add(
+                crate::protected_content_runtime::RELEASE_CONTRIBUTION_WINDOW_SECS
+            )),
+            "{opened}"
+        );
+        assert_eq!(route_17_rights_requests(&fixture).await, 1);
+    }
+
+    /// A resume passes the first check at the last fitting second, then the
+    /// wallet and policy steps take 2 s. The release window is checked again
+    /// when it starts: the open is refused by name, uses no readings of the
+    /// custody round, and clears the pending open.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn route_17_resume_delayed_past_the_window_is_refused_by_name() {
+        let _guard = protected_content_gateway_mock_test_guard().lock().await;
+        let fixture = purchase_two_people(Route17OpenClock::Wall, false).await;
+        fixture.wallet.hold_rights_signatures();
+        let latest = crate::protected_content_runtime::latest_custody_resume_offset_secs();
+        let (wall, open_at, last_good) = route_17_resume_readings(latest);
+        let (pending, _) = route_17_open_on(&fixture, &[open_at, wall]).await;
+        let stale = route_17_approval_id(&pending);
+        fixture.wallet.approve_rights_signature(&stale);
+        fixture.wallet.clear_requests().await;
+
+        let delayed = last_good.saturating_add(2);
+        let (refused, reads) = route_17_open_on(&fixture, &[last_good, last_good, delayed]).await;
+        assert_eq!(
+            refused["message"],
+            crate::protected_content_runtime::RUNTIME_CUSTODY_RELEASE_WINDOW_CLOSED_MESSAGE,
+            "{refused}"
+        );
+        assert_eq!(reads, 3, "no custody round may start: {refused}");
+        assert_eq!(route_17_rights_requests(&fixture).await, 1);
+
+        let (again, _) = route_17_open_on(&fixture, &[delayed, delayed]).await;
+        assert_ne!(route_17_approval_id(&again), stale, "{again}");
+    }
+
+    /// The same 2 s delay on a first open, with an approving Wallet.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn route_17_first_open_delayed_past_the_window_is_refused_by_name() {
+        let _guard = protected_content_gateway_mock_test_guard().lock().await;
+        let fixture = purchase_two_people(Route17OpenClock::Wall, false).await;
+        let latest = crate::protected_content_runtime::latest_custody_resume_offset_secs();
+        let wall = crate::auth::now_ts();
+        let first = wall.saturating_sub(10);
+        let delayed = first.saturating_add(latest).saturating_add(2);
+        let (refused, reads) = route_17_open_on(&fixture, &[first, wall, delayed]).await;
+        assert_eq!(
+            refused["message"],
+            crate::protected_content_runtime::RUNTIME_CUSTODY_RELEASE_WINDOW_CLOSED_MESSAGE,
+            "{refused}"
+        );
+        assert_eq!(reads, 3, "no custody round may start: {refused}");
+
+        let opened = player_open(
+            &fixture.app,
+            &fixture.p_player_token,
+            &fixture.mint_a_hex,
+            &fixture.p.principal_id,
+        )
+        .await;
+        assert_eq!(opened["status"], "ok", "{opened}");
     }
 }
 
