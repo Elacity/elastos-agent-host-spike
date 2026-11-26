@@ -184,7 +184,6 @@ pub(crate) const RELEASE_ISSUE_SKEW_SECS: u64 = RIGHTS_CLOCK_SKEW_SECS;
 pub(crate) const RELEASE_CONTRIBUTION_WINDOW_SECS: u64 = 50;
 pub(crate) const WHOLE_RELEASE_SECS: u64 =
     RELEASE_CONTRIBUTION_WINDOW_SECS + RIGHTS_CLOCK_SKEW_SECS;
-pub(crate) const RELEASE_OPERATION_ISSUE_SKEW_SECS: u64 = 3;
 pub(crate) const RIGHTS_REQUEST_AHEAD_SECS: u64 = 180;
 pub(crate) fn custody_release_round_fits(
     round: u64,
@@ -6596,7 +6595,7 @@ pub(crate) async fn open_runtime_custody_viewer(
             evidence_request,
             custody_epoch: composition.signed_epoch.clone(),
             audit_request_id,
-            issued_at: release_now.saturating_sub(RELEASE_OPERATION_ISSUE_SKEW_SECS),
+            issued_at: release_now.saturating_sub(3),
             expires_at: release_now.saturating_add(RELEASE_CONTRIBUTION_WINDOW_SECS),
         },
         release_now,
