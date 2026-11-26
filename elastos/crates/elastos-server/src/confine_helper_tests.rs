@@ -274,7 +274,7 @@ async fn localhost_and_object_providers_work_inside_their_fences() {
         &object_data,
         elastos_runtime::provider::BridgeProviderConfig {
             base_path: object_data.display().to_string(),
-            extra: crate::library::object_helper_init_extra(&object_data, &did),
+            extra: crate::library::object_helper_init_extra(&did),
             ..Default::default()
         },
     )
@@ -469,7 +469,7 @@ async fn an_updated_home_reads_existing_files_through_the_fence() {
         &data,
         elastos_runtime::provider::BridgeProviderConfig {
             base_path: data.display().to_string(),
-            extra: crate::library::object_helper_init_extra(&data, &did),
+            extra: crate::library::object_helper_init_extra(&did),
             ..Default::default()
         },
     )
@@ -796,6 +796,52 @@ async fn capsule_install_while_home_runs_writes_under_users_fence() {
     .await;
     assert_eq!(read["status"], "ok", "{read}");
     assert_eq!(read["data"]["data"], payload);
+
+    // The helper started before the install, keeps no grant list and cannot
+    // read the install. Its depth bound still covers the new root: a path 16
+    // folders below `Notes` is refused by name and nothing is written.
+    let parent = format!(
+        "{root}/Notes/{}",
+        (1..=15)
+            .map(|n| format!("{n:02}"))
+            .collect::<Vec<_>>()
+            .join("/")
+    );
+    let deep = exchange_ok(
+        bridge,
+        serde_json::json!({
+            "op": "mkdir",
+            "principal_id": principal,
+            "parent_uri": parent,
+            "name": "16"
+        }),
+    )
+    .await;
+    assert_eq!(deep["status"], "error", "{deep}");
+    let message = deep["message"].as_str().unwrap_or("");
+    assert!(
+        message.contains("more than 16 folders deep") && message.contains("Notes"),
+        "{deep}"
+    );
+    assert!(
+        !data
+            .join(format!("{parent}/16").trim_start_matches("localhost://"))
+            .exists(),
+        "mkdir wrote the deep folder"
+    );
+    crate::api::auth_gateway::verify_configured_principal_roots_ready(&data)
+        .unwrap_or_else(|err| panic!("Home did not start: {err:#}"));
+    let again = exchange_ok(
+        bridge,
+        serde_json::json!({
+            "op": "write",
+            "principal_id": principal,
+            "uri": format!("{root}/Notes/again.txt"),
+            "data": payload
+        }),
+    )
+    .await;
+    assert_eq!(again["status"], "ok", "{again}");
     bridge.shutdown().await.unwrap();
 }
 
@@ -897,7 +943,7 @@ async fn fenced_object_library_list_gets_viewers_from_the_runtime() {
         &data,
         elastos_runtime::provider::BridgeProviderConfig {
             base_path: data.display().to_string(),
-            extra: crate::library::object_helper_init_extra(&data, &did),
+            extra: crate::library::object_helper_init_extra(&did),
             ..Default::default()
         },
     )
@@ -1225,7 +1271,7 @@ async fn musl_release_helpers_start_under_the_fence() {
         &data,
         elastos_runtime::provider::BridgeProviderConfig {
             base_path: data.display().to_string(),
-            extra: crate::library::object_helper_init_extra(&data, &did),
+            extra: crate::library::object_helper_init_extra(&did),
             ..Default::default()
         },
     )
@@ -1546,7 +1592,7 @@ async fn spawn_object(
         data,
         elastos_runtime::provider::BridgeProviderConfig {
             base_path: data.display().to_string(),
-            extra: crate::library::object_helper_init_extra(data, did),
+            extra: crate::library::object_helper_init_extra(did),
             ..Default::default()
         },
     )
@@ -2344,7 +2390,8 @@ async fn object_helper_uses_the_runtime_did_and_names_an_unknown_principal() {
 }
 
 /// A capsule storage root under `Users/self/<dir>` is a start-walk root. The
-/// helper receives that grant at spawn. mkdir, move, copy, and archive
+/// helper holds no grant list; its depth bound covers every folder below a
+/// person's root. mkdir, move, copy, and archive
 /// extraction that would land 16 folders below it are refused by name, and
 /// Home still starts.
 #[cfg(all(

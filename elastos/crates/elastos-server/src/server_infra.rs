@@ -469,7 +469,7 @@ fn object_provider_bridge_config(
         allowed_paths: file_backed_prefixes(),
         read_only: false,
         encryption_key: String::new(),
-        extra: elastos_server::library::object_helper_init_extra(data_dir, &did),
+        extra: elastos_server::library::object_helper_init_extra(&did),
     })
 }
 

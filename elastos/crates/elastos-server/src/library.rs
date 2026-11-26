@@ -4047,37 +4047,8 @@ fn clean_library_uri(localhost_root: &str, uri: &str) -> anyhow::Result<String> 
     Ok(uri)
 }
 
-static GRANTS: OnceLock<Result<Vec<String>, String>> = OnceLock::new();
-
-fn helper_grants() -> Option<Result<Vec<String>, String>> {
-    elastos_identity::object_helper_process().then(|| {
-        GRANTS
-            .get()
-            .cloned()
-            .unwrap_or(Err("components.json".into()))
-    })
-}
-
-pub(crate) fn helper_storage_grants() -> Option<Vec<String>> {
-    helper_grants().map(|grants| grants.unwrap_or_default())
-}
-
-pub fn install_storage_grants_from_config(config: &Value) -> Result<(), String> {
-    let _ = GRANTS.set(match config.pointer("/extra/storage_roots") {
-        None => Err("components.json".into()),
-        Some(Value::String(file)) => Err(file.clone()),
-        Some(value) => Ok(serde_json::from_value(value.clone())
-            .map_err(|_| "object helper storage roots are not a list".to_string())?),
-    });
-    Ok(())
-}
-
-pub fn object_helper_init_extra(data_dir: &Path, did: &str) -> Value {
-    let roots = crate::api::capsule_inventory::read_active_storage_grants(data_dir);
-    json!({
-        "runtime_did": did,
-        "storage_roots": roots.map(Value::from).unwrap_or_else(Value::String),
-    })
+pub fn object_helper_init_extra(did: &str) -> Value {
+    json!({ "runtime_did": did })
 }
 
 /// The start walk's folder-depth rule for Library writes (#449). Home does
@@ -4092,9 +4063,12 @@ struct StartWalkRule {
 
 impl StartWalkRule {
     fn new(data_dir: &Path, localhost_root: &str) -> Self {
-        let unread = helper_grants()
-            .unwrap_or_else(|| crate::api::capsule_inventory::read_active_storage_grants(data_dir))
-            .err();
+        // The helper cannot read the grants; `check` covers every root there.
+        let unread = if elastos_identity::object_helper_process() {
+            None
+        } else {
+            crate::api::capsule_inventory::read_active_storage_grants(data_dir).err()
+        };
         Self {
             localhost_root: localhost_root.to_string(),
             inventory: crate::api::auth_gateway::principal_root_protected_object_inventory(
@@ -4106,27 +4080,38 @@ impl StartWalkRule {
     }
 
     fn file(&self, uri: &str) -> anyhow::Result<()> {
-        if let Some(file) = &self.unread {
-            bail!("library write was not saved: the start-walk rule could not read {file}");
-        }
-        crate::auth::refuse_principal_root_depth_breach(
-            &self.localhost_root,
-            &self.inventory,
-            uri,
-            false,
-        )
+        self.check(uri, false)
     }
 
     fn folder(&self, uri: &str) -> anyhow::Result<()> {
+        self.check(uri, true)
+    }
+
+    /// The object helper cannot read the capsules' storage grants, and a
+    /// capsule can be installed while Home runs. There, every folder directly
+    /// below the person's root also counts as a start-walk root, so the depth
+    /// bound holds for any root a grant can name.
+    fn check(&self, uri: &str, folder: bool) -> anyhow::Result<()> {
         if let Some(file) = &self.unread {
             bail!("library write was not saved: the start-walk rule could not read {file}");
         }
-        crate::auth::refuse_principal_root_depth_breach(
-            &self.localhost_root,
-            &self.inventory,
-            uri,
-            true,
-        )
+        let root = &self.localhost_root;
+        crate::auth::refuse_principal_root_depth_breach(root, &self.inventory, uri, folder)?;
+        if !elastos_identity::object_helper_process() {
+            return Ok(());
+        }
+        let first = uri
+            .strip_prefix(root.as_str())
+            .map(|rest| rest.trim_start_matches('/'));
+        let Some(first) =
+            first.and_then(|rest| rest.split('/').next().filter(|name| !name.is_empty()))
+        else {
+            return Ok(());
+        };
+        let declared = [
+            crate::auth::PrincipalRootProtectedObjectDeclarationV1::root(format!("{root}/{first}")),
+        ];
+        crate::auth::refuse_principal_root_depth_breach(root, &declared, uri, folder)
     }
 
     /// `from` copied or moved to `to_uri`: every file and folder it holds is

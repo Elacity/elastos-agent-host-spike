@@ -846,12 +846,10 @@ pub(super) fn principal_root_protected_object_inventory(
             "{localhost_root}/.AppData/LocalHost/GBA"
         )),
     ];
-    for storage in crate::library::helper_storage_grants().unwrap_or_else(|| {
-        super::capsule_inventory::list_active_capsule_manifests(data_dir)
-            .into_iter()
-            .flat_map(|manifest| manifest.permissions.storage)
-            .collect()
-    }) {
+    for storage in super::capsule_inventory::list_active_capsule_manifests(data_dir)
+        .into_iter()
+        .flat_map(|manifest| manifest.permissions.storage)
+    {
         let root_uri = principal_scoped_storage_uri_for_root(&storage, localhost_root);
         if root_uri == localhost_root
             || !root_uri

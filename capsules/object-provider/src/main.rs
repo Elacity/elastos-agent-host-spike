@@ -68,10 +68,6 @@ impl ObjectProviderProcess {
         if let Err((code, message)) = install_public_runtime_did(&config) {
             return response_error(code, &message);
         }
-        #[cfg(unix)]
-        if let Err(message) = elastos_server::library::install_storage_grants_from_config(&config) {
-            return response_error("invalid_config", &message);
-        }
         self.data_dir = Some(data_dir.clone());
         response_ok(json!({
             "provider": PROVIDER_ID,
