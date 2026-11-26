@@ -3614,6 +3614,46 @@ async fn a_crash_between_the_owed_and_signed_stop_rows_settles_once_after_restar
     assert!(crate::agents::owed_stop_rows(&home.data).is_empty());
 }
 
+/// A plane stop that names one session denies only that session's waiting
+/// asks. Another live session of the same agent keeps its ask.
+#[tokio::test]
+async fn a_stop_for_one_session_leaves_another_sessions_ask_waiting() {
+    let home = Home::open();
+    let (owner, _) = admins(&home, "one-session");
+    let dir = home._temp.path().join("probe");
+    let agent = create_owned_agent(&home.data, &owner, &sign_probe(&dir));
+    let gateway = Gateway::start(&home.data).await;
+    let runtime = crate::api::agent_plane::plane_runtime(&home.data).unwrap();
+    runtime
+        .register_capsule(crate::runtime::RunningCapsuleInfo {
+            id: "session-kept".to_string(),
+            name: "kept".to_string(),
+            status: crate::runtime::CAPSULE_RUNNING.to_string(),
+            capsule_type: elastos_common::CapsuleType::Wasm,
+            handle: None,
+            session_id: "session-kept".to_string(),
+            principal: Some(agent.clone()),
+            cause: None,
+            ended_at: None,
+        })
+        .await;
+    let kept = plant_pending(&home, "session-kept", &agent).await;
+    crate::api::agent_plane::plant_retiring_runtime(&home.data, Arc::clone(&runtime));
+    let body = json!({ "agent_id": agent, "session_id": "session-other" }).to_string();
+    let answer = crate::api::agent_plane::stop_on_retiring(&home.data, body.into_bytes()).await;
+    assert!(answer.is_some_and(|answer| answer.status() != 200));
+    let (store, _, _) = runtime.instance_authority_plane().unwrap();
+    assert!(
+        store.get_request(&kept).await.unwrap().is_pending(),
+        "a stop for another session denied this ask"
+    );
+    let body = json!({ "agent_id": agent, "session_id": "session-kept" }).to_string();
+    let _ = crate::api::agent_plane::stop_on_retiring(&home.data, body.into_bytes()).await;
+    assert!(store.get_request(&kept).await.unwrap().is_denied());
+    runtime.unregister_capsule("session-kept").await;
+    gateway.shutdown().await;
+}
+
 fn stopped_rows(data: &Path) -> Vec<elastos_runtime::auth::RuntimeAuditEventV1> {
     crate::auth::load_auth_state(data)
         .unwrap()

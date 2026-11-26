@@ -761,7 +761,10 @@ async fn stop_and_settle(
     let forward = if let Ok(request) = serde_json::from_slice::<PlaneStopBody>(&body) {
         let agent_id = request.agent_id.trim();
         if !agent_id.is_empty() {
-            let ids = runtime.live_sessions_for_agent(agent_id).await;
+            let mut ids = runtime.live_sessions_for_agent(agent_id).await;
+            if let Some(session_id) = request.session_id.as_deref() {
+                ids.retain(|id| id == session_id);
+            }
             let reason = match request.cause.as_deref() {
                 Some(cause) if !cause.is_empty() => format!("{cause}: {agent_id}"),
                 _ => format!("denied: {agent_id} stopped"),
