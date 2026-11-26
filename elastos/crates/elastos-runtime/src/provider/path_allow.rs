@@ -9,7 +9,7 @@
 
 use super::rights::AdmittedRights;
 use super::rights_table::RuntimeProviderId;
-use std::os::unix::fs::{MetadataExt, PermissionsExt};
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
 /// One rendered helper confinement. `landlock` is the path-beneath plan.
@@ -237,8 +237,7 @@ fn resolve_roots(
 }
 
 /// Create each missing component of `relative` at mode 0700. A symlink or a
-/// non-directory on that path is refused. An existing directory keeps its
-/// mode, except a component named `Library`, which is narrowed to 0700.
+/// non-directory on that path is refused. Open each one without following a link, at 0700.
 fn ensure_nested_directory(data_dir: &Path, relative: &str) -> Result<(), String> {
     let mut current = data_dir.to_path_buf();
     for part in relative.split('/') {
@@ -259,17 +258,9 @@ fn ensure_nested_directory(data_dir: &Path, relative: &str) -> Result<(), String
                     "provider start is refused: {relative} is not a directory. Replace it with a directory you own, then start Home again."
                 ));
             }
-            Ok(_) => elastos_common::localhost::narrow_library(part, &current, relative)?,
+            Ok(_) => elastos_common::localhost::private_dir(&current, relative, false)?,
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-                std::fs::create_dir(&current).map_err(|error| {
-                    format!("provider start is refused: {relative} could not be created: {error}")
-                })?;
-                std::fs::set_permissions(&current, std::fs::Permissions::from_mode(0o700))
-                    .map_err(|error| {
-                        format!(
-                            "provider start is refused: {relative} could not be created: {error}"
-                        )
-                    })?;
+                elastos_common::localhost::private_dir(&current, relative, true)?;
             }
             Err(err) => {
                 return Err(format!(
@@ -795,12 +786,20 @@ mod tests {
         std::fs::create_dir_all(&library).unwrap();
         std::fs::set_permissions(&library, std::fs::Permissions::from_mode(0o755)).unwrap();
         render("object-provider", data, Path::new(EXE), 5).expect("existing Library is narrowed");
-        let mode = std::fs::symlink_metadata(&library)
-            .unwrap()
-            .permissions()
-            .mode()
-            & 0o777;
-        assert_eq!(mode, 0o700);
+        let mode = |path: &std::path::Path| {
+            std::fs::symlink_metadata(path)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777
+        };
+        let services = data.join("ElastOS/SystemServices");
+        assert_eq!(mode(&library), 0o700);
+        assert_eq!(mode(&services), 0o700);
+        std::fs::set_permissions(&services, std::fs::Permissions::from_mode(0o755)).unwrap();
+        render("object-provider", data, Path::new(EXE), 5).expect("a second start narrows again");
+        assert_eq!(mode(&library), 0o700);
+        assert_eq!(mode(&services), 0o700);
         assert!(!data.join("ElastOS/SystemServices/Wallet").exists());
     }
 
