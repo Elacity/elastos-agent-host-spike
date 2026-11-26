@@ -274,7 +274,7 @@ async fn localhost_and_object_providers_work_inside_their_fences() {
         &object_data,
         elastos_runtime::provider::BridgeProviderConfig {
             base_path: object_data.display().to_string(),
-            extra: serde_json::json!({ "runtime_did": did }),
+            extra: crate::library::object_helper_init_extra(&object_data, &did),
             ..Default::default()
         },
     )
@@ -469,7 +469,7 @@ async fn an_updated_home_reads_existing_files_through_the_fence() {
         &data,
         elastos_runtime::provider::BridgeProviderConfig {
             base_path: data.display().to_string(),
-            extra: serde_json::json!({ "runtime_did": did }),
+            extra: crate::library::object_helper_init_extra(&data, &did),
             ..Default::default()
         },
     )
@@ -718,7 +718,7 @@ async fn fenced_object_library_list_gets_viewers_from_the_runtime() {
         &data,
         elastos_runtime::provider::BridgeProviderConfig {
             base_path: data.display().to_string(),
-            extra: serde_json::json!({ "runtime_did": did }),
+            extra: crate::library::object_helper_init_extra(&data, &did),
             ..Default::default()
         },
     )
@@ -1049,7 +1049,7 @@ async fn musl_release_helpers_start_under_the_fence() {
         &data,
         elastos_runtime::provider::BridgeProviderConfig {
             base_path: data.display().to_string(),
-            extra: serde_json::json!({ "runtime_did": did }),
+            extra: crate::library::object_helper_init_extra(&data, &did),
             ..Default::default()
         },
     )
@@ -1357,7 +1357,7 @@ async fn spawn_object(
         data,
         elastos_runtime::provider::BridgeProviderConfig {
             base_path: data.display().to_string(),
-            extra: serde_json::json!({ "runtime_did": did }),
+            extra: crate::library::object_helper_init_extra(data, did),
             ..Default::default()
         },
     )
@@ -2032,5 +2032,223 @@ async fn object_helper_uses_the_runtime_did_and_names_an_unknown_principal() {
         "{unknown}"
     );
     assert_eq!(std::fs::read(&key).unwrap(), key_before);
+    bridge.shutdown().await.unwrap();
+}
+
+/// A capsule storage root under `Users/self/<dir>` is a start-walk root. The
+/// helper receives that grant at spawn. mkdir, move, copy, and archive
+/// extraction that would land 16 folders below it are refused by name, and
+/// Home still starts.
+#[cfg(all(
+    not(elastos_unsupported_os_check),
+    any(
+        target_os = "macos",
+        all(
+            target_os = "linux",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        )
+    )
+))]
+#[tokio::test]
+async fn fenced_object_refuses_a_capsule_storage_root_at_depth_16() {
+    use base64::Engine;
+    let (_hold, data) = helper_data_root();
+    let capsule = data.join("capsules/notes");
+    std::fs::create_dir_all(&capsule).unwrap();
+    std::fs::write(
+        capsule.join("index.html"),
+        "<!doctype html><title>Notes</title>",
+    )
+    .unwrap();
+    std::fs::write(
+        capsule.join("capsule.json"),
+        serde_json::to_vec(&serde_json::json!({
+            "schema": "elastos.capsule/v1",
+            "name": "notes",
+            "version": "0.1.0",
+            "description": "Notes",
+            "author": "elastos",
+            "role": "app",
+            "type": "data",
+            "entrypoint": "index.html",
+            "permissions": { "storage": ["localhost://Users/self/Notes/*"] }
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    std::fs::write(
+        data.join("components.json"),
+        serde_json::to_vec(&serde_json::json!({
+            "external": {
+                "notes": { "install_path": "capsules/notes", "platforms": {} }
+            },
+            "capsules": {},
+            "profiles": {}
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let grants = crate::api::capsule_inventory::read_active_storage_grants(&data)
+        .unwrap_or_else(|err| panic!("grant read: {err}"));
+    assert!(
+        grants.iter().any(|grant| grant.contains("Notes")),
+        "the fixture grant was not read: {grants:?}"
+    );
+    let principal = "person:local:ada";
+    let protection = crate::auth::store_test_principal_root_protection(&data, principal);
+    let root = protection.localhost_root;
+    let notes = format!("{root}/Notes");
+    let on_disk = |uri: &str| data.join(uri.trim_start_matches("localhost://"));
+    let home_starts = |data: &std::path::Path| {
+        crate::api::auth_gateway::verify_configured_principal_roots_ready(data)
+            .unwrap_or_else(|err| panic!("Home did not start: {err:#}"));
+    };
+    let (_, did) = elastos_identity::load_or_create_did(&data).unwrap();
+    let object = spawn_object(&provider_binary("object-provider"), &data, &did).await;
+    let bridge = object.bridge();
+    let kept = exchange_ok(
+        bridge,
+        serde_json::json!({
+            "op": "mkdir",
+            "principal_id": principal,
+            "parent_uri": notes,
+            "name": "kept"
+        }),
+    )
+    .await;
+    assert_eq!(kept["status"], "ok", "{kept}");
+    home_starts(&data);
+
+    let parent = format!(
+        "{notes}/{}",
+        (1..=15)
+            .map(|n| format!("{n:02}"))
+            .collect::<Vec<_>>()
+            .join("/")
+    );
+    let deep = exchange_ok(
+        bridge,
+        serde_json::json!({
+            "op": "mkdir",
+            "principal_id": principal,
+            "parent_uri": parent,
+            "name": "16"
+        }),
+    )
+    .await;
+    assert_eq!(deep["status"], "error", "{deep}");
+    let deep_message = deep["message"].as_str().unwrap_or("");
+    assert!(
+        deep_message.contains("more than 16 folders deep") && deep_message.contains("Notes"),
+        "{deep}"
+    );
+    assert!(
+        !on_disk(&format!("{parent}/16")).exists(),
+        "mkdir wrote the deep folder"
+    );
+    home_starts(&data);
+
+    let hold = format!("{root}/hold");
+    std::fs::create_dir_all(on_disk(&format!(
+        "{hold}/{}",
+        (1..=15)
+            .map(|n| format!("{n:02}"))
+            .collect::<Vec<_>>()
+            .join("/")
+    )))
+    .unwrap();
+    home_starts(&data);
+    let moved = exchange_ok(
+        bridge,
+        serde_json::json!({
+            "op": "move",
+            "principal_id": principal,
+            "uri": hold,
+            "target_parent_uri": notes
+        }),
+    )
+    .await;
+    assert_eq!(moved["status"], "error", "{moved}");
+    let moved_message = moved["message"].as_str().unwrap_or("");
+    assert!(
+        moved_message.contains("more than 16 folders deep") && moved_message.contains("Notes"),
+        "{moved}"
+    );
+    assert!(
+        on_disk(&hold).is_dir(),
+        "the refused move removed the source"
+    );
+    assert!(!on_disk(&format!("{notes}/hold")).exists());
+    home_starts(&data);
+
+    let copied = exchange_ok(
+        bridge,
+        serde_json::json!({
+            "op": "copy",
+            "principal_id": principal,
+            "uri": hold,
+            "target_parent_uri": notes
+        }),
+    )
+    .await;
+    assert_eq!(copied["status"], "error", "{copied}");
+    let copied_message = copied["message"].as_str().unwrap_or("");
+    assert!(
+        copied_message.contains("more than 16 folders deep") && copied_message.contains("Notes"),
+        "{copied}"
+    );
+    assert!(on_disk(&hold).is_dir());
+    assert!(!on_disk(&format!("{notes}/hold")).exists());
+    home_starts(&data);
+
+    let mut archive = Vec::new();
+    {
+        let mut builder = tar::Builder::new(&mut archive);
+        let mut header = tar::Header::new_gnu();
+        header.set_entry_type(tar::EntryType::Directory);
+        header.set_mode(0o700);
+        header.set_size(0);
+        let entry = (1..=15)
+            .map(|n| format!("{n:02}"))
+            .collect::<Vec<_>>()
+            .join("/");
+        header.set_path(format!("{entry}/")).unwrap();
+        header.set_cksum();
+        builder.append(&header, std::io::empty()).unwrap();
+        builder.finish().unwrap();
+    }
+    let tar_uri = format!("{notes}/deep.tar");
+    let wrote = exchange_ok(
+        bridge,
+        serde_json::json!({
+            "op": "write",
+            "principal_id": principal,
+            "uri": tar_uri,
+            "data": base64::engine::general_purpose::STANDARD.encode(&archive)
+        }),
+    )
+    .await;
+    assert_eq!(wrote["status"], "ok", "{wrote}");
+    let extracted = exchange_ok(
+        bridge,
+        serde_json::json!({
+            "op": "extract_archive",
+            "principal_id": principal,
+            "uri": tar_uri
+        }),
+    )
+    .await;
+    assert_eq!(extracted["status"], "error", "{extracted}");
+    let extracted_message = extracted["message"].as_str().unwrap_or("");
+    assert!(
+        extracted_message.contains("more than 16 folders deep")
+            && extracted_message.contains("Notes"),
+        "{extracted}"
+    );
+    assert!(
+        !on_disk(&format!("{notes}/deep")).exists(),
+        "extraction created the folder"
+    );
+    home_starts(&data);
     bridge.shutdown().await.unwrap();
 }

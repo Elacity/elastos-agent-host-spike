@@ -4042,6 +4042,39 @@ fn clean_library_uri(localhost_root: &str, uri: &str) -> anyhow::Result<String> 
     Ok(uri)
 }
 
+static GRANTS: OnceLock<Result<Vec<String>, String>> = OnceLock::new();
+
+fn helper_grants() -> Option<Result<Vec<String>, String>> {
+    elastos_identity::object_helper_process().then(|| {
+        GRANTS
+            .get()
+            .cloned()
+            .unwrap_or(Err("components.json".into()))
+    })
+}
+
+pub(crate) fn helper_storage_grants() -> Option<Vec<String>> {
+    helper_grants().map(|grants| grants.unwrap_or_default())
+}
+
+pub fn install_storage_grants_from_config(config: &Value) -> Result<(), String> {
+    let _ = GRANTS.set(match config.pointer("/extra/storage_roots") {
+        None => Err("components.json".into()),
+        Some(Value::String(file)) => Err(file.clone()),
+        Some(value) => Ok(serde_json::from_value(value.clone())
+            .map_err(|_| "object helper storage roots are not a list".to_string())?),
+    });
+    Ok(())
+}
+
+pub fn object_helper_init_extra(data_dir: &Path, did: &str) -> Value {
+    let roots = crate::api::capsule_inventory::read_active_storage_grants(data_dir);
+    json!({
+        "runtime_did": did,
+        "storage_roots": roots.map(Value::from).unwrap_or_else(Value::String),
+    })
+}
+
 /// The start walk's folder-depth rule for Library writes (#449). Home does
 /// not start while a protected folder is 16 or more folders below its root,
 /// so Library refuses to create such a file or folder, by write, upload,
@@ -4049,20 +4082,28 @@ fn clean_library_uri(localhost_root: &str, uri: &str) -> anyhow::Result<String> 
 struct StartWalkRule {
     localhost_root: String,
     inventory: Vec<crate::auth::PrincipalRootProtectedObjectDeclarationV1>,
+    unread: Option<String>,
 }
 
 impl StartWalkRule {
     fn new(data_dir: &Path, localhost_root: &str) -> Self {
+        let unread = helper_grants()
+            .unwrap_or_else(|| crate::api::capsule_inventory::read_active_storage_grants(data_dir))
+            .err();
         Self {
             localhost_root: localhost_root.to_string(),
             inventory: crate::api::auth_gateway::principal_root_protected_object_inventory(
                 data_dir,
                 localhost_root,
             ),
+            unread,
         }
     }
 
     fn file(&self, uri: &str) -> anyhow::Result<()> {
+        if let Some(file) = &self.unread {
+            bail!("library write was not saved: the start-walk rule could not read {file}");
+        }
         crate::auth::refuse_principal_root_depth_breach(
             &self.localhost_root,
             &self.inventory,
@@ -4072,6 +4113,9 @@ impl StartWalkRule {
     }
 
     fn folder(&self, uri: &str) -> anyhow::Result<()> {
+        if let Some(file) = &self.unread {
+            bail!("library write was not saved: the start-walk rule could not read {file}");
+        }
         crate::auth::refuse_principal_root_depth_breach(
             &self.localhost_root,
             &self.inventory,
@@ -9050,6 +9094,9 @@ fn fill_one_fenced_library_object(data_dir: &Path, map: &mut serde_json::Map<Str
         .and_then(Value::as_str)
         .unwrap_or("")
         .to_string();
+    if is_webspace_uri(name.trim_end_matches('/')) {
+        return;
+    }
     let viewers = viewer_options_for_name(data_dir, &name);
     write_viewer_fields(map, &viewers);
     let file = map.get("kind").and_then(Value::as_str) == Some("file");
@@ -12566,6 +12613,63 @@ mod r5a_tests {
     #[test]
     fn empty_trash_of_an_unstored_principal_keeps_the_shared_index() {
         unstored_publish_row("empty_trash");
+    }
+
+    /// A WebSpace object already named its viewers. Fill must not replace
+    /// them, including a folder whose name looks like a text file.
+    #[test]
+    fn a_webspace_object_keeps_its_own_viewer_fields() {
+        let held = tempfile::tempdir().unwrap();
+        let mut folder = serde_json::json!({
+            "schema": super::LIBRARY_OBJECT_SCHEMA,
+            "uri": "localhost://WebSpaces/demo/notes.txt/",
+            "kind": "directory",
+            "viewers": []
+        });
+        super::fill_fenced_library_fields(held.path(), &mut folder);
+        assert!(folder.get("viewer").is_none(), "{folder}");
+        assert_eq!(folder["viewers"], serde_json::json!([]));
+        let mut file = serde_json::json!({
+            "schema": super::LIBRARY_OBJECT_SCHEMA,
+            "uri": "localhost://WebSpaces/demo/notes.txt",
+            "kind": "file",
+            "viewer": "documents",
+            "viewers": [{ "id": "documents", "name": "Documents" }]
+        });
+        super::fill_fenced_library_fields(held.path(), &mut file);
+        assert_eq!(file["viewer"], "documents");
+        assert_eq!(file["viewers"][0]["id"], "documents");
+    }
+
+    /// The depth rule reads `components.json` before a write. A read that
+    /// does not finish refuses the write and names that file.
+    #[cfg(unix)]
+    #[test]
+    fn a_library_write_names_components_json_when_it_cannot_be_read() {
+        let held = tempfile::tempdir().unwrap();
+        let principal = "person:local:ada";
+        let protection = crate::auth::store_test_principal_root_protection(held.path(), principal);
+        std::fs::create_dir(held.path().join("components.json")).unwrap();
+        let reply = super::handle_object_provider_raw_request(
+            held.path(),
+            &serde_json::json!({
+                "op": "mkdir",
+                "principal_id": principal,
+                "parent_uri": format!("{}/Notes", protection.localhost_root),
+                "name": "kept"
+            }),
+        );
+        assert_eq!(reply["status"], "error", "{reply}");
+        let message = reply["message"].as_str().unwrap_or("");
+        assert!(
+            message.contains("components.json"),
+            "the unread file was not named: {reply}"
+        );
+        assert!(!held
+            .path()
+            .join(protection.localhost_root.trim_start_matches("localhost://"))
+            .join("Notes/kept")
+            .exists());
     }
 }
 
