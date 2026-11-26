@@ -3154,10 +3154,12 @@ function scriptRoot() {
 
 function readAgentsInGateway() {
   const repo = scriptRoot();
+  const read = (rel) => fs.readFileSync(path.join(repo, rel), "utf8");
+  const api = "elastos/crates/elastos-server/src/api";
   return agentsInGatewayChange(
-    fs.readFileSync(path.join(repo, "elastos/crates/elastos-server/src/api/gateway.rs"), "utf8"),
-    fs.readFileSync(path.join(repo, "elastos/crates/elastos-server/src/api/gateway_agents.rs"), "utf8"),
-    fs.readFileSync(path.join(repo, "elastos/crates/elastos-server/src/api/gateway_home_runtime.rs"), "utf8"),
+    `${read(`${api}/gateway.rs`)}\n${read(`${api}/gateway_inbox.rs`)}`,
+    read(`${api}/gateway_agents.rs`),
+    read(`${api}/gateway_home_runtime.rs`),
   );
 }
 

@@ -1723,10 +1723,9 @@ async fn an_audit_failure_on_the_inbox_mints_nothing() {
     super::seams::arm_grant_fault(&home.data, false);
     let (status, body) = http_approve(&gateway.addr, &token, &request_id).await;
     assert_ne!(status, 200, "{body}");
-    assert!(
-        body.contains("injected agent grant audit failure"),
-        "{body}"
-    );
+    assert_eq!(body, "Nothing ran. A fresh passkey is needed.");
+    assert!(!body.contains(&home.data.display().to_string()), "{body}");
+    assert!(!body.contains("auth-state"), "{body}");
     assert!(
         grant_audit(&home.data, &request_id).is_empty(),
         "a failed approval row must not exist"
@@ -2624,4 +2623,390 @@ async fn a_pending_plan_stays_when_its_capsule_is_still_running() {
         })
         .expect("the pending plan");
     assert_eq!(stored["status"], "pending");
+}
+
+fn passkey_context(auth: &super::TestPasskeyAuthority) -> HomeLaunchTokenContext {
+    HomeLaunchTokenContext::for_test(
+        auth.principal_id.clone(),
+        auth.session_id.clone(),
+        Some(auth.proof_binding_id.clone()),
+        auth.grant_id.clone(),
+        crate::auth::PrincipalKind::Human,
+    )
+}
+
+fn create_owned_agent(data: &Path, auth: &super::TestPasskeyAuthority, cid: &str) -> String {
+    let record = crate::auth::stored_principal_record(data, &auth.principal_id)
+        .unwrap()
+        .unwrap();
+    crate::auth::store_test_principal_root_protection_for(
+        data,
+        &auth.principal_id,
+        &record.localhost_root,
+    );
+    let caller = crate::agents::Caller {
+        principal_id: &auth.principal_id,
+        proof_binding_id: &auth.proof_binding_id,
+        session_id: &auth.session_id,
+    };
+    let id = crate::agents::create(
+        data,
+        &caller,
+        &crate::agents::CreateRequest {
+            display_name: "Owner".to_string(),
+            agent_host: HOST.to_string(),
+            request_id: "request-Owner".to_string(),
+        },
+        |host| {
+            Ok(
+                crate::agent_admission::VerifiedAgentHost::unchecked_for_test(
+                    host,
+                    REGISTRY_CID,
+                    cid,
+                ),
+            )
+        },
+        1,
+    )
+    .unwrap()
+    .agent_id;
+    crate::agents::set_active(data, &caller, &id, true, 1).unwrap();
+    id
+}
+
+async fn post_json(addr: &str, token: &str, path: &str, body: &str) -> (u16, String) {
+    let response = reqwest::Client::new()
+        .post(format!("http://{addr}{path}"))
+        .header("host", addr)
+        .header("origin", "null")
+        .header("x-elastos-home-token", token)
+        .header("content-type", "application/json")
+        .body(body.to_string())
+        .send()
+        .await
+        .unwrap();
+    let status = response.status().as_u16();
+    (status, response.text().await.unwrap())
+}
+
+fn plan_file(data: &Path, request_id: &str) -> serde_json::Value {
+    let path = data
+        .join("inspect-actions")
+        .join(format!("{request_id}.json"));
+    serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap()
+}
+
+fn stop_cause(data: &Path, agent_id: &str, event_type: &str) -> (String, String) {
+    let event = crate::auth::load_auth_state(data)
+        .unwrap()
+        .audit
+        .into_iter()
+        .find(|event| {
+            event.event_type == event_type && event.capsule_id.as_deref() == Some(agent_id)
+        })
+        .unwrap_or_else(|| panic!("no {event_type} row"));
+    let reason: serde_json::Value = serde_json::from_str(&event.reason).unwrap();
+    (
+        event.principal_id.unwrap_or_default(),
+        reason["cause"].as_str().unwrap_or("").to_string(),
+    )
+}
+
+fn step_plan() -> serde_json::Value {
+    json!({ "steps": [{ "scheme": "availability", "operation": "status", "request": {} }] })
+}
+
+#[tokio::test]
+async fn demotion_stops_the_running_agent_and_closes_its_plans() {
+    let home = Home::open();
+    let owner = super::passkey_authority_with_name_role_credential(
+        &home.data,
+        Some("Owner"),
+        crate::auth::RuntimePrincipalRole::Admin,
+        "r11-owner",
+    );
+    let other = super::passkey_authority_with_name_role_credential(
+        &home.data,
+        Some("Other"),
+        crate::auth::RuntimePrincipalRole::Admin,
+        "r11-other",
+    );
+    let dir = home._temp.path().join("probe");
+    let agent = create_owned_agent(&home.data, &owner, &sign_probe(&dir));
+    let gateway = Gateway::start(&home.data).await;
+    let context = passkey_context(&owner);
+    let grant = super::super::gateway_home_token::issue_home_agent_launch_token_with_context(
+        &home.data, &agent, HOST, &context,
+    )
+    .unwrap();
+    let session =
+        super::super::gateway_home_runtime::launch_runtime_agent(&home.data, &dir, &agent, &grant)
+            .await
+            .unwrap()
+            .session_id;
+    assert!(capsule_live(&gateway.agent_url, &gateway.secret, &session).await);
+    let runtime = crate::api::agent_plane::plane_runtime(&home.data).unwrap();
+    let root = crate::auth::stored_principal_record(&home.data, &agent)
+        .unwrap()
+        .unwrap()
+        .localhost_root;
+    let (store, _, _) = runtime.instance_authority_plane().unwrap();
+    let ask = store
+        .create_request_with_reason(
+            elastos_runtime::session::SessionId::from_string(&session),
+            elastos_runtime::capability::ResourceId::new(format!("{root}/.AppData/journal")),
+            elastos_runtime::capability::Action::Write,
+            "write the journal".to_string(),
+        )
+        .await;
+    let now = crate::auth::now_ts();
+    let pending = super::super::gateway_inspect_actions::submit_pending_agent_plan(
+        &home.data,
+        &owner.principal_id,
+        &agent,
+        HOST,
+        &session,
+        &step_plan(),
+        now,
+    )
+    .unwrap();
+    let inflight = super::super::gateway_inspect_actions::submit_pending_agent_plan(
+        &home.data,
+        &owner.principal_id,
+        &agent,
+        HOST,
+        &session,
+        &step_plan(),
+        now + 1,
+    )
+    .unwrap();
+    let pending_id = pending["request_id"].as_str().unwrap().to_string();
+    let inflight_id = inflight["request_id"].as_str().unwrap().to_string();
+    let mut flying = plan_file(&home.data, &inflight_id);
+    flying["status"] = json!("dispatching");
+    std::fs::write(
+        home.data
+            .join("inspect-actions")
+            .join(format!("{inflight_id}.json")),
+        serde_json::to_vec_pretty(&flying).unwrap(),
+    )
+    .unwrap();
+    let (blocked, blocked_body) = post_json(
+        &gateway.addr,
+        &other.system_token,
+        "/api/apps/system/agents/stop",
+        &json!({ "agent_id": agent }).to_string(),
+    )
+    .await;
+    assert_eq!(blocked, 409, "{blocked_body}");
+    assert!(capsule_live(&gateway.agent_url, &gateway.secret, &session).await);
+    let (status, body) = home_http(
+        &gateway.addr,
+        &other.system_token,
+        reqwest::Method::POST,
+        &format!("/api/auth/passkeys/{}/demote-guest", owner.proof_binding_id),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    assert!(!capsule_live(&gateway.agent_url, &gateway.secret, &session).await);
+    for id in [&pending_id, &inflight_id] {
+        let stored = plan_file(&home.data, id);
+        assert_eq!(stored["status"], "owner demoted", "{stored}");
+        assert_eq!(stored["audit_recorded"], true, "{stored}");
+    }
+    let (signer, cause) = stop_cause(&home.data, &agent, "agent.stop.requested");
+    assert_eq!(signer, other.principal_id);
+    assert_eq!(cause, "owner demoted");
+    let (stopped_by, stopped_cause) = stop_cause(&home.data, &agent, "agent.stopped");
+    assert_eq!(stopped_by, other.principal_id);
+    assert_eq!(stopped_cause, "owner demoted");
+    assert!(!store
+        .get_request(ask.id.as_str())
+        .await
+        .unwrap()
+        .is_pending());
+    let guest_inbox = inbox_token(&home.data, &owner.principal_id, &owner.proof_binding_id);
+    let (seen, summary) = home_http(
+        &gateway.addr,
+        &guest_inbox,
+        reqwest::Method::GET,
+        "/api/apps/inbox/summary",
+    )
+    .await;
+    assert_eq!(seen, 200, "{summary}");
+    assert!(!summary.contains("agent_plan"), "{summary}");
+    assert!(!summary.contains("capability-request:agent:"), "{summary}");
+    let (answer, answer_body) = http_approve(&gateway.addr, &guest_inbox, ask.id.as_str()).await;
+    assert_eq!(answer, 403, "{answer_body}");
+    assert_eq!(answer_body, crate::agents::OWNER_NOT_ADMIN);
+    assert!(!store
+        .get_request(ask.id.as_str())
+        .await
+        .unwrap()
+        .is_granted());
+    let (stop, stop_body) = post_json(
+        &gateway.addr,
+        &owner.system_token,
+        "/api/apps/system/agents/stop",
+        &json!({ "agent_id": agent }).to_string(),
+    )
+    .await;
+    assert_eq!(stop, 403, "{stop_body}");
+    assert!(stop_body.contains("admin passkey required"), "{stop_body}");
+    let (other_seen, other_summary) = home_http(
+        &gateway.addr,
+        &super::app_token_for_authority(&home.data, "inbox", &other),
+        reqwest::Method::GET,
+        "/api/apps/inbox/summary",
+    )
+    .await;
+    assert_eq!(other_seen, 200, "{other_summary}");
+    assert!(!other_summary.contains(&pending_id), "{other_summary}");
+    gateway.shutdown().await;
+}
+
+#[tokio::test]
+async fn another_admin_stops_an_agent_whose_owner_was_demoted_directly() {
+    let home = Home::open();
+    let owner = super::passkey_authority_with_name_role_credential(
+        &home.data,
+        Some("Owner"),
+        crate::auth::RuntimePrincipalRole::Admin,
+        "r11-plant-owner",
+    );
+    let other = super::passkey_authority_with_name_role_credential(
+        &home.data,
+        Some("Other"),
+        crate::auth::RuntimePrincipalRole::Admin,
+        "r11-plant-other",
+    );
+    let dir = home._temp.path().join("probe");
+    let agent = create_owned_agent(&home.data, &owner, &sign_probe(&dir));
+    let gateway = Gateway::start(&home.data).await;
+    let context = passkey_context(&owner);
+    let grant = super::super::gateway_home_token::issue_home_agent_launch_token_with_context(
+        &home.data, &agent, HOST, &context,
+    )
+    .unwrap();
+    let session =
+        super::super::gateway_home_runtime::launch_runtime_agent(&home.data, &dir, &agent, &grant)
+            .await
+            .unwrap()
+            .session_id;
+    crate::auth::demote_passkey_to_guest(
+        &home.data,
+        &owner.proof_binding_id,
+        crate::auth::now_ts(),
+    )
+    .unwrap();
+    assert!(
+        capsule_live(&gateway.agent_url, &gateway.secret, &session).await,
+        "a direct demote leaves the guest running"
+    );
+    let (status, body) = post_json(
+        &gateway.addr,
+        &other.system_token,
+        "/api/apps/system/agents/stop",
+        &json!({ "agent_id": agent }).to_string(),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    assert!(!capsule_live(&gateway.agent_url, &gateway.secret, &session).await);
+    let (guest, guest_body) = post_json(
+        &gateway.addr,
+        &owner.system_token,
+        "/api/apps/system/agents/stop",
+        &json!({ "agent_id": agent }).to_string(),
+    )
+    .await;
+    assert_eq!(guest, 403, "{guest_body}");
+    gateway.shutdown().await;
+}
+
+#[tokio::test]
+async fn the_last_passkey_revocation_stops_the_agent_and_one_of_two_does_not() {
+    let home = Home::open();
+    let owner = super::passkey_authority_with_name_role_credential(
+        &home.data,
+        Some("Owner"),
+        crate::auth::RuntimePrincipalRole::Admin,
+        "r11-revoke-owner",
+    );
+    let other = super::passkey_authority_with_name_role_credential(
+        &home.data,
+        Some("Other"),
+        crate::auth::RuntimePrincipalRole::Admin,
+        "r11-revoke-other",
+    );
+    let dir = home._temp.path().join("probe");
+    let agent = create_owned_agent(&home.data, &owner, &sign_probe(&dir));
+    let gateway = Gateway::start(&home.data).await;
+    let context = passkey_context(&owner);
+    let grant = super::super::gateway_home_token::issue_home_agent_launch_token_with_context(
+        &home.data, &agent, HOST, &context,
+    )
+    .unwrap();
+    let session =
+        super::super::gateway_home_runtime::launch_runtime_agent(&home.data, &dir, &agent, &grant)
+            .await
+            .unwrap()
+            .session_id;
+    super::add_second_active_passkey(
+        &home.data,
+        &owner.principal_id,
+        crate::auth::RuntimePrincipalRole::Admin,
+    );
+    let second = crate::auth::load_auth_state(&home.data)
+        .unwrap()
+        .principals
+        .into_iter()
+        .find(|record| {
+            record.principal_id == owner.principal_id
+                && record.proof_binding_id != owner.proof_binding_id
+        })
+        .unwrap();
+    let (kept, kept_body) = home_http(
+        &gateway.addr,
+        &other.system_token,
+        reqwest::Method::POST,
+        &format!("/api/auth/passkeys/{}/revoke", second.proof_binding_id),
+    )
+    .await;
+    assert_eq!(kept, 200, "{kept_body}");
+    assert!(capsule_live(&gateway.agent_url, &gateway.secret, &session).await);
+    assert!(crate::agents::owner_is_admin_now(
+        &home.data,
+        &owner.principal_id
+    ));
+    let now = crate::auth::now_ts();
+    let plan = super::super::gateway_inspect_actions::submit_pending_agent_plan(
+        &home.data,
+        &owner.principal_id,
+        &agent,
+        HOST,
+        &session,
+        &step_plan(),
+        now,
+    )
+    .unwrap();
+    let plan_id = plan["request_id"].as_str().unwrap();
+    let (status, body) = home_http(
+        &gateway.addr,
+        &other.system_token,
+        reqwest::Method::POST,
+        &format!("/api/auth/passkeys/{}/revoke", owner.proof_binding_id),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    assert!(!capsule_live(&gateway.agent_url, &gateway.secret, &session).await);
+    assert!(!crate::agents::owner_is_admin_now(
+        &home.data,
+        &owner.principal_id
+    ));
+    let stored = plan_file(&home.data, plan_id);
+    assert_eq!(stored["status"], "passkey revoked", "{stored}");
+    let (signer, cause) = stop_cause(&home.data, &agent, "agent.stopped");
+    assert_eq!(signer, other.principal_id);
+    assert_eq!(cause, "passkey revoked");
+    gateway.shutdown().await;
 }

@@ -1106,7 +1106,9 @@ async fn passkey_revoke_inner(
     let manager = state.identity_manager()?;
     let mut manager = manager.lock().await;
     let now = crate::auth::now_ts();
-    crate::auth::revoke_passkey_for_actor(
+    let actor_record =
+        crate::auth::load_principal_for_proof_binding(&state.data_dir, actor_proof_binding_id)?;
+    let revoked = crate::auth::revoke_passkey_for_actor(
         &state.data_dir,
         context.principal_id(),
         actor_proof_binding_id,
@@ -1138,6 +1140,16 @@ async fn passkey_revoke_inner(
             ..AuditEventInput::default()
         }),
     )?;
+    if !crate::agents::owner_is_admin_now(&state.data_dir, &revoked.principal_id) {
+        super::gateway::stop_agents_after_admin_lost(
+            &state.data_dir,
+            &context,
+            &actor_record,
+            &revoked.principal_id,
+            "passkey revoked",
+        )
+        .await;
+    }
 
     let clear_current_cookie = context.proof_binding_id() == Some(proof_binding_id.as_str());
     Ok((
@@ -1223,7 +1235,7 @@ async fn passkey_demote_guest_inner(
         &state.data_dir,
         audit_event(AuditEventInput {
             event_type: "auth.passkey.demoted",
-            principal_id: Some(actor.principal_id),
+            principal_id: Some(actor.principal_id.clone()),
             proof_binding_id: Some(demoted.proof_binding_id.clone()),
             session_id: Some(context.session_id().to_string()),
             result: "ok",
@@ -1232,6 +1244,14 @@ async fn passkey_demote_guest_inner(
             ..AuditEventInput::default()
         }),
     )?;
+    super::gateway::stop_agents_after_admin_lost(
+        &state.data_dir,
+        &context,
+        &actor,
+        &demoted.principal_id,
+        "owner demoted",
+    )
+    .await;
 
     Ok(PasskeyDemoteResponse {
         status: "demoted".to_string(),

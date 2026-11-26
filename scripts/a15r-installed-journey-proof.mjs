@@ -267,21 +267,34 @@ export function judgeCreatingOwner(input) {
   return { ok: true, reason: "" };
 }
 
+// Comments are not calls. A call is a name followed by `(`.
+function sourceCode(text) {
+  return String(text || "").replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "");
+}
+
+function calls(text, name) {
+  const needle = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`(?:^|[^\\w])${needle}\\s*\\(`).test(sourceCode(text));
+}
+
 // The launch route is the agents-in-gateway change when the gateway starts
 // the guest through the in-process agent plane. The home runtime must call
 // the plane's live coordinates and define a launch function with a body.
-// The gateway source must dispatch the approved plan.
+// The gateway source must call the approved-plan dispatch.
 export function agentsInGatewayChange(gatewaySource, launchSource, homeRuntimeSource) {
   const route = "/api/apps/system/agents/launch";
-  const gateway = String(gatewaySource || "");
-  const registered = gateway.includes(`"${route}"`);
-  const dispatch = gateway.includes("dispatch_approved_agent_plan");
-  const text = String(launchSource || "");
-  const asksPlane = text.includes("launch_runtime_agent") && text.includes("agent_plane::");
-  const home = String(homeRuntimeSource || "");
-  const liveCoords = home.includes("agent_plane::live_coords");
+  const gateway = sourceCode(gatewaySource);
+  const registered = new RegExp(
+    `(?:^|[^\\w])route\\(\\s*["']${route}["']\\s*,\\s*post\\(\\s*agents_launch\\s*\\)\\s*\\)`,
+  ).test(gateway);
+  const dispatch = calls(gateway, "dispatch_approved_agent_plan");
+  const text = sourceCode(launchSource);
+  const asksPlane = calls(text, "launch_runtime_agent")
+    && /agent_plane::[A-Za-z0-9_]+\s*\(/.test(text);
+  const home = sourceCode(homeRuntimeSource);
+  const liveCoords = calls(home, "agent_plane::live_coords");
   const emptyLaunch = /async fn launch_runtime_agent\s*\([^)]*\)\s*\{\s*\}/.test(home);
-  const hop = home.includes("async fn launch_runtime_agent") && !emptyLaunch;
+  const hop = /async fn launch_runtime_agent\s*\(/.test(home) && !emptyLaunch;
   const ok = registered && dispatch && asksPlane && liveCoords && hop;
   let reason = "";
   if (!registered) reason = "the launch route is not registered";

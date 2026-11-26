@@ -962,11 +962,12 @@ pub(super) async fn agents_stop(
 
 /// The owner gate. With no agent id this is the admin check, and it runs
 /// before the body is read. With an agent id it is that check plus "this
-/// owner owns this agent". The agent may be off or retired, and the Home may
-/// have turned agents off. A guest fails the admin check. Another owner fails
-/// the ownership check. Either refusal happens before the Runtime is asked
-/// to stop anything. The checked owner comes back, so the stop it authorized
-/// can be signed in its name.
+/// owner owns this agent", or the owner is no longer an admin and this
+/// caller is. The agent may be off or retired, and the Home may have turned
+/// agents off. A guest fails the admin check. Another admin of a still-admin
+/// owner fails the ownership check. Either refusal happens before the Runtime
+/// is asked to stop anything. The checked caller comes back, so the stop it
+/// authorized can be signed in its name.
 fn owner_may_stop(
     state: &GatewayState,
     headers: &HeaderMap,
@@ -974,13 +975,106 @@ fn owner_may_stop(
 ) -> anyhow::Result<AgentsOwner> {
     let owner = agents_owner(state, headers)?;
     if let Some(agent_id) = agent_id {
-        crate::agents::stored_agent_for_stop(
+        if crate::agents::stored_agent_for_stop(
             &state.data_dir,
             &owner.principal.principal_id,
             agent_id,
-        )?;
+        )
+        .is_err()
+        {
+            let record_owner = crate::agents::owner_of(&state.data_dir, agent_id);
+            let allowed = record_owner.as_deref().is_some_and(|record_owner| {
+                record_owner != owner.principal.principal_id
+                    && !crate::agents::owner_is_admin_now(&state.data_dir, record_owner)
+            });
+            if !allowed {
+                crate::agents::stored_agent_for_stop(
+                    &state.data_dir,
+                    &owner.principal.principal_id,
+                    agent_id,
+                )?;
+            }
+        }
     }
     Ok(owner)
+}
+
+/// Demotion and last-passkey revocation use Stop's signed rows. `signer` is
+/// the admin who demoted or revoked. Open asks and plans close as `cause`.
+pub(in crate::api) async fn stop_agents_after_admin_lost(
+    data_dir: &std::path::Path,
+    actor: &HomeLaunchTokenContext,
+    principal: &crate::auth::PrincipalRecord,
+    owner_id: &str,
+    cause: &str,
+) {
+    let signer = AgentsOwner {
+        context: actor.clone(),
+        principal: principal.clone(),
+    };
+    for agent_id in crate::agents::ids_owned_by(data_dir, owner_id) {
+        // Plans close before Stop. Denying the ask here lets a parked guest
+        // finish and leave Stop with no session, so the denial is inside Stop.
+        let _ = crate::api::gateway::close_owner_open_plans(data_dir, &agent_id, cause);
+        let reason = serde_json::json!({ "agent_id": agent_id, "cause": cause });
+        let _ = append_agent_lifecycle_audit(
+            data_dir,
+            "agent.stop.requested",
+            &signer,
+            AgentAuditIds {
+                challenge_id: None,
+                capsule_id: Some(&agent_id),
+                session_id: None,
+            },
+            "ok",
+            reason.clone(),
+        );
+        match super::gateway_home_runtime::stop_runtime_agent_for_cause(data_dir, &agent_id, cause)
+            .await
+        {
+            Ok(outcome) => {
+                for session in &outcome.stopped {
+                    let result = if session_ended(&session.status, session.ended) {
+                        "ok"
+                    } else {
+                        "stopping"
+                    };
+                    let _ = append_agent_lifecycle_audit(
+                        data_dir,
+                        "agent.stopped",
+                        &signer,
+                        AgentAuditIds {
+                            challenge_id: None,
+                            capsule_id: Some(&agent_id),
+                            session_id: Some(&session.session_id),
+                        },
+                        result,
+                        reason.clone(),
+                    );
+                }
+                for session in &outcome.stopping {
+                    let _ = append_agent_lifecycle_audit(
+                        data_dir,
+                        "agent.stopped",
+                        &signer,
+                        AgentAuditIds {
+                            challenge_id: None,
+                            capsule_id: Some(&agent_id),
+                            session_id: Some(&session.session_id),
+                        },
+                        "stopping",
+                        reason.clone(),
+                    );
+                }
+            }
+            Err(error) => {
+                crate::api::agent_plane::deny_agent_asks(data_dir, &agent_id, cause).await;
+                tracing::warn!(
+                    "stop of agent '{agent_id}' after {cause} did not finish: {error:#}"
+                );
+            }
+        }
+    }
 }
 
 /// Owner check, then ask the Runtime to stop the live row whose principal is
@@ -1027,11 +1121,16 @@ async fn stop_agent(
         }
     };
     let _ = confirm_stopping_rows(&state.data_dir).await;
-    let host = crate::agents::stored_agent_for_stop(
+    let host = match crate::agents::stored_agent_for_stop(
         &state.data_dir,
         &owner.principal.principal_id,
         &request.agent_id,
-    )?;
+    ) {
+        Ok(host) => host,
+        Err(error) => {
+            crate::agents::agent_record(&state.data_dir, &request.agent_id).or(Err(error))?
+        }
+    };
     let capsule_id = host
         .record
         .agent_host_package

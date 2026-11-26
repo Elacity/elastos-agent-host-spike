@@ -43,6 +43,7 @@ use url::form_urlencoded;
 
 #[path = "gateway_agents.rs"]
 mod gateway_agents;
+pub(in crate::api) use gateway_agents::stop_agents_after_admin_lost;
 #[path = "gateway_assistant.rs"]
 mod gateway_assistant;
 #[path = "gateway_assistant_workspace_v2.rs"]
@@ -107,6 +108,7 @@ pub(crate) use gateway_inspect_actions::agent_plan_result_for_requester;
 pub(crate) use gateway_inspect_actions::close_agent_plans;
 pub(crate) use gateway_inspect_actions::close_home_plans;
 pub(crate) use gateway_inspect_actions::close_instance_plans;
+pub(crate) use gateway_inspect_actions::close_owner_open_plans;
 #[cfg(test)]
 pub(in crate::api) use gateway_inspect_actions::dispatch_approved_agent_plan;
 pub(crate) use gateway_inspect_actions::expire_pending_agent_plans;
@@ -1603,6 +1605,13 @@ fn gateway_provider_error_status(scheme: &str, err: &anyhow::Error) -> StatusCod
     }
 }
 
+/// An Inbox grant or plan audit failed. The path stays in the log. The person
+/// reads one sentence: nothing ran, and a fresh passkey is needed.
+pub(super) fn inbox_audit_refusal(error: anyhow::Error) -> anyhow::Error {
+    tracing::warn!("inbox decision was not recorded: {error:#}");
+    anyhow::anyhow!("Nothing ran. A fresh passkey is needed.")
+}
+
 fn inbox_error_response(err: anyhow::Error) -> Response {
     if let Some(response) = protected_record_kept_elsewhere_response(&err) {
         return response;
@@ -1613,6 +1622,7 @@ fn inbox_error_response(err: anyhow::Error) -> Response {
         .unwrap_or_else(|| err.to_string());
     let status = if text.contains("home launch token")
         || text.contains("admin passkey required")
+        || text.contains("the agent's owner is not an admin")
         || text.contains("fresh passkey")
         || text.contains("passkey step-up")
         || text.contains("auth session is not active")

@@ -978,10 +978,11 @@ async fn a15r_shared_resource_requires_admin_grant() {
         let (state, calls) = agent_plan_dispatch_state(dir.path()).await;
         let app = gateway_router(state);
         let admin = passkey_authority(dir.path());
-        let owner = passkey_authority_with_name_role(
+        let owner = passkey_authority_with_name_role_credential(
             dir.path(),
             Some("Agent owner"),
-            crate::auth::RuntimePrincipalRole::Guest,
+            crate::auth::RuntimePrincipalRole::Admin,
+            "r11-plan-owner",
         );
         let agent_id = crate::agents::tests::plant_for_dispatch(
             dir.path(),
@@ -3942,4 +3943,165 @@ async fn a_dropped_dispatch_future_resolves_the_flight() {
             .is_some_and(|steps| steps.iter().any(|step| step["request_id"] == plant.id)),
         "{body}"
     );
+}
+
+fn closed_rows(dir: &Path, request_id: &str, event_type: &str) -> usize {
+    crate::auth::load_auth_state(dir)
+        .unwrap()
+        .audit
+        .iter()
+        .filter(|event| {
+            event.event_type == event_type && event.challenge_id.as_deref() == Some(request_id)
+        })
+        .count()
+}
+
+fn settle(dir: &Path) {
+    super::super::gateway_inspect_actions::settle_agent_plans_lost_before_start(dir).unwrap();
+}
+
+#[tokio::test]
+async fn an_audit_failure_on_a_plan_decision_names_the_refusal() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = gateway_router(routed_agent_plan_state(dir.path()).await);
+    let owner = passkey_authority(dir.path());
+    let token = app_token_for_authority(dir.path(), INBOX_CAPSULE_ID, &owner);
+    let created = submit(
+        dir.path(),
+        &owner.principal_id,
+        "agent:v2:plan-requester",
+        read_plan(),
+        71,
+    );
+    let request_id = created["request_id"].as_str().unwrap();
+    let card = owner_card(&app, &token, request_id).await;
+    let fresh = step_up_token_for_app_context(
+        dir.path(),
+        INBOX_CAPSULE_ID,
+        &token,
+        "agent_plan.approve",
+        &json!({ "request_id": request_id }),
+    );
+    super::seams::arm_grant_fault(dir.path(), false);
+    let (status, body) = post_action(
+        &app,
+        &token,
+        approve_body(request_id, &card["request_binding"], Some(&fresh)),
+    )
+    .await;
+    assert_ne!(status, StatusCode::OK, "{body}");
+    assert_eq!(body, "Nothing ran. A fresh passkey is needed.");
+    assert!(!body.contains(dir.path().to_str().unwrap_or("")));
+    assert!(!body.contains("auth-state"), "{body}");
+    assert_eq!(read_record(dir.path(), request_id)["status"], "pending");
+}
+
+#[tokio::test]
+async fn a_terminal_plan_is_signed_once_after_a_crash_and_after_rolloff() {
+    let (dir, _owner, request_id) = planted_plan(80);
+    super::seams::arm_grant_fault(dir.path(), false);
+    let error = crate::api::gateway::close_instance_plans(
+        dir.path(),
+        "capsule:agent-host",
+        "instance ended",
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("auth-state"), "{error}");
+    assert_eq!(plan_status(dir.path(), &request_id), "instance ended");
+    assert_ne!(
+        read_record(dir.path(), &request_id)["audit_recorded"],
+        json!(true)
+    );
+    assert_eq!(closed_rows(dir.path(), &request_id, "agent.plan.closed"), 0);
+    settle(dir.path());
+    assert_eq!(closed_rows(dir.path(), &request_id, "agent.plan.closed"), 1);
+    assert_eq!(
+        read_record(dir.path(), &request_id)["audit_recorded"],
+        json!(true)
+    );
+    settle(dir.path());
+    assert_eq!(closed_rows(dir.path(), &request_id, "agent.plan.closed"), 1);
+
+    let (dir, _owner, request_id) = planted_plan(81);
+    crate::api::gateway::close_instance_plans(dir.path(), "capsule:agent-host", "instance ended")
+        .unwrap();
+    assert_eq!(closed_rows(dir.path(), &request_id, "agent.plan.closed"), 1);
+    assert_eq!(
+        read_record(dir.path(), &request_id)["audit_recorded"],
+        json!(true)
+    );
+    let mut record = read_record(dir.path(), &request_id);
+    record["audit_recorded"] = json!(false);
+    write_record(dir.path(), &request_id, &record);
+    settle(dir.path());
+    assert_eq!(closed_rows(dir.path(), &request_id, "agent.plan.closed"), 1);
+    assert_eq!(
+        read_record(dir.path(), &request_id)["audit_recorded"],
+        json!(true)
+    );
+
+    let (dir, owner, request_id) = planted_plan(82);
+    crate::api::gateway::close_instance_plans(dir.path(), "capsule:agent-host", "instance ended")
+        .unwrap();
+    let before = closed_rows(dir.path(), &request_id, "agent.plan.closed");
+    for index in 0..513 {
+        crate::auth::append_audit_event(
+            dir.path(),
+            elastos_runtime::auth::RuntimeAuditEventV1 {
+                schema: elastos_runtime::auth::RuntimeAuditEventV1::SCHEMA.to_string(),
+                event_id: format!("audit:pad:{index}"),
+                event_type: "audit.pad".to_string(),
+                principal_id: Some(owner.clone()),
+                proof_binding_id: None,
+                session_id: None,
+                challenge_id: None,
+                capsule_id: None,
+                result: "ok".to_string(),
+                reason: "pad".to_string(),
+                occurred_at: index as u64,
+                signer_did: None,
+                signature: None,
+            },
+        )
+        .unwrap();
+    }
+    let rolled = closed_rows(dir.path(), &request_id, "agent.plan.closed");
+    settle(dir.path());
+    assert_eq!(
+        closed_rows(dir.path(), &request_id, "agent.plan.closed"),
+        rolled
+    );
+    assert!(rolled <= before);
+    assert_eq!(
+        read_record(dir.path(), &request_id)["audit_recorded"],
+        json!(true)
+    );
+
+    for (status, event_type) in [
+        ("denied", "agent.plan.closed"),
+        ("completed", "agent_plan.dispatch.completed"),
+    ] {
+        let (dir, owner_id, request_id) = planted_plan(90);
+        let mut record = read_record(dir.path(), &request_id);
+        record["status"] = json!(status);
+        record["audit_recorded"] = json!(false);
+        write_record(dir.path(), &request_id, &record);
+        settle(dir.path());
+        assert_eq!(
+            closed_rows(dir.path(), &request_id, event_type),
+            1,
+            "{status}"
+        );
+        assert_eq!(
+            read_record(dir.path(), &request_id)["audit_recorded"],
+            json!(true)
+        );
+        settle(dir.path());
+        assert_eq!(
+            closed_rows(dir.path(), &request_id, event_type),
+            1,
+            "{status}"
+        );
+        let _ = owner_id;
+    }
 }

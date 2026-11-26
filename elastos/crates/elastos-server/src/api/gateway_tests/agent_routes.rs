@@ -943,12 +943,9 @@ mod on {
         let installed = installed_home();
         let agent_id = create_agent(&installed, "u3-agent-caller-setup").await;
         let data = &installed.home.data;
-        let root = crate::auth::principal_kind_localhost_root(
-            &agent_id,
-            crate::auth::PrincipalKind::Agent,
-        );
-        let binding = crate::agents::stored_agent_for_root(data, &agent_id, &root)
-            .unwrap()
+        // A new agent is off. The on-only lookup returns none, so the binding
+        // comes from the stored record.
+        let binding = crate::agents::agent_record(data, &agent_id)
             .unwrap()
             .record
             .proof_binding_id;
@@ -1489,12 +1486,9 @@ mod on {
         let installed = installed_home();
         let agent_id = create_agent(&installed, "self-1").await;
         let data = &installed.home.data;
-        let root = crate::auth::principal_kind_localhost_root(
-            &agent_id,
-            crate::auth::PrincipalKind::Agent,
-        );
-        let binding = crate::agents::stored_agent_for_root(data, &agent_id, &root)
-            .unwrap()
+        // A new agent is off. The on-only lookup returns none, so the binding
+        // comes from the stored record.
+        let binding = crate::agents::agent_record(data, &agent_id)
             .unwrap()
             .record
             .proof_binding_id;

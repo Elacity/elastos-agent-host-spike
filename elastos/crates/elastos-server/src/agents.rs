@@ -1520,6 +1520,8 @@ pub(crate) const NOT_ENABLED: &str = "agents are not turned on for this Home";
 pub(crate) const NOT_A_PERSON: &str = "only a stored person may use agents";
 /// The refusal for a person who may not turn agents on or off.
 pub(crate) const NOT_AN_ADMIN: &str = "only an admin of this Home turns agents on or off";
+/// The refusal when the agent's owner is a Guest, or their last passkey is revoked.
+pub(crate) const OWNER_NOT_ADMIN: &str = "the agent's owner is not an admin";
 
 /// Refuses by name in a build without the feature. Every operation below
 /// starts here.
@@ -2252,8 +2254,9 @@ pub(crate) fn set_active(
 
 /// One stored agent of `owner_id`, for a launch. Every gate applies before a
 /// record leaves this module: the build, the Home's stored choice, a stored
-/// person as the owner, the agent's own owner, its retirement, and whether
-/// its owner has turned this agent on.
+/// person as the owner, that the owner is an admin with a live passkey now,
+/// the agent's own owner, its retirement, and whether its owner has turned
+/// this agent on.
 pub(crate) fn stored_agent(
     data_dir: &Path,
     owner_id: &str,
@@ -2281,6 +2284,9 @@ pub(crate) fn stored_agent(
     else {
         return refused(NO_SUCH_AGENT);
     };
+    if !owner_is_admin_now(data_dir, owner_id) {
+        return refused(OWNER_NOT_ADMIN);
+    }
     if agent.record.retired_at.is_some() {
         return refused(NO_SUCH_AGENT);
     }
@@ -2288,6 +2294,71 @@ pub(crate) fn stored_agent(
         return refused(NOT_ACTIVE);
     }
     Ok(agent.clone())
+}
+
+/// The owner is an admin now: Admin role, and a live passkey when they have one.
+/// A Guest, and an admin whose every passkey is revoked, is not.
+pub(crate) fn owner_is_admin_now(data_dir: &Path, owner_id: &str) -> bool {
+    let Ok(records) = crate::auth::load_owner_principals(data_dir) else {
+        return false;
+    };
+    let mut admin = false;
+    let mut passkey = false;
+    let mut live_passkey = false;
+    for record in &records {
+        if record.principal_id != owner_id || !is_person(record) {
+            continue;
+        }
+        admin |= crate::auth::is_admin(record);
+        if let Some(key) = record.proof_binding.passkey.as_ref() {
+            passkey = true;
+            live_passkey |= key.revoked_at.is_none();
+        }
+    }
+    admin && (!passkey || live_passkey)
+}
+
+/// Agent ids this person owns, retired records included, so their open plans close.
+pub(crate) fn ids_owned_by(data_dir: &Path, owner_id: &str) -> Vec<String> {
+    let Ok(opened) = open(data_dir, false) else {
+        return Vec::new();
+    };
+    opened
+        .file
+        .agents
+        .into_iter()
+        .filter(|agent| agent.record.owner.as_deref() == Some(owner_id))
+        .map(|agent| agent.record.principal_id)
+        .collect()
+}
+
+/// The stored owner of one agent, when the file holds that id.
+pub(crate) fn owner_of(data_dir: &Path, agent_id: &str) -> Option<String> {
+    let opened = open(data_dir, false).ok()?;
+    opened
+        .file
+        .agents
+        .into_iter()
+        .find(|agent| agent.record.principal_id == agent_id)
+        .and_then(|agent| agent.record.owner)
+}
+
+/// The stored agent, without the owner check. Stop uses this after it has
+/// already allowed another admin to end an agent whose owner is not an admin.
+pub(crate) fn agent_record(data_dir: &Path, agent_id: &str) -> anyhow::Result<StoredAgent> {
+    if !build_allows_for_home(data_dir) {
+        return refused(FEATURE_OFF);
+    }
+    let opened = open(data_dir, false)?;
+    match opened
+        .file
+        .agents
+        .into_iter()
+        .find(|agent| agent.record.principal_id == agent_id)
+    {
+        Some(agent) => Ok(agent),
+        None => refused(NO_SUCH_AGENT),
+    }
 }
 
 /// One stored agent of `owner_id`, for a Stop. The owner must own the record.

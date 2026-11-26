@@ -717,6 +717,10 @@ async fn list_owner_pending(
 #[derive(serde::Deserialize)]
 struct PlaneStopBody {
     agent_id: String,
+    #[serde(default)]
+    session_id: Option<String>,
+    #[serde(default)]
+    cause: Option<String>,
 }
 
 async fn stop_and_settle(
@@ -725,35 +729,58 @@ async fn stop_and_settle(
     Extension(pending): Extension<Arc<PendingRequestStore>>,
     body: axum::body::Bytes,
 ) -> Response {
-    // The same fields Stop accepts. A body Stop will refuse does not deny
-    // the waiting asks.
-    if let Ok(request) = serde_json::from_slice::<PlaneStopBody>(&body) {
+    // The same fields Stop accepts. `cause` names why an ask is denied and is
+    // not a Stop field, so the body Stop reads has no cause.
+    let forward = if let Ok(request) = serde_json::from_slice::<PlaneStopBody>(&body) {
         let agent_id = request.agent_id.trim();
         if !agent_id.is_empty() {
             let ids = runtime.live_sessions_for_agent(agent_id).await;
-            deny_waiting_asks(&pending, &ids, agent_id).await;
+            let reason = match request.cause.as_deref() {
+                Some(cause) if !cause.is_empty() => format!("{cause}: {agent_id}"),
+                _ => format!("denied: {agent_id} stopped"),
+            };
+            deny_waiting_asks(&pending, &ids, &reason).await;
         }
-    }
-    crate::api::routes::stop_agent_session(Extension(runtime), Extension(audit), body).await
+        let mut value = serde_json::json!({ "agent_id": request.agent_id });
+        if let Some(session_id) = request.session_id {
+            value["session_id"] = serde_json::json!(session_id);
+        }
+        serde_json::to_vec(&value).unwrap_or_else(|_| body.to_vec())
+    } else {
+        body.to_vec()
+    };
+    crate::api::routes::stop_agent_session(Extension(runtime), Extension(audit), forward.into())
+        .await
 }
 
-/// Deny every still-waiting ask of these sessions. The reason names the agent.
+/// Deny every still-waiting ask of these sessions. `reason` names why.
 pub(crate) async fn deny_waiting_asks(
     store: &PendingRequestStore,
     session_ids: &[String],
-    agent_id: &str,
+    reason: &str,
 ) {
-    let reason = format!("denied: {agent_id} stopped");
     for ask in store.list_pending().await {
         if session_ids
             .iter()
             .any(|id| id == &ask.session_id.to_string())
         {
             let _ = store
-                .deny_request_by(ask.id.as_str(), &reason, Settler::Runtime)
+                .deny_request_by(ask.id.as_str(), reason, Settler::Runtime)
                 .await;
         }
     }
+}
+
+/// Close this agent's waiting asks under `cause`, before Stop runs.
+pub(crate) async fn deny_agent_asks(data_dir: &Path, agent_id: &str, cause: &str) {
+    let Some(runtime) = plane_runtime(data_dir) else {
+        return;
+    };
+    let Some((store, _, _)) = runtime.instance_authority_plane() else {
+        return;
+    };
+    let ids = runtime.live_sessions_for_agent(agent_id).await;
+    deny_waiting_asks(&store, &ids, &format!("{cause}: {agent_id}")).await;
 }
 
 /// A crashed write leaves `.{coords}.{nonce}.tmp` beside the coordinates,
@@ -1202,7 +1229,12 @@ mod tests {
                 Action::Read,
             )
             .await;
-        super::deny_waiting_asks(&store, &["session-a".to_string()], "agent-a").await;
+        super::deny_waiting_asks(
+            &store,
+            &["session-a".to_string()],
+            "denied: agent-a stopped",
+        )
+        .await;
         match store.get_request(denied.id.as_str()).await.unwrap().status {
             RequestStatus::Denied { reason, settled_by } => {
                 assert!(reason.contains("agent-a"), "{reason}");

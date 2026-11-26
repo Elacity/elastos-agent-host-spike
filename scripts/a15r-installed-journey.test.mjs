@@ -534,9 +534,10 @@ test("a skipped owner check is not a pass", () => {
 
 test("full mode notice names the missing agents-in-gateway route", () => {
   assert.match(FULL_MODE_NOTICE, /not proof of anything until/);
-  const gateway = fs.readFileSync(new URL("../elastos/crates/elastos-server/src/api/gateway.rs", import.meta.url), "utf8");
-  const launch = fs.readFileSync(new URL("../elastos/crates/elastos-server/src/api/gateway_agents.rs", import.meta.url), "utf8");
-  const homeRuntime = fs.readFileSync(new URL("../elastos/crates/elastos-server/src/api/gateway_home_runtime.rs", import.meta.url), "utf8");
+  const read = (rel) => fs.readFileSync(new URL(`../elastos/crates/elastos-server/src/api/${rel}`, import.meta.url), "utf8");
+  const gateway = `${read("gateway.rs")}\n${read("gateway_inbox.rs")}`;
+  const launch = read("gateway_agents.rs");
+  const homeRuntime = read("gateway_home_runtime.rs");
   const detected = agentsInGatewayChange(gateway, launch, homeRuntime);
   assert.equal(detected.ok, true, detected.reason);
   assert.equal(detected.route, "/api/apps/system/agents/launch");
@@ -547,16 +548,16 @@ test("full mode notice names the missing agents-in-gateway route", () => {
   );
   assert.equal(child.ok, false);
   const ready = agentsInGatewayChange(
-    'route("/api/apps/system/agents/launch", post(agents_launch))\ndispatch_approved_agent_plan',
+    'route("/api/apps/system/agents/launch", post(agents_launch))\ndispatch_approved_agent_plan()',
     "agent_plane::ensure_running(); launch_runtime_agent();",
-    "agent_plane::live_coords\nasync fn launch_runtime_agent() {}",
+    "agent_plane::live_coords(data)\nasync fn launch_runtime_agent() {}",
   );
   assert.equal(ready.ok, false);
   assert.match(ready.reason, /empty/);
   const filled = agentsInGatewayChange(
-    'route("/api/apps/system/agents/launch", post(agents_launch))\ndispatch_approved_agent_plan',
+    'route("/api/apps/system/agents/launch", post(agents_launch))\ndispatch_approved_agent_plan()',
     "agent_plane::ensure_running(); launch_runtime_agent();",
-    "agent_plane::live_coords\nasync fn launch_runtime_agent() {\n  return;\n}",
+    "agent_plane::live_coords(data)\nasync fn launch_runtime_agent() {\n  return;\n}",
   );
   assert.equal(filled.ok, true, filled.reason);
   const noHop = agentsInGatewayChange(
@@ -565,6 +566,17 @@ test("full mode notice names the missing agents-in-gateway route", () => {
     "fn something_else() {}",
   );
   assert.equal(noHop.ok, false);
+  const commented = agentsInGatewayChange(
+    '// route("/api/apps/system/agents/launch", post(agents_launch))\n// dispatch_approved_agent_plan()',
+    "// agent_plane::ensure_running(); launch_runtime_agent();",
+    "// agent_plane::live_coords(data)\n// async fn launch_runtime_agent() { return; }",
+  );
+  assert.equal(commented.ok, false);
+  const sentence = "Nothing ran. A fresh passkey is needed.";
+  const blocked = /\b(runtime mirror|projection|schema|derived facts?|capsules?|providers?|capabilit(?:y|ies)|affordances?|authority boundary|provider boundary|gate preview|runtime-owned|launch token|hostcall|request failed|failed to fetch|unauthorized|forbidden|[45]\d\d)\b|engine_[a-z_]+/i;
+  assert.equal(blocked.test(sentence), false);
+  const inbox = fs.readFileSync(new URL("../capsules/inbox/browser/inbox.js", import.meta.url), "utf8");
+  assert.match(inbox, /text === "Nothing ran\. A fresh passkey is needed\."/);
 });
 
 test("the gateway pid owns the listening port", async () => {

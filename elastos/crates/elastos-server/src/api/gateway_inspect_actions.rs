@@ -253,7 +253,11 @@ pub(super) fn pending_inspect_action_requests(
     data_dir: &FsPath,
     principal_id: &str,
 ) -> anyhow::Result<Vec<serde_json::Value>> {
-    store::pending_inspect_action_requests(data_dir, principal_id)
+    let mut rows = store::pending_inspect_action_requests(data_dir, principal_id)?;
+    if !crate::agents::owner_is_admin_now(data_dir, principal_id) {
+        rows.retain(|row| row.get("kind").and_then(|kind| kind.as_str()) != Some(AGENT_PLAN_KIND));
+    }
+    Ok(rows)
 }
 
 pub(super) async fn approve_inspect_action_request(
@@ -410,6 +414,9 @@ pub(super) fn approve_agent_plan_request(
     card_binding: &serde_json::Value,
     step_up_token: Option<&str>,
 ) -> anyhow::Result<String> {
+    if plan_owner_lost_admin(&state.data_dir, request_id, context.principal_id()) {
+        anyhow::bail!(crate::agents::OWNER_NOT_ADMIN);
+    }
     if let Some(block) = agent_plan_approval_block(&state.data_dir, request_id) {
         anyhow::bail!(block);
     }
@@ -438,7 +445,8 @@ pub(super) fn approve_agent_plan_request(
                     record,
                     "agent.plan.approved",
                     "approved",
-                )?;
+                )
+                .map_err(super::inbox_audit_refusal)?;
             }
             Ok(())
         },
@@ -455,6 +463,18 @@ pub(super) fn settle_agent_plans_lost_before_start(data_dir: &FsPath) -> anyhow:
 /// pending ask. The guest repeats the 30s host park until this life ends.
 pub(crate) const PLAN_DECISION_SECS: u64 = 300;
 
+/// The caller owns this plan and is not an admin now. Nothing is written.
+fn plan_owner_lost_admin(data_dir: &FsPath, request_id: &str, caller: &str) -> bool {
+    let person = crate::auth::stored_principal_record(data_dir, caller)
+        .ok()
+        .flatten()
+        .is_some_and(|record| record.kind == crate::auth::PrincipalKind::Human);
+    person
+        && !crate::agents::owner_is_admin_now(data_dir, caller)
+        && read_inspect_action_record(data_dir, request_id)
+            .is_ok_and(|record| record.kind == AGENT_PLAN_KIND && record.principal_id == caller)
+}
+
 /// Why this plan cannot be approved, or nothing when it is still pending.
 pub(crate) fn agent_plan_approval_block(data_dir: &FsPath, request_id: &str) -> Option<String> {
     let current = read_inspect_action_record(data_dir, request_id).ok()?;
@@ -466,6 +486,8 @@ pub(crate) fn agent_plan_approval_block(data_dir: &FsPath, request_id: &str) -> 
         "agent off",
         "stopped",
         "unresolved",
+        "owner demoted",
+        "passkey revoked",
     ];
     if current.kind == AGENT_PLAN_KIND && CLOSED.contains(&current.status.as_str()) {
         Some(format!(
@@ -483,6 +505,13 @@ fn append_agent_plan_decision_audit(
     event_type: &str,
     result: &str,
 ) -> anyhow::Result<()> {
+    #[cfg(test)]
+    if super::gateway_tests::seams::take_grant_fault(data_dir, false) {
+        anyhow::bail!(
+            "failed to write {}/auth-state.json: injected agent plan approval audit failure",
+            data_dir.display()
+        );
+    }
     append_provider_effect_audit(
         data_dir,
         ProviderEffectAuditInput {
@@ -503,12 +532,26 @@ fn finish_closed_plans(
 ) -> anyhow::Result<()> {
     for record in &records {
         crate::resource_bridge::forget_one_agent_plan_authority(&record.request_id);
-        append_agent_plan_decision_audit(data_dir, record, "agent.plan.closed", &record.status)?;
     }
     if !records.is_empty() {
         crate::resource_bridge::notify_plan_waiters();
     }
-    Ok(())
+    let mut failed = None;
+    for record in &records {
+        if let Err(error) =
+            append_agent_plan_decision_audit(data_dir, record, "agent.plan.closed", &record.status)
+        {
+            failed.get_or_insert(error);
+            continue;
+        }
+        if let Err(error) = store::mark_plan_audit_recorded(data_dir, &record.request_id) {
+            failed.get_or_insert(error);
+        }
+    }
+    match failed {
+        Some(error) => Err(error),
+        None => Ok(()),
+    }
 }
 
 /// Close this instance's pending plans as `outcome` in the same step that
@@ -518,7 +561,7 @@ pub(crate) fn close_instance_plans(
     capsule_id: &str,
     outcome: &str,
 ) -> anyhow::Result<usize> {
-    let closed = store::close_pending_agent_plans(data_dir, outcome, now_ts(), |record| {
+    let closed = store::close_pending_agent_plans(data_dir, outcome, now_ts(), false, |record| {
         record.id == capsule_id
     })?;
     let count = closed.len();
@@ -531,7 +574,21 @@ pub(crate) fn close_agent_plans(
     agent_id: &str,
     outcome: &str,
 ) -> anyhow::Result<usize> {
-    let closed = store::close_pending_agent_plans(data_dir, outcome, now_ts(), |record| {
+    let closed = store::close_pending_agent_plans(data_dir, outcome, now_ts(), false, |record| {
+        record.requester_id.as_deref() == Some(agent_id)
+    })?;
+    let count = closed.len();
+    finish_closed_plans(closed, data_dir)?;
+    Ok(count)
+}
+
+/// Close this owner's pending and in-flight plans as `outcome`.
+pub(crate) fn close_owner_open_plans(
+    data_dir: &FsPath,
+    agent_id: &str,
+    outcome: &str,
+) -> anyhow::Result<usize> {
+    let closed = store::close_pending_agent_plans(data_dir, outcome, now_ts(), true, |record| {
         record.requester_id.as_deref() == Some(agent_id)
     })?;
     let count = closed.len();
@@ -540,7 +597,7 @@ pub(crate) fn close_agent_plans(
 }
 
 pub(crate) fn close_home_plans(data_dir: &FsPath, outcome: &str) -> anyhow::Result<usize> {
-    let closed = store::close_pending_agent_plans(data_dir, outcome, now_ts(), |_| true)?;
+    let closed = store::close_pending_agent_plans(data_dir, outcome, now_ts(), false, |_| true)?;
     let count = closed.len();
     finish_closed_plans(closed, data_dir)?;
     Ok(count)
@@ -551,20 +608,23 @@ pub(crate) fn deny_agent_plan_request(
     owner_id: &str,
     request_id: &str,
 ) -> anyhow::Result<String> {
-    let closed = store::close_pending_agent_plans(data_dir, "denied", now_ts(), |record| {
+    if plan_owner_lost_admin(data_dir, request_id, owner_id) {
+        anyhow::bail!(crate::agents::OWNER_NOT_ADMIN);
+    }
+    let closed = store::close_pending_agent_plans(data_dir, "denied", now_ts(), false, |record| {
         record.request_id == request_id && record.principal_id == owner_id
     })?;
     if closed.is_empty() {
         anyhow::bail!("agent plan is not pending");
     }
-    finish_closed_plans(closed, data_dir)?;
+    finish_closed_plans(closed, data_dir).map_err(super::inbox_audit_refusal)?;
     Ok("Denied agent plan.".to_string())
 }
 
 /// Pending plans older than [`PLAN_DECISION_SECS`] close as `expired`.
 pub(crate) fn expire_pending_agent_plans(data_dir: &FsPath) -> anyhow::Result<usize> {
     let now = now_ts();
-    let closed = store::close_pending_agent_plans(data_dir, "expired", now, |record| {
+    let closed = store::close_pending_agent_plans(data_dir, "expired", now, false, |record| {
         now.saturating_sub(record.created_at) >= PLAN_DECISION_SECS
     })?;
     let count = closed.len();
@@ -964,6 +1024,7 @@ fn settle_agent_plan_dispatch(
     record.status = status.to_string();
     record.result = Some(result);
     record.updated_at = now_ts();
+    record.audit_recorded = false;
     // Three attempts. A fault or a write error spends one. When none land,
     // the stored record stays as it was (still `dispatching` when the claim
     // is the last write) and the caller resolves the flight as unknown.
@@ -987,6 +1048,9 @@ fn settle_agent_plan_dispatch(
         );
     } else if let Err(err) = append_agent_plan_dispatch_audit(data_dir, &record, status) {
         tracing::warn!("agent plan dispatch audit was not stored: {err}");
+    } else {
+        record.audit_recorded = true;
+        let _ = write_inspect_action_record(data_dir, &record);
     }
     Ok(format!("Agent plan dispatch {status}."))
 }

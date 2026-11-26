@@ -114,12 +114,15 @@ pub(super) async fn append_inbox_requests(
     if ensure_admin_context(&state.data_dir, context).is_ok() {
         append_runtime_capability_notifications(notifications, home_asks);
     }
-    append_agent_asks(
-        notifications,
-        context.principal_id(),
-        &owned_agents(&state.data_dir),
-        &agent_asks,
-    );
+    // A Guest, including an admin who was just demoted, sees no agent ask.
+    if crate::agents::owner_is_admin_now(&state.data_dir, context.principal_id()) {
+        append_agent_asks(
+            notifications,
+            context.principal_id(),
+            &owned_agents(&state.data_dir),
+            &agent_asks,
+        );
+    }
     if let Ok(inspect_requests) =
         pending_inspect_action_requests(&state.data_dir, context.principal_id())
     {
@@ -1106,10 +1109,16 @@ async fn answer_agent_ask(
         .await
         .ok_or_else(|| anyhow::anyhow!("agent runtime is not running"))?;
     let pending = read_pending(&coords).await?;
-    let ask = pending
-        .iter()
-        .find(|row| row.request_id == request_id)
-        .ok_or_else(|| anyhow::anyhow!("that request is no longer pending"))?;
+    let Some(ask) = pending.iter().find(|row| row.request_id == request_id) else {
+        let person = crate::auth::stored_principal_record(data_dir, caller)
+            .ok()
+            .flatten()
+            .is_some_and(|record| record.kind == crate::auth::PrincipalKind::Human);
+        if person && !crate::agents::owner_is_admin_now(data_dir, caller) {
+            anyhow::bail!(crate::agents::OWNER_NOT_ADMIN);
+        }
+        anyhow::bail!("that request is no longer pending");
+    };
     if ask.agent_id.is_empty() {
         anyhow::bail!("the asking session has ended");
     }
@@ -1120,20 +1129,25 @@ async fn answer_agent_ask(
     if agent.owner != caller {
         anyhow::bail!("{}", not_owner(caller, &agent.name));
     }
+    if !crate::agents::owner_is_admin_now(data_dir, caller) {
+        anyhow::bail!(crate::agents::OWNER_NOT_ADMIN);
+    }
     if let Err(error) = crate::agents::stored_agent(data_dir, caller, &ask.agent_id) {
         let _ = sign_agent_grant(data_dir, caller, ask, request_id, "denied", "denied");
         let _ = decide_capability(&coords, request_id, false).await;
         return Err(error);
     }
     if ask.resource.starts_with("localhost://") && own_rest(&ask.resource, &agent.root).is_none() {
-        sign_agent_grant(data_dir, caller, ask, request_id, "denied", "denied")?;
+        sign_agent_grant(data_dir, caller, ask, request_id, "denied", "denied")
+            .map_err(super::inbox_audit_refusal)?;
         decide_capability(&coords, request_id, false).await?;
         anyhow::bail!("a path outside the agent's own folder is not pending");
     }
     // One answer at a time, so two approvals of one ask mint one grant.
     let _gate = grant_answer_gate().lock().await;
     if !approve {
-        sign_agent_grant(data_dir, caller, ask, request_id, "denied", "denied")?;
+        sign_agent_grant(data_dir, caller, ask, request_id, "denied", "denied")
+            .map_err(super::inbox_audit_refusal)?;
         return decide_capability(&coords, request_id, false).await;
     }
     let again = read_pending(&coords).await?;
@@ -1145,7 +1159,8 @@ async fn answer_agent_ask(
     // left this process. After that marker, a crash, a timeout, or a failed
     // minted row is unresolved. `not_granted` is only a refusal the plane
     // answered before any mint.
-    sign_agent_grant(data_dir, caller, row, request_id, "approved", "approved")?;
+    sign_agent_grant(data_dir, caller, row, request_id, "approved", "approved")
+        .map_err(super::inbox_audit_refusal)?;
     #[cfg(test)]
     if super::gateway_tests::seams::take_grant_kind(data_dir, "before-send") {
         anyhow::bail!("crash before the send");

@@ -3412,17 +3412,26 @@ fn an_older_build_refuses_a_spent_file_by_name_and_home_still_loads() {
     })
     .unwrap();
     let field_less = home.agent_bytes();
+    let field_less_text = std::str::from_utf8(&field_less).unwrap();
     assert!(
-        !std::str::from_utf8(&field_less)
-            .unwrap()
-            .contains("model_tokens_spent"),
+        !field_less_text.contains("model_tokens_spent"),
         "a zero total is absent from the file"
+    );
+    assert!(
+        field_less_text.contains("last_audit"),
+        "a write records the one-way audit field"
     );
     assert!(
         parse_strict(&field_less).is_ok(),
         "this build accepts the field-less file"
     );
-    assert_eq!(frozen_older_agent_parser(&field_less), Ok(()));
+    // last_audit is one-way. The frozen parser refuses a file that carries it
+    // before any spend. Stripping that field leaves the older shape.
+    assert_eq!(frozen_older_agent_parser(&field_less), Err(NOT_OUR_FORM));
+    let mut older_shape = serde_json::from_slice::<Value>(&field_less).unwrap();
+    older_shape.as_object_mut().unwrap().remove("last_audit");
+    let older_shape = serde_json::to_vec(&older_shape).unwrap();
+    assert_eq!(frozen_older_agent_parser(&older_shape), Ok(()));
     allow_dispatch_spend(home.path());
     charge_model_spend(home.path(), OWNER_ID, &agent.agent_id, (0, 0), 1, 64, None).unwrap();
     let bytes = home.agent_bytes();
@@ -3430,12 +3439,18 @@ fn an_older_build_refuses_a_spent_file_by_name_and_home_still_loads() {
         .unwrap()
         .contains("model_tokens_spent"));
     assert_eq!(frozen_older_agent_parser(&bytes), Err(NOT_OUR_FORM));
-    let mut without = serde_json::from_slice::<Value>(&bytes).unwrap();
-    without["agents"][0]
+    let mut without_spend = serde_json::from_slice::<Value>(&bytes).unwrap();
+    without_spend["agents"][0]
         .as_object_mut()
         .unwrap()
         .remove("model_tokens_spent");
-    let without = serde_json::to_vec(&without).unwrap();
+    let spent_only_removed = serde_json::to_vec(&without_spend).unwrap();
+    assert_eq!(
+        frozen_older_agent_parser(&spent_only_removed),
+        Err(NOT_OUR_FORM)
+    );
+    without_spend.as_object_mut().unwrap().remove("last_audit");
+    let without = serde_json::to_vec(&without_spend).unwrap();
     assert_eq!(frozen_older_agent_parser(&without), Ok(()));
     assert!(
         parse_strict(&without).is_ok(),

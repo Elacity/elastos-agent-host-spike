@@ -820,6 +820,8 @@ struct RuntimeAgentStopRequest<'a> {
     agent_id: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
     session_id: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cause: Option<&'a str>,
 }
 
 #[derive(Deserialize)]
@@ -848,7 +850,16 @@ pub(super) async fn stop_runtime_agent(
     data_dir: &FsPath,
     agent_id: &str,
 ) -> anyhow::Result<RuntimeAgentStop> {
-    stop_runtime_agent_rows(data_dir, agent_id, None).await
+    stop_runtime_agent_rows(data_dir, agent_id, None, None).await
+}
+
+/// Stop, and deny this agent's waiting asks as `cause` in that same step.
+pub(super) async fn stop_runtime_agent_for_cause(
+    data_dir: &FsPath,
+    agent_id: &str,
+    cause: &str,
+) -> anyhow::Result<RuntimeAgentStop> {
+    stop_runtime_agent_rows(data_dir, agent_id, None, Some(cause)).await
 }
 
 /// Ask the agent Runtime to stop one session of this agent, named by
@@ -861,13 +872,14 @@ pub(super) async fn stop_runtime_agent_session(
     agent_id: &str,
     session_id: &str,
 ) -> anyhow::Result<RuntimeAgentStop> {
-    stop_runtime_agent_rows(data_dir, agent_id, Some(session_id)).await
+    stop_runtime_agent_rows(data_dir, agent_id, Some(session_id), None).await
 }
 
 async fn stop_runtime_agent_rows(
     data_dir: &FsPath,
     agent_id: &str,
     session_id: Option<&str>,
+    cause: Option<&str>,
 ) -> anyhow::Result<RuntimeAgentStop> {
     let coords = match live_agent_coords(data_dir).await {
         Ok(coords) => coords,
@@ -893,6 +905,7 @@ async fn stop_runtime_agent_rows(
         .json(&RuntimeAgentStopRequest {
             agent_id,
             session_id,
+            cause,
         })
         .send()
         .await?;

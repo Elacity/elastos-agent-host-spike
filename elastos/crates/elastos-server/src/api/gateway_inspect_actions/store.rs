@@ -362,22 +362,42 @@ pub(super) fn close_pending_agent_plans(
     data_dir: &Path,
     outcome: &str,
     now: u64,
+    open: bool,
     keep: impl Fn(&InspectActionRequestRecord) -> bool,
 ) -> anyhow::Result<Vec<InspectActionRequestRecord>> {
     let _guard = inspect_action_store_lock()?;
     let records = load_inspect_action_records(data_dir)?;
     let mut closed = Vec::new();
     for mut record in records {
-        if record.kind != AGENT_PLAN_KIND || record.status != "pending" || !keep(&record) {
+        let open_status = if open {
+            matches!(
+                record.status.as_str(),
+                "pending" | "approved" | "dispatching" | "started"
+            )
+        } else {
+            record.status == "pending"
+        };
+        if record.kind != AGENT_PLAN_KIND || !open_status || !keep(&record) {
             continue;
         }
         record.status = outcome.to_string();
         record.error = Some(outcome.to_string());
         record.updated_at = now;
+        record.audit_recorded = false;
         write_inspect_action_record_unlocked(data_dir, &record)?;
         closed.push(record);
     }
     Ok(closed)
+}
+
+pub(super) fn mark_plan_audit_recorded(data_dir: &Path, request_id: &str) -> anyhow::Result<()> {
+    let _guard = inspect_action_store_lock()?;
+    let mut record = read_inspect_action_record_unlocked(data_dir, request_id)?;
+    if record.audit_recorded {
+        return Ok(());
+    }
+    record.audit_recorded = true;
+    write_inspect_action_record_unlocked(data_dir, &record)
 }
 
 pub(super) fn set_agent_plan_status(
@@ -446,6 +466,9 @@ fn settle_records_in_place(
         let down = record.status == "pending"
             && !crate::api::agent_plane::instance_is_running(data_dir, &record.id);
         let owed_end = record.status == "instance ended" && !record.audit_recorded;
+        let owed_terminal = record.kind == AGENT_PLAN_KIND
+            && !record.audit_recorded
+            && is_terminal_plan(&record.status);
         if record.kind == AGENT_PLAN_KIND && (down || owed_end) {
             if down {
                 record.status = "instance ended".into();
@@ -482,7 +505,11 @@ fn settle_records_in_place(
             crate::resource_bridge::notify_plan_waiters();
             continue;
         }
-        if record.kind != AGENT_PLAN_KIND || (!lost && !owed) {
+        if record.kind != AGENT_PLAN_KIND || (!lost && !owed && !owed_terminal) {
+            continue;
+        }
+        if owed_terminal && !lost && !owed {
+            record_terminal_audit(data_dir, &path, &mut record);
             continue;
         }
         if lost {
@@ -519,6 +546,72 @@ fn settle_records_in_place(
         record.audit_recorded = true;
         let _ = write_inspect_action_at_path(&path, &record);
     }
+}
+
+fn is_terminal_plan(status: &str) -> bool {
+    matches!(
+        status,
+        "denied"
+            | "agent off"
+            | "agents off"
+            | "expired"
+            | "completed"
+            | "failed"
+            | "refused"
+            | "unknown"
+            | "not_sent"
+            | "stale"
+            | "stopped"
+            | "owner demoted"
+            | "passkey revoked"
+    )
+}
+
+fn record_terminal_audit(data_dir: &Path, path: &Path, record: &mut InspectActionRequestRecord) {
+    let status = record.status.clone();
+    let dispatch = matches!(
+        status.as_str(),
+        "completed" | "failed" | "refused" | "unknown" | "not_sent" | "stale"
+    );
+    let event_type = if dispatch {
+        match status.as_str() {
+            "completed" => "agent_plan.dispatch.completed",
+            "failed" => "agent_plan.dispatch.failed",
+            "refused" => "agent_plan.dispatch.refused",
+            "not_sent" => "agent_plan.dispatch.not_sent",
+            "stale" => "agent_plan.dispatch.stale",
+            _ => "agent_plan.dispatch.unknown",
+        }
+    } else {
+        "agent.plan.closed"
+    };
+    if plan_row_landed(data_dir, event_type, &status, &record.request_id) {
+        record.audit_recorded = true;
+        let _ = write_inspect_action_at_path(path, record);
+        return;
+    }
+    let appended = if dispatch {
+        super::append_agent_plan_dispatch_audit(data_dir, record, &status)
+    } else {
+        super::append_agent_plan_decision_audit(data_dir, record, "agent.plan.closed", &status)
+    };
+    if appended.is_err() {
+        return;
+    }
+    record.audit_recorded = true;
+    let _ = write_inspect_action_at_path(path, record);
+}
+
+fn plan_row_landed(data_dir: &Path, event_type: &str, result: &str, request_id: &str) -> bool {
+    crate::auth::load_auth_state(data_dir)
+        .map(|state| {
+            state.audit.iter().any(|event| {
+                event.event_type == event_type
+                    && event.result == result
+                    && event.challenge_id.as_deref() == Some(request_id)
+            })
+        })
+        .unwrap_or(false)
 }
 
 fn instance_end_audit_landed(data_dir: &Path, request_id: &str) -> bool {

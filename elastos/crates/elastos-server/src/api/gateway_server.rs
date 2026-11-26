@@ -1322,7 +1322,7 @@ mod trusted_gateway_tests {
                     value["status"].as_str().unwrap().to_string()
                 })
                 .collect();
-            if statuses == ["unresolved", "unresolved", "pending"]
+            if statuses == ["unresolved", "unresolved", "instance ended"]
                 || server.is_finished()
                 || tokio::time::Instant::now() >= read_deadline
             {
@@ -1375,7 +1375,7 @@ mod trusted_gateway_tests {
         };
         assert!(
             listened
-                && statuses == ["unresolved", "unresolved", "pending"]
+                && statuses == ["unresolved", "unresolved", "instance ended"]
                 && result.as_ref().is_ok_and(|value| {
                     value["status"] == "unresolved"
                         && value["dispatch_result"]["reason"]
