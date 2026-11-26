@@ -2781,6 +2781,291 @@ mod tests {
     /// and each helper's route refuses by name.
     #[test]
     fn a_missing_object_or_chain_helper_leaves_home_healthy() {
+        let (scratch, home, xdg, data, localhost) = fence_home_with_localhost_probe();
+        let manifest = serde_json::json!({
+            "external": {"localhost-provider": localhost},
+            "capsules": {},
+            "profiles": {"home": {"components": [
+                "localhost-provider", "object-provider", "chain-provider"
+            ]}},
+        });
+        fs::write(
+            data.join("components.json"),
+            serde_json::to_vec(&manifest).unwrap(),
+        )
+        .unwrap();
+        sign_test_home(&data);
+        let (stdout, log) = run_fence_home_probe(
+            &scratch,
+            &home,
+            &xdg,
+            &data,
+            "server_infra::tests::missing_object_and_chain_helpers_leave_home_up_probe",
+        );
+        for name in ["object-provider", "chain-provider"] {
+            let named = format!("{name} binary is not installed");
+            let line = log
+                .lines()
+                .find(|line| line.contains(&named))
+                .unwrap_or_else(|| panic!("log does not name {name}\n{log}"));
+            eprintln!("{line}");
+            assert!(
+                !log.contains(&format!("Failed to spawn {name}")),
+                "{name} was spawned: {log}"
+            );
+            assert!(
+                !log.contains(&format!("{name} capsule from")),
+                "{name} started: {log}"
+            );
+        }
+        let facts = probe_facts(&stdout, &log);
+        assert_eq!(facts["health"], "ok", "{facts}");
+        assert_eq!(facts["http_health"], 200, "{facts}");
+        assert!(
+            facts["http_health_body"]
+                .as_str()
+                .unwrap_or("")
+                .contains("ok"),
+            "{facts}"
+        );
+        // The object HTTP route answers the session denial before it consults
+        // the registry, so that body does not prove the provider is absent.
+        // Absence is the registry line in facts["object"].
+        assert_eq!(facts["http_object"], 403, "{facts}");
+        assert!(
+            facts["http_object_body"]
+                .as_str()
+                .unwrap_or("")
+                .contains("object_session_proxy_denied"),
+            "{facts}"
+        );
+        let object_line = facts["object"].as_str().unwrap_or("");
+        assert!(
+            !object_line.contains("protocol_version"),
+            "registry absence is not a running provider: {object_line}"
+        );
+        assert!(
+            facts["http_chain_body"]
+                .as_str()
+                .unwrap_or("")
+                .contains("no provider for scheme: chain"),
+            "{facts}"
+        );
+        for (key, scheme) in [("object", "object"), ("chain", "chain")] {
+            assert!(
+                facts[key]
+                    .as_str()
+                    .unwrap_or("")
+                    .contains(&format!("no provider for scheme: {scheme}")),
+                "{facts}"
+            );
+        }
+    }
+
+    /// A fresh data directory: no Auth folder before Home starts. Home starts
+    /// the real fenced object helper from a signed row, a person signs up, and
+    /// the first Library roots call answers through the registry.
+    #[cfg(any(
+        all(target_os = "macos", not(elastos_unsupported_os_check)),
+        all(
+            target_os = "linux",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        )
+    ))]
+    #[test]
+    fn a_fresh_home_starts_the_object_helper_and_roots_answer() {
+        let (scratch, home, xdg, data, localhost) = fence_home_with_localhost_probe();
+        let built = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../target/provider-fence-tests/debug/object-provider");
+        assert!(
+            built.is_file(),
+            "{} is missing. Run `just prepare-providers` before this test.",
+            built.display()
+        );
+        let object = data.join("bin/object-provider");
+        fs::copy(&built, &object).unwrap();
+        fs::set_permissions(&object, fs::Permissions::from_mode(0o755)).unwrap();
+        use sha2::Digest as _;
+        let checksum = format!(
+            "sha256:{}",
+            hex::encode(sha2::Sha256::digest(fs::read(&object).unwrap()))
+        );
+        let manifest = serde_json::json!({
+            "external": {
+                "localhost-provider": localhost,
+                "object-provider": {
+                    "version": "test",
+                    "install_path": "bin/object-provider",
+                    "provider_runtime": {
+                        "role": "provider",
+                        "substrate": "native",
+                        "runtime_abi": "elastos.provider-stdio/v1",
+                        "execution": "native-provider",
+                        "provides": "elastos://object/*",
+                    },
+                    "platforms": {elastos_server::setup::detect_platform(): {
+                        "checksum": checksum,
+                        "source": object.to_string_lossy(),
+                        "strategy": "local-copy",
+                    }},
+                },
+            },
+            "capsules": {},
+            "profiles": {"home": {"components": ["localhost-provider", "object-provider"]}},
+        });
+        fs::write(
+            data.join("components.json"),
+            serde_json::to_vec(&manifest).unwrap(),
+        )
+        .unwrap();
+        sign_test_home(&data);
+        assert!(
+            !data.join("ElastOS/System/Auth").exists(),
+            "the data directory must start without Auth"
+        );
+        let (stdout, log) = run_fence_home_probe(
+            &scratch,
+            &home,
+            &xdg,
+            &data,
+            "server_infra::tests::fresh_home_object_roots_probe",
+        );
+        assert!(
+            log.contains("object-provider capsule from"),
+            "the object helper did not start: {log}"
+        );
+        let facts = probe_facts(&stdout, &log);
+        for key in ["device_list", "device_roots", "roots"] {
+            assert_eq!(facts[key]["status"], "ok", "{key}: {facts}");
+        }
+        for key in ["device_roots", "roots"] {
+            assert!(
+                facts[key]["data"]["roots"]
+                    .as_array()
+                    .is_some_and(|rows| !rows.is_empty()),
+                "{key} must answer: {facts}"
+            );
+        }
+        let unknown = facts["unknown"].to_string();
+        assert!(
+            unknown.contains("has no stored record") && !unknown.contains("Permission denied"),
+            "{facts}"
+        );
+    }
+
+    #[cfg(any(
+        all(target_os = "macos", not(elastos_unsupported_os_check)),
+        all(
+            target_os = "linux",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        )
+    ))]
+    #[tokio::test]
+    #[ignore = "child half of a_fresh_home_starts_the_object_helper_and_roots_answer; the parent runs it"]
+    async fn fresh_home_object_roots_probe() {
+        rustls::crypto::ring::default_provider()
+            .install_default()
+            .unwrap();
+        tracing_subscriber::fmt()
+            .with_ansi(false)
+            .with_max_level(tracing::Level::INFO)
+            .try_init()
+            .expect("tracing subscriber");
+        let expected = PathBuf::from(
+            std::env::var_os("ELASTOS_FENCE_HOME_ROOT").expect("ELASTOS_FENCE_HOME_ROOT"),
+        );
+        let data_dir = crate::sources::default_data_dir();
+        assert_eq!(data_dir, expected);
+        let mut infrastructure = setup_server_infrastructure()
+            .await
+            .unwrap_or_else(|error| panic!("Home did not start: {error:#}"));
+        let registry = infrastructure.provider_registry.clone();
+        let ask = |request: serde_json::Value| {
+            let registry = registry.clone();
+            async move {
+                registry.send_raw("object", &request).await.unwrap_or_else(
+                    |error| serde_json::json!({"status": "error", "message": error.to_string()}),
+                )
+            }
+        };
+        // Before anyone signs up, only the device principal exists.
+        let (_, did) = elastos_identity::load_or_create_did(&data_dir).unwrap();
+        let device = format!("device:{did}");
+        let device_list = ask(serde_json::json!({"op": "list", "principal_id": device})).await;
+        let device_roots = ask(serde_json::json!({"op": "roots", "principal_id": device})).await;
+        // This call reads the auth state, so Auth must be ready before the fence.
+        let unknown =
+            ask(serde_json::json!({"op": "list", "principal_id": "person:local:missing"})).await;
+        let person = elastos_server::auth::upsert_principal_for_binding(
+            &data_dir,
+            elastos_auth::ProofBinding::evm_account(20, &format!("0x{}", "1".repeat(40)), 1),
+            1,
+        )
+        .unwrap_or_else(|error| panic!("sign-up: {error:#}"));
+        let roots =
+            ask(serde_json::json!({"op": "roots", "principal_id": person.principal_id})).await;
+        if let Some(carrier) = infrastructure.carrier_service.as_mut() {
+            carrier.shutdown().await.unwrap();
+        }
+        drop(infrastructure);
+        println!(
+            "{}",
+            serde_json::json!({
+                "device_list": device_list,
+                "device_roots": device_roots,
+                "unknown": unknown,
+                "roots": roots,
+            })
+        );
+    }
+
+    /// The first JSON line a fence Home probe printed.
+    fn probe_facts(stdout: &str, log: &str) -> serde_json::Value {
+        serde_json::from_str(
+            stdout
+                .lines()
+                .find(|line| line.starts_with('{'))
+                .unwrap_or_else(|| panic!("no facts: {log}")),
+        )
+        .unwrap()
+    }
+
+    /// Runs one ignored probe of this binary as a Home with `home` and `xdg`.
+    /// Returns its stdout and its whole log.
+    fn run_fence_home_probe(
+        scratch: &TempDir,
+        home: &Path,
+        xdg: &Path,
+        data: &Path,
+        probe: &str,
+    ) -> (String, String) {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "--ignored", "--nocapture", probe])
+            .env("HOME", home)
+            .env("XDG_DATA_HOME", xdg)
+            .env("TMPDIR", scratch.path())
+            .env("RUST_LOG", "elastos=warn")
+            .env("ELASTOS_FENCE_HOME_ROOT", data)
+            .env_remove("ELASTOS_CAPSULE_BIN_DIR")
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+        // The child is a test process. Its captured log is on stdout.
+        let log = format!("{stderr}\n{stdout}");
+        assert!(
+            output.status.success() && !log.contains("FAILED") && !log.contains("panicked"),
+            "home probe failed ({}): {log}",
+            output.status
+        );
+        (stdout, log)
+    }
+
+    /// A Home data directory with HOME and XDG roots at 0700 and a localhost
+    /// probe that answers every line with ok. Returns its components row.
+    fn fence_home_with_localhost_probe() -> (TempDir, PathBuf, PathBuf, PathBuf, serde_json::Value)
+    {
         let scratch = TempDir::new().unwrap();
         fs::set_permissions(scratch.path(), fs::Permissions::from_mode(0o700)).unwrap();
         let home = scratch.path().join("home");
@@ -2839,123 +3124,23 @@ fn main() {
             "sha256:{}",
             hex::encode(sha2::Sha256::digest(fs::read(&probe).unwrap()))
         );
-        let manifest = serde_json::json!({
-            "external": {"localhost-provider": {
-                "version": "test",
-                "install_path": "bin/localhost-provider",
-                "provider_runtime": {
-                    "role": "provider",
-                    "substrate": "native",
-                    "runtime_abi": "elastos.provider-stdio/v1",
-                    "execution": "native-provider",
-                    "provides": "localhost://*",
-                },
-                "platforms": {elastos_server::setup::detect_platform(): {
-                    "checksum": checksum,
-                    "source": probe.to_string_lossy(),
-                    "strategy": "local-copy",
-                }},
+        let row = serde_json::json!({
+            "version": "test",
+            "install_path": "bin/localhost-provider",
+            "provider_runtime": {
+                "role": "provider",
+                "substrate": "native",
+                "runtime_abi": "elastos.provider-stdio/v1",
+                "execution": "native-provider",
+                "provides": "localhost://*",
+            },
+            "platforms": {elastos_server::setup::detect_platform(): {
+                "checksum": checksum,
+                "source": probe.to_string_lossy(),
+                "strategy": "local-copy",
             }},
-            "capsules": {},
-            "profiles": {"home": {"components": [
-                "localhost-provider", "object-provider", "chain-provider"
-            ]}},
         });
-        fs::write(
-            data.join("components.json"),
-            serde_json::to_vec(&manifest).unwrap(),
-        )
-        .unwrap();
-        sign_test_home(&data);
-        let _guard = ENV_LOCK.lock().unwrap();
-        let output = std::process::Command::new(std::env::current_exe().unwrap())
-            .args([
-                "--exact",
-                "--ignored",
-                "--nocapture",
-                "server_infra::tests::missing_object_and_chain_helpers_leave_home_up_probe",
-            ])
-            .env("HOME", &home)
-            .env("XDG_DATA_HOME", &xdg)
-            .env("TMPDIR", scratch.path())
-            .env("RUST_LOG", "elastos=warn")
-            .env("ELASTOS_FENCE_HOME_ROOT", &data)
-            .env_remove("ELASTOS_CAPSULE_BIN_DIR")
-            .output()
-            .unwrap();
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        // The child is a test process. Its captured log is on stdout.
-        let log = format!("{stderr}\n{stdout}");
-        assert!(
-            output.status.success() && !log.contains("FAILED") && !log.contains("panicked"),
-            "home probe failed ({}): {log}",
-            output.status
-        );
-        for name in ["object-provider", "chain-provider"] {
-            let named = format!("{name} binary is not installed");
-            let line = log
-                .lines()
-                .find(|line| line.contains(&named))
-                .unwrap_or_else(|| panic!("log does not name {name}\n{log}"));
-            eprintln!("{line}");
-            assert!(
-                !log.contains(&format!("Failed to spawn {name}")),
-                "{name} was spawned: {log}"
-            );
-            assert!(
-                !log.contains(&format!("{name} capsule from")),
-                "{name} started: {log}"
-            );
-        }
-        let facts: serde_json::Value = serde_json::from_str(
-            stdout
-                .lines()
-                .find(|line| line.starts_with('{'))
-                .unwrap_or_else(|| panic!("no facts: {stdout}\n{stderr}")),
-        )
-        .unwrap();
-        assert_eq!(facts["health"], "ok", "{facts}");
-        assert_eq!(facts["http_health"], 200, "{facts}");
-        assert!(
-            facts["http_health_body"]
-                .as_str()
-                .unwrap_or("")
-                .contains("ok"),
-            "{facts}"
-        );
-        // The object HTTP route answers the session denial before it consults
-        // the registry, so that body does not prove the provider is absent.
-        // Absence is the registry line in facts["object"].
-        assert_eq!(facts["http_object"], 403, "{facts}");
-        assert!(
-            facts["http_object_body"]
-                .as_str()
-                .unwrap_or("")
-                .contains("object_session_proxy_denied"),
-            "{facts}"
-        );
-        let object_line = facts["object"].as_str().unwrap_or("");
-        assert!(
-            !object_line.contains("protocol_version"),
-            "registry absence is not a running provider: {object_line}"
-        );
-        assert!(
-            facts["http_chain_body"]
-                .as_str()
-                .unwrap_or("")
-                .contains("no provider for scheme: chain"),
-            "{facts}"
-        );
-        for (key, scheme) in [("object", "object"), ("chain", "chain")] {
-            assert!(
-                facts[key]
-                    .as_str()
-                    .unwrap_or("")
-                    .contains(&format!("no provider for scheme: {scheme}")),
-                "{facts}"
-            );
-        }
+        (scratch, home, xdg, data, row)
     }
 
     #[tokio::test]
