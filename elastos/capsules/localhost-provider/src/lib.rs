@@ -111,6 +111,8 @@ fn open_new_format(key: &[u8; 32], bytes: Vec<u8>, name: &str) -> io::Result<Vec
     };
     let why = if version == FILE_KEY_ENVELOPE_VERSION {
         format!("{name} does not decrypt. Move it aside, or remove it.")
+    } else if cfg!(unix) {
+        format!("{name} does not decrypt. Move the file aside, then restart.")
     } else {
         format!("{name} does not decrypt. Restore identity/device.key, or move the file aside, then restart.")
     };

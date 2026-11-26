@@ -2034,7 +2034,7 @@ mod tests {
     }
 
     #[test]
-    fn a_bad_old_envelope_still_says_restore_the_device_key() {
+    fn a_bad_old_envelope_names_a_remedy_for_this_system() {
         let dir = setup_test_dir();
         fs::create_dir(dir.path().join("Users")).unwrap();
         let provider = make_encrypted_provider(&dir);
@@ -2050,10 +2050,18 @@ mod tests {
         fs::write(dir.path().join("Users/old.bin"), &sealed).unwrap();
         let err = refusal(&provider, "Users/old.bin", None, None);
         assert!(err.contains("does not decrypt"), "{err}");
-        assert!(
-            err.contains("Restore identity/device.key, or move the file aside, then restart."),
-            "{err}"
-        );
+        #[cfg(unix)]
+        {
+            assert!(err.contains("Move the file aside, then restart."), "{err}");
+            assert!(!err.contains("device.key"), "{err}");
+        }
+        #[cfg(not(unix))]
+        {
+            assert!(
+                err.contains("Restore identity/device.key, or move the file aside, then restart."),
+                "{err}"
+            );
+        }
         assert!(!err.contains("Move it aside, or remove it."), "{err}");
     }
 

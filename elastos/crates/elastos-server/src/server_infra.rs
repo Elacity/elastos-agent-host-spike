@@ -4959,6 +4959,77 @@ mod tests {
     }
 
     #[test]
+    fn the_unix_old_file_message_first_step_lets_the_next_start_succeed() {
+        let device_key = [0x61; 32];
+        let file_key = expected_localhost_file_key(&device_key);
+        let root = TempDir::new().unwrap();
+        let aside = TempDir::new().unwrap();
+        plant_device_envelope(&root.path().join("Users/kept.bin"), &device_key, b"kept");
+        match localhost_bringup(root.path(), &device_key) {
+            LocalhostBringup::Start(_) => {}
+            LocalhostBringup::Refuse(got) => panic!("first start refused: {got}"),
+        }
+        assert_current_marker(root.path(), &device_key);
+        let restored = root.path().join("Users/restored.bin");
+        let sealed = plant_device_envelope(&restored, &device_key, b"from-the-old-backup");
+        let message = localhost_provider::read_sealed_localhost_file(
+            &file_key,
+            &restored,
+            "Users/restored.bin",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(message.contains("does not decrypt"), "{message}");
+        let step = message.split(", or ").next().unwrap_or(&message);
+        let step = step.split(", then").next().unwrap_or(step);
+        if step.contains("device.key") {
+            fs::create_dir_all(root.path().join("identity")).unwrap();
+            fs::write(root.path().join("identity/device.key"), device_key).unwrap();
+        } else if step.contains("Move the file aside")
+            || step.contains("move the file out of the folder")
+        {
+            fs::rename(&restored, aside.path().join("restored.bin")).unwrap();
+        } else if step.contains("localhost-file-key-v1") {
+            fs::remove_file(root.path().join("identity/localhost-file-key-v1")).unwrap();
+        } else {
+            panic!("the first step is not a remedy this row follows: {message}");
+        }
+        match localhost_bringup(root.path(), &device_key) {
+            LocalhostBringup::Start(_) => {}
+            LocalhostBringup::Refuse(got) => panic!("next start refused: {got}"),
+        }
+        assert!(
+            elastos_server::local_apps::local_apps_refusal(root.path()).is_none(),
+            "local apps stayed off after the next start"
+        );
+        if restored.exists() {
+            match localhost_provider::read_sealed_localhost_file(
+                &file_key,
+                &restored,
+                "Users/restored.bin",
+            ) {
+                Ok(plain) => assert_eq!(plain, b"from-the-old-backup"),
+                Err(err) => panic!("the first step left the file blocked\n{message}\n{err}"),
+            }
+        } else {
+            assert_eq!(
+                fs::read(aside.path().join("restored.bin")).unwrap(),
+                sealed,
+                "moving the file aside changed its bytes"
+            );
+        }
+        assert_eq!(
+            localhost_provider::read_sealed_localhost_file(
+                &file_key,
+                &root.path().join("Users/kept.bin"),
+                "Users/kept.bin",
+            )
+            .unwrap(),
+            b"kept"
+        );
+    }
+
+    #[test]
     fn localhost_link_stops_start_and_leaves_outside_bytes_unchanged() {
         let device_key = [0x33; 32];
         let original = localhost_provider::encrypt_bytes(&device_key, b"credential").unwrap();

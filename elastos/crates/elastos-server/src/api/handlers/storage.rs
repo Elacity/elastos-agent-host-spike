@@ -123,12 +123,12 @@ async fn refuse_local_apps(
     headers: &HeaderMap,
     path: &str,
     op: &str,
-) -> Result<(), StorageApiError> {
+) -> Result<String, StorageApiError> {
     let path = normalize_path(path);
     reject_principal_root_storage_path(&path)?;
     enforce_capability(state, session, headers, &path, row_right(op)?).await?;
     let Some(sentence) = crate::local_apps::await_local_apps_decision(&state.data_dir).await else {
-        return Ok(());
+        return Ok(path);
     };
     Err(StorageApiError::LocalApps(
         crate::local_apps::local_apps_refusal_body(&sentence, owner_shell(session, headers)),
@@ -141,11 +141,8 @@ pub async fn read_file(
     headers: HeaderMap,
     Path(path): Path<String>,
 ) -> Result<Response, StorageApiError> {
-    refuse_local_apps(&state, &session, &headers, &path, "read").await?;
+    let path = refuse_local_apps(&state, &session, &headers, &path, "read").await?;
     let user_id = session_user_id(&session);
-    let path = normalize_path(&path);
-    reject_principal_root_storage_path(&path)?;
-    enforce_capability(&state, &session, &headers, &path, row_right("read")?).await?;
     let uri = canonical_local_uri(&path)?;
 
     let result = state
@@ -177,11 +174,8 @@ pub async fn write_file(
     Path(path): Path<String>,
     body: Bytes,
 ) -> Result<Json<WriteOutput>, StorageApiError> {
-    refuse_local_apps(&state, &session, &headers, &path, "write").await?;
+    let path = refuse_local_apps(&state, &session, &headers, &path, "write").await?;
     let user_id = session_user_id(&session);
-    let path = normalize_path(&path);
-    reject_principal_root_storage_path(&path)?;
-    enforce_capability(&state, &session, &headers, &path, row_right("write")?).await?;
 
     // Enforce storage quota (0 = unlimited)
     if state.storage_quota_mb > 0 {
@@ -241,11 +235,8 @@ pub async fn delete_path(
     Path(path): Path<String>,
     Query(query): Query<DeleteQuery>,
 ) -> Result<Json<DeleteOutput>, StorageApiError> {
-    refuse_local_apps(&state, &session, &headers, &path, "delete").await?;
+    let path = refuse_local_apps(&state, &session, &headers, &path, "delete").await?;
     let user_id = session_user_id(&session);
-    let path = normalize_path(&path);
-    reject_principal_root_storage_path(&path)?;
-    enforce_capability(&state, &session, &headers, &path, row_right("delete")?).await?;
     let uri = canonical_local_uri(&path)?;
     let recursive = query.recursive.unwrap_or(false);
 
@@ -294,11 +285,8 @@ pub async fn list_dir(
     headers: HeaderMap,
     Path(path): Path<String>,
 ) -> Result<Json<ListOutput>, StorageApiError> {
-    refuse_local_apps(&state, &session, &headers, &path, "list").await?;
+    let path = refuse_local_apps(&state, &session, &headers, &path, "list").await?;
     let user_id = session_user_id(&session);
-    let path = normalize_path(&path);
-    reject_principal_root_storage_path(&path)?;
-    enforce_capability(&state, &session, &headers, &path, row_right("list")?).await?;
     let uri = canonical_local_uri(&path)?;
 
     let result = state
@@ -377,11 +365,8 @@ pub async fn stat_path(
     headers: HeaderMap,
     Path(path): Path<String>,
 ) -> Result<Response, StorageApiError> {
-    refuse_local_apps(&state, &session, &headers, &path, "stat").await?;
+    let path = refuse_local_apps(&state, &session, &headers, &path, "stat").await?;
     let user_id = session_user_id(&session);
-    let path = normalize_path(&path);
-    reject_principal_root_storage_path(&path)?;
-    enforce_capability(&state, &session, &headers, &path, row_right("stat")?).await?;
     let uri = canonical_local_uri(&path)?;
 
     let result = state
@@ -427,11 +412,8 @@ pub async fn mkdir(
     headers: HeaderMap,
     Path(path): Path<String>,
 ) -> Result<Json<MkdirOutput>, StorageApiError> {
-    refuse_local_apps(&state, &session, &headers, &path, "mkdir").await?;
+    let path = refuse_local_apps(&state, &session, &headers, &path, "mkdir").await?;
     let user_id = session_user_id(&session);
-    let path = normalize_path(&path);
-    reject_principal_root_storage_path(&path)?;
-    enforce_capability(&state, &session, &headers, &path, row_right("mkdir")?).await?;
     let uri = canonical_local_uri(&path)?;
 
     let result = state
@@ -1466,5 +1448,186 @@ mod tests {
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert!(body.contains("Cannot read root as file"), "{body}");
         assert!(!body.contains("checking"), "{body}");
+    }
+
+    struct CountingLocalhostProvider {
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl Provider for CountingLocalhostProvider {
+        async fn handle(
+            &self,
+            request: ResourceRequest,
+        ) -> Result<ResourceResponse, ProviderError> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(match request.action {
+                ResourceAction::Read => ResourceResponse::Data(b"note".to_vec()),
+                ResourceAction::Write => ResourceResponse::Written {
+                    bytes: request.content.as_ref().map(Vec::len).unwrap_or(0),
+                },
+                ResourceAction::Delete => ResourceResponse::Deleted,
+                ResourceAction::List => ResourceResponse::List(Vec::new()),
+                ResourceAction::Stat => ResourceResponse::Metadata {
+                    size: 4,
+                    entry_type: ProviderEntryType::File,
+                    modified: 1,
+                },
+                ResourceAction::Mkdir => ResourceResponse::Created,
+                ResourceAction::Exists => ResourceResponse::Exists(true),
+            })
+        }
+
+        fn schemes(&self) -> Vec<&'static str> {
+            vec!["localhost"]
+        }
+
+        fn name(&self) -> &'static str {
+            "counting-localhost"
+        }
+    }
+
+    fn capability_uses(audit: &AuditLog) -> usize {
+        audit
+            .recent_events(64)
+            .into_iter()
+            .filter(|event| {
+                matches!(
+                    event,
+                    elastos_runtime::primitives::audit::AuditEvent::CapabilityUse { .. }
+                )
+            })
+            .count()
+    }
+
+    fn single_use_headers(
+        cap_mgr: &CapabilityManager,
+        session: &Session,
+        action: Action,
+    ) -> HeaderMap {
+        let token = cap_mgr.grant(
+            session.id.as_str(),
+            ResourceId::new("localhost://MyWebSite/*"),
+            action,
+            TokenConstraints::new(0, false, None, Some(1)),
+            None,
+        );
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "X-Capability-Token",
+            token.to_base64().unwrap().parse().unwrap(),
+        );
+        headers
+    }
+
+    #[derive(Clone, Copy)]
+    enum OnceOp {
+        Read,
+        Write,
+        Delete,
+        List,
+        Stat,
+        Mkdir,
+    }
+
+    async fn dispatch_once(
+        state: ProviderStorageState,
+        session: Session,
+        headers: HeaderMap,
+        path: &str,
+        op: OnceOp,
+    ) -> Result<(), StorageApiError> {
+        let state = State(state);
+        let session = Extension(session);
+        let path = Path(path.to_string());
+        match op {
+            OnceOp::Read => read_file(state, session, headers, path).await.map(|_| ()),
+            OnceOp::Write => write_file(state, session, headers, path, Bytes::from_static(b"note"))
+                .await
+                .map(|_| ()),
+            OnceOp::Delete => delete_path(
+                state,
+                session,
+                headers,
+                path,
+                Query(DeleteQuery { recursive: None }),
+            )
+            .await
+            .map(|_| ()),
+            OnceOp::List => list_dir(state, session, headers, path).await.map(|_| ()),
+            OnceOp::Stat => stat_path(state, session, headers, path).await.map(|_| ()),
+            OnceOp::Mkdir => mkdir(state, session, headers, path).await.map(|_| ()),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_single_use_token_works_once_on_each_localhost_route() {
+        let _guard = crate::local_apps::lock_local_apps_for_test();
+        crate::local_apps::set_local_apps_refusal_for_test(None);
+        let home = tempfile::tempdir().unwrap();
+        let audit = Arc::new(AuditLog::new());
+        let cap_mgr = Arc::new(CapabilityManager::new(
+            Arc::new(CapabilityStore::new()),
+            audit.clone(),
+            Arc::new(MetricsManager::new()),
+        ));
+        let provider = Arc::new(CountingLocalhostProvider {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let registry = Arc::new(ProviderRegistry::new());
+        registry.register(provider.clone()).await;
+        let state = ProviderStorageState {
+            data_dir: home.path().to_path_buf(),
+            registry,
+            audit_log: Some(audit.clone()),
+            capability_manager: Some(cap_mgr.clone()),
+            storage_quota_mb: 0,
+        };
+        let session = make_session(SessionType::Capsule);
+        let ops = [
+            (Action::Read, OnceOp::Read, "MyWebSite/once-read.txt"),
+            (Action::Write, OnceOp::Write, "MyWebSite/once-write.txt"),
+            (Action::Delete, OnceOp::Delete, "MyWebSite/once-delete.txt"),
+            (Action::Read, OnceOp::List, "MyWebSite/once-list.txt"),
+            (Action::Read, OnceOp::Stat, "MyWebSite/once-stat.txt"),
+            (Action::Write, OnceOp::Mkdir, "MyWebSite/once-dir.txt"),
+        ];
+        for (action, op, path) in ops {
+            let uses_before = capability_uses(&audit);
+            let calls_before = provider.calls.load(std::sync::atomic::Ordering::SeqCst);
+            let headers = single_use_headers(&cap_mgr, &session, action);
+            dispatch_once(state.clone(), session.clone(), headers.clone(), path, op)
+                .await
+                .unwrap_or_else(|err| panic!("{path} first use failed: {err:?}"));
+            assert_eq!(
+                capability_uses(&audit),
+                uses_before + 1,
+                "{path} wrote more than one CapabilityUse"
+            );
+            assert_eq!(
+                provider.calls.load(std::sync::atomic::Ordering::SeqCst),
+                calls_before + 1,
+                "{path} reached the provider twice"
+            );
+            let err = dispatch_once(state.clone(), session.clone(), headers, path, op)
+                .await
+                .expect_err("second use was allowed");
+            match err {
+                StorageApiError::PermissionDenied(msg) => {
+                    assert!(msg.contains("use limit exceeded: 1 >= 1"), "{path}: {msg}");
+                }
+                other => panic!("{path} second use was not refused: {other:?}"),
+            }
+            assert_eq!(
+                capability_uses(&audit),
+                uses_before + 2,
+                "{path} refusal wrote extra CapabilityUse entries"
+            );
+            assert_eq!(
+                provider.calls.load(std::sync::atomic::Ordering::SeqCst),
+                calls_before + 1,
+                "{path} second use reached the provider"
+            );
+        }
     }
 }
