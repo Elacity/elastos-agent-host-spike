@@ -557,9 +557,22 @@ test("full mode notice names the missing agents-in-gateway route", () => {
   const filled = agentsInGatewayChange(
     'route("/api/apps/system/agents/launch", post(agents_launch))\ndispatch_approved_agent_plan()',
     "agent_plane::ensure_running(); launch_runtime_agent();",
-    "agent_plane::live_coords(data)\nasync fn launch_runtime_agent() {\n  return;\n}",
+    "async fn launch_runtime_agent() {\n  agent_plane::live_coords(data);\n  return;\n}",
   );
   assert.equal(filled.ok, true, filled.reason);
+  const outside = agentsInGatewayChange(
+    'route("/api/apps/system/agents/launch", post(agents_launch))\ndispatch_approved_agent_plan()',
+    "agent_plane::ensure_running(); launch_runtime_agent();",
+    "agent_plane::live_coords(data)\nasync fn launch_runtime_agent() {\n  return;\n}",
+  );
+  assert.equal(outside.ok, false);
+  assert.match(outside.reason, /live coordinates/);
+  const followed = agentsInGatewayChange(
+    'route("/api/apps/system/agents/launch", post(agents_launch))\ndispatch_approved_agent_plan()',
+    "agent_plane::ensure_running(); launch_runtime_agent();",
+    "async fn live_agent_coords() {\n  agent_plane::live_coords(data);\n}\nasync fn launch_runtime_agent() {\n  live_agent_coords();\n}",
+  );
+  assert.equal(followed.ok, true, followed.reason);
   const noHop = agentsInGatewayChange(
     'route("/api/apps/system/agents/launch", post(agents_launch))',
     "agent_plane::ensure_running(); launch_runtime_agent();",
@@ -576,7 +589,7 @@ test("full mode notice names the missing agents-in-gateway route", () => {
   const blocked = /\b(runtime mirror|projection|schema|derived facts?|capsules?|providers?|capabilit(?:y|ies)|affordances?|authority boundary|provider boundary|gate preview|runtime-owned|launch token|hostcall|request failed|failed to fetch|unauthorized|forbidden|[45]\d\d)\b|engine_[a-z_]+/i;
   assert.equal(blocked.test(sentence), false);
   const inbox = fs.readFileSync(new URL("../capsules/inbox/browser/inbox.js", import.meta.url), "utf8");
-  assert.match(inbox, /text === "Nothing ran\. A fresh passkey is needed\."/);
+  assert.match(inbox, /text\.startsWith\("Nothing ran\."\)/);
 });
 
 test("the gateway pid owns the listening port", async () => {

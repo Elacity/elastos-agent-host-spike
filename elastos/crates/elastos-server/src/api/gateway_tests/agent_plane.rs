@@ -179,7 +179,7 @@ impl Plane {
 
     async fn shutdown(self) {
         let url = self.url.clone();
-        crate::api::agent_plane::stop_running(&self.data).await;
+        stop_plane(&self.data).await;
         port_closed(&url).await;
     }
 }
@@ -309,6 +309,11 @@ async fn capsule_cause(url: &str, secret: &str, session: &str) -> Option<String>
     capsule_row(url, secret, session)
         .await
         .and_then(|row| row["cause"].as_str().map(str::to_string))
+}
+
+async fn stop_plane(data: &Path) {
+    let (_, closed) = crate::api::agent_plane::stop_running(data).await;
+    closed.expect("agent plans closed");
 }
 
 async fn capsule_live(url: &str, secret: &str, session: &str) -> bool {
@@ -675,7 +680,7 @@ async fn agent_runtime_is_loopback_owner_only_and_stops_with_the_gateway() {
     assert!(!gateway_bytes.is_empty());
     gateway.health().await;
     crate::agents::set_enabled(&data, &caller, false, 2).unwrap();
-    crate::api::agent_plane::stop_running(&data).await;
+    stop_plane(&data).await;
     assert!(
         crate::api::agent_plane::live_coords(&data).await.is_none(),
         "the agent runtime stayed up after Off"
@@ -1723,7 +1728,7 @@ async fn an_audit_failure_on_the_inbox_mints_nothing() {
     super::seams::arm_grant_fault(&home.data, false);
     let (status, body) = http_approve(&gateway.addr, &token, &request_id).await;
     assert_ne!(status, 200, "{body}");
-    assert_eq!(body, "Nothing ran. A fresh passkey is needed.");
+    assert_eq!(body, "Nothing ran. Approve this ask again.");
     assert!(!body.contains(&home.data.display().to_string()), "{body}");
     assert!(!body.contains("auth-state"), "{body}");
     assert!(
@@ -1935,7 +1940,7 @@ async fn an_effect_held_across_turn_off_is_not_signed_ok() {
         },
     )
     .unwrap();
-    crate::api::agent_plane::stop_running(&home.data).await;
+    stop_plane(&home.data).await;
     assert!(
         crate::api::agent_plane::plane_runtime(&home.data).is_some(),
         "the plane left while the effect was in flight"
@@ -2355,7 +2360,7 @@ async fn off_then_on_waits_until_the_old_plane_is_idle() {
     )
     .await;
     assert_eq!(stopped_ok_count(&home.data, &session), 1);
-    crate::api::agent_plane::stop_running(&home.data).await;
+    stop_plane(&home.data).await;
     gateway.shutdown().await;
     other_gateway.shutdown().await;
 }
@@ -2486,7 +2491,7 @@ async fn two_enables_at_once_share_one_plane() {
 async fn enable_racing_startup_shares_one_plane() {
     let home = Home::open();
     let gateway = Gateway::start(&home.data).await;
-    crate::api::agent_plane::stop_running(&home.data).await;
+    stop_plane(&home.data).await;
     assert!(crate::agents::home_enabled(&home.data));
     assert!(crate::api::agent_plane::plane_runtime(&home.data).is_none());
     let token = system_token(&home);
@@ -2696,19 +2701,26 @@ fn plan_file(data: &Path, request_id: &str) -> serde_json::Value {
     serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap()
 }
 
-fn stop_cause(data: &Path, agent_id: &str, event_type: &str) -> (String, String) {
+fn stop_cause(data: &Path, agent_id: &str, event_type: &str) -> (String, String, String) {
     let event = crate::auth::load_auth_state(data)
         .unwrap()
         .audit
         .into_iter()
         .find(|event| {
-            event.event_type == event_type && event.capsule_id.as_deref() == Some(agent_id)
+            if event.event_type != event_type {
+                return false;
+            }
+            let reason: serde_json::Value =
+                serde_json::from_str(&event.reason).unwrap_or(json!({}));
+            event.capsule_id.as_deref() == Some(agent_id)
+                || reason["agent_id"].as_str() == Some(agent_id)
         })
         .unwrap_or_else(|| panic!("no {event_type} row"));
     let reason: serde_json::Value = serde_json::from_str(&event.reason).unwrap();
     (
         event.principal_id.unwrap_or_default(),
         reason["cause"].as_str().unwrap_or("").to_string(),
+        event.capsule_id.clone().unwrap_or_default(),
     )
 }
 
@@ -2814,12 +2826,13 @@ async fn demotion_stops_the_running_agent_and_closes_its_plans() {
         assert_eq!(stored["status"], "owner demoted", "{stored}");
         assert_eq!(stored["audit_recorded"], true, "{stored}");
     }
-    let (signer, cause) = stop_cause(&home.data, &agent, "agent.stop.requested");
+    let (signer, cause, _) = stop_cause(&home.data, &agent, "agent.stop.requested");
     assert_eq!(signer, other.principal_id);
     assert_eq!(cause, "owner demoted");
-    let (stopped_by, stopped_cause) = stop_cause(&home.data, &agent, "agent.stopped");
+    let (stopped_by, stopped_cause, capsule) = stop_cause(&home.data, &agent, "agent.stopped");
     assert_eq!(stopped_by, other.principal_id);
     assert_eq!(stopped_cause, "owner demoted");
+    assert_eq!(capsule, HOST);
     assert!(!store
         .get_request(ask.id.as_str())
         .await
@@ -2899,19 +2912,33 @@ async fn another_admin_stops_an_agent_whose_owner_was_demoted_directly() {
         crate::auth::now_ts(),
     )
     .unwrap();
-    assert!(
-        capsule_live(&gateway.agent_url, &gateway.secret, &session).await,
-        "a direct demote leaves the guest running"
-    );
-    let (status, body) = post_json(
-        &gateway.addr,
-        &other.system_token,
-        "/api/apps/system/agents/stop",
-        &json!({ "agent_id": agent }).to_string(),
-    )
-    .await;
-    assert_eq!(status, 200, "{body}");
-    assert!(!capsule_live(&gateway.agent_url, &gateway.secret, &session).await);
+    let mut stopped = false;
+    for _ in 0..50 {
+        if !capsule_live(&gateway.agent_url, &gateway.secret, &session).await {
+            stopped = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(stopped, "a direct demote stops the guest");
+    let mut signed = false;
+    for _ in 0..50 {
+        let present = crate::auth::load_auth_state(&home.data)
+            .unwrap()
+            .audit
+            .into_iter()
+            .any(|event| event.event_type == "agent.stopped");
+        if present {
+            signed = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(signed, "a direct demote signs agent.stopped");
+    let (signer, cause, capsule) = stop_cause(&home.data, &agent, "agent.stopped");
+    assert_eq!(signer, other.principal_id);
+    assert_eq!(cause, "owner demoted");
+    assert_eq!(capsule, HOST);
     let (guest, guest_body) = post_json(
         &gateway.addr,
         &owner.system_token,
@@ -2974,10 +3001,7 @@ async fn the_last_passkey_revocation_stops_the_agent_and_one_of_two_does_not() {
     .await;
     assert_eq!(kept, 200, "{kept_body}");
     assert!(capsule_live(&gateway.agent_url, &gateway.secret, &session).await);
-    assert!(crate::agents::owner_is_admin_now(
-        &home.data,
-        &owner.principal_id
-    ));
+    assert!(crate::agents::owner_is_admin_now(&home.data, &owner.principal_id).unwrap());
     let now = crate::auth::now_ts();
     let plan = super::super::gateway_inspect_actions::submit_pending_agent_plan(
         &home.data,
@@ -2999,14 +3023,380 @@ async fn the_last_passkey_revocation_stops_the_agent_and_one_of_two_does_not() {
     .await;
     assert_eq!(status, 200, "{body}");
     assert!(!capsule_live(&gateway.agent_url, &gateway.secret, &session).await);
-    assert!(!crate::agents::owner_is_admin_now(
-        &home.data,
-        &owner.principal_id
-    ));
+    assert!(!crate::agents::owner_is_admin_now(&home.data, &owner.principal_id).unwrap());
     let stored = plan_file(&home.data, plan_id);
     assert_eq!(stored["status"], "passkey revoked", "{stored}");
-    let (signer, cause) = stop_cause(&home.data, &agent, "agent.stopped");
+    let (signer, cause, capsule) = stop_cause(&home.data, &agent, "agent.stopped");
     assert_eq!(signer, other.principal_id);
     assert_eq!(cause, "passkey revoked");
+    assert_eq!(capsule, HOST);
+    gateway.shutdown().await;
+}
+
+async fn http_deny(addr: &str, token: &str, request_id: &str) -> (u16, String) {
+    let response = reqwest::Client::new()
+        .post(format!("http://{addr}/api/apps/inbox/actions"))
+        .header("host", addr)
+        .header("origin", "null")
+        .header("x-elastos-home-token", token)
+        .header("content-type", "application/json")
+        .body(
+            json!({
+                "action_id": format!("capability-deny-request:agent:{request_id}"),
+            })
+            .to_string(),
+        )
+        .send()
+        .await
+        .unwrap();
+    let status = response.status().as_u16();
+    (status, response.text().await.unwrap())
+}
+
+#[tokio::test]
+async fn an_audit_failure_on_a_sent_grant_names_the_next_start() {
+    let home = Home::open();
+    let agent = home.create_agent("Notes", "bafkreiauditsent");
+    let gateway = Gateway::start(&home.data).await;
+    let request_id = plant_pending(&home, "capsule:audit-sent", &agent).await;
+    let token = inbox_token(&home.data, &home.owner, &home.proof);
+    super::seams::arm_grant_kind(&home.data, "sent");
+    let (status, body) = http_approve(&gateway.addr, &token, &request_id).await;
+    assert_ne!(status, 200, "{body}");
+    assert_eq!(
+        body,
+        "Nothing ran. This approval is settled the next time Home starts."
+    );
+    assert!(!body.contains(&home.data.display().to_string()), "{body}");
+    let kinds: Vec<_> = grant_events(&home.data, &request_id)
+        .into_iter()
+        .map(|event| event.event_type)
+        .collect();
+    assert!(
+        kinds.iter().any(|kind| kind == "agent.grant.approved"),
+        "{kinds:?}"
+    );
+    assert!(
+        !kinds.iter().any(|kind| kind == "agent.grant.sent"),
+        "{kinds:?}"
+    );
+    gateway.shutdown().await;
+}
+
+#[tokio::test]
+async fn an_audit_failure_on_a_denied_ask_names_the_retry() {
+    let home = Home::open();
+    let agent = home.create_agent("Notes", "bafkreiauditdeny");
+    let gateway = Gateway::start(&home.data).await;
+    let request_id = plant_pending(&home, "capsule:audit-deny", &agent).await;
+    let token = inbox_token(&home.data, &home.owner, &home.proof);
+    super::seams::arm_grant_fault(&home.data, false);
+    let (status, body) = http_deny(&gateway.addr, &token, &request_id).await;
+    assert_ne!(status, 200, "{body}");
+    assert_eq!(body, "Nothing ran. Deny this ask again.");
+    assert!(!body.contains(&home.data.display().to_string()), "{body}");
+    gateway.shutdown().await;
+}
+
+fn live_home() -> (Home, PathBuf) {
+    let home = Home::open();
+    let dir = home._temp.path().join("probe");
+    (home, dir)
+}
+
+#[tokio::test]
+async fn a_failed_stop_row_on_disable_is_the_answer() {
+    let (home, dir) = live_home();
+    let agent = home.create_agent("Live", &sign_probe(&dir));
+    let gateway = Gateway::start(&home.data).await;
+    let _session = home.launch(&agent, &dir).await;
+    super::super::gateway_agents::fail_next_agent_audit(&home.data);
+    let (status, body) = post_json(
+        &gateway.addr,
+        &system_token(&home),
+        "/api/apps/system/agents/disable",
+        "{}",
+    )
+    .await;
+    assert_ne!(status, 200, "{body}");
+    assert!(
+        body.contains("the signed stop row was not recorded"),
+        "{body}"
+    );
+    assert!(!body.contains(&home.data.display().to_string()), "{body}");
+    gateway.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_failed_stop_row_on_retire_is_the_answer() {
+    let (home, dir) = live_home();
+    let agent = home.create_agent("Live", &sign_probe(&dir));
+    let gateway = Gateway::start(&home.data).await;
+    let _session = home.launch(&agent, &dir).await;
+    super::super::gateway_agents::fail_next_agent_audit(&home.data);
+    let (status, body) = post_json(
+        &gateway.addr,
+        &system_token(&home),
+        "/api/apps/system/agents/retire",
+        &json!({ "agent_id": agent }).to_string(),
+    )
+    .await;
+    assert_ne!(status, 200, "{body}");
+    assert!(
+        body.contains("the signed stop row was not recorded"),
+        "{body}"
+    );
+    assert!(!body.contains(&home.data.display().to_string()), "{body}");
+    gateway.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_failed_stop_row_on_activate_false_is_the_answer() {
+    let (home, dir) = live_home();
+    let agent = home.create_agent("Live", &sign_probe(&dir));
+    let gateway = Gateway::start(&home.data).await;
+    let session = home.launch(&agent, &dir).await;
+    let mut up = false;
+    for _ in 0..50 {
+        if capsule_live(&gateway.agent_url, &gateway.secret, &session).await {
+            up = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(up, "guest is up before activate");
+    super::super::gateway_agents::fail_next_agent_audit(&home.data);
+    let (status, body) = post_json(
+        &gateway.addr,
+        &system_token(&home),
+        "/api/apps/system/agents/activate",
+        &json!({ "agent_id": agent, "active": false }).to_string(),
+    )
+    .await;
+    assert_ne!(status, 200, "{body}");
+    assert!(
+        body.contains("the signed stop row was not recorded"),
+        "{body}"
+    );
+    assert!(!body.contains(&home.data.display().to_string()), "{body}");
+    gateway.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_failed_plan_close_on_disable_is_the_answer() {
+    let (home, dir) = live_home();
+    let agent = home.create_agent("Live", &sign_probe(&dir));
+    let gateway = Gateway::start(&home.data).await;
+    super::super::gateway_inspect_actions::submit_pending_agent_plan(
+        &home.data,
+        &home.owner,
+        &agent,
+        HOST,
+        "session:plan-close",
+        &step_plan(),
+        crate::auth::now_ts(),
+    )
+    .unwrap();
+    super::seams::arm_grant_fault(&home.data, false);
+    let (status, body) = post_json(
+        &gateway.addr,
+        &system_token(&home),
+        "/api/apps/system/agents/disable",
+        "{}",
+    )
+    .await;
+    assert_ne!(status, 200, "{body}");
+    assert!(
+        body.contains("the signed plan close was not recorded"),
+        "{body}"
+    );
+    assert!(!body.contains(&home.data.display().to_string()), "{body}");
+    gateway.shutdown().await;
+}
+
+#[tokio::test]
+async fn shutdown_signs_stopping_for_an_ended_session_with_an_inflight_effect() {
+    let (home, dir) = live_home();
+    let agent = home.create_agent("Live", &sign_probe(&dir));
+    let gateway = Gateway::start(&home.data).await;
+    let session = home.launch(&agent, &dir).await;
+    let runtime = crate::api::agent_plane::plane_runtime(&home.data).expect("plane");
+    runtime.bind_plan_instance(&session, &agent);
+    let book = runtime.plan_book();
+    let _guard =
+        crate::runtime::Runtime::try_enter_plan_effect(&book, &session, &agent, "hold-the-effect")
+            .expect("the effect is in flight");
+    runtime.end_planted_session_for_test(&session).await;
+    let (status, body) = post_json(
+        &gateway.addr,
+        &system_token(&home),
+        "/api/apps/system/agents/disable",
+        "{}",
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    let row = crate::auth::load_auth_state(&home.data)
+        .unwrap()
+        .audit
+        .into_iter()
+        .find(|event| {
+            event.event_type == "agent.stopped"
+                && event.session_id.as_deref() == Some(session.as_str())
+        })
+        .expect("stopping row");
+    assert_eq!(row.result, "stopping");
+    assert_eq!(row.capsule_id.as_deref(), Some(HOST));
+    gateway.shutdown().await;
+}
+
+#[tokio::test]
+async fn retire_of_an_idle_agent_succeeds_while_the_plane_is_down() {
+    let (home, dir) = live_home();
+    let agent = home.create_agent("Idle", &sign_probe(&dir));
+    let gateway = Gateway::start(&home.data).await;
+    stop_plane(&home.data).await;
+    assert!(crate::api::agent_plane::plane_runtime(&home.data).is_none());
+    std::fs::write(
+        crate::runtime_control::home_runtime_coord_path(&home.data),
+        br#"{"api_url":"http://127.0.0.1:9","attach_secret":"not-the-agent-plane"}"#,
+    )
+    .unwrap();
+    let error =
+        match super::super::gateway_home_runtime::stop_runtime_agent(&home.data, &agent).await {
+            Err(error) => error,
+            Ok(_) => panic!("a down plane still stopped the agent"),
+        };
+    assert_eq!(error.to_string(), "agent runtime is not running");
+    let (status, body) = post_json(
+        &gateway.addr,
+        &system_token(&home),
+        "/api/apps/system/agents/retire",
+        &json!({ "agent_id": agent }).to_string(),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    let record = crate::auth::stored_principal_record(&home.data, &agent)
+        .unwrap()
+        .unwrap();
+    assert!(record.retired_at.is_some(), "{record:?}");
+    gateway.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_failed_role_read_does_not_stop_another_admins_agent() {
+    let home = Home::open();
+    let owner = super::passkey_authority_with_name_role_credential(
+        &home.data,
+        Some("Owner"),
+        crate::auth::RuntimePrincipalRole::Admin,
+        "r12-read-owner",
+    );
+    let other = super::passkey_authority_with_name_role_credential(
+        &home.data,
+        Some("Other"),
+        crate::auth::RuntimePrincipalRole::Admin,
+        "r12-read-other",
+    );
+    let dir = home._temp.path().join("probe");
+    let agent = create_owned_agent(&home.data, &owner, &sign_probe(&dir));
+    let gateway = Gateway::start(&home.data).await;
+    let context = passkey_context(&owner);
+    let grant = super::super::gateway_home_token::issue_home_agent_launch_token_with_context(
+        &home.data, &agent, HOST, &context,
+    )
+    .unwrap();
+    let session =
+        super::super::gateway_home_runtime::launch_runtime_agent(&home.data, &dir, &agent, &grant)
+            .await
+            .unwrap()
+            .session_id;
+    crate::agents::fail_owner_admin_read(&home.data);
+    let (status, body) = post_json(
+        &gateway.addr,
+        &other.system_token,
+        "/api/apps/system/agents/stop",
+        &json!({ "agent_id": agent }).to_string(),
+    )
+    .await;
+    assert_ne!(status, 200, "{body}");
+    assert!(
+        body.contains("the owner's role could not be read"),
+        "{body}"
+    );
+    assert!(!body.contains(&home.data.display().to_string()), "{body}");
+    assert!(capsule_live(&gateway.agent_url, &gateway.secret, &session).await);
+    let stopped = crate::auth::load_auth_state(&home.data)
+        .unwrap()
+        .audit
+        .into_iter()
+        .any(|event| event.event_type == "agent.stopped");
+    assert!(!stopped, "a failed role read signed a stop");
+    gateway.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_failed_demote_stop_is_signed_and_retried_at_the_next_start() {
+    let home = Home::open();
+    let owner = super::passkey_authority_with_name_role_credential(
+        &home.data,
+        Some("Owner"),
+        crate::auth::RuntimePrincipalRole::Admin,
+        "r12-stop-owner",
+    );
+    let other = super::passkey_authority_with_name_role_credential(
+        &home.data,
+        Some("Other"),
+        crate::auth::RuntimePrincipalRole::Admin,
+        "r12-stop-other",
+    );
+    let dir = home._temp.path().join("probe");
+    let agent = create_owned_agent(&home.data, &owner, &sign_probe(&dir));
+    let gateway = Gateway::start(&home.data).await;
+    let context = passkey_context(&owner);
+    let grant = super::super::gateway_home_token::issue_home_agent_launch_token_with_context(
+        &home.data, &agent, HOST, &context,
+    )
+    .unwrap();
+    let session =
+        super::super::gateway_home_runtime::launch_runtime_agent(&home.data, &dir, &agent, &grant)
+            .await
+            .unwrap()
+            .session_id;
+    crate::api::agent_plane::arm_task_fault(&home.data, "the plane did not stop the agent");
+    let (status, body) = home_http(
+        &gateway.addr,
+        &other.system_token,
+        reqwest::Method::POST,
+        &format!("/api/auth/passkeys/{}/demote-guest", owner.proof_binding_id),
+    )
+    .await;
+    assert_ne!(status, 200, "{body}");
+    assert!(body.contains("did not stop"), "{body}");
+    assert!(!body.contains(&home.data.display().to_string()), "{body}");
+    // The parked ask is denied in the same failure, and that denial ends this
+    // probe. The signed failed row is what the next start retries.
+    let (signer, cause, capsule) = stop_cause(&home.data, &agent, "agent.stopped");
+    assert_eq!(signer, other.principal_id);
+    assert_eq!(cause, "owner demoted");
+    assert_eq!(capsule, HOST);
+    let failed = crate::auth::load_auth_state(&home.data)
+        .unwrap()
+        .audit
+        .into_iter()
+        .find(|event| event.event_type == "agent.stopped")
+        .unwrap();
+    assert_eq!(failed.result, "failed");
+    crate::api::agent_plane::clear_task_fault(&home.data);
+    super::super::gateway_agents::confirm_stopping_rows(&home.data)
+        .await
+        .unwrap();
+    assert!(!capsule_live(&gateway.agent_url, &gateway.secret, &session).await);
+    let retried = crate::auth::load_auth_state(&home.data)
+        .unwrap()
+        .audit
+        .into_iter()
+        .rfind(|event| event.event_type == "agent.stopped")
+        .unwrap();
+    assert_ne!(retried.result, "failed");
     gateway.shutdown().await;
 }

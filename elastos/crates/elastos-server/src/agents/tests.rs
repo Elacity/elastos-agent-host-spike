@@ -3280,6 +3280,12 @@ fn production_sources(dir: &Path, found: &mut Vec<(PathBuf, String)>) {
 }
 
 #[test]
+fn a_failed_owner_read_is_named() {
+    let name: fn(&Path) = fail_owner_admin_read;
+    let _ = name;
+}
+
+#[test]
 fn the_cargo_feature_is_read_in_one_place() {
     let mut sources = Vec::new();
     production_sources(

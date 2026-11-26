@@ -4990,6 +4990,76 @@ pub(crate) fn load_owner_principals(data_dir: &Path) -> anyhow::Result<Vec<Princ
     Ok(load_auth_state(data_dir)?.principals)
 }
 
+/// Another admin with a live passkey. `owner_id` is not a candidate.
+pub(crate) fn another_live_admin(data_dir: &Path, owner_id: &str) -> Option<PrincipalRecord> {
+    load_owner_principals(data_dir)
+        .ok()?
+        .into_iter()
+        .find(|principal| {
+            principal.principal_id != owner_id
+                && is_admin(principal)
+                && principal
+                    .proof_binding
+                    .passkey
+                    .as_ref()
+                    .is_some_and(|passkey| passkey.revoked_at.is_none())
+        })
+}
+
+/// One agent whose latest `agent.stopped` row is `failed`, with the principal
+/// that signed it. A later `ok` or `stopping` row drops that agent.
+pub(crate) struct FailedAgentStop {
+    pub(crate) agent_id: String,
+    pub(crate) principal: PrincipalRecord,
+    pub(crate) reason: serde_json::Value,
+}
+
+pub(crate) fn latest_failed_agent_stops(data_dir: &Path) -> Vec<FailedAgentStop> {
+    let Ok(auth) = load_auth_state(data_dir) else {
+        return Vec::new();
+    };
+    let mut latest =
+        std::collections::HashMap::<String, (String, String, serde_json::Value)>::new();
+    for event in &auth.audit {
+        if event.event_type != "agent.stopped" {
+            continue;
+        }
+        let Ok(reason) = serde_json::from_str::<serde_json::Value>(&event.reason) else {
+            continue;
+        };
+        let Some(agent_id) = reason.get("agent_id").and_then(|value| value.as_str()) else {
+            continue;
+        };
+        let Some(principal_id) = event.principal_id.clone() else {
+            continue;
+        };
+        latest.insert(
+            agent_id.to_string(),
+            (event.result.clone(), principal_id, reason),
+        );
+    }
+    let mut failed = Vec::new();
+    for (agent_id, (result, principal_id, reason)) in latest {
+        if result != "failed" {
+            continue;
+        }
+        let Some(principal) = auth
+            .principals
+            .iter()
+            .find(|principal| principal.principal_id == principal_id)
+            .cloned()
+        else {
+            continue;
+        };
+        failed.push(FailedAgentStop {
+            agent_id,
+            principal,
+            reason,
+        });
+    }
+    failed
+}
+
 fn load_auth_state_with_identity(
     data_dir: &Path,
 ) -> anyhow::Result<(AuthState, Option<RegularFileIdentity>)> {
@@ -8079,7 +8149,7 @@ pub fn demote_passkey_to_guest(
     proof_binding_id: &str,
     updated_at: u64,
 ) -> anyhow::Result<PrincipalRecord> {
-    mutate_auth_state(data_dir, |state| {
+    let demoted = mutate_auth_state(data_dir, |state| {
         let index = active_passkey_role_target(state, proof_binding_id)?;
         let target = &state.principals[index];
         if target.role != RuntimePrincipalRole::Admin {
@@ -8103,7 +8173,9 @@ pub fn demote_passkey_to_guest(
             RuntimePrincipalRole::Guest,
             updated_at,
         ))
-    })
+    })?;
+    crate::agents::owner_demoted(data_dir, &demoted.principal_id);
+    Ok(demoted)
 }
 
 pub fn ensure_recovered_root_reassignable(

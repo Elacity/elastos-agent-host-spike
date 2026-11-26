@@ -36,8 +36,8 @@ pub(crate) fn take_grant_fault(data_dir: &Path, crash: bool) -> bool {
     guard(&GRANT_FAULTS).remove(&(data_dir.to_path_buf(), crash))
 }
 
-/// One named fault for this Home: `before-send`, `after-mint`, `minted-row`, or `timeout`.
-#[cfg(feature = "prototype-agents")]
+/// One named fault for this Home: `before-send`, `after-mint`, `minted-row`,
+/// `timeout`, `sent`, or `started`.
 pub(crate) fn arm_grant_kind(data_dir: &Path, kind: &str) {
     guard(&GRANT_KINDS).insert(data_dir.to_path_buf(), kind.to_string());
 }

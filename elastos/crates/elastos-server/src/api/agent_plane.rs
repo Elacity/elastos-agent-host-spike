@@ -45,6 +45,18 @@ pub(crate) fn task_fault(data_dir: &Path) -> Option<&'static str> {
     map.get(data_dir).copied()
 }
 
+#[cfg(all(test, unix))]
+pub(crate) fn arm_task_fault(data_dir: &Path, name: &'static str) {
+    if let Ok(mut map) = faults().lock() {
+        map.insert(data_dir.to_path_buf(), name);
+    }
+}
+
+#[cfg(all(test, unix))]
+pub(crate) fn clear_task_fault(data_dir: &Path) {
+    clear_fault(data_dir);
+}
+
 #[cfg(unix)]
 fn note_fault(data_dir: &Path, name: &'static str) {
     if let Ok(mut map) = faults().lock() {
@@ -173,14 +185,18 @@ impl AgentPlane {
     /// whether that session actually ended and whether a plan effect is still
     /// in flight. A caller signs `ok` only from those two facts.
     pub(crate) async fn shutdown(mut self) -> Vec<EndedGuest> {
-        let live: Vec<String> = self
-            .runtime
-            .list_capsules()
-            .await
-            .into_iter()
-            .filter(|info| info.ended_at.is_none())
-            .map(|info| info.id)
-            .collect();
+        let capsules = self.runtime.list_capsules().await;
+        let mut ids = std::collections::HashSet::new();
+        for info in &capsules {
+            if info.ended_at.is_none() {
+                ids.insert(info.id.clone());
+            }
+            if let Some(principal) = info.principal.as_deref() {
+                ids.extend(self.runtime.inflight_plan_sessions(principal));
+            }
+        }
+        let mut live: Vec<String> = ids.into_iter().collect();
+        live.sort();
         let mut ended = Vec::new();
         for id in live {
             let agent_id = self
@@ -509,12 +525,13 @@ pub(crate) fn instance_is_running(data_dir: &Path, capsule_id: &str) -> bool {
 /// Stop the agent Runtime for this Home. Live guests end first, inside
 /// [`AgentPlane::shutdown`], so their grants and pending plans end with them.
 /// The live runtime is recorded as retiring before it leaves the map, under
-/// the same lock, so a reader never sees neither.
-pub(crate) async fn stop_running(data_dir: &Path) -> Vec<EndedGuest> {
+/// the same lock, so a reader never sees neither. The plan-close result is
+/// the caller's to answer: a failed signature is not dropped here.
+pub(crate) async fn stop_running(data_dir: &Path) -> (Vec<EndedGuest>, anyhow::Result<()>) {
     let gate = home_gate(data_dir);
     let _hold = gate.lock().await;
     let Some(plane) = take_live_for_stop(data_dir) else {
-        return Vec::new();
+        return (Vec::new(), Ok(()));
     };
     #[cfg(all(test, unix))]
     if STOP_GAP.swap(false, Ordering::AcqRel) {
@@ -530,9 +547,9 @@ pub(crate) async fn stop_running(data_dir: &Path) -> Vec<EndedGuest> {
         }
         homes.retain(|_, slot| slot.live.is_some() || slot.retiring.is_some());
     }
-    let _ = crate::api::gateway::close_home_plans(&dir, "agents off");
+    let closed = crate::api::gateway::close_home_plans(&dir, "agents off").map(|_| ());
     crate::resource_bridge::notify_plan_waiters();
-    ended
+    (ended, closed)
 }
 
 fn take_live_for_stop(data_dir: &Path) -> Option<AgentPlane> {
@@ -1169,6 +1186,16 @@ mod tests {
             assert!(super::installed_provider_registry(dir.path()).is_none());
         }
         assert!(!super::PLANT_TASK_PANIC.load(std::sync::atomic::Ordering::Acquire));
+        #[cfg(unix)]
+        {
+            fn name_task_faults(
+                arm: fn(&std::path::Path, &'static str),
+                clear: fn(&std::path::Path),
+            ) {
+                let _ = (arm, clear);
+            }
+            name_task_faults(super::arm_task_fault, super::clear_task_fault);
+        }
         #[cfg(unix)]
         {
             // Named so a build without the agents feature still compiles them.

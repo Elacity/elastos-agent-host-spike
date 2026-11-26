@@ -254,7 +254,7 @@ pub(super) fn pending_inspect_action_requests(
     principal_id: &str,
 ) -> anyhow::Result<Vec<serde_json::Value>> {
     let mut rows = store::pending_inspect_action_requests(data_dir, principal_id)?;
-    if !crate::agents::owner_is_admin_now(data_dir, principal_id) {
+    if crate::agents::owner_is_admin_now(data_dir, principal_id).ok() != Some(true) {
         rows.retain(|row| row.get("kind").and_then(|kind| kind.as_str()) != Some(AGENT_PLAN_KIND));
     }
     Ok(rows)
@@ -414,7 +414,7 @@ pub(super) fn approve_agent_plan_request(
     card_binding: &serde_json::Value,
     step_up_token: Option<&str>,
 ) -> anyhow::Result<String> {
-    if plan_owner_lost_admin(&state.data_dir, request_id, context.principal_id()) {
+    if plan_owner_lost_admin(&state.data_dir, request_id, context.principal_id())? {
         anyhow::bail!(crate::agents::OWNER_NOT_ADMIN);
     }
     if let Some(block) = agent_plan_approval_block(&state.data_dir, request_id) {
@@ -446,7 +446,7 @@ pub(super) fn approve_agent_plan_request(
                     "agent.plan.approved",
                     "approved",
                 )
-                .map_err(super::inbox_audit_refusal)?;
+                .map_err(|error| super::inbox_audit_refusal(error, "A fresh passkey is needed."))?;
             }
             Ok(())
         },
@@ -464,15 +464,21 @@ pub(super) fn settle_agent_plans_lost_before_start(data_dir: &FsPath) -> anyhow:
 pub(crate) const PLAN_DECISION_SECS: u64 = 300;
 
 /// The caller owns this plan and is not an admin now. Nothing is written.
-fn plan_owner_lost_admin(data_dir: &FsPath, request_id: &str, caller: &str) -> bool {
+fn plan_owner_lost_admin(
+    data_dir: &FsPath,
+    request_id: &str,
+    caller: &str,
+) -> anyhow::Result<bool> {
     let person = crate::auth::stored_principal_record(data_dir, caller)
         .ok()
         .flatten()
         .is_some_and(|record| record.kind == crate::auth::PrincipalKind::Human);
-    person
-        && !crate::agents::owner_is_admin_now(data_dir, caller)
+    if !person {
+        return Ok(false);
+    }
+    Ok(!crate::agents::owner_is_admin_now(data_dir, caller)?
         && read_inspect_action_record(data_dir, request_id)
-            .is_ok_and(|record| record.kind == AGENT_PLAN_KIND && record.principal_id == caller)
+            .is_ok_and(|record| record.kind == AGENT_PLAN_KIND && record.principal_id == caller))
 }
 
 /// Why this plan cannot be approved, or nothing when it is still pending.
@@ -608,7 +614,7 @@ pub(crate) fn deny_agent_plan_request(
     owner_id: &str,
     request_id: &str,
 ) -> anyhow::Result<String> {
-    if plan_owner_lost_admin(data_dir, request_id, owner_id) {
+    if plan_owner_lost_admin(data_dir, request_id, owner_id)? {
         anyhow::bail!(crate::agents::OWNER_NOT_ADMIN);
     }
     let closed = store::close_pending_agent_plans(data_dir, "denied", now_ts(), false, |record| {
@@ -617,7 +623,9 @@ pub(crate) fn deny_agent_plan_request(
     if closed.is_empty() {
         anyhow::bail!("agent plan is not pending");
     }
-    finish_closed_plans(closed, data_dir).map_err(super::inbox_audit_refusal)?;
+    finish_closed_plans(closed, data_dir).map_err(|error| {
+        super::inbox_audit_refusal(error, "This denial is signed the next time Home starts.")
+    })?;
     Ok("Denied agent plan.".to_string())
 }
 
@@ -748,13 +756,18 @@ pub(in crate::api) async fn dispatch_approved_agent_plan(
     };
     let data_dir = state.data_dir.clone();
     if let Err(err) = append_agent_plan_dispatch_audit(&data_dir, &record, "started") {
-        settle_agent_plan_dispatch(
+        let settled = settle_agent_plan_dispatch(
             &data_dir,
             record,
             "not_sent",
             serde_json::json!({"status": "not_sent", "code": "claim_audit_error"}),
-        )?;
-        return Err(err);
+        );
+        let next = if settled.is_ok() {
+            "This step was not sent."
+        } else {
+            "This approval is settled the next time Home starts."
+        };
+        return Err(super::inbox_audit_refusal(err, next));
     }
     let record_if_lost = record.clone();
     let data_dir_if_lost = data_dir.clone();
@@ -1052,6 +1065,9 @@ fn settle_agent_plan_dispatch(
         record.audit_recorded = true;
         let _ = write_inspect_action_record(data_dir, &record);
     }
+    if !matches!(status, "pending" | "approved" | "dispatching" | "started") {
+        crate::resource_bridge::forget_one_agent_plan_authority(&record.request_id);
+    }
     Ok(format!("Agent plan dispatch {status}."))
 }
 
@@ -1088,6 +1104,10 @@ fn append_agent_plan_dispatch_audit(
     record: &InspectActionRequestRecord,
     status: &str,
 ) -> anyhow::Result<()> {
+    #[cfg(test)]
+    if status == "started" && super::gateway_tests::seams::take_grant_kind(data_dir, "started") {
+        anyhow::bail!("injected agent plan dispatch audit failure");
+    }
     let event_type = match status {
         "started" => "agent_plan.dispatch.started",
         "completed" => "agent_plan.dispatch.completed",

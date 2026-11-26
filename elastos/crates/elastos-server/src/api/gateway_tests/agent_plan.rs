@@ -4105,3 +4105,144 @@ async fn a_terminal_plan_is_signed_once_after_a_crash_and_after_rolloff() {
         let _ = owner_id;
     }
 }
+
+#[tokio::test]
+async fn a_failed_plan_denial_names_the_next_start() {
+    let (dir, owner, request_id) = planted_plan(91);
+    super::seams::arm_grant_fault(dir.path(), false);
+    let error = super::super::gateway_inspect_actions::deny_agent_plan_request(
+        dir.path(),
+        &owner,
+        &request_id,
+    )
+    .unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "Nothing ran. This denial is signed the next time Home starts."
+    );
+    assert!(!error
+        .to_string()
+        .contains(&dir.path().display().to_string()));
+    assert_eq!(plan_status(dir.path(), &request_id), "denied");
+    assert_ne!(
+        read_record(dir.path(), &request_id)["audit_recorded"],
+        json!(true)
+    );
+}
+
+#[tokio::test]
+async fn a_failed_started_row_says_the_step_was_not_sent() {
+    let dir = tempfile::tempdir().unwrap();
+    let (state, _calls) = agent_plan_dispatch_state(dir.path()).await;
+    let owner = passkey_authority(dir.path());
+    let agent_id = crate::agents::tests::plant_for_dispatch(
+        dir.path(),
+        &owner.principal_id,
+        &owner.principal_id,
+    );
+    let created = submit(dir.path(), &owner.principal_id, &agent_id, read_plan(), 92);
+    let id = created["request_id"].as_str().unwrap();
+    set_approved(dir.path(), id);
+    super::seams::arm_grant_kind(dir.path(), "started");
+    let error = super::gateway_inspect_actions::dispatch_approved_agent_plan(
+        &state,
+        &dispatch_context(&owner.principal_id),
+        id,
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.to_string(), "Nothing ran. This step was not sent.");
+    assert!(!error
+        .to_string()
+        .contains(&dir.path().display().to_string()));
+    assert_eq!(plan_status(dir.path(), id), "not_sent");
+}
+
+#[cfg(feature = "prototype-agents")]
+#[tokio::test]
+async fn a_guest_submit_stops_at_the_open_plan_cap_and_keeps_older_rows() {
+    let Some((home, ctx, requester, owner)) =
+        crate::resource_bridge::tests::open_submit_agent_plan().await
+    else {
+        return;
+    };
+    let plan = read_plan();
+    let mut ids = Vec::new();
+    let mut step = serde_json::Value::Null;
+    for n in 1..=8u64 {
+        let response = crate::resource_bridge::tests::submit_with_write(&ctx, n, &plan).await;
+        assert_eq!(
+            response["response"]["type"], "resource_result",
+            "{response}"
+        );
+        step = response["response"]["result"]["data"]["request"].clone();
+        ids.push(
+            response["response"]["result"]["data"]["request_id"]
+                .as_str()
+                .unwrap()
+                .to_string(),
+        );
+    }
+    // The ninth call below is the refusal. This authority is not an open plan.
+    crate::resource_bridge::retain_agent_plan_dispatch_authority(
+        "closed-plan",
+        &owner,
+        &ctx,
+        &step,
+    )
+    .unwrap();
+    assert!(crate::resource_bridge::agent_plan_authority_is_held(
+        "closed-plan"
+    ));
+    let before = std::fs::read_dir(home.path().join("inspect-actions"))
+        .unwrap()
+        .count();
+    let refused = crate::resource_bridge::tests::submit_with_write(&ctx, 9, &plan).await;
+    assert_eq!(
+        refused["response"]["code"], "submit_agent_plan_refused",
+        "{refused}"
+    );
+    let message = refused["response"]["message"].as_str().unwrap_or("");
+    assert!(
+        message.contains("submit_agent_plan refused") && message.contains("8"),
+        "{refused}"
+    );
+    assert!(!crate::resource_bridge::agent_plan_authority_is_held(
+        "closed-plan"
+    ));
+    let after = std::fs::read_dir(home.path().join("inspect-actions"))
+        .unwrap()
+        .count();
+    assert_eq!(after, before, "a refused submit writes nothing");
+    for id in &ids {
+        assert_eq!(plan_status(home.path(), id), "pending", "{id}");
+    }
+    for n in 0..24u64 {
+        crate::api::gateway::submit_pending_agent_plan(
+            home.path(),
+            &owner,
+            &requester,
+            "capsule:extra",
+            &format!("session:extra-{n}"),
+            &plan,
+            9_000 + n,
+        )
+        .unwrap();
+    }
+    let home_full = crate::api::gateway::submit_pending_agent_plan(
+        home.path(),
+        &owner,
+        &requester,
+        "capsule:extra",
+        "session:extra-full",
+        &plan,
+        9_100,
+    )
+    .unwrap_err();
+    assert!(
+        home_full.to_string().contains("submit_agent_plan refused")
+            && home_full.to_string().contains("32"),
+        "{home_full}"
+    );
+    assert_eq!(plan_status(home.path(), &ids[0]), "pending");
+}

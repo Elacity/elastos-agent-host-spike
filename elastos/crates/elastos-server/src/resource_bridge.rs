@@ -508,6 +508,26 @@ pub(crate) fn forget_one_agent_plan_authority(request_id: &str) {
     }
 }
 
+/// Drop authorities for plans that are no longer open on this Home.
+pub(crate) fn drop_closed_plan_authorities(data_dir: &Path, open_ids: &[&str]) {
+    if let Ok(mut authorities) = plan_authorities().lock() {
+        authorities.retain(|id, held| {
+            let Some(held_dir) = held.context.data_dir.as_deref() else {
+                return true;
+            };
+            held_dir != data_dir || open_ids.contains(&id.as_str())
+        });
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn agent_plan_authority_is_held(request_id: &str) -> bool {
+    plan_authorities()
+        .lock()
+        .map(|authorities| authorities.contains_key(request_id))
+        .unwrap_or(false)
+}
+
 /// How many guests on one Home may sit in the host waiting for a plan
 /// decision at once. A third Start on that Home is refused while two waits
 /// are held. Another Home counts its own waits.
@@ -9424,9 +9444,17 @@ pub(crate) mod tests {
         Some((home, ctx, provider, requester, owner))
     }
 
+    /// The guest bridge, without the test provider in the type.
+    #[cfg(unix)]
+    pub(crate) async fn open_submit_agent_plan(
+    ) -> Option<(crate::agents::tests::Home, BridgeContext, String, String)> {
+        let (home, ctx, _provider, requester, owner) = submit_agent_plan_context().await?;
+        Some((home, ctx, requester, owner))
+    }
+
     /// A granted submission of `plan` by the bridge's principal.
     #[cfg(unix)]
-    async fn submit_with_write(
+    pub(crate) async fn submit_with_write(
         ctx: &BridgeContext,
         id: u64,
         plan: &serde_json::Value,
@@ -10728,5 +10756,16 @@ fn after() {
             index += 1;
         }
         panic!("unclosed {name}");
+    }
+
+    #[test]
+    fn an_unheld_plan_authority_is_not_held() {
+        assert!(!super::agent_plan_authority_is_held("missing-plan"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_submit_bridge_is_named() {
+        let _ = open_submit_agent_plan;
     }
 }

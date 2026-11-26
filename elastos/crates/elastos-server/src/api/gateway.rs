@@ -1606,10 +1606,10 @@ fn gateway_provider_error_status(scheme: &str, err: &anyhow::Error) -> StatusCod
 }
 
 /// An Inbox grant or plan audit failed. The path stays in the log. The person
-/// reads one sentence: nothing ran, and a fresh passkey is needed.
-pub(super) fn inbox_audit_refusal(error: anyhow::Error) -> anyhow::Error {
+/// reads one sentence: nothing ran, and what to do next for this action.
+pub(super) fn inbox_audit_refusal(error: anyhow::Error, next: &'static str) -> anyhow::Error {
     tracing::warn!("inbox decision was not recorded: {error:#}");
-    anyhow::anyhow!("Nothing ran. A fresh passkey is needed.")
+    anyhow::anyhow!("Nothing ran. {next}")
 }
 
 fn inbox_error_response(err: anyhow::Error) -> Response {

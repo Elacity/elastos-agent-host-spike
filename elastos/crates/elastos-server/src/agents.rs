@@ -2284,7 +2284,7 @@ pub(crate) fn stored_agent(
     else {
         return refused(NO_SUCH_AGENT);
     };
-    if !owner_is_admin_now(data_dir, owner_id) {
+    if !owner_is_admin_now(data_dir, owner_id)? {
         return refused(OWNER_NOT_ADMIN);
     }
     if agent.record.retired_at.is_some() {
@@ -2296,11 +2296,39 @@ pub(crate) fn stored_agent(
     Ok(agent.clone())
 }
 
+/// One Home whose next owner-role read fails. A failed read is not "not an admin".
+#[cfg(test)]
+static OWNER_ADMIN_READ_FAILS: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashSet<std::path::PathBuf>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashSet::new()));
+
+/// The next `owner_is_admin_now` for this Home fails closed.
+#[cfg(all(test, unix))]
+pub(crate) fn fail_owner_admin_read(data_dir: &Path) {
+    OWNER_ADMIN_READ_FAILS
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+        .insert(data_dir.to_path_buf());
+}
+
 /// The owner is an admin now: Admin role, and a live passkey when they have one.
-/// A Guest, and an admin whose every passkey is revoked, is not.
-pub(crate) fn owner_is_admin_now(data_dir: &Path, owner_id: &str) -> bool {
-    let Ok(records) = crate::auth::load_owner_principals(data_dir) else {
-        return false;
+/// A Guest, and an admin whose every passkey is revoked, is not. A failed read
+/// is an error. It is not a Guest.
+pub(crate) fn owner_is_admin_now(data_dir: &Path, owner_id: &str) -> anyhow::Result<bool> {
+    #[cfg(test)]
+    if OWNER_ADMIN_READ_FAILS
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+        .remove(data_dir)
+    {
+        anyhow::bail!("the owner's role could not be read");
+    }
+    let records = match crate::auth::load_owner_principals(data_dir) {
+        Ok(records) => records,
+        Err(error) => {
+            tracing::warn!("owner admin check was not read: {error:#}");
+            anyhow::bail!("the owner's role could not be read");
+        }
     };
     let mut admin = false;
     let mut passkey = false;
@@ -2315,7 +2343,63 @@ pub(crate) fn owner_is_admin_now(data_dir: &Path, owner_id: &str) -> bool {
             live_passkey |= key.revoked_at.is_none();
         }
     }
-    admin && (!passkey || live_passkey)
+    Ok(admin && (!passkey || live_passkey))
+}
+
+/// The route that demotes an owner stops that owner's agents itself.
+/// A demote that does not come through the route is not claimed, and the
+/// registered stop runs for that owner.
+static DEMOTE_STOP_CLAIMS: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashSet<String>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashSet::new()));
+type OwnerDemotedHook = fn(&Path, &str);
+static OWNER_DEMOTED_HOOK: std::sync::LazyLock<std::sync::Mutex<Option<OwnerDemotedHook>>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(None));
+
+fn demote_stop_key(data_dir: &Path, owner_id: &str) -> String {
+    format!("{}\n{owner_id}", data_dir.display())
+}
+
+fn demote_claims() -> std::sync::MutexGuard<'static, std::collections::HashSet<String>> {
+    DEMOTE_STOP_CLAIMS
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+}
+
+/// The demote route calls this before it changes the role, then stops the
+/// agents itself and releases the claim.
+pub(crate) fn claim_demoted_stop(data_dir: &Path, owner_id: &str) {
+    demote_claims().insert(demote_stop_key(data_dir, owner_id));
+}
+
+pub(crate) fn release_demoted_stop(data_dir: &Path, owner_id: &str) {
+    demote_claims().remove(&demote_stop_key(data_dir, owner_id));
+}
+
+/// The gateway registers the stop that a direct demote runs.
+pub(crate) fn set_owner_demoted_hook(hook: fn(&Path, &str)) {
+    *OWNER_DEMOTED_HOOK
+        .lock()
+        .unwrap_or_else(|err| err.into_inner()) = Some(hook);
+}
+
+/// A role change to Guest. The route's own stop is claimed and skips this.
+/// With no agents there is nothing to stop.
+pub(crate) fn owner_demoted(data_dir: &Path, owner_id: &str) {
+    if demote_claims().contains(&demote_stop_key(data_dir, owner_id)) {
+        return;
+    }
+    if ids_owned_by(data_dir, owner_id).is_empty() {
+        return;
+    }
+    let hook = OWNER_DEMOTED_HOOK
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+        .as_ref()
+        .copied();
+    if let Some(hook) = hook {
+        hook(data_dir, owner_id);
+    }
 }
 
 /// Agent ids this person owns, retired records included, so their open plans close.

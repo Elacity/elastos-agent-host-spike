@@ -108,6 +108,7 @@ pub(super) async fn start_gateway_server_with_shutdown(
         std::io::ErrorKind::Unsupported,
         "gateway child ownership and private local control are unsupported on Windows",
     ))?;
+    crate::agents::set_owner_demoted_hook(super::gateway_agents::schedule_demoted_owner_stop);
     crate::auth::verify_auth_audit_chain_ready(&data_dir)?;
     let listener = TcpListener::bind(addr).await?;
     let local_control_registry = provider_registry.clone();
@@ -237,7 +238,10 @@ pub(super) async fn start_gateway_server_with_shutdown(
             (&mut server).await
         }
     };
-    crate::api::agent_plane::stop_running(&data_dir).await;
+    let (_, closed) = crate::api::agent_plane::stop_running(&data_dir).await;
+    if let Err(error) = closed {
+        tracing::warn!("agent plans were not closed while the gateway stopped: {error:#}");
+    }
     if let Some(task) = backup_cleanup {
         task.abort();
     }

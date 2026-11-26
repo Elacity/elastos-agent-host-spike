@@ -100,8 +100,36 @@ pub(super) fn create_pending_agent_plan_record(
         anyhow::bail!("agent plan step preview is too large and is refused rather than cut");
     }
     record.request_binding = Some(request_binding);
+    let open = super::store::load_agent_plan_records(data_dir)?;
+    let open_ids: Vec<&str> = open
+        .iter()
+        .filter(|row| agent_plan_is_open(&row.status))
+        .map(|row| row.request_id.as_str())
+        .collect();
+    crate::resource_bridge::drop_closed_plan_authorities(data_dir, &open_ids);
+    if open_ids.len() >= OPEN_AGENT_PLANS_PER_HOME {
+        anyhow::bail!(
+            "submit_agent_plan refused: this Home has {OPEN_AGENT_PLANS_PER_HOME} open agent plans"
+        );
+    }
+    let session_open = open
+        .iter()
+        .filter(|row| agent_plan_is_open(&row.status) && row.session_id == context.session_id)
+        .count();
+    if session_open >= OPEN_AGENT_PLANS_PER_SESSION {
+        anyhow::bail!(
+            "submit_agent_plan refused: this session has {OPEN_AGENT_PLANS_PER_SESSION} open agent plans"
+        );
+    }
     write_inspect_action_record(data_dir, &record)?;
     Ok(record)
+}
+
+const OPEN_AGENT_PLANS_PER_SESSION: usize = 8;
+const OPEN_AGENT_PLANS_PER_HOME: usize = 32;
+
+fn agent_plan_is_open(status: &str) -> bool {
+    matches!(status, "pending" | "approved" | "dispatching" | "started")
 }
 
 /// The one binding of an agent plan: the ESP sha256 over its exact typed step

@@ -1140,15 +1140,19 @@ async fn passkey_revoke_inner(
             ..AuditEventInput::default()
         }),
     )?;
-    if !crate::agents::owner_is_admin_now(&state.data_dir, &revoked.principal_id) {
-        super::gateway::stop_agents_after_admin_lost(
-            &state.data_dir,
-            &context,
-            &actor_record,
-            &revoked.principal_id,
-            "passkey revoked",
-        )
-        .await;
+    match crate::agents::owner_is_admin_now(&state.data_dir, &revoked.principal_id) {
+        Ok(false) => {
+            super::gateway::stop_agents_after_admin_lost(
+                &state.data_dir,
+                &context,
+                &actor_record,
+                &revoked.principal_id,
+                "passkey revoked",
+            )
+            .await?;
+        }
+        Ok(true) => {}
+        Err(error) => return Err(error),
     }
 
     let clear_current_cookie = context.proof_binding_id() == Some(proof_binding_id.as_str());
@@ -1230,8 +1234,19 @@ async fn passkey_demote_guest_inner(
     }
 
     let now = crate::auth::now_ts();
-    let demoted = crate::auth::demote_passkey_to_guest(&state.data_dir, &proof_binding_id, now)?;
-    crate::auth::append_audit_event(
+    let owner_id = target.principal_id.clone();
+    // This route stops the agents. A demote that skips the route does not
+    // take the claim, so the same stop runs from the role change.
+    crate::agents::claim_demoted_stop(&state.data_dir, &owner_id);
+    let demoted =
+        match crate::auth::demote_passkey_to_guest(&state.data_dir, &proof_binding_id, now) {
+            Ok(demoted) => demoted,
+            Err(error) => {
+                crate::agents::release_demoted_stop(&state.data_dir, &owner_id);
+                return Err(error);
+            }
+        };
+    let audited = crate::auth::append_audit_event(
         &state.data_dir,
         audit_event(AuditEventInput {
             event_type: "auth.passkey.demoted",
@@ -1243,8 +1258,8 @@ async fn passkey_demote_guest_inner(
             occurred_at: now,
             ..AuditEventInput::default()
         }),
-    )?;
-    super::gateway::stop_agents_after_admin_lost(
+    );
+    let stopped = super::gateway::stop_agents_after_admin_lost(
         &state.data_dir,
         &context,
         &actor,
@@ -1252,6 +1267,9 @@ async fn passkey_demote_guest_inner(
         "owner demoted",
     )
     .await;
+    crate::agents::release_demoted_stop(&state.data_dir, &owner_id);
+    audited?;
+    stopped?;
 
     Ok(PasskeyDemoteResponse {
         status: "demoted".to_string(),

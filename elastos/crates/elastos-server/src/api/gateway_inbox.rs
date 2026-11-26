@@ -115,7 +115,8 @@ pub(super) async fn append_inbox_requests(
         append_runtime_capability_notifications(notifications, home_asks);
     }
     // A Guest, including an admin who was just demoted, sees no agent ask.
-    if crate::agents::owner_is_admin_now(&state.data_dir, context.principal_id()) {
+    if crate::agents::owner_is_admin_now(&state.data_dir, context.principal_id()).ok() == Some(true)
+    {
         append_agent_asks(
             notifications,
             context.principal_id(),
@@ -1114,7 +1115,7 @@ async fn answer_agent_ask(
             .ok()
             .flatten()
             .is_some_and(|record| record.kind == crate::auth::PrincipalKind::Human);
-        if person && !crate::agents::owner_is_admin_now(data_dir, caller) {
+        if person && !crate::agents::owner_is_admin_now(data_dir, caller)? {
             anyhow::bail!(crate::agents::OWNER_NOT_ADMIN);
         }
         anyhow::bail!("that request is no longer pending");
@@ -1129,7 +1130,7 @@ async fn answer_agent_ask(
     if agent.owner != caller {
         anyhow::bail!("{}", not_owner(caller, &agent.name));
     }
-    if !crate::agents::owner_is_admin_now(data_dir, caller) {
+    if !crate::agents::owner_is_admin_now(data_dir, caller)? {
         anyhow::bail!(crate::agents::OWNER_NOT_ADMIN);
     }
     if let Err(error) = crate::agents::stored_agent(data_dir, caller, &ask.agent_id) {
@@ -1139,7 +1140,7 @@ async fn answer_agent_ask(
     }
     if ask.resource.starts_with("localhost://") && own_rest(&ask.resource, &agent.root).is_none() {
         sign_agent_grant(data_dir, caller, ask, request_id, "denied", "denied")
-            .map_err(super::inbox_audit_refusal)?;
+            .map_err(|error| super::inbox_audit_refusal(error, "Deny this ask again."))?;
         decide_capability(&coords, request_id, false).await?;
         anyhow::bail!("a path outside the agent's own folder is not pending");
     }
@@ -1147,7 +1148,7 @@ async fn answer_agent_ask(
     let _gate = grant_answer_gate().lock().await;
     if !approve {
         sign_agent_grant(data_dir, caller, ask, request_id, "denied", "denied")
-            .map_err(super::inbox_audit_refusal)?;
+            .map_err(|error| super::inbox_audit_refusal(error, "Deny this ask again."))?;
         return decide_capability(&coords, request_id, false).await;
     }
     let again = read_pending(&coords).await?;
@@ -1160,12 +1161,14 @@ async fn answer_agent_ask(
     // minted row is unresolved. `not_granted` is only a refusal the plane
     // answered before any mint.
     sign_agent_grant(data_dir, caller, row, request_id, "approved", "approved")
-        .map_err(super::inbox_audit_refusal)?;
+        .map_err(|error| super::inbox_audit_refusal(error, "Approve this ask again."))?;
     #[cfg(test)]
     if super::gateway_tests::seams::take_grant_kind(data_dir, "before-send") {
         anyhow::bail!("crash before the send");
     }
-    sign_agent_grant(data_dir, caller, row, request_id, "sent", "sent")?;
+    sign_agent_grant(data_dir, caller, row, request_id, "sent", "sent").map_err(|error| {
+        super::inbox_audit_refusal(error, "This approval is settled the next time Home starts.")
+    })?;
     #[cfg(test)]
     if super::gateway_tests::seams::grant_kind_is(data_dir, "timeout") {
         let client = reqwest::Client::builder()
@@ -1283,6 +1286,10 @@ fn sign_agent_grant(
     #[cfg(test)]
     if kind == "minted" && super::gateway_tests::seams::take_grant_kind(data_dir, "minted-row") {
         anyhow::bail!("the minted row failed");
+    }
+    #[cfg(test)]
+    if kind == "sent" && super::gateway_tests::seams::take_grant_kind(data_dir, "sent") {
+        anyhow::bail!("injected agent grant audit failure");
     }
     #[cfg(test)]
     if super::gateway_tests::seams::take_grant_fault(data_dir, false) {

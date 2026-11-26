@@ -107,7 +107,7 @@
 
     function publicInboxText(value, fallback) {
       const text = String(value || "").trim();
-      if (text === "Nothing ran. A fresh passkey is needed.") {
+      if (text.startsWith("Nothing ran.")) {
         return text;
       }
       if (!text || /\b(runtime mirror|projection|schema|derived facts?|capsules?|providers?|capabilit(?:y|ies)|affordances?|authority boundary|provider boundary|gate preview|runtime-owned|launch token|hostcall|request failed|failed to fetch|unauthorized|forbidden|[45]\d\d)\b|engine_[a-z_]+/i.test(text)) {

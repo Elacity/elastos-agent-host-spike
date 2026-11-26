@@ -277,6 +277,37 @@ function calls(text, name) {
   return new RegExp(`(?:^|[^\\w])${needle}\\s*\\(`).test(sourceCode(text));
 }
 
+// The body of one function, skipping braces that sit inside quotes.
+function functionBody(source, name) {
+  const start = source.search(new RegExp(`(?:async\\s+)?fn\\s+${name}\\s*\\(`));
+  if (start < 0) return "";
+  const open = source.indexOf("{", start);
+  if (open < 0) return "";
+  let depth = 0;
+  let quote = "";
+  for (let i = open; i < source.length; i++) {
+    const ch = source[i];
+    if (quote) {
+      if (ch === "\\" && quote !== "`") {
+        i += 1;
+        continue;
+      }
+      if (ch === quote) quote = "";
+      continue;
+    }
+    if (ch === "\"" || ch === "'" || ch === "`") {
+      quote = ch;
+      continue;
+    }
+    if (ch === "{") depth += 1;
+    else if (ch === "}") {
+      depth -= 1;
+      if (depth === 0) return source.slice(open, i + 1);
+    }
+  }
+  return "";
+}
+
 // The launch route is the agents-in-gateway change when the gateway starts
 // the guest through the in-process agent plane. The home runtime must call
 // the plane's live coordinates and define a launch function with a body.
@@ -292,7 +323,12 @@ export function agentsInGatewayChange(gatewaySource, launchSource, homeRuntimeSo
   const asksPlane = calls(text, "launch_runtime_agent")
     && /agent_plane::[A-Za-z0-9_]+\s*\(/.test(text);
   const home = sourceCode(homeRuntimeSource);
-  const liveCoords = calls(home, "agent_plane::live_coords");
+  const launchBody = functionBody(home, "launch_runtime_agent");
+  let liveScope = launchBody;
+  if (calls(launchBody, "live_agent_coords")) {
+    liveScope += functionBody(home, "live_agent_coords");
+  }
+  const liveCoords = calls(liveScope, "agent_plane::live_coords");
   const emptyLaunch = /async fn launch_runtime_agent\s*\([^)]*\)\s*\{\s*\}/.test(home);
   const hop = /async fn launch_runtime_agent\s*\(/.test(home) && !emptyLaunch;
   const ok = registered && dispatch && asksPlane && liveCoords && hop;
@@ -300,8 +336,8 @@ export function agentsInGatewayChange(gatewaySource, launchSource, homeRuntimeSo
   if (!registered) reason = "the launch route is not registered";
   else if (!dispatch) reason = "the gateway does not dispatch the approved plan";
   else if (!asksPlane) reason = "the launch route does not start the agent on the in-process plane";
-  else if (!liveCoords) reason = "the launch does not call the plane's live coordinates";
   else if (emptyLaunch) reason = "launch_runtime_agent is empty";
+  else if (!liveCoords) reason = "the launch does not call the plane's live coordinates";
   else if (!hop) reason = "gateway_home_runtime.rs does not define launch_runtime_agent";
   return { ok, route, reason };
 }
