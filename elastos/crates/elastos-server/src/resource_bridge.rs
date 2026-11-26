@@ -1536,7 +1536,7 @@ fn protected_principal_root_resource_response(
             // the two reads is a conflict, so the call ends as an error.
             if check_revision {
                 #[cfg(test)]
-                run_read_revision_gap();
+                run_read_revision_gap(data_dir);
                 let again = match crate::auth::read_principal_root_object(
                     data_dir,
                     principal_id,
@@ -1761,18 +1761,22 @@ fn request_content_bytes(request: &serde_json::Value) -> Result<Vec<u8>, String>
 }
 
 #[cfg(test)]
-static READ_REVISION_GAP: std::sync::Mutex<Option<Box<dyn FnMut() + Send>>> =
-    std::sync::Mutex::new(None);
+type ReadGap = (std::path::PathBuf, Box<dyn FnMut() + Send>);
+#[cfg(test)]
+static READ_REVISION_GAP: std::sync::Mutex<Option<ReadGap>> = std::sync::Mutex::new(None);
 
 #[cfg(test)]
-fn run_read_revision_gap() {
-    if let Some(hook) = READ_REVISION_GAP.lock().expect("revision gap").as_mut() {
-        hook();
+fn run_read_revision_gap(data_dir: &std::path::Path) {
+    // Only a read in the Home that set the hook runs it: tests share this slot.
+    if let Some((dir, hook)) = READ_REVISION_GAP.lock().expect("revision gap").as_mut() {
+        if dir == data_dir {
+            hook();
+        }
     }
 }
 
 #[cfg(test)]
-fn set_read_revision_gap(hook: Option<Box<dyn FnMut() + Send>>) {
+fn set_read_revision_gap(hook: Option<ReadGap>) {
     *READ_REVISION_GAP.lock().expect("revision gap") = hook;
 }
 
@@ -7333,7 +7337,7 @@ pub(crate) mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn a_v1_window_of_a_protected_object_is_not_the_v2_cap() {
-        let (_temp, ctx, object_uri) = journal_context("person:local:journal-owner");
+        let (temp, ctx, object_uri) = journal_context("person:local:journal-owner");
         let written = journal_write(
             &ctx,
             &object_uri,
@@ -7356,6 +7360,14 @@ pub(crate) mod tests {
             serde_json::json!([48, 49, 50, 51]),
             "a v1 window stays a byte array"
         );
+        let path = journal_path(&temp, &object_uri);
+        let body_reads = || {
+            crate::auth::principal_object_io::reads(temp.path())
+                .iter()
+                .filter(|read| read.as_path() == path)
+                .count()
+        };
+        let before = body_reads();
         let v2 = handle_request(
             &journal_window_line(81, JOURNAL_SELF_URI, token, true, 4),
             &Some(ctx),
@@ -7366,6 +7378,11 @@ pub(crate) mod tests {
         assert_eq!(
             v2["response"]["result"]["message"],
             "object is over the read cap"
+        );
+        assert_eq!(
+            body_reads(),
+            before,
+            "the over-cap refusal reads no object body"
         );
     }
 
@@ -8743,17 +8760,20 @@ pub(crate) mod tests {
         let data_dir = temp.path().to_path_buf();
         let gap_uri = object_uri.clone();
         let gap_path = path.clone();
-        super::set_read_revision_gap(Some(Box::new(move || {
-            crate::auth::write_principal_root_object(
-                &data_dir,
-                "person:local:journal-owner",
-                &crate::auth::principal_localhost_root("person:local:journal-owner"),
-                &gap_uri,
-                &gap_path,
-                b"journal v2",
-            )
-            .expect("the object changes between the two reads");
-        })));
+        super::set_read_revision_gap(Some((
+            temp.path().to_path_buf(),
+            Box::new(move || {
+                crate::auth::write_principal_root_object(
+                    &data_dir,
+                    "person:local:journal-owner",
+                    &crate::auth::principal_localhost_root("person:local:journal-owner"),
+                    &gap_uri,
+                    &gap_path,
+                    b"journal v2",
+                )
+                .expect("the object changes between the two reads");
+            }),
+        )));
         let changed = handle_request(
             &journal_checked_read_line(72, JOURNAL_SELF_URI, token),
             &Some(ctx),
