@@ -4771,10 +4771,12 @@ mod tests {
         );
         assert_eq!(config.encryption_key, hex::encode(file_key));
         assert_ne!(config.encryption_key, hex::encode(device_key));
+        assert_eq!(config.extra["file_key"], serde_json::json!(true));
         let init =
             serde_json::to_value(provider::bridge::ProviderRequest::Init { config }).unwrap();
         assert_eq!(init["op"], "init");
         assert_eq!(init["config"]["encryption_key"], hex::encode(file_key));
+        assert_eq!(init["config"]["extra"]["file_key"], true);
         let serialized = serde_json::to_string(&init).unwrap();
         assert!(
             !serialized.contains(&hex::encode(device_key)),
@@ -5503,11 +5505,14 @@ mod tests {
         let users = root.path().join("Users");
         fs::create_dir_all(&users).unwrap();
         let prefix = localhost_provider::FILE_KEY_ENVELOPE_PREFIX;
+        let mark = localhost_provider::FILE_KEY_ENVELOPE_MARK;
         assert!(
             localhost_provider::encrypt_file_key_bytes(&file_key, b"ours")
                 .unwrap()
                 .starts_with(prefix)
         );
+        assert!(localhost_provider::header_is_file_key_envelope(mark));
+        assert!(!localhost_provider::header_is_file_key_envelope(prefix));
         assert!(!localhost_provider::header_is_file_key_envelope(
             br#"{"version":20"#
         ));
@@ -5520,15 +5525,16 @@ mod tests {
 
         let ours = users.join("ours.bin");
         let ours_bytes = localhost_provider::encrypt_file_key_bytes(&file_key, b"ours").unwrap();
+        assert!(localhost_provider::header_is_file_key_envelope(&ours_bytes));
         fs::write(&ours, &ours_bytes).unwrap();
         let foreign = users.join("foreign.bin");
         let foreign_bytes =
             localhost_provider::encrypt_file_key_bytes(&[0x94; 32], b"not-ours").unwrap();
         fs::write(&foreign, &foreign_bytes).unwrap();
         let cut = users.join("cut.bin");
-        fs::write(&cut, prefix).unwrap();
+        fs::write(&cut, mark).unwrap();
         let huge = users.join("huge-v2.bin");
-        fs::write(&huge, prefix).unwrap();
+        fs::write(&huge, mark).unwrap();
         std::fs::OpenOptions::new()
             .write(true)
             .open(&huge)
@@ -5557,7 +5563,7 @@ mod tests {
         home_is_up(root.path());
         assert_eq!(fs::read(&ours).unwrap(), ours_bytes);
         assert_eq!(fs::read(&foreign).unwrap(), foreign_bytes);
-        assert_eq!(fs::read(&cut).unwrap(), prefix);
+        assert_eq!(fs::read(&cut).unwrap(), mark);
         assert_eq!(
             fs::metadata(&huge).unwrap().len(),
             localhost_provider::SEALED_READ_HARD_LIMIT + 1
@@ -5577,7 +5583,10 @@ mod tests {
         )
         .unwrap_err()
         .to_string();
-        assert_eq!(foreign_open, "Users/foreign.bin does not decrypt.");
+        assert_eq!(
+            foreign_open,
+            "Users/foreign.bin does not decrypt. Restore identity/device.key, or move the file aside, then restart."
+        );
         let cut_open =
             localhost_provider::read_sealed_localhost_file(&file_key, &cut, "Users/cut.bin")
                 .unwrap_err()
@@ -5619,10 +5628,10 @@ mod tests {
         let root = TempDir::new().unwrap();
         let users = root.path().join("Users");
         fs::create_dir_all(&users).unwrap();
-        let prefix = localhost_provider::FILE_KEY_ENVELOPE_PREFIX;
+        let mark = localhost_provider::FILE_KEY_ENVELOPE_MARK;
         for n in 0..2000 {
             let mut file = fs::File::create(users.join(format!("{n:04}.bin"))).unwrap();
-            std::io::Write::write_all(&mut file, prefix).unwrap();
+            std::io::Write::write_all(&mut file, mark).unwrap();
             file.set_len(1024 * 1024).unwrap();
         }
         let _ = take_localhost_migration_bytes_read();
@@ -8508,11 +8517,8 @@ mod tests {
             fs::write(kept.path().join("Users").join(name), &sealed).unwrap();
         }
         let mut two_hundred = fs::File::create(kept.path().join("Users/two-hundred.bin")).unwrap();
-        std::io::Write::write_all(
-            &mut two_hundred,
-            localhost_provider::FILE_KEY_ENVELOPE_PREFIX,
-        )
-        .unwrap();
+        std::io::Write::write_all(&mut two_hundred, localhost_provider::FILE_KEY_ENVELOPE_MARK)
+            .unwrap();
         two_hundred.set_len(200 * 1024 * 1024).unwrap();
         let test = format!(
             "{}::a_file_the_new_key_wrote_over_the_cap_stays_readable",

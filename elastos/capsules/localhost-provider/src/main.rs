@@ -5,7 +5,7 @@
 //! When an encryption key is provided, files are encrypted at rest with AES-256-GCM.
 
 use elastos_guest::prelude::*;
-use localhost_provider::{encrypt_file_key_bytes, read_sealed_localhost_file};
+use localhost_provider::{encrypt_bytes, encrypt_file_key_bytes, read_sealed_localhost_file};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::{self, BufRead, Read, Write};
@@ -120,6 +120,8 @@ pub struct ProviderConfig {
     /// Hex-encoded AES-256 encryption key (empty = no encryption)
     #[serde(default)]
     pub encryption_key: String,
+    #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
+    pub extra: serde_json::Value,
 }
 
 /// File metadata
@@ -456,6 +458,11 @@ impl LocalProvider {
         Ok(buffer)
     }
 
+    #[rustfmt::skip]
+    fn seal(&self, key: &[u8; 32], plain: &[u8]) -> io::Result<Vec<u8>> {
+        if self.config.extra.get("file_key").and_then(serde_json::Value::as_bool) == Some(true) { encrypt_file_key_bytes(key, plain) } else { encrypt_bytes(key, plain) }
+    }
+
     /// Write file contents
     pub fn write_file(
         &self,
@@ -504,7 +511,7 @@ impl LocalProvider {
                 content.to_vec()
             };
 
-            let encrypted = encrypt_file_key_bytes(key, &plaintext)?;
+            let encrypted = self.seal(key, &plaintext)?;
             fs::write(&full_path, &encrypted)?;
             return Ok(content.len() as u64);
         }
@@ -887,8 +894,63 @@ mod tests {
             allowed_paths: vec!["*".to_string()],
             read_only: false,
             encryption_key: hex::encode(key),
+            extra: serde_json::json!({ "file_key": true }),
         })
         .unwrap()
+    }
+
+    fn provider_from_config(
+        dir: &tempfile::TempDir,
+        key: &[u8; 32],
+        file_key: bool,
+    ) -> LocalProvider {
+        let config: ProviderConfig = serde_json::from_value(serde_json::json!({
+            "base_path": dir.path().to_string_lossy(),
+            "allowed_paths": ["*"],
+            "read_only": false,
+            "encryption_key": hex::encode(key),
+            "extra": { "file_key": file_key }
+        }))
+        .unwrap();
+        LocalProvider::new(config).unwrap()
+    }
+
+    #[test]
+    fn a_device_key_writes_the_old_header_and_a_file_key_writes_the_new_one() {
+        let dir = setup_test_dir();
+        let device = [1u8; 32];
+        let file = [2u8; 32];
+        let old = provider_from_config(&dir, &device, false);
+        old.write_file("device.bin", "token", b"device-plain", false)
+            .unwrap();
+        let planted = fs::read(dir.path().join("device.bin")).unwrap();
+        assert!(localhost_provider::header_is_device_key_envelope(&planted));
+        assert!(!localhost_provider::header_is_file_key_envelope(&planted));
+        assert_eq!(
+            old.read_file("device.bin", "token", None, None).unwrap(),
+            b"device-plain"
+        );
+        let again = provider_from_config(&dir, &device, false);
+        assert_eq!(
+            again.read_file("device.bin", "token", None, None).unwrap(),
+            b"device-plain"
+        );
+
+        let new = provider_from_config(&dir, &file, true);
+        new.write_file("file.bin", "token", b"file-plain", false)
+            .unwrap();
+        let sealed = fs::read(dir.path().join("file.bin")).unwrap();
+        assert!(localhost_provider::header_is_file_key_envelope(&sealed));
+        assert!(!localhost_provider::header_is_device_key_envelope(&sealed));
+        assert_eq!(
+            new.read_file("file.bin", "token", None, None).unwrap(),
+            b"file-plain"
+        );
+        println!(
+            "SL_R19_DEVICE={}",
+            String::from_utf8_lossy(&planted[..localhost_provider::FILE_KEY_ENVELOPE_PREFIX.len()])
+        );
+        println!("SL_R19_FILE={}", String::from_utf8_lossy(&sealed[..22]));
     }
 
     #[test]
@@ -899,6 +961,7 @@ mod tests {
             allowed_paths: vec!["*".to_string()],
             read_only: false,
             encryption_key: String::new(),
+            extra: serde_json::Value::Null,
         };
         let mut provider = LocalProvider::new(config).unwrap();
 
@@ -954,6 +1017,7 @@ mod tests {
             allowed_paths: vec!["*".to_string()],
             read_only: false,
             encryption_key: String::new(),
+            extra: serde_json::Value::Null,
         };
 
         let provider = LocalProvider::new(config).unwrap();
@@ -969,6 +1033,7 @@ mod tests {
             allowed_paths: vec!["Users".to_string()],
             read_only: false,
             encryption_key: String::new(),
+            extra: serde_json::Value::Null,
         };
         fs::create_dir_all(dir.path().join("Users/self/Documents")).unwrap();
         fs::write(
@@ -1010,6 +1075,7 @@ mod tests {
             allowed_paths: elastos_common::localhost::file_backed_prefixes(),
             read_only: false,
             encryption_key: String::new(),
+            extra: serde_json::Value::Null,
         })
         .unwrap()
     }
@@ -1180,6 +1246,7 @@ mod tests {
             allowed_paths: vec!["*".to_string()],
             read_only: false,
             encryption_key: String::new(),
+            extra: serde_json::Value::Null,
         };
 
         let provider = LocalProvider::new(config).unwrap();
@@ -1197,6 +1264,7 @@ mod tests {
             allowed_paths: vec!["*".to_string()],
             read_only: false,
             encryption_key: String::new(),
+            extra: serde_json::Value::Null,
         };
 
         let provider = LocalProvider::new(config).unwrap();
@@ -1216,6 +1284,7 @@ mod tests {
             allowed_paths: vec!["*".to_string()],
             read_only: false,
             encryption_key: String::new(),
+            extra: serde_json::Value::Null,
         };
 
         let provider = LocalProvider::new(config).unwrap();
@@ -1235,6 +1304,7 @@ mod tests {
             allowed_paths: vec!["*".to_string()],
             read_only: true,
             encryption_key: String::new(),
+            extra: serde_json::Value::Null,
         };
 
         let provider = LocalProvider::new(config).unwrap();
@@ -1250,6 +1320,7 @@ mod tests {
             allowed_paths: vec!["*".to_string()],
             read_only: false,
             encryption_key: String::new(),
+            extra: serde_json::Value::Null,
         };
 
         let provider = LocalProvider::new(config).unwrap();
@@ -1269,6 +1340,7 @@ mod tests {
             allowed_paths: vec!["*".to_string()],
             read_only: false,
             encryption_key: String::new(),
+            extra: serde_json::Value::Null,
         };
 
         let provider = LocalProvider::new(config).unwrap();
@@ -1287,6 +1359,7 @@ mod tests {
             allowed_paths: vec!["*".to_string()],
             read_only: false,
             encryption_key: String::new(),
+            extra: serde_json::Value::Null,
         };
 
         let provider = LocalProvider::new(config).unwrap();
@@ -1303,6 +1376,7 @@ mod tests {
             allowed_paths: vec!["*".to_string()],
             read_only: false,
             encryption_key: String::new(),
+            extra: serde_json::Value::Null,
         };
 
         let provider = LocalProvider::new(config).unwrap();
@@ -1319,6 +1393,7 @@ mod tests {
             allowed_paths: vec!["*".to_string()],
             read_only: false,
             encryption_key: String::new(),
+            extra: serde_json::Value::Null,
         };
 
         let provider = LocalProvider::new(config).unwrap();
@@ -1334,6 +1409,7 @@ mod tests {
             allowed_paths: vec!["*".to_string()],
             read_only: false,
             encryption_key: String::new(),
+            extra: serde_json::Value::Null,
         };
 
         let provider = LocalProvider::new(config).unwrap();
@@ -1361,6 +1437,7 @@ mod tests {
             allowed_paths: vec!["*".to_string()],
             read_only: false,
             encryption_key: String::new(),
+            extra: serde_json::Value::Null,
         };
 
         let provider = LocalProvider::new(config).unwrap();
@@ -1390,6 +1467,7 @@ mod tests {
             allowed_paths: vec!["*".to_string()],
             read_only: false,
             encryption_key: String::new(),
+            extra: serde_json::Value::Null,
         };
 
         let provider = LocalProvider::new(config).unwrap();
@@ -1619,7 +1697,7 @@ mod tests {
 
     fn plant_prefix(path: &std::path::Path, len: u64) {
         fs::create_dir_all(path.parent().unwrap()).unwrap();
-        fs::write(path, localhost_provider::FILE_KEY_ENVELOPE_PREFIX).unwrap();
+        fs::write(path, localhost_provider::FILE_KEY_ENVELOPE_MARK).unwrap();
         fs::OpenOptions::new()
             .write(true)
             .open(path)
@@ -1670,10 +1748,9 @@ mod tests {
         let bad = dir.path().join("Users/bad.bin");
         let mut file = fs::File::create(&bad).unwrap();
         use std::io::Write;
-        file.write_all(localhost_provider::FILE_KEY_ENVELOPE_PREFIX)
+        file.write_all(localhost_provider::FILE_KEY_ENVELOPE_MARK)
             .unwrap();
-        file.write_all(b"g0112233445566778899aabb").unwrap();
-        file.write_all(br#"","ciphertext":""#).unwrap();
+        file.write_all(b"g").unwrap();
         let chunk = [b'a'; 64 * 1024];
         let mut left = over as usize - file.metadata().unwrap().len() as usize;
         while left > 0 {
@@ -1712,9 +1789,13 @@ mod tests {
             .to_string();
         assert!(err.contains("larger than this process can read"), "{err}");
         assert_eq!(fs::metadata(&big).unwrap().len(), huge);
-        let mut head = [0u8; 32];
+        let mut head = [0u8; 64];
         std::io::Read::read_exact(&mut fs::File::open(&big).unwrap(), &mut head).unwrap();
+        assert!(head.starts_with(localhost_provider::FILE_KEY_ENVELOPE_MARK));
         assert!(localhost_provider::header_is_file_key_envelope(&head));
+        assert!(!localhost_provider::header_is_file_key_envelope(
+            &head[..localhost_provider::FILE_KEY_ENVELOPE_PREFIX.len()]
+        ));
     }
 
     fn old_sealed(dir: &std::path::Path, name: &str, len: u64) -> std::path::PathBuf {
@@ -1940,6 +2021,10 @@ mod tests {
         fs::write(&path, &bad).unwrap();
         let err = refusal(&provider, "Users/reordered.bin", None, None);
         assert!(err.contains("does not decrypt"), "{err}");
+        assert!(
+            err.contains("Restore identity/device.key, or move the file aside, then restart."),
+            "{err}"
+        );
         assert!(!err.contains("larger than 32 MiB"), "{err}");
         assert!(!err.contains("Remove it"), "{err}");
     }

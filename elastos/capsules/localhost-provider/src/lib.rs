@@ -58,8 +58,14 @@ fn hard_limit_refusal(name: &str) -> io::Error {
 
 pub const FILE_KEY_ENVELOPE_PREFIX: &[u8] = br#"{"version":2,"nonce":""#;
 
+pub const FILE_KEY_ENVELOPE_MARK: &[u8] =
+    br#"{"version":2,"nonce":"00112233445566778899aabb","ciphertext":"0"#;
+
+#[rustfmt::skip]
 pub fn header_is_file_key_envelope(header: &[u8]) -> bool {
-    header.starts_with(FILE_KEY_ENVELOPE_PREFIX)
+    const H: &[u8] = br#"{"version":2,"nonce":""#; const M: &[u8] = br#"","ciphertext":""#;
+    let (mid, d) = (H.len() + 24, H.len() + 24 + M.len());
+    header.len() > d && header.starts_with(H) && header[H.len()..mid].iter().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')) && header[mid..].starts_with(M) && matches!(header[d], b'0'..=b'9' | b'a'..=b'f')
 }
 
 /// `encrypt_bytes` has written this since the first localhost provider.
@@ -86,7 +92,7 @@ fn open_new_format(key: &[u8; 32], bytes: Vec<u8>, name: &str) -> io::Result<Vec
     };
     Aes256Gcm::new_from_slice(key).map_err(|e| io::Error::other(format!("AES key init: {e}")))?
         .decrypt_in_place(&Nonce::from(nonce), b"", &mut body)
-        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, format!("{name} does not decrypt.")))?;
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, format!("{name} does not decrypt. Restore identity/device.key, or move the file aside, then restart.")))?;
     Ok(body)
 }
 
@@ -540,13 +546,25 @@ mod tests {
 
     #[test]
     fn a_file_key_header_is_an_envelope_without_a_scan() {
+        assert!(header_is_file_key_envelope(FILE_KEY_ENVELOPE_MARK));
+        assert_eq!(
+            &FILE_KEY_ENVELOPE_MARK[..FILE_KEY_ENVELOPE_PREFIX.len()],
+            FILE_KEY_ENVELOPE_PREFIX
+        );
+        assert!(!header_is_file_key_envelope(FILE_KEY_ENVELOPE_PREFIX));
+        assert!(!header_is_file_key_envelope(
+            br#"{"version":2,"nonce":"g0112233445566778899aabb","ciphertext":"0"#
+        ));
+        assert!(!header_is_file_key_envelope(
+            br#"{"version":2,"nonce":"00112233445566778899aabb","ciphertext":"g"#
+        ));
         let (plain, extra) =
-            reads_as_plain_bytes(FILE_KEY_ENVELOPE_PREFIX, ENVELOPE_BYTE_LIMIT + 1, &mut Boom)
+            reads_as_plain_bytes(FILE_KEY_ENVELOPE_MARK, ENVELOPE_BYTE_LIMIT + 1, &mut Boom)
                 .unwrap();
         assert!(!plain);
         assert_eq!(extra, 0);
         let (plain, extra) = reads_as_plain_bytes(
-            FILE_KEY_ENVELOPE_PREFIX,
+            FILE_KEY_ENVELOPE_MARK,
             SEALED_READ_HARD_LIMIT + 1,
             &mut Boom,
         )

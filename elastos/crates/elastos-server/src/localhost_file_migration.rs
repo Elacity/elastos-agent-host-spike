@@ -1267,7 +1267,7 @@ fn migrate_localhost_files_to_file_key(
 ///
 /// On Unix, files under the five encrypted roots are rewritten onto the HKDF
 /// file key before this returns. The encryption field is that file key.
-/// On Windows, files are not rewritten and the field is the device key.
+/// On Windows, files are not rewritten, the field is the device key, and `extra.file_key` is false.
 /// The "never the device key" claim is the Unix field only.
 ///
 /// The local below is the authority-census needle for the row
@@ -1280,22 +1280,22 @@ pub(crate) fn localhost_provider_bridge_config(
     device_key: &[u8; 32],
 ) -> anyhow::Result<provider::BridgeProviderConfig> {
     #[cfg(unix)]
-    let device_key_hex = {
+    let (device_key_hex, given_file_key) = {
         use zeroize::Zeroize;
         migrate_localhost_files_to_file_key(data_dir, device_key)?;
         let mut file_key = localhost_file_key(device_key)?;
         let file_key_hex = hex::encode(file_key);
         file_key.zeroize();
-        file_key_hex
+        (file_key_hex, true)
     };
     #[cfg(not(unix))]
-    let device_key_hex = hex::encode(device_key);
+    let (device_key_hex, given_file_key) = (hex::encode(device_key), false);
     Ok(provider::BridgeProviderConfig {
         base_path: data_dir.to_string_lossy().to_string(),
         allowed_paths: file_backed_prefixes(),
         read_only: false,
         encryption_key: device_key_hex,
-        ..Default::default()
+        extra: serde_json::json!({ "file_key": given_file_key }),
     })
 }
 
@@ -1373,6 +1373,20 @@ fn refuse_special(path: &Path, meta: &std::fs::Metadata, link: &str) -> anyhow::
         "is not a regular file"
     };
     Err(localhost_refused(path, why))
+}
+
+#[cfg(all(test, not(unix)))]
+mod windows_header {
+    use super::localhost_provider_bridge_config;
+
+    #[test]
+    fn a_home_without_a_file_key_asks_for_the_old_header() {
+        let dir = tempfile::tempdir().unwrap();
+        let device_key = [0x5au8; 32];
+        let config = localhost_provider_bridge_config(dir.path(), &device_key).unwrap();
+        assert_eq!(config.encryption_key, hex::encode(device_key));
+        assert_eq!(config.extra["file_key"], serde_json::json!(false));
+    }
 }
 
 #[cfg(all(test, unix))]

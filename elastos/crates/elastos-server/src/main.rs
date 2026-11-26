@@ -2078,6 +2078,13 @@ async fn serve_web_capsule(
     } else if std::env::var("SSH_CLIENT").is_ok() || std::env::var("SSH_TTY").is_ok() {
         println!("  (remote session — use port forwarding or open on the device itself)");
     }
+    if let Some(sentence) = elastos_server::local_apps::local_apps_refusal(&default_data_dir()) {
+        println!(
+            "{}",
+            elastos_server::local_apps::local_apps_health_line(&sentence)
+        );
+        let _ = std::io::Write::flush(&mut std::io::stdout());
+    }
     println!();
 
     if auto_open_browser {
