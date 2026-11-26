@@ -2031,6 +2031,13 @@ fn settle_guest_burn(
 /// when `deadline` passes, so a timeout keeps no thread. A call that blocks
 /// this poll runs to the end first. A sync host call, used by tests, runs on
 /// this thread and adds none.
+#[rustfmt::skip]
+async fn await_bridges(bridges: &[OpenBridge], deadline: std::time::Instant) -> Vec<HostAnswer> {
+    let mut raws = Vec::with_capacity(bridges.len());
+    for bridge in bridges { raws.push(await_v2_bridge(bridge, deadline.saturating_duration_since(std::time::Instant::now())).await); }
+    raws
+}
+
 async fn await_v2_bridge(bridge: &OpenBridge, deadline: Duration) -> HostAnswer {
     let line = bridge.line.as_str();
     let capsule_id = bridge.capsule_id.as_str();
@@ -2362,9 +2369,11 @@ fn encode_b64(bytes: &[u8]) -> String {
 fn bus_error(code: &str, message: impl Into<String>) -> elastos::bus::types::BusError {
     let message = message.into();
     match code {
-        "denied" | "capability_denied" | "missing_token" | "invalid_token" => {
-            elastos::bus::types::BusError::Denied(message)
-        }
+        "denied"
+        | "capability_denied"
+        | "missing_token"
+        | "invalid_token"
+        | "principal_context_required" => elastos::bus::types::BusError::Denied(message),
         "not_found" => elastos::bus::types::BusError::NotFound(message),
         "timeout" => elastos::bus::types::BusError::Timeout(message),
         "unavailable" => elastos::bus::types::BusError::Unavailable(message),
@@ -2652,40 +2661,44 @@ impl ComponentState {
         let book = self.grants.lock().expect("grant book");
         let frame = crate::providers::bus2_ui::present_frame(media, document, &book)
             .map_err(present_error)?;
+        let grants = image_grants(&frame);
         let mut bridges = Vec::new();
-        for node in &frame.nodes {
-            let FrameNode::Image { grant, resource } = node else {
-                continue;
-            };
-            bridges.push(self.open_bridge(format!(
-                r#"{{"id":1,"request":{{"type":"resource_invoke","uri":{resource:?},"operation":"read","token":{grant:?},"body":{{"path":{resource:?},"use_grant":true}}}}}}"#
-            )));
+        for spend in [false, true] {
+            for (grant, resource) in &grants {
+                bridges.push(self.open_bridge(grant_line(grant, resource, spend)));
+            }
         }
         Ok((frame, bridges))
     }
 
-    fn store_present(&mut self, frame: Frame, raws: &[HostAnswer]) -> V2Result<()> {
+    fn store_present(&mut self, frame: Frame, raws: &[HostAnswer], checks: usize) -> V2Result<()> {
+        for raw in &raws[..checks] {
+            grant_counted(raw, false)?;
+        }
+        let mut counted: Vec<String> = Vec::new();
+        for (raw, (grant, _)) in raws[checks..].iter().zip(&image_grants(&frame)) {
+            if let Err(err) = grant_counted(raw, true) {
+                let mut book = self.grants.lock().expect("grant book");
+                for id in &counted {
+                    book.spend(id);
+                }
+                return Err(err);
+            }
+            counted.push(grant.clone());
+        }
         let mut book = self.grants.lock().expect("grant book");
         #[cfg(test)]
         if let Some(gate) = &self.present_gate {
             gate.wait();
         }
-        let mut n = 0;
-        for node in &frame.nodes {
-            let FrameNode::Image { grant, .. } = node else {
-                continue;
-            };
-            let text = raws[n]
-                .as_ref()
-                .map_err(|err| V2BusError::Internal(err.clone()))?;
-            n += 1;
-            if !runtime_spent_use(text) || book.blocks_presented_image(grant) {
-                return Err(V2BusError::Denied("the grant is spent".into()));
-            }
-            book.spend(grant);
+        let stopped = self.book_closed();
+        let blocked = counted.iter().any(|id| book.blocks_presented_image(id));
+        for id in &counted {
+            book.spend(id);
         }
-        if self.book_closed() {
-            return Err(V2BusError::Denied(BOOK_CLOSED.into()));
+        if stopped || blocked {
+            let why = [BOOK_CLOSED, "the grant is spent"][usize::from(!stopped)];
+            return Err(V2BusError::Denied(why.into()));
         }
         self.frames.lock().expect("frames").insert(
             self.capsule_id.clone(),
@@ -2700,8 +2713,13 @@ impl ComponentState {
     #[cfg(test)]
     fn present_document(&mut self, media: &str, document: &[u8]) -> V2Result<()> {
         let (frame, bridges) = self.present_parts(media, document)?;
-        let raws: Vec<_> = bridges.iter().map(sync_bridge).collect();
-        self.store_present(frame, &raws)
+        let half = bridges.len() / 2;
+        let mut raws: Vec<_> = bridges[..half].iter().map(sync_bridge).collect();
+        let checks = raws.len();
+        if !raws.iter().any(|raw| grant_counted(raw, false).is_err()) {
+            raws.extend(bridges[half..].iter().map(sync_bridge));
+        }
+        self.store_present(frame, &raws, checks)
     }
 
     fn open_bridge(&self, line: String) -> OpenBridge {
@@ -2730,6 +2748,27 @@ fn sync_bridge(bridge: &OpenBridge) -> std::result::Result<String, String> {
         Ok(result) => result,
         Err(_) => Err("panicked".into()),
     }
+}
+
+#[rustfmt::skip]
+fn image_grants(frame: &Frame) -> Vec<(String, String)> {
+    let mut grants = Vec::new();
+    for node in &frame.nodes { if let FrameNode::Image { grant, resource } = node { if grants.iter().all(|(id, _)| id != grant) { grants.push((grant.clone(), resource.clone())); } } }
+    grants
+}
+
+#[rustfmt::skip]
+fn grant_line(grant: &str, resource: &str, spend: bool) -> String {
+    let mark = ["\"count_use\":false", "\"use_grant\":true"][usize::from(spend)];
+    format!(r#"{{"id":1,"request":{{"type":"resource_invoke","uri":{resource:?},"operation":"read","token":{grant:?},"body":{{"path":{resource:?},{mark}}}}}}}"#) }
+
+#[rustfmt::skip]
+fn grant_counted(raw: &HostAnswer, spend: bool) -> V2Result<()> {
+    let text = raw.as_ref().map_err(|err| V2BusError::Internal(err.clone()))?;
+    let response = decode_bridge(Ok(text.clone())).map_err(v2_error)?;
+    let RuntimeResponse::ResourceResult { result, .. } = &response else { return Err(v2_error(response_error(&response))); };
+    if result.get("status").and_then(|v| v.as_str()) == Some("ok") && (!spend || runtime_spent_use(text)) { return Ok(()); }
+    Err(V2BusError::Denied(["present failed", "the runtime did not count the grant"][usize::from(spend)].into()))
 }
 
 /// The bridge spent this use. The stamp is `response.use_spent` on the
@@ -3216,13 +3255,30 @@ impl v2::elastos::bus::ui::HostWithStore<ComponentState> for HasSelf<ComponentSt
         media_type: String,
         document: Vec<u8>,
     ) -> std::result::Result<(), v2::elastos::bus::types::BusError> {
-        let (frame, bridges) =
-            accessor.with(|mut access| access.get().present_parts(&media_type, &document))?;
-        let mut raws = Vec::with_capacity(bridges.len());
-        for bridge in &bridges {
-            raws.push(await_v2_bridge(bridge, V2_HOST_DEADLINE).await);
+        let (opened, bucket, prepared) = accessor.with(|mut access| {
+            let opened = charge_access(&mut access);
+            let bucket = access.get().fuel_bucket.clone();
+            let prepared = access.get().present_parts(&media_type, &document);
+            (opened, bucket, prepared)
+        });
+        let _guard = arm_host_wait(opened, &bucket);
+        let deadline = std::time::Instant::now() + V2_HOST_DEADLINE;
+        let outcome = async {
+            let (frame, bridges) = prepared?;
+            let half = bridges.len() / 2;
+            let mut raws = await_bridges(&bridges[..half], deadline).await;
+            let checks = raws.len();
+            if !raws.iter().any(|raw| grant_counted(raw, false).is_err()) {
+                raws.extend(await_bridges(&bridges[half..], deadline).await);
+            }
+            Ok((frame, raws, checks))
         }
-        accessor.with(|mut access| access.get().store_present(frame, &raws))
+        .await;
+        accessor.with(|mut access| {
+            release_access(&mut access);
+            outcome
+                .and_then(|(frame, raws, checks)| access.get().store_present(frame, &raws, checks))
+        })
     }
 }
 
@@ -4730,12 +4786,15 @@ mod tests {
             .present_document(media, image(&show.id).as_bytes())
             .expect("present spends through the runtime");
         let called = lines.lock().expect("lines").clone();
-        assert_eq!(called.len(), 1, "{called:?}");
-        let parsed: serde_json::Value = serde_json::from_str(&called[0]).expect("line");
-        assert_eq!(parsed["request"]["type"], "resource_invoke");
-        assert_eq!(parsed["request"]["operation"], "read");
-        assert_eq!(parsed["request"]["body"]["use_grant"], true);
-        assert_eq!(parsed["request"]["token"], show.id);
+        assert_eq!(called.len(), 2, "{called:?}");
+        let check: serde_json::Value = serde_json::from_str(&called[0]).expect("check");
+        let spend: serde_json::Value = serde_json::from_str(&called[1]).expect("spend");
+        assert_eq!(check["request"]["body"]["count_use"], false);
+        assert!(check["request"]["body"]["use_grant"].is_null());
+        assert_eq!(spend["request"]["type"], "resource_invoke");
+        assert_eq!(spend["request"]["operation"], "read");
+        assert_eq!(spend["request"]["body"]["use_grant"], true);
+        assert_eq!(spend["request"]["token"], show.id);
         let refused = state.begin_read(&read_of(&show.id), false);
         let Err(err) = refused else {
             panic!("the present spent the read");
@@ -6028,9 +6087,133 @@ mod tests {
         assert!(matches!(sealed, V2BusError::Denied(message) if message == SEALED_BRIDGE));
         assert_eq!(
             calls.load(Ordering::Relaxed),
-            4,
-            "an image present asks the runtime to spend the grant"
+            5,
+            "an image present checks the grant, then asks the runtime to count it"
         );
+    }
+
+    /// One frame checks every image before it counts any grant. A repeated id
+    /// is one count. A check that fails counts nothing and stores nothing.
+    /// A count that fails after an earlier count leaves that earlier grant
+    /// counted and still stores nothing.
+    #[test]
+    fn a_frame_checks_every_image_then_counts_each_grant_once() {
+        let lines = Arc::new(Mutex::new(Vec::new()));
+        let seen = lines.clone();
+        let mut state = ComponentState::new(
+            Some(Arc::new(move |line, _, _| {
+                seen.lock().expect("lines").push(line.to_string());
+                let value: serde_json::Value = serde_json::from_str(line).expect("line");
+                let token = value["request"]["token"].as_str().unwrap_or("");
+                let spend = value["request"]["body"]["use_grant"].as_bool() == Some(true);
+                if token == "bad" || (spend && token == "late") {
+                    return Ok(serde_json::json!({
+                        "id": 1,
+                        "response": {"type": "error", "code": "denied", "message": "revoked"}
+                    })
+                    .to_string());
+                }
+                Ok(use_spent_host()("x", "y", None).expect("host"))
+            })),
+            "capsule".into(),
+            None,
+        );
+        let media = crate::providers::bus2_ui::UI_MEDIA_TYPE;
+        let once = |state: &mut ComponentState, id: &str| {
+            let pending = one_read_grant(state);
+            state
+                .finish_grant(pending, Ok(token_line(id, r#","max_uses":1"#)))
+                .expect("once")
+        };
+        let held = |state: &ComponentState, id: &str| {
+            !state.grants.lock().expect("grant book").blocks_read(id)
+        };
+        let frame_of = |ids: &[&str]| {
+            let nodes: Vec<_> = ids
+                .iter()
+                .map(|id| format!(r#"{{"image":{{"grant":"{id}"}}}}"#))
+                .collect();
+            format!(r#"{{"frame":[{}]}}"#, nodes.join(","))
+        };
+        let dup = once(&mut state, "dup");
+        state
+            .present_document(media, frame_of(&[&dup.id, &dup.id]).as_bytes())
+            .expect("a repeated id is one frame");
+        let called = lines.lock().expect("lines").clone();
+        assert_eq!(called.len(), 2, "{called:?}");
+        assert!(called[0].contains("\"count_use\":false"), "{called:?}");
+        assert!(called[1].contains("\"use_grant\":true"), "{called:?}");
+        assert_eq!(
+            called
+                .iter()
+                .filter(|line| line.contains("\"dup\""))
+                .count(),
+            2
+        );
+        assert!(!held(&state, "dup"), "the one count is spent");
+        let stored = state
+            .frames
+            .lock()
+            .expect("frames")
+            .get("capsule")
+            .unwrap()
+            .clone();
+        assert_eq!(stored.frame.nodes.len(), 2, "both nodes stay on the frame");
+
+        lines.lock().expect("lines").clear();
+        let good = once(&mut state, "good");
+        let bad = once(&mut state, "bad");
+        let err = state
+            .present_document(media, frame_of(&[&good.id, &bad.id]).as_bytes())
+            .expect_err("a failed check stores nothing");
+        assert!(
+            matches!(err, V2BusError::Denied(ref message) if message == "revoked"),
+            "{err:?}"
+        );
+        let called = lines.lock().expect("lines").clone();
+        assert!(
+            called
+                .iter()
+                .all(|line| line.contains("\"count_use\":false")),
+            "{called:?}"
+        );
+        assert!(
+            called
+                .iter()
+                .all(|line| !line.contains("\"use_grant\":true")),
+            "{called:?}"
+        );
+        assert!(held(&state, "good") && held(&state, "bad"));
+        assert!(state.frames.lock().expect("frames").get("capsule").unwrap().frame.nodes.iter().all(|node| {
+            !matches!(node, crate::providers::bus2_ui::FrameNode::Image { grant, .. } if grant == "good" || grant == "bad")
+        }));
+
+        lines.lock().expect("lines").clear();
+        let early = once(&mut state, "early");
+        let late = once(&mut state, "late");
+        let err = state
+            .present_document(media, frame_of(&[&early.id, &late.id]).as_bytes())
+            .expect_err("a failed count stores nothing");
+        assert!(
+            matches!(err, V2BusError::Denied(ref message) if message == "revoked"),
+            "{err:?}"
+        );
+        let called = lines.lock().expect("lines").clone();
+        assert_eq!(
+            called
+                .iter()
+                .filter(|line| line.contains("\"use_grant\":true"))
+                .count(),
+            2,
+            "{called:?}"
+        );
+        assert!(!held(&state, "early"), "the count that returned is spent");
+        assert!(held(&state, "late"), "the failed count is not spent");
+        assert!(state.frames.lock().expect("frames").get("capsule").is_some_and(|stored| {
+            stored.frame.nodes.iter().all(|node| {
+                !matches!(node, crate::providers::bus2_ui::FrameNode::Image { grant, .. } if grant == "early" || grant == "late")
+            })
+        }));
     }
 
     #[test]
@@ -7255,6 +7438,13 @@ mod tests {
             invoke_with("capability_denied"),
             elastos::bus::types::BusError::Denied(_)
         ));
+        assert!(
+            matches!(
+                invoke_with("principal_context_required"),
+                elastos::bus::types::BusError::Denied(message) if message == "refused"
+            ),
+            "a missing principal is a refusal the guest can name"
+        );
     }
 
     #[test]
@@ -7815,6 +8005,76 @@ mod tests {
             started.elapsed() >= Duration::from_millis(1_500),
             "2000 one-millisecond sleeps returned in {:?}",
             started.elapsed()
+        );
+    }
+
+    /// Present's bridge wait is a host wait. Ten slow presents stay inside a
+    /// four-tick cap, and the events read is still pending when they finish.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn ten_slow_presents_do_not_spend_the_tick_window() {
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let seen = calls.clone();
+        let provider = ComponentProvider::new();
+        provider.set_bus_hostcall_async(Arc::new(move |_line, _capsule, _principal| {
+            let seen = seen.clone();
+            Box::pin(async move {
+                tokio::time::sleep(Duration::from_millis(12)).await;
+                seen.fetch_add(1, Ordering::Release);
+                Ok(serde_json::json!({
+                    "id": 1,
+                    "response": {
+                        "type": "resource_result",
+                        "result": {"status": "ok"},
+                        "use_spent": true
+                    }
+                })
+                .to_string())
+            })
+        }));
+        let bytes = wat::parse_str(include_str!(
+            "../../../../tests/fixtures/components/v2-present-loop.wat"
+        ))
+        .unwrap();
+        let handle = load_v2_fixture(&provider, bytes).await;
+        provider
+            .testing_hold_grant(&handle.id, "g", "localhost://Local/note.txt", "read")
+            .await;
+        provider
+            .instances
+            .write()
+            .await
+            .get_mut(&handle.id)
+            .unwrap()
+            .test_max_ticks = 4;
+        let pending = provider.instances.read().await[&handle.id]
+            .pending_read
+            .clone();
+        provider.start(&handle).await.expect("the presenter starts");
+        let started = Instant::now();
+        let ending = tokio::time::timeout(Duration::from_secs(8), async {
+            loop {
+                if let Some(ending) = provider.endings.read().await.get(&handle.id).cloned() {
+                    return ending;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("ten presents did not finish");
+        let elapsed = started.elapsed();
+        assert_eq!(ending, "returned", "{ending} after {elapsed:?}");
+        assert_eq!(
+            calls.load(Ordering::Acquire),
+            20,
+            "check and count for each present"
+        );
+        assert!(
+            pending.load(Ordering::Acquire),
+            "the events read must still be pending"
+        );
+        assert!(
+            elapsed >= Duration::from_millis(200),
+            "ten presents of two 12 ms waits finished in {elapsed:?}"
         );
     }
 

@@ -829,13 +829,13 @@ fn resource_invoke_dispatch(
                 .into(),
         );
     }
-    let uri = scope_current_user_alias(uri, principal_id, data_dir)?;
-
     let operation = request["operation"]
         .as_str()
         .filter(|value| !value.is_empty())
-        .ok_or_else(|| "resource_invoke missing operation".to_string())?
-        .to_string();
+        .ok_or_else(|| "resource_invoke missing operation".to_string())?;
+    refuse_unoffered_v2_read(operation, request, uri)?;
+    let operation = operation.to_string();
+    let uri = scope_current_user_alias(uri, principal_id, data_dir)?;
 
     let scheme = provider_scheme_for_resource_uri(&uri)?;
     let mut body = request
@@ -1099,6 +1099,20 @@ async fn authorize_and_dispatch_resource_invoke(
         }
     };
     let resource_id = ResourceId::new(&dispatch.resource);
+    if dispatch.operation == "read" && dispatch.request["count_use"].as_bool() == Some(false) {
+        let ready = token.action() == dispatch.required_action
+            && resource_id.matches(token.resource())
+            && bridge_ctx
+                .capability_manager
+                .can_still_validate_for_caller(&token, &bridge_ctx.capsule_id)
+                .await;
+        let response = match ready {
+            true => serde_json::json!({"type": "resource_result", "result": {"status": "ok"}}),
+            false => resource_error_response("capability_denied", "Capability validation failed"),
+        };
+        let outcome = if ready { "ok" } else { "denied" };
+        return finish_component_invoke(bridge_ctx, &audit_id, &dispatch, outcome, response);
+    }
     if bridge_ctx
         .capability_manager
         .validate(
@@ -1184,25 +1198,6 @@ async fn authorize_and_dispatch_resource_invoke(
             _ => "error",
         };
         return finish_component_invoke(bridge_ctx, &audit_id, &dispatch, outcome, response);
-    }
-
-    // A v2 read names a root this path does not offer. It is not sent on.
-    if dispatch.operation == "read"
-        && dispatch
-            .request
-            .get("check_revision")
-            .and_then(|value| value.as_bool())
-            == Some(true)
-    {
-        if let Some(root) = unoffered_v2_read_root(&dispatch.resource) {
-            return finish_component_invoke(
-                bridge_ctx,
-                &audit_id,
-                &dispatch,
-                "error",
-                resource_error_response("root_not_offered", &format!("{root} is not offered")),
-            );
-        }
     }
 
     if dispatch.scheme == "model" {
@@ -1360,6 +1355,11 @@ fn submit_agent_plan_response(
         }
         Err(err) => resource_error_response("submit_agent_plan_refused", &err.to_string()),
     }
+}
+
+#[rustfmt::skip]
+fn refuse_unoffered_v2_read(operation: &str, request: &serde_json::Value, uri: &str) -> Result<(), ResourceInvokeError> {
+    if operation == "read" && request["body"]["check_revision"].as_bool() == Some(true) { let named = request["body"]["path"].as_str().unwrap_or(uri); if let Some(root) = unoffered_v2_read_root(named).or(unoffered_v2_read_root(uri)) { return Err(ResourceInvokeError::new("root_not_offered", format!("{root} is not offered"))); } } Ok(())
 }
 
 /// Local, Public, and Users are offered. Any other root is named.
@@ -2971,6 +2971,69 @@ pub(crate) mod tests {
         assert_eq!(unoffered_v2_read_root("https://example/a"), None);
     }
 
+    /// UsersAI is refused by name on a v2 read before the protected path,
+    /// with a principal and without one. Users stays offered.
+    #[tokio::test]
+    async fn a_v2_read_of_users_ai_is_refused_by_name_with_or_without_a_principal() {
+        let read = |id: u64, uri: &str, revision: bool| {
+            let mut body = serde_json::json!({"path": uri});
+            if revision {
+                body["check_revision"] = serde_json::Value::Bool(true);
+            }
+            serde_json::json!({
+                "id": id,
+                "request": {
+                    "type": "resource_invoke",
+                    "uri": uri,
+                    "operation": "read",
+                    "token": "tok",
+                    "body": body,
+                }
+            })
+            .to_string()
+        };
+        let code = |response: serde_json::Value| {
+            response["response"]["code"]
+                .as_str()
+                .unwrap_or("")
+                .to_string()
+        };
+        let users_ai = "localhost://UsersAI/self/note.txt";
+        let open = handle_request(&read(1, users_ai, true), &Some(bridge_context()))
+            .await
+            .expect("bridge");
+        assert_eq!(code(open.clone()), "root_not_offered", "{open}");
+        assert_eq!(
+            open["response"]["message"], "UsersAI is not offered",
+            "{open}"
+        );
+
+        let mut protected = bridge_context();
+        protected.principal_id = Some("person:local:active".into());
+        protected.data_dir = Some(std::env::temp_dir());
+        protected.manifest_capabilities = any_action(vec![format!("{users_ai}")]);
+        let closed = handle_request(&read(2, users_ai, true), &Some(protected))
+            .await
+            .expect("bridge");
+        assert_eq!(code(closed.clone()), "root_not_offered", "{closed}");
+        assert_eq!(
+            closed["response"]["message"], "UsersAI is not offered",
+            "{closed}"
+        );
+
+        let v1 = handle_request(&read(3, users_ai, false), &Some(bridge_context()))
+            .await
+            .expect("bridge");
+        assert_ne!(code(v1.clone()), "root_not_offered", "{v1}");
+        let users = handle_request(
+            &read(4, "localhost://Users/self/note.txt", true),
+            &Some(bridge_context()),
+        )
+        .await
+        .expect("bridge");
+        assert_ne!(code(users.clone()), "root_not_offered", "{users}");
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn s5_p2_object_bridge_binds_every_operation_to_launched_x() {
@@ -4530,6 +4593,31 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_parenthesised_alias_and_self_inside_the_impl_are_seen() {
+        let text = concat!(
+            "type Paren = (BridgeContext);\n",
+            "type Nested = ((path::BridgeContext));\n",
+            "impl BridgeContext { type Same = Self; }\n",
+            "impl BridgeContext { type Wrapped = (Self); }\n",
+            "impl Other { type Same = Self; }\n",
+            "fn f(value: (BridgeContext)) {}\n",
+        );
+        let found: Vec<_> = collapsed_statements(text)
+            .into_iter()
+            .filter(|line| bridge_context_alias_line(line))
+            .collect();
+        assert_eq!(found.len(), 4, "{found:?}");
+        assert!(found.iter().any(|line| line.contains("Paren")));
+        assert!(found.iter().any(|line| line.contains("Nested")));
+        assert!(found
+            .iter()
+            .any(|line| line.contains("Same") && line.contains("BridgeContext")));
+        assert!(found.iter().any(|line| line.contains("Wrapped")));
+        assert!(found.iter().all(|line| !line.contains("Other")));
+        assert!(found.iter().all(|line| !line.contains("fn f")));
+    }
+
+    #[test]
     fn a_split_bridge_context_alias_is_one_statement() {
         let text = "fn f<'a>(value: &'a BridgeContext) -> &'a BridgeContext { value }\nuse crate::bus::{\n    BridgeContext as Hidden\n};\ntype Alias =\n    BridgeContext;\n";
         let found: Vec<_> = collapsed_statements(text)
@@ -4547,6 +4635,16 @@ pub(crate) mod tests {
         use_alias_of_bridge(&padded)
     }
 
+    fn bridge_alias_head(rhs: &str) -> &str {
+        let mut rhs = rhs.trim_start();
+        while let Some(stripped) = rhs.strip_prefix('(') {
+            rhs = stripped.trim_start();
+        }
+        rhs.split(|ch: char| [';', '{', '<', ' ', ')'].contains(&ch))
+            .next()
+            .unwrap_or("")
+    }
+
     fn type_alias_of_bridge(padded: &str) -> bool {
         let mut rest = padded;
         while let Some(at) = rest.find(" type ") {
@@ -4562,11 +4660,12 @@ pub(crate) mod tests {
                     .chars()
                     .all(|ch| ch.is_ascii_alphanumeric() || ch == '_');
             let rhs = after[eq + 1..].trim_start();
-            let head = rhs
-                .split(|ch: char| [';', '{', '<', ' '].contains(&ch))
-                .next()
-                .unwrap_or("");
-            if named && (head == "BridgeContext" || head.ends_with("::BridgeContext")) {
+            let head = bridge_alias_head(rhs);
+            let bridge = head == "BridgeContext" || head.ends_with("::BridgeContext");
+            let self_bridge = (head == "Self" || head.ends_with("::Self"))
+                && padded.contains("impl")
+                && padded.contains("BridgeContext");
+            if named && (bridge || self_bridge) {
                 return true;
             }
             rest = &rest[at + 6..];
@@ -5391,6 +5490,54 @@ pub(crate) mod tests {
         let after = read_invoke(&ctx, uri, &shown_encoded, false).await;
         assert_eq!(after["response"]["code"], "capability_denied", "{after}");
         assert_eq!(capability_use_successes(&ctx, &shown.id().to_string()), 1);
+    }
+
+    /// The present check is the read-only form of the same grant. It does not
+    /// count. The following `use_grant` read is the one CapabilityUse.
+    #[tokio::test]
+    async fn a_present_check_does_not_count_and_the_use_grant_does() {
+        let ctx = bridge_context();
+        let uri = "localhost://Local/SharedByLocalUsersAndBots/Home/pic.png";
+        let (token, encoded) = once_read_token(&ctx, uri);
+        let body = serde_json::json!({"path": uri, "count_use": false});
+        let line = serde_json::json!({
+            "id": 1,
+            "request": {
+                "type": "resource_invoke",
+                "uri": uri,
+                "operation": "read",
+                "token": &encoded,
+                "body": &body,
+            }
+        })
+        .to_string();
+        let checked = handle_request(&line, &Some(ctx.clone()))
+            .await
+            .expect("check");
+        assert_eq!(checked["response"]["type"], "resource_result", "{checked}");
+        assert!(checked["response"].get("use_spent").is_none(), "{checked}");
+        assert_eq!(capability_use_successes(&ctx, &token.id().to_string()), 0);
+        assert!(ctx.capability_manager.can_still_validate(&token).await);
+        let spent = read_invoke(&ctx, uri, &encoded, true).await;
+        assert_eq!(spent["response"]["use_spent"], true, "{spent}");
+        assert_eq!(capability_use_successes(&ctx, &token.id().to_string()), 1);
+        assert!(!ctx.capability_manager.can_still_validate(&token).await);
+        let again = serde_json::json!({
+            "id": 2,
+            "request": {
+                "type": "resource_invoke",
+                "uri": uri,
+                "operation": "read",
+                "token": &encoded,
+                "body": &body,
+            }
+        })
+        .to_string();
+        let denied = handle_request(&again, &Some(ctx.clone()))
+            .await
+            .expect("spent check");
+        assert_eq!(denied["response"]["code"], "capability_denied", "{denied}");
+        assert_eq!(capability_use_successes(&ctx, &token.id().to_string()), 1);
     }
 
     #[test]
