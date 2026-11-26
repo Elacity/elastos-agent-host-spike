@@ -1233,3 +1233,434 @@ fn native_provider_spawn_routes_keep_the_checked_executable() {
         );
     }
 }
+
+fn decl_prefix(prefix: &str) -> bool {
+    prefix.split_whitespace().all(|word| {
+        word.starts_with("pub")
+            || matches!(word, "async" | "unsafe" | "const" | "extern" | "default")
+    })
+}
+
+fn brace_body(code: &str, from: usize) -> Option<String> {
+    let bytes = code.as_bytes();
+    let mut depth = 0i32;
+    let mut i = from;
+    while i < bytes.len() {
+        if bytes[i..].starts_with(b"->") {
+            i += 2;
+            continue;
+        }
+        match bytes[i] {
+            b'(' | b'[' | b'<' => depth += 1,
+            b')' | b']' | b'>' if depth > 0 => depth -= 1,
+            // A signature that ends in `;` has no body. The `{` of the next
+            // item is that item's body. A `;` inside `()` or `[]` (an array
+            // length) is not the end of the signature.
+            b';' if depth == 0 => return None,
+            b'{' if depth == 0 => {
+                let open = i;
+                let mut braces = 0usize;
+                for (at, byte) in bytes[open..].iter().enumerate() {
+                    match byte {
+                        b'{' => braces += 1,
+                        b'}' => {
+                            braces -= 1;
+                            if braces == 0 {
+                                return Some(code[open..=open + at].to_string());
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                return None;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Production functions, by name. A name that two files define stays a list,
+/// and a caller follows it only when one definition is the one in reach.
+fn function_index(sources: &BTreeMap<String, String>) -> BTreeMap<String, Vec<(String, String)>> {
+    let mut index: BTreeMap<String, Vec<(String, String)>> = BTreeMap::new();
+    for (file, text) in sources {
+        if file == WINDOWS_WALK {
+            continue;
+        }
+        let code = source::code_only(text);
+        let bytes = code.as_bytes();
+        let mut at = 0;
+        while let Some(rel) = code[at..].find("fn ") {
+            let fn_at = at + rel;
+            let ident_before = fn_at > 0 && {
+                let prev = bytes[fn_at - 1];
+                prev.is_ascii_alphanumeric() || prev == b'_'
+            };
+            let line_start = code[..fn_at]
+                .rfind('\n')
+                .map(|index| index + 1)
+                .unwrap_or(0);
+            if !ident_before && decl_prefix(code[line_start..fn_at].trim()) {
+                let name_at = fn_at + 3;
+                let name_len = code[name_at..]
+                    .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+                    .unwrap_or(code.len() - name_at);
+                if name_len > 0 {
+                    if let Some(body) = brace_body(&code, name_at + name_len) {
+                        index
+                            .entry(code[name_at..name_at + name_len].to_string())
+                            .or_default()
+                            .push((file.clone(), body));
+                    }
+                }
+            }
+            at = fn_at + 3;
+        }
+    }
+    index
+}
+
+fn calls(body: &str) -> Vec<String> {
+    let bytes = body.as_bytes();
+    let mut found = Vec::new();
+    for (paren, _) in body.match_indices('(') {
+        let mut end = paren;
+        while end > 0 && bytes[end - 1].is_ascii_whitespace() {
+            end -= 1;
+        }
+        let mut start = end;
+        while start > 0 && {
+            let prev = bytes[start - 1];
+            prev.is_ascii_alphanumeric() || prev == b'_'
+        } {
+            start -= 1;
+        }
+        if start < end {
+            found.push(body[start..end].to_string());
+        }
+    }
+    found
+}
+
+fn choose<'a>(
+    index: &'a BTreeMap<String, Vec<(String, String)>>,
+    name: &str,
+    file: &str,
+) -> Option<&'a str> {
+    let defs = index.get(name)?;
+    let same: Vec<_> = defs
+        .iter()
+        .filter(|(def_file, _)| def_file == file)
+        .collect();
+    if same.len() == 1 {
+        Some(same[0].1.as_str())
+    } else if defs.len() == 1 {
+        Some(defs[0].1.as_str())
+    } else {
+        None
+    }
+}
+
+fn reachable(
+    index: &BTreeMap<String, Vec<(String, String)>>,
+    file: &str,
+    function: &str,
+) -> String {
+    let mut seen = BTreeSet::new();
+    let mut queue = vec![(file.to_string(), function.to_string())];
+    let mut text = String::new();
+    while let Some((file, name)) = queue.pop() {
+        if !seen.insert((file.clone(), name.clone())) {
+            continue;
+        }
+        let Some(body) = choose(index, &name, &file) else {
+            continue;
+        };
+        text.push_str(body);
+        text.push('\n');
+        let here = index.get(&name).and_then(|defs| {
+            let same = defs
+                .iter()
+                .filter(|(def_file, _)| def_file == &file)
+                .count();
+            if same == 1 {
+                Some(file.clone())
+            } else if defs.len() == 1 {
+                Some(defs[0].0.clone())
+            } else {
+                None
+            }
+        });
+        let Some(def_file) = here else {
+            continue;
+        };
+        for called in calls(body) {
+            if choose(index, &called, &def_file).is_some() {
+                queue.push((def_file.clone(), called));
+            }
+        }
+    }
+    text
+}
+
+const WINDOWS_WALK: &str = "elastos-bundle-identity/src/windows_walk.rs";
+
+struct Bind {
+    file: &'static str,
+    function: &'static str,
+    /// Census `row.call`, so two rows that share a function stay distinct
+    /// binds (for example `start_by_bundle`'s two load calls). Empty when
+    /// the bind is not a census row.
+    call: String,
+    needle: String,
+}
+
+/// Every bound row and the needle its code must still hold. A function name
+/// of `""` is the whole file, which is how the Windows walk is bound. The
+/// bound set is the install and launch paths this slice's checks cover:
+/// closure starts that admit a pin, `run_signer`'s folder walk plus its
+/// signature and slot-accept checks, the stage walk, and the Windows walk.
+fn binds() -> Vec<Bind> {
+    let mut binds = Vec::new();
+    for row in rows() {
+        if row.checks == "CID+DID+closure" && row.function != "run_signer" {
+            binds.push(Bind {
+                file: row.file,
+                function: row.function,
+                call: row.call.clone(),
+                needle: ".admit_closure_member(data_dir, &pinned".to_string(),
+            });
+        }
+    }
+    // Folder walk, the unpinned-requirement name, the publisher DID check,
+    // and the slot-accept check. The refusal text is a string, so code-only
+    // blanks it; `requirement.name` is the value that refusal formats.
+    for needle in [
+        "walk_folder_start(",
+        "requirement.name",
+        "verify_capsule_signature(",
+        "accept_folder_start(",
+    ] {
+        binds.push(Bind {
+            file: "elastos-server/src/runtime.rs",
+            function: "run_signer",
+            call: String::new(),
+            needle: needle.to_string(),
+        });
+    }
+    // Joined at run time, so this file never holds the text that
+    // `the_server_walks_a_bundle_only_under_its_budget` scans the server for.
+    let within = ["checked_bundle", "_within("].concat();
+    let within_reported = ["checked_bundle", "_within_reported("].concat();
+    binds.push(Bind {
+        file: "elastos-server/src/runtime.rs",
+        function: "walk_folder_start",
+        call: String::new(),
+        needle: within,
+    });
+    for needle in [
+        within_reported,
+        "empty_folders".to_string(),
+        "check_bundle_signature(".to_string(),
+    ] {
+        binds.push(Bind {
+            file: "elastos-server/src/stage_cmd.rs",
+            function: "stage_bundle",
+            call: String::new(),
+            needle,
+        });
+    }
+    binds.push(Bind {
+        file: WINDOWS_WALK,
+        function: "",
+        call: String::new(),
+        needle: "tally.note_empty(".to_string(),
+    });
+    binds
+}
+
+fn binding_sources() -> BTreeMap<String, String> {
+    let mut sources = source::production_sources();
+    let windows = fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../elastos-bundle-identity/src/windows_walk.rs"),
+    )
+    .expect("windows walk")
+    .replace("\r\n", "\n");
+    sources.insert(WINDOWS_WALK.to_string(), windows);
+    sources
+}
+
+/// One bind against its needle. Comments and strings are masked through
+/// `function_index` / `code_only`, including in `windows_walk.rs`. A miss
+/// panics naming this bind's file, function, call, and needle so a plant
+/// can tell which bind refused.
+fn check_bind(
+    index: &BTreeMap<String, Vec<(String, String)>>,
+    sources: &BTreeMap<String, String>,
+    bind: &Bind,
+) {
+    let haystack = if bind.function.is_empty() {
+        let text = sources
+            .get(bind.file)
+            .unwrap_or_else(|| panic!("missing {}", bind.file));
+        source::code_only(text)
+    } else {
+        reachable(index, bind.file, bind.function)
+    };
+    assert!(
+        haystack.contains(bind.needle.as_str()),
+        "{}::{} [{}] does not contain {}",
+        bind.file,
+        bind.function,
+        bind.call,
+        bind.needle
+    );
+}
+
+fn panic_text(payload: Box<dyn std::any::Any + Send>) -> String {
+    if let Some(text) = payload.downcast_ref::<String>() {
+        text.clone()
+    } else if let Some(text) = payload.downcast_ref::<&str>() {
+        (*text).to_string()
+    } else {
+        String::from("<non-string panic>")
+    }
+}
+
+/// One check of every bound row against its needles. A miss panics.
+fn bind_closure_and_stage(sources: &BTreeMap<String, String>) {
+    let pinned = ".admit_closure_member(data_dir, &pinned";
+    let binds = binds();
+    let closure = binds.iter().filter(|bind| bind.needle == pinned).count();
+    assert_eq!(closure, 7, "a closure row was added or dropped");
+    let closure_calls: BTreeSet<_> = binds
+        .iter()
+        .filter(|bind| bind.needle == pinned)
+        .map(|bind| (bind.file, bind.function, bind.call.as_str()))
+        .collect();
+    assert_eq!(
+        closure_calls.len(),
+        7,
+        "a closure bind dropped its call key: {closure_calls:?}"
+    );
+    assert_eq!(
+        rows()
+            .iter()
+            .filter(|row| row.function == "run_signer" && row.checks == "CID+DID+closure")
+            .count(),
+        1
+    );
+    assert_eq!(
+        rows()
+            .iter()
+            .filter(|row| row.function == "stage_bundle" && row.checks == "CID+DID")
+            .count(),
+        1
+    );
+    let index = function_index(sources);
+    for bind in &binds {
+        check_bind(&index, sources, bind);
+    }
+    let signer = choose(&index, "run_signer", "elastos-server/src/runtime.rs").expect("run_signer");
+    assert!(
+        !signer.contains("admit_closure_member("),
+        "run_signer now admits a pinned member; bind the row to that call"
+    );
+}
+
+/// The closure rows reach the one pinned walk, and the stage row reaches the
+/// report, the empty-folder name, and the signature check. `run_signer`
+/// walks the folder, checks the publisher DID, accepts the slot, and names
+/// the loose requirement; it does not admit a pin.
+#[test]
+fn closure_and_stage_rows_bind_to_their_checks() {
+    bind_closure_and_stage(&binding_sources());
+}
+
+/// Each bound needle, removed from a copy of the source, makes that bind's
+/// own check refuse. One plant per bind (not per unique needle), and the
+/// panic must name that bind's file, function, call, and needle: a shared
+/// pin needle still proves every closure row, and no plant shares another's
+/// assertion. The text stays inside a comment, so a raw search would still
+/// pass.
+#[test]
+fn each_bound_needle_stripped_from_a_copy_makes_the_binder_refuse() {
+    let sources = binding_sources();
+    let binds = binds();
+    assert_eq!(
+        binds.len(),
+        16,
+        "a bound row or needle was added or dropped"
+    );
+    for bind in &binds {
+        let planted = sources
+            .iter()
+            .map(|(file, text)| {
+                (
+                    file.clone(),
+                    text.replace(bind.needle.as_str(), &format!("/*{}*/", bind.needle)),
+                )
+            })
+            .collect();
+        let index = function_index(&planted);
+        let refused = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            check_bind(&index, &planted, bind);
+        }));
+        let Err(payload) = refused else {
+            panic!(
+                "binder still accepts after planting {}::{} [{}] needle {}",
+                bind.file, bind.function, bind.call, bind.needle
+            );
+        };
+        let msg = panic_text(payload);
+        let call_marker = format!("[{}]", bind.call);
+        assert!(
+            msg.contains(bind.file)
+                && msg.contains(bind.function)
+                && msg.contains(&call_marker)
+                && msg.contains(bind.needle.as_str()),
+            "plant for {}::{} [{}] needle {} panicked as a different bind: {}",
+            bind.file,
+            bind.function,
+            bind.call,
+            bind.needle,
+            msg
+        );
+    }
+}
+
+#[test]
+fn a_bodiless_signature_does_not_take_the_next_body() {
+    let mut sources = BTreeMap::new();
+    sources.insert(
+        "sample.rs".into(),
+        [
+            "trait T {",
+            "    fn foo();",
+            "    fn bar() {",
+            "        bar_body()",
+            "    }",
+            "}",
+            "fn array(x: [u8; 4]) {",
+            "    array_body()",
+            "}",
+            "fn returned() -> [u8; 4] {",
+            "    returned_body()",
+            "}",
+            "",
+        ]
+        .join("\n"),
+    );
+    let index = function_index(&sources);
+    assert!(
+        !index.contains_key("foo"),
+        "a bodiless signature took a body"
+    );
+    assert!(index["bar"][0].1.contains("bar_body"));
+    assert!(!index["bar"][0].1.contains("array_body"));
+    assert!(index["array"][0].1.contains("array_body"));
+    assert!(index["returned"][0].1.contains("returned_body"));
+}

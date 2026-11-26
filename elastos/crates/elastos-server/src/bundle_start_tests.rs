@@ -1462,7 +1462,7 @@ fn the_start_by_cid_reads_each_slot_once_and_fetches_nothing() {
     // function's own indent.
     assert_eq!(source.matches("impl VerifiedBundle {").count(), 1);
     let maker = fn_body(&source, "impl VerifiedBundle {", "pub(crate) fn check(");
-    let walk = ["checked_bundle", "_within("].concat();
+    let walk = ["checked_bundle", "_within_reported("].concat();
     assert_eq!(start.matches(&walk).count(), 0);
     // The walk, then the moment after it, then the one maker. The CID, the
     // signature, the manifest and the imports are that maker, in that order.
@@ -1537,7 +1537,7 @@ fn the_start_by_cid_reads_each_slot_once_and_fetches_nothing() {
     assert_eq!(production.matches("&mut left").count(), 2);
     assert_eq!(production.matches("left.max_").count(), 4);
     for shrinks in [
-        "left.max_entries = left.max_entries.saturating_sub(files.len());",
+        "left.max_entries = left.max_entries.saturating_sub(report.entries);",
         "left.max_total_bytes = left.max_total_bytes.saturating_sub(bytes);",
     ] {
         assert_eq!(member.matches(shrinks).count(), 1, "{shrinks}");
@@ -2276,6 +2276,215 @@ async fn the_bundles_of_one_start_share_one_budget() {
         let (alone, _) = home.run_watched(&second_cid, None, short).await;
         assert_eq!(alone.unwrap(), "second");
     }
+}
+
+/// One start spends one budget over its whole closure. A folder the slot
+/// holds is a listed entry, so it comes off that budget with the files.
+/// Three bundles of two files and two empty folders pass at 12 listed
+/// entries and refuse at 8, on the last bundle. That bundle alone still
+/// starts at 8. The walk already counts a folder against the budget it is
+/// given, and a staged slot holds no empty folder until this test adds one.
+#[tokio::test]
+async fn one_start_charges_every_listed_entry() {
+    let publisher = key(87);
+    let home = Home::trusting(&[&publisher]).await;
+    let quiet = quiet_component();
+    let (first, second) = (manifest("first"), manifest("second"));
+    let first_cid = home.staged("first", &first, &quiet, &publisher).await;
+    let second_cid = home.staged("second", &second, &quiet, &publisher).await;
+    let root = manifest_pinning("root", &[("first", &first_cid), ("second", &second_cid)]);
+    let root_cid = home.staged("root", &root, &quiet, &publisher).await;
+    for cid in [&root_cid, &first_cid, &second_cid] {
+        fs::create_dir(home.slot_file(cid, "empty-a")).unwrap();
+        fs::create_dir(home.slot_file(cid, "empty-b")).unwrap();
+    }
+
+    let passes = Budget {
+        max_entries: 12,
+        ..BUNDLE_WALK_BUDGET
+    };
+    let (ran, walked) = home.run_watched(&root_cid, None, passes).await;
+    assert_eq!(ran.unwrap(), "root");
+    assert_eq!(
+        walked,
+        [root_cid.as_str(), first_cid.as_str(), second_cid.as_str()]
+    );
+
+    let refuses = Budget {
+        max_entries: 8,
+        ..BUNDLE_WALK_BUDGET
+    };
+    let (result, walked) = home.run_watched(&root_cid, None, refuses).await;
+    let refusal = result.unwrap_err();
+    assert_eq!(refusal.code(), "bundle_walk_over_budget", "{refusal}");
+    assert!(
+        matches!(&refusal, BundleRefusal::Requirement { name, .. } if name == "second"),
+        "{refusal}"
+    );
+    assert!(
+        refusal.to_string().contains("the walk's limit on entries"),
+        "{refusal}"
+    );
+    assert_eq!(walked, [root_cid.as_str(), first_cid.as_str()]);
+    let (alone, _) = home.run_watched(&second_cid, None, refuses).await;
+    assert_eq!(alone.unwrap(), "second");
+}
+
+/// `max_depth` and `max_path_bytes` stay per path across a closure. Several
+/// pinned bundles may each sit at those limits and pass; the totals are not
+/// summed. One path one folder deeper, or one byte longer, in one member is
+/// refused while the members already walked still pass.
+#[tokio::test]
+async fn depth_and_path_bytes_stay_per_path_across_a_closure() {
+    let publisher = key(88);
+    let home = Home::trusting(&[&publisher]).await;
+    let quiet = quiet_component();
+    // Folder path of three parts is refused before it opens. Two parts pass.
+    const DEPTH: usize = 3;
+    // Long enough for `app.component.wasm`, short enough to craft by hand.
+    const PATH_BYTES: usize = 64;
+    // Under `n/n` ("n/n/" is four bytes) a leaf of length 60 sits at 64.
+    let at_path = "p".repeat(PATH_BYTES - 4);
+    let over_path = "p".repeat(PATH_BYTES - 3);
+
+    async fn stage_nested(
+        home: &Home,
+        publisher: &SigningKey,
+        quiet: &[u8],
+        name: &str,
+        manifest: &str,
+        folders: usize,
+        leaf: &str,
+    ) -> String {
+        let folder = home.bundle(name, manifest, quiet);
+        let mut at = folder.clone();
+        for _ in 0..folders {
+            at.push("n");
+        }
+        fs::create_dir_all(&at).unwrap();
+        fs::write(at.join(leaf), b"x").unwrap();
+        home.stage(&folder, publisher).await
+    }
+
+    let first = stage_nested(
+        &home,
+        &publisher,
+        &quiet,
+        "first",
+        &manifest("first"),
+        2,
+        &at_path,
+    )
+    .await;
+    let second = stage_nested(
+        &home,
+        &publisher,
+        &quiet,
+        "second",
+        &manifest("second"),
+        2,
+        &at_path,
+    )
+    .await;
+    let root = stage_nested(
+        &home,
+        &publisher,
+        &quiet,
+        "root",
+        &manifest_pinning("root", &[("first", &first), ("second", &second)]),
+        2,
+        &at_path,
+    )
+    .await;
+
+    let at_limit = Budget {
+        max_depth: DEPTH,
+        max_path_bytes: PATH_BYTES,
+        ..BUNDLE_WALK_BUDGET
+    };
+    let (ran, walked) = home.run_watched(&root, None, at_limit).await;
+    assert_eq!(ran.unwrap(), "root");
+    assert_eq!(
+        walked,
+        [root.as_str(), first.as_str(), second.as_str()],
+        "each member sat at the path limits and the limits were not summed"
+    );
+
+    let deep = stage_nested(
+        &home,
+        &publisher,
+        &quiet,
+        "deep",
+        &manifest("deep"),
+        3,
+        &at_path,
+    )
+    .await;
+    let root_deep = stage_nested(
+        &home,
+        &publisher,
+        &quiet,
+        "root-deep",
+        &manifest_pinning("root-deep", &[("first", &first), ("deep", &deep)]),
+        2,
+        &at_path,
+    )
+    .await;
+    let (result, walked) = home.run_watched(&root_deep, None, at_limit).await;
+    let refusal = result.unwrap_err();
+    assert_eq!(refusal.code(), "bundle_walk_over_budget", "{refusal}");
+    assert!(
+        matches!(&refusal, BundleRefusal::Requirement { name, .. } if name == "deep"),
+        "{refusal}"
+    );
+    assert!(
+        refusal.to_string().contains("the walk's limit on depth"),
+        "{refusal}"
+    );
+    assert_eq!(
+        walked,
+        [root_deep.as_str(), first.as_str()],
+        "the first pin passed; only the deep path refused"
+    );
+
+    let long = stage_nested(
+        &home,
+        &publisher,
+        &quiet,
+        "long",
+        &manifest("long"),
+        2,
+        &over_path,
+    )
+    .await;
+    let root_long = stage_nested(
+        &home,
+        &publisher,
+        &quiet,
+        "root-long",
+        &manifest_pinning("root-long", &[("first", &first), ("long", &long)]),
+        2,
+        &at_path,
+    )
+    .await;
+    let (result, walked) = home.run_watched(&root_long, None, at_limit).await;
+    let refusal = result.unwrap_err();
+    assert_eq!(refusal.code(), "bundle_walk_over_budget", "{refusal}");
+    assert!(
+        matches!(&refusal, BundleRefusal::Requirement { name, .. } if name == "long"),
+        "{refusal}"
+    );
+    assert!(
+        refusal
+            .to_string()
+            .contains("the walk's limit on path bytes"),
+        "{refusal}"
+    );
+    assert_eq!(
+        walked,
+        [root_long.as_str(), first.as_str()],
+        "the first pin passed; only the long path refused"
+    );
 }
 
 /// C-limits. A pin may sit at depth 4 and not at depth 5, the bundle asked

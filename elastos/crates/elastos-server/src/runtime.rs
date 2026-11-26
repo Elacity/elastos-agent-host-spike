@@ -9,7 +9,10 @@ use tokio::sync::RwLock;
 use crate::bundle_admission::{self, AcceptedSignature, BundleKind, BundleRefusal};
 use crate::model_budget::{AgentKey, ModelBudget};
 use crate::resource_bridge::{BridgePrincipal, LaunchContent};
-use elastos_bundle_identity::{checked_bundle_within, Budget, CheckedBundle, LabCid};
+use elastos_bundle_identity::{
+    checked_bundle_within, checked_bundle_within_reported, Budget, CheckedBundle, LabCid,
+    WalkReport,
+};
 use elastos_common::{AuthorityBound, CapsuleManifest, CapsuleType, ElastosError, Result};
 use elastos_compute::providers::{BridgeHostcall, ComponentProvider, STOPPED_BEFORE_RUN};
 use elastos_compute::{CapsuleHandle, ComputeProvider};
@@ -3960,9 +3963,9 @@ impl Runtime {
         let asked: LabCid = cid
             .parse()
             .map_err(|_| BundleRefusal::CidFormInvalid(cid.to_string()))?;
-        // One budget for the bundle asked for and every bundle pinned below
-        // it: the files and bytes each walk takes in come off what the next
-        // may take.
+        // One start spends one budget over its whole closure. Every listed
+        // entry, a file or a folder, and the file bytes come off what the
+        // next bundle may take.
         let mut left = budget;
         // Who is trusted is read once, here. That one reading judges the
         // bundle asked for and every bundle pinned below it, and it is held
@@ -4163,7 +4166,7 @@ impl Runtime {
     /// the signature beside the slot under `trust` (the start's one reading
     /// of who is trusted), and only then judges the manifest and a program's
     /// imports. Its fields are private to the module that defines the struct.
-    /// What the walk took in comes off `left`.
+    /// Every listed entry and the file bytes come off `left`.
     ///
     /// The walk is not blind to the manifest: to name a bundle it parses
     /// and validates `capsule.json` with the Runtime's reader, before the
@@ -4233,11 +4236,12 @@ impl Runtime {
         }
         // The one walk of the slot. The manifest and the component below
         // come from this value; the slot is not read again.
-        let bundle = checked_bundle_within(&slot, *left).map_err(bundle_admission::walk_refusal)?;
+        let mut report = WalkReport::default();
+        let bundle = checked_bundle_within_reported(&slot, *left, &mut report)
+            .map_err(bundle_admission::walk_refusal)?;
         after_walk(asked);
-        let files = bundle.entries();
-        let bytes: u64 = files.iter().map(|file| file.content.len() as u64).sum();
-        left.max_entries = left.max_entries.saturating_sub(files.len());
+        let bytes = report.bytes;
+        left.max_entries = left.max_entries.saturating_sub(report.entries);
         left.max_total_bytes = left.max_total_bytes.saturating_sub(bytes);
         let signature = bundle_admission::bundle_signature_path(data_dir, asked);
         VerifiedBundle::check(&bundle, asked, &signature, trust)
