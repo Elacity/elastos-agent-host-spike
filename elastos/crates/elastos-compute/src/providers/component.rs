@@ -2266,6 +2266,14 @@ impl ComputeProvider for ComponentProvider {
     }
 }
 
+/// The trailer's only wait. It ends when the stream is drained or dropped.
+async fn await_read_trailer(
+    rx: tokio::sync::oneshot::Receiver<std::result::Result<(), String>>,
+) -> std::result::Result<(), String> {
+    rx.await
+        .map_err(|_| "the provider ended without a result".to_string())?
+}
+
 fn v2_error(err: elastos::bus::types::BusError) -> V2BusError {
     use elastos::bus::types::BusError as V1;
     match err {
@@ -2369,11 +2377,9 @@ fn encode_b64(bytes: &[u8]) -> String {
 fn bus_error(code: &str, message: impl Into<String>) -> elastos::bus::types::BusError {
     let message = message.into();
     match code {
-        "denied"
-        | "capability_denied"
-        | "missing_token"
-        | "invalid_token"
-        | "principal_context_required" => elastos::bus::types::BusError::Denied(message),
+        "denied" | "capability_denied" | "missing_token" | "invalid_token" => {
+            elastos::bus::types::BusError::Denied(message)
+        }
         "not_found" => elastos::bus::types::BusError::NotFound(message),
         "timeout" => elastos::bus::types::BusError::Timeout(message),
         "unavailable" => elastos::bus::types::BusError::Unavailable(message),
@@ -3228,12 +3234,9 @@ impl v2::elastos::bus::providers::HostWithStore<ComponentState> for HasSelf<Comp
                     super::bus2_stream::WindowRead::new(bytes, tx, hold).stop_when(stop),
                 )?;
                 let trailer = wasmtime::component::FutureReader::new(&mut access, async move {
-                    let ended = match tokio::time::timeout(V2_HOST_DEADLINE, rx).await {
-                        Ok(Ok(value)) => value,
-                        Ok(Err(_)) => Err("the provider ended without a result".into()),
-                        Err(_) => Err("deadline".into()),
-                    };
-                    Ok::<_, wasmtime::Error>(ended.map_err(V2BusError::Invalid))
+                    Ok::<_, wasmtime::Error>(
+                        await_read_trailer(rx).await.map_err(V2BusError::Invalid),
+                    )
                 })?;
                 Ok::<_, wasmtime::Error>((
                     v2::elastos::bus::types::InvokeStatus {
@@ -5738,6 +5741,29 @@ mod tests {
         );
     }
 
+    /// The trailer may be polled before the stream is drained, and for longer
+    /// than the host-call deadline. Draining still makes it ok.
+    #[tokio::test]
+    async fn a_trailer_polled_before_the_drain_stays_ok_past_the_host_deadline() {
+        let bytes = vec![7u8; 8];
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let mut stream = crate::providers::bus2_stream::WindowRead::new(
+            bytes.clone(),
+            tx,
+            crate::providers::bus2_stream::ReadHold::empty(),
+        );
+        let trailer = tokio::spawn(super::await_read_trailer(rx));
+        tokio::time::sleep(super::V2_HOST_DEADLINE + Duration::from_millis(50)).await;
+        let mut got = Vec::new();
+        while let Some(chunk) = stream.pull(4) {
+            got.extend(chunk);
+        }
+        drop(stream);
+        let ended = trailer.await.expect("trailer task");
+        assert!(ended.is_ok(), "{ended:?}");
+        assert_eq!(got, bytes);
+    }
+
     #[tokio::test]
     async fn v2_exact_cap_object_arrives_in_more_than_one_chunk() {
         let chunk = crate::providers::bus2_stream::READ_CHUNK;
@@ -7441,9 +7467,9 @@ mod tests {
         assert!(
             matches!(
                 invoke_with("principal_context_required"),
-                elastos::bus::types::BusError::Denied(message) if message == "refused"
+                elastos::bus::types::BusError::Internal(message) if message == "refused"
             ),
-            "a missing principal is a refusal the guest can name"
+            "a v1 read keeps principal_context_required as Internal"
         );
     }
 

@@ -833,7 +833,7 @@ fn resource_invoke_dispatch(
         .as_str()
         .filter(|value| !value.is_empty())
         .ok_or_else(|| "resource_invoke missing operation".to_string())?;
-    refuse_unoffered_v2_read(operation, request, uri)?;
+    refuse_unoffered_v2_read(operation, request, uri, principal_id, data_dir)?;
     let operation = operation.to_string();
     let uri = scope_current_user_alias(uri, principal_id, data_dir)?;
 
@@ -1357,9 +1357,33 @@ fn submit_agent_plan_response(
     }
 }
 
+/// A Bus v2 read is a read whose body sets `check_revision`. Called once.
 #[rustfmt::skip]
-fn refuse_unoffered_v2_read(operation: &str, request: &serde_json::Value, uri: &str) -> Result<(), ResourceInvokeError> {
-    if operation == "read" && request["body"]["check_revision"].as_bool() == Some(true) { let named = request["body"]["path"].as_str().unwrap_or(uri); if let Some(root) = unoffered_v2_read_root(named).or(unoffered_v2_read_root(uri)) { return Err(ResourceInvokeError::new("root_not_offered", format!("{root} is not offered"))); } } Ok(())
+fn is_v2_read(operation: &str, request: &serde_json::Value) -> bool {
+    operation == "read" && request["body"]["check_revision"].as_bool() == Some(true)
+}
+
+/// The stored root of this launch, after `self` is resolved. Anything else is not.
+#[rustfmt::skip]
+fn caller_owns(resource: &str, principal_id: Option<&str>, data_dir: Option<&Path>) -> bool {
+    let Some(id) = principal_id else { return false };
+    let Ok(own) = crate::auth::principal_stored_localhost_root(data_dir, id) else { return false };
+    let Ok(scoped) = scope_current_user_alias(resource, Some(id), data_dir) else { return false };
+    scoped == own || scoped.starts_with(&format!("{own}/"))
+}
+
+/// Own root, then the name. The name still runs before the protected path.
+#[rustfmt::skip]
+fn refuse_unoffered_v2_read(operation: &str, request: &serde_json::Value, uri: &str, principal_id: Option<&str>, data_dir: Option<&Path>) -> Result<(), ResourceInvokeError> {
+    if !is_v2_read(operation, request) { return Ok(()); }
+    let named = request["body"]["path"].as_str().unwrap_or(uri);
+    for resource in [named, uri] {
+        if caller_owns(resource, principal_id, data_dir) { continue; }
+        if let Some(root) = unoffered_v2_read_root(resource) {
+            return Err(ResourceInvokeError::new("root_not_offered", format!("{root} is not offered")));
+        }
+    }
+    Ok(())
 }
 
 /// Local, Public, and Users are offered. Any other root is named.
