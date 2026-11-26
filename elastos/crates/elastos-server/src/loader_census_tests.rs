@@ -1414,7 +1414,10 @@ struct Bind {
 }
 
 /// Every bound row and the needle its code must still hold. A function name
-/// of `""` is the whole file, which is how the Windows walk is bound.
+/// of `""` is the whole file, which is how the Windows walk is bound. The
+/// bound set is the install and launch paths this slice's checks cover:
+/// closure starts that admit a pin, `run_signer`'s folder walk plus its
+/// signature and slot-accept checks, the stage walk, and the Windows walk.
 fn binds() -> Vec<Bind> {
     let mut binds = Vec::new();
     for row in rows() {
@@ -1426,9 +1429,15 @@ fn binds() -> Vec<Bind> {
             });
         }
     }
-    // The refusal text is a string, so code-only blanks it. `requirement.name`
-    // is the value that refusal formats.
-    for needle in ["walk_folder_start(", "requirement.name"] {
+    // Folder walk, the unpinned-requirement name, the publisher DID check,
+    // and the slot-accept check. The refusal text is a string, so code-only
+    // blanks it; `requirement.name` is the value that refusal formats.
+    for needle in [
+        "walk_folder_start(",
+        "requirement.name",
+        "verify_capsule_signature(",
+        "accept_folder_start(",
+    ] {
         binds.push(Bind {
             file: "elastos-server/src/runtime.rs",
             function: "run_signer",
@@ -1518,33 +1527,45 @@ fn bind_closure_and_stage(sources: &BTreeMap<String, String>) {
 
 /// The closure rows reach the one pinned walk, and the stage row reaches the
 /// report, the empty-folder name, and the signature check. `run_signer`
-/// walks the folder and names the loose requirement; it does not admit a pin.
+/// walks the folder, checks the publisher DID, accepts the slot, and names
+/// the loose requirement; it does not admit a pin.
 #[test]
 fn closure_and_stage_rows_bind_to_their_checks() {
     bind_closure_and_stage(&binding_sources());
 }
 
 /// Each bound needle, removed from a copy of the source, makes the binder
-/// refuse. The text stays inside a comment, so a raw search would still pass.
+/// refuse for that bind. One plant per bind (not per unique needle), so a
+/// shared pin needle still proves every closure row. The text stays inside
+/// a comment, so a raw search would still pass.
 #[test]
 fn each_bound_needle_stripped_from_a_copy_makes_the_binder_refuse() {
     let sources = binding_sources();
-    let mut needles = BTreeSet::new();
-    for bind in binds() {
-        needles.insert(bind.needle);
-    }
-    assert_eq!(needles.len(), 8, "a bound needle was added or dropped");
-    for needle in needles {
+    let binds = binds();
+    assert_eq!(
+        binds.len(),
+        16,
+        "a bound row or needle was added or dropped"
+    );
+    for bind in binds {
         let planted = sources
             .iter()
-            .map(|(file, text)| (file.clone(), text.replace(needle, &format!("/*{needle}*/"))))
+            .map(|(file, text)| {
+                (
+                    file.clone(),
+                    text.replace(bind.needle, &format!("/*{}*/", bind.needle)),
+                )
+            })
             .collect();
         let refused = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             bind_closure_and_stage(&planted);
         }));
         assert!(
             refused.is_err(),
-            "binder still accepts a source whose code lost {needle}"
+            "binder still accepts after planting {}::{} needle {}",
+            bind.file,
+            bind.function,
+            bind.needle
         );
     }
 }
