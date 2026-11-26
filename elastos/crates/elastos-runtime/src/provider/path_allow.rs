@@ -31,12 +31,12 @@ pub(crate) struct HelperConfinement {
 /// `ElastOS_System` is the parameter for `ElastOS/System` and `LibraryIndex`
 /// is the parameter for `ElastOS/SystemServices/Library`.
 ///
-/// `Users` and `UsersAI` hold caller-chosen object names. Object's ElastOS
-/// root is `ElastOS/System`, the directory its auth state, lock file, and
-/// temp files use. The published-CID index is the only file under
-/// `ElastOS/SystemServices/Library`. That directory is this helper's own
-/// rule. Home creates it before the helper starts and leaves it owner-only.
-/// Nothing else under `ElastOS/SystemServices` is an object root.
+/// `Users` and `UsersAI` hold caller-chosen object names and stay writable.
+/// `ElastOS/System` is read-only, including `ElastOS/System/Auth`: the helper
+/// reads auth state and the recovery key and does not write them. The
+/// published-CID index under `ElastOS/SystemServices/Library` is the one
+/// SystemServices directory this helper may write. Home creates it before
+/// the helper starts and leaves it owner-only.
 ///
 /// Linux Landlock cannot exclude a child of a granted directory. Localhost
 /// still grants `ElastOS`, so `ElastOS/SystemServices/Wallet` stays inside
@@ -601,6 +601,12 @@ mod tests {
                     ),
                     "object grants ElastOS/System"
                 );
+                assert!(rendered
+                    .seatbelt
+                    .contains("(allow file-read* (subpath (param \"ElastOS_System\")))"));
+                assert!(!rendered
+                    .seatbelt
+                    .contains("file-write* (subpath (param \"ElastOS_System\"))"));
                 assert!(
                     !rendered
                         .landlock
@@ -688,7 +694,12 @@ mod tests {
                     "{component_key} reaches the device key through {}",
                     rule.1.display()
                 );
-                assert_eq!(rule.2, storage_mask, "{component_key} mask");
+                let mask = if *name == "ElastOS_System" {
+                    0xc
+                } else {
+                    storage_mask
+                };
+                assert_eq!(rule.2, mask, "{component_key} {name}");
             }
             let executable_rules: Vec<_> = rest
                 .iter()

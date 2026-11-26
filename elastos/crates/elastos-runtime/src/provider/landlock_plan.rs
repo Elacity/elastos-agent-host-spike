@@ -645,15 +645,13 @@ fn open_loader_stat(path: &Path) -> std::io::Result<(libc::stat, OwnedFd)> {
     open_stat(path, flags)
 }
 
-/// A regular file opened without following a symlink. The executable rule
-/// uses the verified descriptor when launch has one; this hold is the
-/// descriptor for a plan built before that launch.
+/// Dup the held launch executable. A failed dup does not open the path.
+/// Otherwise Linux uses `O_PATH` (`0x200000`); macOS has no `O_PATH`.
+#[rustfmt::skip]
 fn hold_regular_nofollow(path: &Path) -> Option<OwnedFd> {
-    hold_if(
-        path,
-        libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
-        false,
-    )
+    let launch = INTERPRETER_FD.with(|slot| slot.get());
+    if launch >= 0 { let duped = unsafe { libc::fcntl(launch, libc::F_DUPFD_CLOEXEC, 3) }; return (duped >= 0).then(|| unsafe { OwnedFd::from_raw_fd(duped) }); }
+    hold_if(path, [libc::O_RDONLY, 0x200000][usize::from(cfg!(target_os = "linux"))] | libc::O_CLOEXEC | libc::O_NOFOLLOW, false)
 }
 
 /// Follow the final symlink once and hold that regular file. Chain's
@@ -996,7 +994,9 @@ pub(super) fn build_path_allow_plan(
                     root.name
                 ));
             }
-            rules.push(PathRule(root.name, root.path.clone(), STORAGE));
+            // ElastOS/System is read-only. Landlock cannot carve Auth out of it.
+            let access = [STORAGE, READ_FILE | 8][usize::from(root.name == "ElastOS_System")];
+            rules.push(PathRule(root.name, root.path.clone(), access));
             file_pins.push(None);
             held.push(root.held.take());
             root_dev.push(root.dev);
@@ -1063,6 +1063,12 @@ mod tests {
     use std::collections::HashMap;
     use std::os::unix::io::AsRawFd;
     use RuntimeProviderId::*;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_o_path_is_the_hold_used_when_launch_has_no_fd() {
+        assert_eq!(libc::O_PATH, 0x200000);
+    }
 
     #[test]
     fn a_wrapping_program_header_names_the_executable() {

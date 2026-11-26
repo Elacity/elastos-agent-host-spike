@@ -112,6 +112,15 @@ pub(crate) fn open_regular_lock_file(_path: &Path, _label: &str) -> anyhow::Resu
 pub(crate) const OBJECT_HELPER_AUTH_WRITE_REFUSAL: &str =
     "object helper refuses to write Home sign-in files";
 
+/// The helper does not sign or rewrite a checkpoint that is behind auth-state.
+pub(crate) const OBJECT_HELPER_CHECKPOINT_REFUSAL: &str =
+    "object helper refuses to repair the audit checkpoint";
+
+/// The recovery key is read. Creating it is the unfenced gateway's write.
+#[cfg(unix)]
+pub(crate) const OBJECT_HELPER_RECOVERY_KEY_REFUSAL: &str =
+    "object helper refuses to create the recovery archive key";
+
 fn auth_sign_in_family(path: &Path) -> bool {
     let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
         return false;

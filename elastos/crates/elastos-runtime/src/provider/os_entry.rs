@@ -1512,7 +1512,7 @@ mod tests {
                 "object-provider",
                 data.join("ElastOS/System/own.txt"),
                 data.join("ElastOS/own.txt"),
-                data.join("ElastOS/System/result.txt"),
+                data.join("Users/result.txt"),
             ),
             (
                 "chain-provider",
@@ -1528,6 +1528,12 @@ mod tests {
             let own_lit = format!("{:?}", own.display().to_string());
             let foreign_lit = format!("{:?}", foreign.display().to_string());
             let result_lit = format!("{:?}", result.display().to_string());
+            let denied = if key == "object-provider" {
+                data.join("ElastOS/System/denied.txt")
+            } else {
+                result.with_file_name("denied.txt")
+            };
+            let denied_lit = format!("{:?}", denied.display().to_string());
             let mut probe = String::from(
                 "use std::os::unix::fs::PermissionsExt;\nfn main() {\n    let mut report = String::new();\n    let checks: &[(&str, &str)] = &[\n        (\"device\", ",
             );
@@ -1537,7 +1543,11 @@ mod tests {
             probe.push_str("),\n        (\"foreign\", ");
             probe.push_str(&foreign_lit);
             probe.push_str(
-                "),\n    ];\n    for (name, path) in checks {\n        let code = match std::fs::File::open(path) {\n            Ok(_) => \"open\".to_string(),\n            Err(err) => err.raw_os_error().unwrap_or(-1).to_string(),\n        };\n        let stat = match std::fs::symlink_metadata(path) {\n            Ok(_) => \"stat\".to_string(),\n            Err(err) => err.raw_os_error().unwrap_or(-1).to_string(),\n        };\n        report.push_str(name);\n        report.push('=');\n        report.push_str(&code);\n        report.push('\\n');\n        report.push_str(name);\n        report.push_str(\"_stat=\");\n        report.push_str(&stat);\n        report.push('\\n');\n        if *name == \"device\" {\n            let chmod = match std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)) {\n                Ok(_) => \"chmod\".to_string(),\n                Err(err) => err.raw_os_error().unwrap_or(-1).to_string(),\n            };\n            report.push_str(\"device_chmod=\");\n            report.push_str(&chmod);\n            report.push('\\n');\n        }\n    }\n    if std::fs::write(",
+                "),\n    ];\n    for (name, path) in checks {\n        let code = match std::fs::File::open(path) {\n            Ok(_) => \"open\".to_string(),\n            Err(err) => err.raw_os_error().unwrap_or(-1).to_string(),\n        };\n        let stat = match std::fs::symlink_metadata(path) {\n            Ok(_) => \"stat\".to_string(),\n            Err(err) => err.raw_os_error().unwrap_or(-1).to_string(),\n        };\n        report.push_str(name);\n        report.push('=');\n        report.push_str(&code);\n        report.push('\\n');\n        report.push_str(name);\n        report.push_str(\"_stat=\");\n        report.push_str(&stat);\n        report.push('\\n');\n        if *name == \"device\" {\n            let chmod = match std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)) {\n                Ok(_) => \"chmod\".to_string(),\n                Err(err) => err.raw_os_error().unwrap_or(-1).to_string(),\n            };\n            report.push_str(\"device_chmod=\");\n            report.push_str(&chmod);\n            report.push('\\n');\n        }\n    }\n    let denied_code = match std::fs::write(",
+            );
+            probe.push_str(&denied_lit);
+            probe.push_str(
+                ", b\"x\") {\n        Ok(_) => \"ok\".to_string(),\n        Err(err) => err.raw_os_error().unwrap_or(-1).to_string(),\n    };\n    report.push_str(\"denied=\");\n    report.push_str(&denied_code);\n    report.push('\\n');\n    if std::fs::write(",
             );
             probe.push_str(&result_lit);
             probe.push_str(", report).is_err() {\n        std::process::exit(91);\n    }\n}\n");
@@ -1612,6 +1622,16 @@ mod tests {
                 matches!(line("foreign"), "1" | "13"),
                 "{key} opened a path outside its roots: {report}"
             );
+            if key == "object-provider" {
+                assert!(
+                    matches!(line("denied"), "1" | "13"),
+                    "{key} wrote under ElastOS/System: {report}"
+                );
+                assert!(
+                    !data.join("ElastOS/System/denied.txt").exists(),
+                    "the refused write left a file under ElastOS/System"
+                );
+            }
         }
     }
 

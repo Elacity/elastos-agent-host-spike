@@ -1536,6 +1536,9 @@ async fn fenced_library_publish_rename_move_share_survive_restart() {
         )
         .await;
         assert_eq!(wrote["status"], "ok", "{name}: {wrote}");
+        if name == "rename.txt" {
+            assert_eq!(file_mode(&key), 0o644, "the helper does not write Auth");
+        }
         let published = runtime(&data, &registry, principal, "publish", &uri).await;
         assert_eq!(published["status"], "ok", "{name}: {published}");
         let cid = published["data"]["cid"].as_str().unwrap().to_string();
@@ -1657,7 +1660,7 @@ async fn fenced_library_publish_rename_move_share_survive_restart() {
 }
 
 /// One write and one read with a Recovery Kit already on disk. The key is
-/// widened to 0644 first, so the helper has to narrow it with fchmod.
+/// widened to 0644 first. The helper reads it and leaves that mode.
 #[cfg(any(
     all(not(elastos_unsupported_os_check), target_os = "macos"),
     all(
@@ -1699,8 +1702,8 @@ async fn recovery_kit_touch(binary: &Path) {
     assert_eq!(read["data"]["data"], payload);
     assert_eq!(
         file_mode(&key),
-        0o600,
-        "the helper left the key writable by others"
+        0o644,
+        "the helper does not write the recovery key"
     );
     assert_eq!(std::fs::read(&key).unwrap().len(), 32);
     bridge.shutdown().await.unwrap();
@@ -1750,7 +1753,7 @@ async fn recovery_kit_round_trip(binary: &Path) {
     )
     .await;
     assert_eq!(wrote["status"], "ok", "{wrote}");
-    assert_eq!(file_mode(&key), 0o600);
+    assert_eq!(file_mode(&key), 0o644, "the helper does not write Auth");
     assert_eq!(std::fs::read(&key).unwrap(), key_before);
     let read = exchange_ok(
         bridge,
@@ -1869,19 +1872,12 @@ async fn recovery_kit_round_trip(binary: &Path) {
     )
     .await;
     let missing_text = missing.to_string();
-    // A missing key is created here, then the kit already stored cannot be
-    // opened with that new random key. The fence answer is not a refusal.
     assert_ne!(missing["status"], "ok", "{missing}");
     assert!(
-        !missing_text.contains("Permission denied")
-            && !missing_text.contains("Operation not permitted")
-            && !missing_text.contains("Bad system call")
-            && !missing_text.contains("bad system call"),
+        missing_text.contains(crate::auth_state_files::OBJECT_HELPER_RECOVERY_KEY_REFUSAL),
         "{missing}"
     );
-    assert!(key.is_file(), "the helper did not create the missing key");
-    assert_eq!(file_mode(&key), 0o600);
-    assert_eq!(std::fs::read(&key).unwrap().len(), 32);
+    assert!(!key.exists(), "the helper created the recovery key");
     std::fs::write(&key, &key_before).unwrap();
     std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o644)).unwrap();
     let created = exchange_ok(
@@ -1895,7 +1891,7 @@ async fn recovery_kit_round_trip(binary: &Path) {
     )
     .await;
     assert_eq!(created["status"], "ok", "{created}");
-    assert_eq!(file_mode(&key), 0o600);
+    assert_eq!(file_mode(&key), 0o644, "the helper does not write Auth");
     assert_eq!(std::fs::read(&key).unwrap(), key_before);
     let created_read = exchange_ok(
         bridge,
@@ -1956,17 +1952,34 @@ async fn object_helper_leaves_a_split_sign_in_record_unchanged() {
     let audit_before = std::fs::read(&audit_path).ok();
     let (_, did) = elastos_identity::load_or_create_did(&data).unwrap();
     let object = spawn_object(&provider_binary("object-provider"), &data, &did).await;
+    let bridge = object.bridge();
     let answer = exchange_ok(
-        object.bridge(),
+        bridge,
         serde_json::json!({"op": "list", "principal_id": ada}),
     )
     .await;
     let text = answer.to_string();
     assert!(
-        text.contains(crate::auth_state_files::OBJECT_HELPER_AUTH_WRITE_REFUSAL),
+        text.contains(crate::auth_state_files::OBJECT_HELPER_CHECKPOINT_REFUSAL),
         "{answer}"
     );
     assert_eq!(answer["status"], "error", "{answer}");
+    let published = exchange_ok(
+        bridge,
+        serde_json::json!({
+            "op": "publish",
+            "principal_id": ada,
+            "uri": "localhost://Users/ada/note.txt",
+        }),
+    )
+    .await;
+    let published_text = published.to_string();
+    assert_eq!(published["status"], "error", "{published}");
+    assert!(
+        published_text.contains("Runtime content coordinator")
+            || published_text.contains(crate::auth_state_files::OBJECT_HELPER_CHECKPOINT_REFUSAL),
+        "{published}"
+    );
     assert_eq!(std::fs::read(&auth_path).unwrap(), auth_before);
     assert_eq!(std::fs::read(&audit_path).ok(), audit_before);
     let auth_dir = auth_path.parent().unwrap();
@@ -1975,7 +1988,26 @@ async fn object_helper_leaves_a_split_sign_in_record_unchanged() {
         let name = name.to_string_lossy();
         assert!(!name.contains(".tmp"), "the refused write left {name}");
     }
-    object.bridge().shutdown().await.unwrap();
+    bridge.shutdown().await.unwrap();
+    crate::auth::verify_auth_audit_chain_ready(&data)
+        .unwrap_or_else(|err| panic!("Home did not restart clean: {err:#}"));
+    crate::auth::verify_auth_audit_chain_ready(&data)
+        .unwrap_or_else(|err| panic!("a second Home start did not stay clean: {err:#}"));
+    let (_, did_again) = elastos_identity::load_or_create_did(&data).unwrap();
+    let restarted = spawn_object(&provider_binary("object-provider"), &data, &did_again).await;
+    let again = exchange_ok(
+        restarted.bridge(),
+        serde_json::json!({"op": "list", "principal_id": ada}),
+    )
+    .await;
+    assert_eq!(again["status"], "ok", "{again}");
+    let audit_after = std::fs::read(&audit_path).ok();
+    restarted.bridge().shutdown().await.unwrap();
+    assert_eq!(
+        std::fs::read(&audit_path).ok(),
+        audit_after,
+        "the restarted helper rewrote the checkpoint"
+    );
 }
 
 /// `device:<did>` uses the DID Runtime passed in. An unknown principal keeps

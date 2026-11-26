@@ -1030,18 +1030,7 @@ mod tests {
         std::fs::write(canary.join("kept"), b"kept").unwrap();
         std::fs::set_permissions(&canary, std::fs::Permissions::from_mode(0o755)).unwrap();
         let rows = did_rows();
-        let abi = landlock_plan::kernel_abi().expect("this kernel has no Landlock");
-        let index = landlock_plan::build(
-            RuntimeProviderId::Did,
-            &rows,
-            &bindings_for(&root, Path::new("/bin/true")),
-            abi,
-        )
-        .unwrap()
-        .rules
-        .iter()
-        .position(|rule| rule.0 == "STORAGE_ROOT")
-        .expect("storage rule");
+        let _ = landlock_plan::kernel_abi().expect("this kernel has no Landlock");
         struct ResetSwap;
         impl Drop for ResetSwap {
             fn drop(&mut self) {
@@ -1049,17 +1038,58 @@ mod tests {
             }
         }
         let _reset = ResetSwap;
+        let executable = CheckedExecutable::for_test(Path::new("/bin/true"));
+        let verified = executable.verify_at_spawn().expect("/bin/true opens");
+        let (_dev, _ino, held) = directory_identity(&root).expect("the storage root opens");
+        landlock_plan::set_checked_directory(held);
+        let prepared = landlock_plan::with_interpreter_fd(verified.fd(), || {
+            preexec_installer::prepare(
+                RuntimeProviderId::Did,
+                &rows,
+                &bindings_for(&root, Path::new("/bin/true")),
+            )
+        })
+        .expect("the single-root plan");
+        drop(verified);
         set_pre_fork_storage_swap(Some(canary));
-        let result = start(
-            RuntimeProviderId::Did,
-            &rows,
-            opened_directory(&root),
-            &CheckedExecutable::for_test(Path::new("/bin/true")),
-            &[],
-            None,
-            None,
+        apply_pre_fork_storage_swap(&root);
+        let kept_path = root.join("kept");
+        let kept_c = std::ffi::CString::new(kept_path.as_os_str().as_bytes()).unwrap();
+        let report = std::fs::File::open("/dev/null").unwrap();
+        assert!(
+            std::os::fd::AsRawFd::as_raw_fd(&report) >= 3,
+            "the report fd must survive close_range"
         );
-        let kept = std::fs::read(root.join("kept"))
+        let pid = unsafe { libc::fork() };
+        assert!(pid >= 0);
+        if pid == 0 {
+            let code = if unsafe {
+                preexec_installer::install(&prepared, std::os::fd::AsRawFd::as_raw_fd(&report), -1)
+            }
+            .is_err()
+            {
+                91
+            } else {
+                let opened = unsafe { libc::open(kept_c.as_ptr(), libc::O_RDONLY) };
+                if opened >= 0 {
+                    unsafe { libc::close(opened) };
+                    0
+                } else {
+                    unsafe { *libc::__errno_location() }
+                }
+            };
+            unsafe { libc::_exit(code) };
+        }
+        let mut status = 0;
+        assert_eq!(unsafe { libc::waitpid(pid, &mut status, 0) }, pid);
+        assert!(libc::WIFEXITED(status), "wait status {status}");
+        assert_eq!(
+            libc::WEXITSTATUS(status),
+            libc::EACCES,
+            "the confined child opening root/kept is refused (exit {})",
+            libc::WEXITSTATUS(status)
+        );
+        let kept = std::fs::read(&kept_path)
             .unwrap_or_else(|_| panic!("the canary and its permissions stay unchanged"));
         assert_eq!(
             kept, b"kept",
@@ -1071,37 +1101,6 @@ mod tests {
             .mode()
             & 0o777;
         assert_eq!(mode, 0o755, "the canary and its permissions stay unchanged");
-        match result {
-            Err(LaunchError::ChildFailed { reason, .. }) => {
-                let prepared = preexec_installer::prepare(
-                    RuntimeProviderId::Did,
-                    &rows,
-                    &bindings_for(&root, Path::new("/bin/true")),
-                )
-                .unwrap();
-                let (name, path) = prepared
-                    .added_rule(index)
-                    .expect("the storage rule has a name and a path");
-                assert_eq!(
-                    reason,
-                    format!(
-                        "landlock install refused: {name} {} could not be added with errno {}",
-                        path.display(),
-                        libc::ESTALE
-                    ),
-                    "a swapped storage root must name the rule and its path"
-                );
-            }
-            Ok(pid) => {
-                assert!(
-                    reap_unconfined(pid),
-                    "the held storage directory was granted and the canary was not"
-                );
-            }
-            Err(LaunchError::BeforeFork(reason)) => {
-                panic!("a swapped storage root must reach the child: {reason}")
-            }
-        }
     }
 
     #[test]

@@ -4814,10 +4814,15 @@ pub fn load_or_create_recovery_archive_key(data_dir: &Path) -> anyhow::Result<[u
         if bytes.len() != 32 {
             anyhow::bail!("invalid recovery archive key");
         }
-        set_secret_file_permissions(&path)?;
+        if !elastos_identity::object_helper_process() {
+            set_secret_file_permissions(&path)?;
+        }
         let mut key = [0u8; 32];
         key.copy_from_slice(&bytes);
         return Ok(key);
+    }
+    if elastos_identity::object_helper_process() {
+        anyhow::bail!(crate::auth_state_files::OBJECT_HELPER_RECOVERY_KEY_REFUSAL);
     }
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -4899,6 +4904,10 @@ fn with_audit_chain_activation_lock<T>(
     let _guard = audit_chain_activation_mutex(data_dir)
         .lock()
         .map_err(|_| anyhow!("audit activation lock poisoned"))?;
+    // The helper's load does not create or rewrite the lock file.
+    if elastos_identity::object_helper_process() {
+        return operation();
+    }
     let lock = lock_auth_state_file(open_audit_chain_activation_lock(data_dir)?)?;
     let value = operation()?;
     unlock_auth_state_file(lock)?;
@@ -4916,6 +4925,9 @@ fn persist_audit_chain_activation_unlocked(
     activated_at: u64,
     checkpoint: &AuditChainCheckpointV1,
 ) -> anyhow::Result<RegularFileIdentity> {
+    if elastos_identity::object_helper_process() {
+        anyhow::bail!(crate::auth_state_files::OBJECT_HELPER_CHECKPOINT_REFUSAL);
+    }
     let path = audit_chain_activation_path(data_dir)?;
     if let Some(parent) = path.parent() {
         ensure_regular_auth_parent(data_dir, parent)?;
