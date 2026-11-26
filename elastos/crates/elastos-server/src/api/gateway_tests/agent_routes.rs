@@ -792,6 +792,44 @@ mod off {
         );
         assert_eq!(std::fs::read(agent_file(dir.path())).unwrap(), b"{");
     }
+
+    /// A default build with an agent file: demote and revoke answer as they
+    /// did before agents, and the chain gains no stop row.
+    #[tokio::test]
+    async fn admin_loss_in_a_default_build_answers_success_and_signs_no_stop() {
+        for route in ["demote-guest", "revoke"] {
+            let dir = tempfile::tempdir().unwrap();
+            let app = gateway_router(test_state(dir.path()));
+            let owner = passkey_authority_with_name_role_credential(
+                dir.path(),
+                Some("Owner"),
+                crate::auth::RuntimePrincipalRole::Admin,
+                &format!("r15-off-{route}-owner"),
+            );
+            crate::auth::store_test_principal_root_protection(dir.path(), &owner.principal_id);
+            let other = passkey_authority_with_name_role_credential(
+                dir.path(),
+                Some("Other"),
+                crate::auth::RuntimePrincipalRole::Admin,
+                &format!("r15-off-{route}-other"),
+            );
+            crate::agents::tests::plant_enabled_home_with_one_agent(
+                dir.path(),
+                &owner.principal_id,
+                &owner.proof_binding_id,
+            );
+            let path = format!("/api/auth/passkeys/{}/{route}", owner.proof_binding_id);
+            let (status, body) = call(&app, &path, &other.system_token, Some(json!({}))).await;
+            assert_eq!(status, StatusCode::OK, "{route}: {body}");
+            let stops: Vec<_> = crate::auth::load_auth_state(dir.path())
+                .unwrap()
+                .audit
+                .into_iter()
+                .filter(|event| event.event_type.starts_with("agent.stop"))
+                .collect();
+            assert!(stops.is_empty(), "{route}: {stops:?}");
+        }
+    }
 }
 
 #[cfg(feature = "prototype-agents")]

@@ -3407,3 +3407,278 @@ async fn a_failed_demote_stop_is_signed_and_retried_at_the_next_start() {
     assert_ne!(retried.result, "failed");
     gateway.shutdown().await;
 }
+
+fn stopped_rows(data: &Path) -> Vec<elastos_runtime::auth::RuntimeAuditEventV1> {
+    crate::auth::load_auth_state(data)
+        .unwrap()
+        .audit
+        .into_iter()
+        .filter(|event| event.event_type == "agent.stopped")
+        .collect()
+}
+
+fn admins(home: &Home, tag: &str) -> (super::TestPasskeyAuthority, super::TestPasskeyAuthority) {
+    let owner = super::passkey_authority_with_name_role_credential(
+        &home.data,
+        Some("Owner"),
+        crate::auth::RuntimePrincipalRole::Admin,
+        &format!("r15-{tag}-owner"),
+    );
+    let other = super::passkey_authority_with_name_role_credential(
+        &home.data,
+        Some("Other"),
+        crate::auth::RuntimePrincipalRole::Admin,
+        &format!("r15-{tag}-other"),
+    );
+    (owner, other)
+}
+
+async fn launch_owned(home: &Home, owner: &super::TestPasskeyAuthority, agent: &str) -> String {
+    let dir = home._temp.path().join("probe");
+    let grant = super::super::gateway_home_token::issue_home_agent_launch_token_with_context(
+        &home.data,
+        agent,
+        HOST,
+        &passkey_context(owner),
+    )
+    .unwrap();
+    super::super::gateway_home_runtime::launch_runtime_agent(&home.data, &dir, agent, &grant)
+        .await
+        .unwrap()
+        .session_id
+}
+
+/// Demote and revoke when the owner's agent has nothing to stop (idle, off,
+/// retired, or agents off on this Home) answer 200 and sign no stop. A live
+/// agent is stopped and its stop is signed once.
+#[tokio::test]
+async fn admin_loss_stops_only_a_live_agent_and_signs_it_once() {
+    for state in ["idle", "off", "retired", "home off", "live"] {
+        for route in ["demote-guest", "revoke"] {
+            let home = Home::open();
+            let (owner, other) = admins(&home, &format!("{state}-{route}").replace(' ', "-"));
+            let dir = home._temp.path().join("probe");
+            let agent = create_owned_agent(&home.data, &owner, &sign_probe(&dir));
+            let gateway = Gateway::start(&home.data).await;
+            let caller = crate::agents::Caller {
+                principal_id: &owner.principal_id,
+                proof_binding_id: &owner.proof_binding_id,
+                session_id: &owner.session_id,
+            };
+            let mut session = None;
+            match state {
+                "off" => {
+                    crate::agents::set_active(&home.data, &caller, &agent, false, 2).unwrap();
+                }
+                "retired" => {
+                    crate::agents::retire(&home.data, &caller, &agent, 2).unwrap();
+                }
+                "home off" => {
+                    let (status, body) = post_json(
+                        &gateway.addr,
+                        &system_token(&home),
+                        "/api/apps/system/agents/disable",
+                        "{}",
+                    )
+                    .await;
+                    assert_eq!(status, 200, "{body}");
+                }
+                "live" => session = Some(launch_owned(&home, &owner, &agent).await),
+                _ => {}
+            }
+            let (status, body) = home_http(
+                &gateway.addr,
+                &other.system_token,
+                reqwest::Method::POST,
+                &format!("/api/auth/passkeys/{}/{route}", owner.proof_binding_id),
+            )
+            .await;
+            assert_eq!(status, 200, "{state} {route}: {body}");
+            let rows = stopped_rows(&home.data);
+            assert!(
+                rows.iter().all(|row| row.result != "failed"),
+                "{state} {route}: {rows:?}"
+            );
+            match session {
+                Some(session) => {
+                    assert_eq!(rows.len(), 1, "{state} {route}: {rows:?}");
+                    assert!(!capsule_live(&gateway.agent_url, &gateway.secret, &session).await);
+                }
+                None => assert!(rows.is_empty(), "{state} {route}: {rows:?}"),
+            }
+            gateway.shutdown().await;
+        }
+    }
+}
+
+/// A self-revoke with an idle agent answers as before agents: 200, and the
+/// cookie of the revoked passkey is cleared.
+#[tokio::test]
+async fn a_self_revoke_with_an_idle_agent_clears_the_cookie() {
+    let home = Home::open();
+    let (owner, _other) = admins(&home, "self-revoke");
+    let dir = home._temp.path().join("probe");
+    create_owned_agent(&home.data, &owner, &sign_probe(&dir));
+    let gateway = Gateway::start(&home.data).await;
+    let response = reqwest::Client::new()
+        .post(format!(
+            "http://{}/api/auth/passkeys/{}/revoke",
+            gateway.addr, owner.proof_binding_id
+        ))
+        .header("host", &gateway.addr)
+        .header("origin", "null")
+        .header("x-elastos-home-token", &owner.system_token)
+        .header("content-type", "application/json")
+        .body("{}")
+        .send()
+        .await
+        .unwrap();
+    let status = response.status().as_u16();
+    let cleared = response.headers().contains_key(reqwest::header::SET_COOKIE);
+    let body = response.text().await.unwrap();
+    assert_eq!(status, 200, "{body}");
+    assert!(cleared, "a self-revoke did not clear the cookie: {body}");
+    assert!(stopped_rows(&home.data).is_empty());
+    gateway.shutdown().await;
+}
+
+/// A failed demote stop, then the owner is an admin again and starts a new
+/// run: the list load that retries failed stops leaves the new run alive.
+#[tokio::test]
+async fn a_failed_stop_is_not_retried_against_a_later_run() {
+    let home = Home::open();
+    let (owner, other) = admins(&home, "retry-new-run");
+    let dir = home._temp.path().join("probe");
+    let agent = create_owned_agent(&home.data, &owner, &sign_probe(&dir));
+    let gateway = Gateway::start(&home.data).await;
+    let first = launch_owned(&home, &owner, &agent).await;
+    crate::api::agent_plane::arm_task_fault(&home.data, "the plane did not stop the agent");
+    let (status, body) = home_http(
+        &gateway.addr,
+        &other.system_token,
+        reqwest::Method::POST,
+        &format!("/api/auth/passkeys/{}/demote-guest", owner.proof_binding_id),
+    )
+    .await;
+    assert_ne!(status, 200, "{body}");
+    crate::api::agent_plane::clear_task_fault(&home.data);
+    assert_eq!(stopped_rows(&home.data)[0].result, "failed");
+    let (status, body) = home_http(
+        &gateway.addr,
+        &other.system_token,
+        reqwest::Method::POST,
+        &format!(
+            "/api/auth/passkeys/{}/promote-admin",
+            owner.proof_binding_id
+        ),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    for _ in 0..100 {
+        if !capsule_live(&gateway.agent_url, &gateway.secret, &first).await {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let second = launch_owned(&home, &owner, &agent).await;
+    crate::auth::append_audit_event(
+        &home.data,
+        elastos_runtime::auth::RuntimeAuditEventV1 {
+            schema: elastos_runtime::auth::RuntimeAuditEventV1::SCHEMA.to_string(),
+            event_id: format!("audit:r15-start:{second}"),
+            event_type: "agent.start.completed".to_string(),
+            principal_id: Some(owner.principal_id.clone()),
+            proof_binding_id: Some(owner.proof_binding_id.clone()),
+            session_id: Some(second.clone()),
+            challenge_id: None,
+            capsule_id: Some(HOST.to_string()),
+            result: "ok".to_string(),
+            reason: json!({ "agent_id": agent }).to_string(),
+            occurred_at: crate::auth::now_ts(),
+            signer_did: None,
+            signature: None,
+        },
+    )
+    .unwrap();
+    let (listed, list_body) = home_http(
+        &gateway.addr,
+        &owner.system_token,
+        reqwest::Method::GET,
+        "/api/apps/system/agents",
+    )
+    .await;
+    assert_eq!(listed, 200, "{list_body}");
+    assert!(
+        capsule_live(&gateway.agent_url, &gateway.secret, &second).await,
+        "the list load stopped the new run"
+    );
+    let rows = stopped_rows(&home.data);
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    gateway.shutdown().await;
+}
+
+/// A failed demote stop is not retried once the owner is an admin again.
+#[tokio::test]
+async fn a_failed_demote_stop_is_not_retried_after_the_owner_is_promoted() {
+    let home = Home::open();
+    let (owner, other) = admins(&home, "retry-promoted");
+    let dir = home._temp.path().join("probe");
+    let agent = create_owned_agent(&home.data, &owner, &sign_probe(&dir));
+    let gateway = Gateway::start(&home.data).await;
+    launch_owned(&home, &owner, &agent).await;
+    crate::api::agent_plane::arm_task_fault(&home.data, "the plane did not stop the agent");
+    let (status, body) = home_http(
+        &gateway.addr,
+        &other.system_token,
+        reqwest::Method::POST,
+        &format!("/api/auth/passkeys/{}/demote-guest", owner.proof_binding_id),
+    )
+    .await;
+    assert_ne!(status, 200, "{body}");
+    crate::api::agent_plane::clear_task_fault(&home.data);
+    crate::auth::promote_passkey_to_admin(
+        &home.data,
+        &owner.proof_binding_id,
+        crate::auth::now_ts(),
+    )
+    .unwrap();
+    super::super::gateway_agents::confirm_stopping_rows(&home.data)
+        .await
+        .unwrap();
+    let rows = stopped_rows(&home.data);
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!(rows[0].result, "failed");
+    gateway.shutdown().await;
+}
+
+/// Two list loads at once retry one failed stop once.
+#[tokio::test]
+async fn two_list_loads_retry_a_failed_stop_once() {
+    let home = Home::open();
+    let (owner, other) = admins(&home, "retry-twice");
+    let dir = home._temp.path().join("probe");
+    let agent = create_owned_agent(&home.data, &owner, &sign_probe(&dir));
+    let gateway = Gateway::start(&home.data).await;
+    launch_owned(&home, &owner, &agent).await;
+    crate::api::agent_plane::arm_task_fault(&home.data, "the plane did not stop the agent");
+    let (status, body) = home_http(
+        &gateway.addr,
+        &other.system_token,
+        reqwest::Method::POST,
+        &format!("/api/auth/passkeys/{}/demote-guest", owner.proof_binding_id),
+    )
+    .await;
+    assert_ne!(status, 200, "{body}");
+    crate::api::agent_plane::clear_task_fault(&home.data);
+    let (first, second) = tokio::join!(
+        super::super::gateway_agents::confirm_stopping_rows(&home.data),
+        super::super::gateway_agents::confirm_stopping_rows(&home.data),
+    );
+    first.unwrap();
+    second.unwrap();
+    let rows = stopped_rows(&home.data);
+    assert_eq!(rows.len(), 2, "one failed row and one retry: {rows:?}");
+    assert_eq!(rows[0].result, "failed");
+    assert_ne!(rows[1].result, "failed");
+    gateway.shutdown().await;
+}

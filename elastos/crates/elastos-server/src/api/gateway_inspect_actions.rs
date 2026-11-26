@@ -718,11 +718,18 @@ impl Drop for UnsettledDispatch {
             return;
         }
         let record = self.record.clone();
+        // This guard drops first when the task panics, and its row is the one
+        // terminal row, so it names the panic.
+        let code = if std::thread::panicking() {
+            "dispatch_panic"
+        } else {
+            "dispatch_lost"
+        };
         let _ = settle_agent_plan_dispatch(
             &self.data_dir,
             record,
             "unknown",
-            serde_json::json!({"status": "unknown", "code": "dispatch_lost"}),
+            serde_json::json!({"status": "unknown", "code": code}),
         );
         crate::runtime::resolve_unknown_plan_effect(&self.request_id);
         let request_id = self.request_id.clone();

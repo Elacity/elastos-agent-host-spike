@@ -2534,6 +2534,48 @@ fn a_stopping_row_stays_open_while_the_session_has_not_ended() {
     assert_eq!(ok(&home), 1, "a second confirm does not append another ok");
 }
 
+/// A failed stop is owed a retry only until that agent's next started run.
+#[test]
+fn a_later_started_run_clears_a_failed_stop() {
+    let home = Home::new();
+    let row = |id: &str, event_type: &str, result: &str| {
+        crate::auth::append_audit_event(
+            home.path(),
+            elastos_runtime::auth::RuntimeAuditEventV1 {
+                schema: elastos_runtime::auth::RuntimeAuditEventV1::SCHEMA.to_string(),
+                event_id: format!("audit:retry-plant:{id}"),
+                event_type: event_type.to_string(),
+                principal_id: Some(home.owner.principal_id.clone()),
+                proof_binding_id: Some(home.owner.proof_binding_id.clone()),
+                session_id: None,
+                challenge_id: None,
+                capsule_id: None,
+                result: result.to_string(),
+                reason: serde_json::json!({ "agent_id": "agent-a", "cause": "owner demoted" })
+                    .to_string(),
+                occurred_at: 10,
+                signer_did: None,
+                signature: None,
+            },
+        )
+        .unwrap();
+    };
+    let owed =
+        |home: &Home| crate::agent_record_audit::latest_failed_agent_stops(home.path()).len();
+    row("1", "agent.stopped", "failed");
+    assert_eq!(owed(&home), 1);
+    row("2", "agent.start.completed", "failed");
+    assert_eq!(owed(&home), 1, "a failed start is not a new run");
+    row("3", "agent.start.completed", "ok");
+    assert_eq!(
+        owed(&home),
+        0,
+        "a started run is not the one the stop was about"
+    );
+    row("4", "agent.stopped", "failed");
+    assert_eq!(owed(&home), 1, "a later failed stop is owed again");
+}
+
 #[test]
 fn rename_changes_display_name_only() {
     let home = Home::new();

@@ -162,10 +162,13 @@ fn recorded_plan_close(result: anyhow::Result<usize>) -> anyhow::Result<()> {
 /// been checked. `ok` is written when the live plane and the retiring plane
 /// both say the session ended and no plan effect is in flight, or when this
 /// process has neither plane, which is a Home that restarted. A session that
-/// is still running on either plane stays `stopping`.
+/// is still running on either plane stays `stopping`. The retry of failed
+/// stops runs under the same lock, so two list loads cannot both stop.
 pub(in crate::api) async fn confirm_stopping_rows(
     data_dir: &std::path::Path,
 ) -> anyhow::Result<()> {
+    static CONFIRM: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    let _held = CONFIRM.lock().await;
     crate::api::agent_plane::release_idle_retiring(data_dir).await;
     let open = crate::agent_record_audit::open_stopping_sessions(data_dir)?;
     let watched = crate::api::agent_plane::watched_runtimes(data_dir);
@@ -186,9 +189,25 @@ pub(in crate::api) async fn confirm_stopping_rows(
 }
 
 /// A demotion or revocation whose stop failed is tried again at the next start.
-/// A later `ok` or `stopping` row means that agent is no longer owed a retry.
+/// A later `ok` or `stopping` row, or a later started run, means that agent is
+/// no longer owed a retry. An admin-lost stop runs only while the owner is
+/// still not an admin.
 async fn retry_failed_stops(data_dir: &std::path::Path) {
     for stop in crate::agent_record_audit::latest_failed_agent_stops(data_dir) {
+        let admin_lost = matches!(
+            stop.reason["cause"].as_str(),
+            Some("owner demoted" | "passkey revoked")
+        );
+        if admin_lost
+            && !crate::agents::owner_of(data_dir, &stop.agent_id).is_none_or(|owner| {
+                matches!(
+                    crate::agents::owner_is_admin_now(data_dir, &owner),
+                    Ok(false)
+                )
+            })
+        {
+            continue;
+        }
         let agent_id = stop.agent_id;
         let reason = stop.reason;
         let principal_id = stop.principal.principal_id.clone();
@@ -254,6 +273,9 @@ fn record_caller_denial(
     event_type: &str,
     agent_id: Option<&str>,
 ) {
+    if !crate::agents::build_allows() {
+        return;
+    }
     let Ok(context) =
         require_home_launch_token_context(&state.data_dir, headers, SYSTEM_CAPSULE_ID)
     else {
@@ -1177,8 +1199,19 @@ pub(super) fn schedule_demoted_owner_stop(data_dir: &std::path::Path, owner_id: 
     });
 }
 
+async fn agent_has_live_session(data_dir: &std::path::Path, agent_id: &str) -> bool {
+    for runtime in crate::api::agent_plane::watched_runtimes(data_dir) {
+        if !runtime.live_sessions_for_agent(agent_id).await.is_empty() {
+            return true;
+        }
+    }
+    false
+}
+
 /// Demotion and last-passkey revocation use Stop's signed rows. `signer` is
 /// the admin who demoted or revoked. Open asks and plans close as `cause`.
+/// Only an agent with a live session is stopped; an idle, off or retired
+/// agent, or a build without agents, has nothing to stop and that is done.
 pub(in crate::api) async fn stop_agents_after_admin_lost(
     data_dir: &std::path::Path,
     actor: &HomeLaunchTokenContext,
@@ -1186,6 +1219,9 @@ pub(in crate::api) async fn stop_agents_after_admin_lost(
     owner_id: &str,
     cause: &str,
 ) -> anyhow::Result<()> {
+    if !crate::agents::build_allows() {
+        return Ok(());
+    }
     let signer = AgentsOwner {
         context: actor.clone(),
         principal: principal.clone(),
@@ -1195,6 +1231,9 @@ pub(in crate::api) async fn stop_agents_after_admin_lost(
         // Plans close before Stop. Denying the ask here lets a parked guest
         // finish and leave Stop with no session, so the denial is inside Stop.
         let _ = crate::api::gateway::close_owner_open_plans(data_dir, &agent_id, cause);
+        if !agent_has_live_session(data_dir, &agent_id).await {
+            continue;
+        }
         let reason = serde_json::json!({ "agent_id": agent_id, "cause": cause });
         let _ = append_agent_lifecycle_audit(
             data_dir,
@@ -1238,6 +1277,7 @@ pub(in crate::api) async fn stop_agents_after_admin_lost(
                     );
                 }
             }
+            Err(error) if stop_is_a_refusal(&error) => {}
             Err(error) => {
                 crate::api::agent_plane::deny_agent_asks(data_dir, &agent_id, cause).await;
                 tracing::warn!(

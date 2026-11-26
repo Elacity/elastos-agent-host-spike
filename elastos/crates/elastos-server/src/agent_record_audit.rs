@@ -151,7 +151,9 @@ pub(crate) fn another_live_admin(
 }
 
 /// One agent whose latest `agent.stopped` row is `failed`, with the principal
-/// that signed it. A later `ok` or `stopping` row drops that agent.
+/// that signed it. A later `ok` or `stopping` row drops that agent, and so
+/// does a later `agent.start.completed` `ok`: that is a new run, not the one
+/// the failed stop was about.
 pub(crate) struct FailedAgentStop {
     pub(crate) agent_id: String,
     pub(crate) principal: crate::auth::PrincipalRecord,
@@ -165,7 +167,8 @@ pub(crate) fn latest_failed_agent_stops(data_dir: &Path) -> Vec<FailedAgentStop>
     let mut latest =
         std::collections::HashMap::<String, (String, String, serde_json::Value)>::new();
     for event in &auth.audit {
-        if event.event_type != "agent.stopped" {
+        let started = event.event_type == "agent.start.completed" && event.result == "ok";
+        if event.event_type != "agent.stopped" && !started {
             continue;
         }
         let Ok(reason) = serde_json::from_str::<serde_json::Value>(&event.reason) else {
@@ -174,6 +177,10 @@ pub(crate) fn latest_failed_agent_stops(data_dir: &Path) -> Vec<FailedAgentStop>
         let Some(agent_id) = reason.get("agent_id").and_then(|value| value.as_str()) else {
             continue;
         };
+        if started {
+            latest.remove(agent_id);
+            continue;
+        }
         let Some(principal_id) = event.principal_id.clone() else {
             continue;
         };

@@ -1186,6 +1186,27 @@ function planCards(summary) {
   ));
 }
 
+// What the restart has to close, read just before it: a `stopping` row with
+// no later `ok`, or a step still approved or dispatching. Normal `.requested`
+// rows are not unclosed work. After the restart that state is closed: the
+// stop has its `ok` row, or every such step has left approved and dispatching.
+export function restartHistory(before, after, stoppingSession) {
+  const stoppedOk = (chain) => chain.some((event) => (
+    event.event_type === "agent.stopped" && event.result === "ok" && event.session_id === stoppingSession
+  ));
+  const inFlight = (record) => record.status === "approved" || record.status === "dispatching";
+  const stoppingOpen = Boolean(stoppingSession) && !stoppedOk(before.chain);
+  const unresolved = before.records.filter(inFlight).map((record) => record.request_id);
+  const unclosed = stoppingOpen ? "stopping" : (unresolved.length > 0 ? "unresolved" : "");
+  const closed = unclosed === "stopping"
+    ? stoppedOk(after.chain)
+    : unresolved.length > 0 && unresolved.every((id) => {
+      const record = after.records.find((item) => item.request_id === id);
+      return Boolean(record) && !inFlight(record);
+    });
+  return { unclosed, unresolved, closed };
+}
+
 export function planeSameProcess(pid, gatewayPid, listenerOwned, pidAlive, mode) {
   return pid > 0
     && pid === gatewayPid
@@ -1844,139 +1865,19 @@ async function main() {
   } catch (error) {
     mark("step_up_approve", "fail", String(error.message || error));
   }
-  let stopDuringStep = null;
-  let runnerStoppedTooLate = false;
-  let stopObserved = "";
-  let frozenLook = "";
+  // Step one is agent A's own step. It is approved and lands with no Stop in
+  // its way. Stop races a second step, agent B's, after this step's rows.
   if (state.approveBody) {
-    // Stop once, while the step is approved or dispatching and the note is
-    // not on disk. Freeze the gateway for that look, queue Stop, then let it
-    // run. There is no second Stop.
-    const approvedPromise = call("POST", "/api/apps/inbox/actions", state.inboxToken, state.approveBody);
-    const notePath = path.join(data, rootSuffix(state.rootA), "Documents", "note.txt");
-    const gatewayPid = fs.existsSync(pidFile) ? Number(String(fs.readFileSync(pidFile, "utf8")).trim()) : 0;
-    const inflightDeadline = Date.now() + 20000;
-    let inflight = "";
-    while (Date.now() < inflightDeadline) {
-      const record = inspectRecords().find((item) => item.request_id === state.requestId);
-      const noteThere = fs.existsSync(notePath);
-      const status = record?.status || "";
-      if ((status === "approved" || status === "dispatching") && !noteThere) {
-        inflight = status;
-        break;
-      }
-      if (noteThere || status === "completed" || status === "denied" || status === "unknown") break;
-      await sleep(5);
-    }
-    let frozen = false;
-    if (inflight && gatewayPid > 0) {
-      try {
-        process.kill(gatewayPid, "SIGSTOP");
-        frozen = true;
-        const record = inspectRecords().find((item) => item.request_id === state.requestId);
-        const noteThere = fs.existsSync(notePath);
-        const status = record?.status || "";
-        if ((status === "approved" || status === "dispatching") && !noteThere) {
-          frozenLook = status;
-        } else {
-          stopObserved = `frozen saw ${status} note=${noteThere}`;
-          inflight = "";
-        }
-      } catch (error) {
-        frozen = false;
-        stopObserved = `SIGSTOP failed: ${error.message || error}`;
-      }
-    }
-    let stopPromise = null;
-    try {
-      if (inflight) {
-        stopPromise = call("POST", "/api/apps/system/agents/stop", state.systemToken, {
-          agent_id: state.agentA,
-        });
-        await sleep(30);
-      }
-    } finally {
-      if (frozen) {
-        try {
-          process.kill(gatewayPid, "SIGCONT");
-        } catch {
-          // The gateway has to leave the stop. A failed continue is recorded below.
-        }
-        frozen = false;
-      }
-    }
-    if (stopPromise) {
-      stopDuringStep = await stopPromise;
-      if (stopDuringStep.status === 409 && String(stopDuringStep.text || "").includes("agent_no_session")) {
-        runnerStoppedTooLate = true;
-        stopObserved = "the runner stopped too late";
-      }
-    } else {
-      const record = inspectRecords().find((item) => item.request_id === state.requestId);
-      const noteThere = fs.existsSync(notePath);
-      if (noteThere || record?.status === "completed") {
-        runnerStoppedTooLate = true;
-        stopObserved = "the runner stopped too late";
-      } else if (!stopObserved) {
-        stopObserved = `no in-flight step; status=${record?.status || "missing"} note=${noteThere}`;
-      }
-    }
-    const approved = await approvedPromise;
+    const approved = await call("POST", "/api/apps/inbox/actions", state.inboxToken, state.approveBody);
     keep("step_up_approve", approved.status === 200, approved.text.slice(0, 300));
   }
   let settled = null;
   const settleDeadline = Date.now() + 30000;
   while (Date.now() < settleDeadline) {
     settled = inspectRecords().find((record) => record.request_id === state.requestId) || null;
-    if (settled && settled.status !== "pending") break;
+    if (settled && !["pending", "approved", "dispatching"].includes(settled.status)) break;
     await sleep(300);
   }
-  const stepOutcome = settled
-    ? `${settled.status}${settled.result?.status ? `/${settled.result.status}` : ""}`
-    : "";
-  const stopRows = auditEvents().filter((event) => (
-    event.event_type === "agent.stopped" && event.session_id === state.launchA?.session_id
-  ));
-  const namedStop = stopRows.find((event) => (
-    event.result === "ok" || event.result === "failed" || event.result === "stopping"
-  ));
-  if (runnerStoppedTooLate || (!stopDuringStep && stopObserved)) {
-    mark("stop_after_the_note_lands", "fail", {
-      http: stopDuringStep?.status || 0,
-      body: stopObserved || "the runner stopped too late",
-      step_outcome: stepOutcome,
-      rows: stopRows.map((event) => event.result),
-    });
-  } else if (
-    frozenLook
-    && (stopDuringStep?.status === 200 || stopDuringStep?.status === 202)
-    && namedStop
-    && stepOutcome
-  ) {
-    pass("stop_after_the_note_lands", {
-      http: stopDuringStep.status,
-      session_id: namedStop.session_id,
-      stop_result: namedStop.result,
-      step_outcome: stepOutcome,
-      frozen: frozenLook,
-    });
-  } else {
-    mark("stop_after_the_note_lands", "fail", {
-      http: stopDuringStep?.status || 0,
-      body: stopObserved || String(stopDuringStep?.text || "").slice(0, 240),
-      frozen: frozenLook,
-      step_outcome: stepOutcome,
-      rows: stopRows.map((event) => event.result),
-    });
-  }
-  state.stoppingSession = namedStop?.result === "stopping" ? namedStop.session_id : "";
-  state.stoppingConfirmedBeforeRestart = state.stoppingSession
-    ? auditEvents().some((event) => (
-      event.event_type === "agent.stopped"
-      && event.result === "ok"
-      && event.session_id === state.stoppingSession
-    ))
-    : false;
   const recordResources = JSON.stringify(settled || {}).match(/localhost:\/\/[^"\\\s]+/g) || [];
   // The guest submits localhost://UsersAI/self. The Runtime scopes that alias
   // to this agent. The file check below is the proof the bytes landed in A's
@@ -2084,6 +1985,164 @@ async function main() {
     && JSON.stringify(interestingFiles()) === filesBeforeReplay;
   keep("replay_zero", replayClean, { status: replay.status, body: replay.text.slice(0, 240) });
 
+  // Step two is agent B's step. Stop B once, while that step is approved or
+  // dispatching and B's note is not on disk. Freeze the gateway for that
+  // look, queue Stop, then let it run. There is no second Stop.
+  let cardB = null;
+  const cardBDeadline = Date.now() + 90000;
+  while (Date.now() < cardBDeadline && !cardB) {
+    const summary = await inbox();
+    for (const entry of entries(summary)) {
+      if (
+        String(entry.action_ref?.action_id || "").startsWith("capability-approve-request:")
+        && resourceOf(entry.body).startsWith("elastos://inspect/submit_agent_plan")
+        && String(entry.body || "").includes(state.agentB)
+      ) {
+        await call("POST", "/api/apps/inbox/actions", state.inboxToken, { action_id: entry.action_ref.action_id });
+      }
+    }
+    const cards = planCards(summary).filter((card) => (
+      `${card.title || ""} ${card.body || ""}`.includes(state.launchB.session_id)
+    ));
+    if (cards.length === 1) cardB = cards[0];
+    else await sleep(500);
+  }
+  const requestB = String(cardB?.action_ref?.action_id || "").replace("agent-plan-approve-request:", "");
+  let approveB = null;
+  let stepUpBError = "";
+  if (cardB) {
+    try {
+      approveB = {
+        action_id: cardB.action_ref.action_id,
+        request_binding: cardB.request_binding || null,
+        step_up_token: await stepUp(state.inboxToken, "agent_plan.approve", { request_id: requestB }),
+      };
+    } catch (error) {
+      stepUpBError = String(error.message || error);
+    }
+  }
+  let stopDuringStep = null;
+  let runnerStoppedTooLate = false;
+  let stopObserved = cardB ? (approveB ? "" : `no step-up for B: ${stepUpBError}`) : "no plan card for agent B";
+  let frozenLook = "";
+  let approvedB = null;
+  const noteB = path.join(data, rootSuffix(state.rootB), "Documents", "note.txt");
+  if (approveB) {
+    const approvedPromise = call("POST", "/api/apps/inbox/actions", state.inboxToken, approveB);
+    const gatewayPid = fs.existsSync(pidFile) ? Number(String(fs.readFileSync(pidFile, "utf8")).trim()) : 0;
+    const inflightDeadline = Date.now() + 20000;
+    let inflight = "";
+    while (Date.now() < inflightDeadline) {
+      const record = inspectRecords().find((item) => item.request_id === requestB);
+      const noteThere = fs.existsSync(noteB);
+      const status = record?.status || "";
+      if ((status === "approved" || status === "dispatching") && !noteThere) {
+        inflight = status;
+        break;
+      }
+      if (noteThere || status === "completed" || status === "denied" || status === "unknown") break;
+      await sleep(5);
+    }
+    let frozen = false;
+    if (inflight && gatewayPid > 0) {
+      try {
+        process.kill(gatewayPid, "SIGSTOP");
+        frozen = true;
+        const record = inspectRecords().find((item) => item.request_id === requestB);
+        const noteThere = fs.existsSync(noteB);
+        const status = record?.status || "";
+        if ((status === "approved" || status === "dispatching") && !noteThere) {
+          frozenLook = status;
+        } else {
+          stopObserved = `frozen saw ${status} note=${noteThere}`;
+          inflight = "";
+        }
+      } catch (error) {
+        frozen = false;
+        stopObserved = `SIGSTOP failed: ${error.message || error}`;
+      }
+    }
+    let stopPromise = null;
+    try {
+      if (inflight) {
+        stopPromise = call("POST", "/api/apps/system/agents/stop", state.systemToken, {
+          agent_id: state.agentB,
+        });
+        await sleep(30);
+      }
+    } finally {
+      if (frozen) {
+        try {
+          process.kill(gatewayPid, "SIGCONT");
+        } catch {
+          // The gateway has to leave the stop. A failed continue is recorded below.
+        }
+        frozen = false;
+      }
+    }
+    if (stopPromise) {
+      stopDuringStep = await stopPromise;
+      if (stopDuringStep.status === 409 && String(stopDuringStep.text || "").includes("agent_no_session")) {
+        runnerStoppedTooLate = true;
+        stopObserved = "the runner stopped too late";
+      }
+    } else {
+      const record = inspectRecords().find((item) => item.request_id === requestB);
+      const noteThere = fs.existsSync(noteB);
+      if (noteThere || record?.status === "completed") {
+        runnerStoppedTooLate = true;
+        stopObserved = "the runner stopped too late";
+      } else if (!stopObserved) {
+        stopObserved = `no in-flight step; status=${record?.status || "missing"} note=${noteThere}`;
+      }
+    }
+    approvedB = await approvedPromise;
+  }
+  let settledB = null;
+  const settleBDeadline = Date.now() + 30000;
+  while (requestB && Date.now() < settleBDeadline) {
+    settledB = inspectRecords().find((record) => record.request_id === requestB) || null;
+    if (settledB && !["pending", "approved", "dispatching"].includes(settledB.status)) break;
+    await sleep(300);
+  }
+  const stepOutcome = settledB
+    ? `${settledB.status}${settledB.result?.status ? `/${settledB.result.status}` : ""}`
+    : "";
+  const stopRows = auditEvents().filter((event) => (
+    event.event_type === "agent.stopped" && event.session_id === state.launchB?.session_id
+  ));
+  const namedStop = stopRows.find((event) => (
+    event.result === "ok" || event.result === "failed" || event.result === "stopping"
+  ));
+  const stopDetail = {
+    request_id: requestB,
+    approve: approvedB?.status || 0,
+    http: stopDuringStep?.status || 0,
+    frozen: frozenLook,
+    step_outcome: stepOutcome,
+    rows: stopRows.map((event) => event.result),
+  };
+  if (runnerStoppedTooLate || (!stopDuringStep && stopObserved)) {
+    mark("stop_after_the_note_lands", "fail", { ...stopDetail, body: stopObserved || "the runner stopped too late" });
+  } else if (
+    frozenLook
+    && (stopDuringStep?.status === 200 || stopDuringStep?.status === 202)
+    && namedStop
+    && stepOutcome
+  ) {
+    pass("stop_after_the_note_lands", {
+      ...stopDetail,
+      session_id: namedStop.session_id,
+      stop_result: namedStop.result,
+    });
+  } else {
+    mark("stop_after_the_note_lands", "fail", {
+      ...stopDetail,
+      body: stopObserved || String(stopDuringStep?.text || "").slice(0, 240),
+    });
+  }
+  state.stoppingSession = namedStop?.result === "stopping" ? namedStop.session_id : "";
+
   // The runner wrote the owner's note as plain bytes so the write check can
   // hash it. The gateway refuses to start while that file sits in a protected
   // folder. The hash check above already recorded the bytes.
@@ -2091,7 +2150,21 @@ async function main() {
     try { fs.unlinkSync(ownerDocPath); } catch { /* already gone */ }
   }
 
-  const liveBeforeOff = liveSessions(await capsules(), [state.launchB]);
+  // Agents off needs a live run. B was stopped above, so this is A's run,
+  // started again when its first run has ended.
+  let liveRun = liveSessions(await capsules(), [state.launchA])[0] || null;
+  if (!liveRun) {
+    try {
+      const step = await stepUp(state.systemToken, "agent.start", { agent_id: state.agentA });
+      const relaunchedA = await call("POST", "/api/apps/system/agents/launch", state.systemToken, {
+        agent_id: state.agentA, step_up_token: step,
+      });
+      if (relaunchedA.status === 200 && relaunchedA.json?.session_id) liveRun = relaunchedA.json;
+    } catch {
+      liveRun = null;
+    }
+  }
+  const liveBeforeOff = liveRun ? liveSessions(await capsules(), [liveRun]) : [];
   const off = await call("POST", "/api/apps/system/agents/disable", state.systemToken);
   let again = { status: 0, text: "" };
   try {
@@ -2102,15 +2175,16 @@ async function main() {
   } catch (error) {
     again = { status: 0, text: String(error.message || error) };
   }
-  const stoppedB = auditEvents().find((event) => (
-    event.event_type === "agent.stopped" && event.session_id === state.launchB?.session_id
-  ));
-  if (liveBeforeOff.length === 1 && off.status === 200 && again.status !== 200 && again.text.includes("not turned on") && stoppedB) {
-    state.liveStoppedSession = stoppedB.session_id;
+  const stoppedLive = liveRun
+    ? auditEvents().find((event) => (
+      event.event_type === "agent.stopped" && event.session_id === liveRun.session_id
+    ))
+    : null;
+  if (liveBeforeOff.length === 1 && off.status === 200 && again.status !== 200 && again.text.includes("not turned on") && stoppedLive) {
     pass("agents_off_during_run", {
       off: off.status,
-      session_id: stoppedB.session_id,
-      result: stoppedB.result,
+      session_id: stoppedLive.session_id,
+      result: stoppedLive.result,
       start: again.status,
     });
   } else {
@@ -2119,10 +2193,11 @@ async function main() {
       off: off.status,
       start: again.status,
       body: again.text.slice(0, 180),
-      stopped: Boolean(stoppedB),
+      stopped: Boolean(stoppedLive),
     });
   }
 
+  const beforeRestart = { chain: auditEvents(), records: inspectRecords() };
   try {
     await stopServe();
     await startServe();
@@ -2141,40 +2216,14 @@ async function main() {
     keep("restart_zero", restartClean, { status: restart.status, body: restart.text.slice(0, 240) });
     const chain = auditEvents();
     const finished = chain.some((event) => String(event.event_type).includes("completed") && event.result === "ok");
-    const unfinished = chain.some((event) => event.result === "stopping" || String(event.event_type).endsWith(".requested"));
-    const confirmedStop = Boolean(state.stoppingSession)
-      && state.stoppingConfirmedBeforeRestart !== true
-      && chain.some((event) => (
-        event.event_type === "agent.stopped"
-        && event.result === "ok"
-        && event.session_id === state.stoppingSession
-      ));
-    const lived = state.liveStoppedSession
-      ? chain.some((event) => (
-        event.event_type === "agent.stopped"
-        && event.session_id === state.liveStoppedSession
-        && (event.result === "ok" || event.result === "failed" || event.result === "stopping")
-      ))
-      : false;
-    if (restartClean && finished && unfinished && (confirmedStop || (!state.stoppingSession && lived))) {
-      pass("home_restart_history", {
-        session_id: state.stoppingSession || state.liveStoppedSession,
-        confirmed: confirmedStop ? "ok" : "the stop finished in the same call",
-        finished,
-        unfinished,
-        replay: restart.status,
-      });
-    } else {
-      mark("home_restart_history", "fail", {
-        finished,
-        unfinished,
-        restart: restart.status,
-        stopping_session: state.stoppingSession || "",
-        live_stopped_session: state.liveStoppedSession || "",
-        confirmed: confirmedStop,
-        lived,
-      });
-    }
+    const history = restartHistory(
+      beforeRestart,
+      { chain, records: inspectRecords() },
+      state.stoppingSession,
+    );
+    const detail = { ...history, session_id: state.stoppingSession || "", finished, replay: restart.status };
+    if (restartClean && finished && history.unclosed && history.closed) pass("home_restart_history", detail);
+    else mark("home_restart_history", "fail", detail);
   } catch (error) {
     mark("restart_zero", "fail", String(error.message || error));
   }

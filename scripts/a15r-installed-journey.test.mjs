@@ -24,6 +24,7 @@ import {
   grantWaitSatisfied,
   rootsStayWithTheirAgent,
   planeSameProcess,
+  restartHistory,
   journalFileInRoot,
   ownerDocumentUnchanged,
   ownerNoteRelative,
@@ -203,6 +204,35 @@ test("a plane is the gateway process and its coordinates stay owner-only", () =>
   assert.equal(planeSameProcess(4, 5, true, true, 0o600), false);
   assert.equal(planeSameProcess(4, 4, true, false, 0o600), false);
   assert.equal(planeSameProcess(4, 4, true, true, 0o644), false);
+});
+
+test("the restart row needs a real unclosed state, not a requested row", () => {
+  const requested = { event_type: "agent.start.requested", result: "ok", session_id: "" };
+  const stopping = { event_type: "agent.stopped", result: "stopping", session_id: "s1" };
+  const ok = { event_type: "agent.stopped", result: "ok", session_id: "s1" };
+  const done = { request_id: "r1", status: "completed" };
+  const normal = restartHistory(
+    { chain: [requested], records: [done] },
+    { chain: [requested], records: [done] },
+    "",
+  );
+  assert.equal(normal.unclosed, "");
+  assert.equal(normal.closed, false);
+  const open = restartHistory({ chain: [stopping], records: [] }, { chain: [stopping, ok], records: [] }, "s1");
+  assert.deepEqual(open, { unclosed: "stopping", unresolved: [], closed: true });
+  const early = restartHistory({ chain: [stopping, ok], records: [] }, { chain: [stopping, ok], records: [] }, "s1");
+  assert.equal(early.unclosed, "", "a stop confirmed before the restart is not unclosed");
+  const unconfirmed = restartHistory({ chain: [stopping], records: [] }, { chain: [stopping], records: [] }, "s1");
+  assert.equal(unconfirmed.closed, false);
+  const flying = { request_id: "r2", status: "dispatching" };
+  const settled = restartHistory(
+    { chain: [], records: [flying] },
+    { chain: [], records: [{ request_id: "r2", status: "unknown" }] },
+    "",
+  );
+  assert.deepEqual(settled, { unclosed: "unresolved", unresolved: ["r2"], closed: true });
+  const still = restartHistory({ chain: [], records: [flying] }, { chain: [], records: [flying] }, "");
+  assert.equal(still.closed, false);
 });
 
 test("each root stays in its own grant, including the planted cross-read", () => {
