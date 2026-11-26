@@ -1410,6 +1410,10 @@ const WINDOWS_WALK: &str = "elastos-bundle-identity/src/windows_walk.rs";
 struct Bind {
     file: &'static str,
     function: &'static str,
+    /// Census `row.call`, so two rows that share a function stay distinct
+    /// binds (for example `start_by_bundle`'s two load calls). Empty when
+    /// the bind is not a census row.
+    call: String,
     needle: &'static str,
 }
 
@@ -1425,6 +1429,7 @@ fn binds() -> Vec<Bind> {
             binds.push(Bind {
                 file: row.file,
                 function: row.function,
+                call: row.call.clone(),
                 needle: ".admit_closure_member(data_dir, &pinned",
             });
         }
@@ -1441,12 +1446,14 @@ fn binds() -> Vec<Bind> {
         binds.push(Bind {
             file: "elastos-server/src/runtime.rs",
             function: "run_signer",
+            call: String::new(),
             needle,
         });
     }
     binds.push(Bind {
         file: "elastos-server/src/runtime.rs",
         function: "walk_folder_start",
+        call: String::new(),
         needle: "checked_bundle_within(",
     });
     for needle in [
@@ -1457,12 +1464,14 @@ fn binds() -> Vec<Bind> {
         binds.push(Bind {
             file: "elastos-server/src/stage_cmd.rs",
             function: "stage_bundle",
+            call: String::new(),
             needle,
         });
     }
     binds.push(Bind {
         file: WINDOWS_WALK,
         function: "",
+        call: String::new(),
         needle: "tally.note_empty(",
     });
     binds
@@ -1480,12 +1489,59 @@ fn binding_sources() -> BTreeMap<String, String> {
     sources
 }
 
-/// One check of every bound row against its needles. Comments and strings are
-/// masked, including in `windows_walk.rs`. A miss panics.
+/// One bind against its needle. Comments and strings are masked through
+/// `function_index` / `code_only`, including in `windows_walk.rs`. A miss
+/// panics naming this bind's file, function, call, and needle so a plant
+/// can tell which bind refused.
+fn check_bind(
+    index: &BTreeMap<String, Vec<(String, String)>>,
+    sources: &BTreeMap<String, String>,
+    bind: &Bind,
+) {
+    let haystack = if bind.function.is_empty() {
+        let text = sources
+            .get(bind.file)
+            .unwrap_or_else(|| panic!("missing {}", bind.file));
+        source::code_only(text)
+    } else {
+        reachable(index, bind.file, bind.function)
+    };
+    assert!(
+        haystack.contains(bind.needle),
+        "{}::{} [{}] does not contain {}",
+        bind.file,
+        bind.function,
+        bind.call,
+        bind.needle
+    );
+}
+
+fn panic_text(payload: Box<dyn std::any::Any + Send>) -> String {
+    if let Some(text) = payload.downcast_ref::<String>() {
+        text.clone()
+    } else if let Some(text) = payload.downcast_ref::<&str>() {
+        (*text).to_string()
+    } else {
+        String::from("<non-string panic>")
+    }
+}
+
+/// One check of every bound row against its needles. A miss panics.
 fn bind_closure_and_stage(sources: &BTreeMap<String, String>) {
     let pinned = ".admit_closure_member(data_dir, &pinned";
-    let closure = binds().iter().filter(|bind| bind.needle == pinned).count();
+    let binds = binds();
+    let closure = binds.iter().filter(|bind| bind.needle == pinned).count();
     assert_eq!(closure, 7, "a closure row was added or dropped");
+    let closure_calls: BTreeSet<_> = binds
+        .iter()
+        .filter(|bind| bind.needle == pinned)
+        .map(|bind| (bind.file, bind.function, bind.call.as_str()))
+        .collect();
+    assert_eq!(
+        closure_calls.len(),
+        7,
+        "a closure bind dropped its call key: {closure_calls:?}"
+    );
     assert_eq!(
         rows()
             .iter()
@@ -1501,22 +1557,8 @@ fn bind_closure_and_stage(sources: &BTreeMap<String, String>) {
         1
     );
     let index = function_index(sources);
-    for bind in binds() {
-        let haystack = if bind.function.is_empty() {
-            let text = sources
-                .get(bind.file)
-                .unwrap_or_else(|| panic!("missing {}", bind.file));
-            source::code_only(text)
-        } else {
-            reachable(&index, bind.file, bind.function)
-        };
-        assert!(
-            haystack.contains(bind.needle),
-            "{}::{} does not contain {}",
-            bind.file,
-            bind.function,
-            bind.needle
-        );
+    for bind in &binds {
+        check_bind(&index, sources, bind);
     }
     let signer = choose(&index, "run_signer", "elastos-server/src/runtime.rs").expect("run_signer");
     assert!(
@@ -1534,10 +1576,12 @@ fn closure_and_stage_rows_bind_to_their_checks() {
     bind_closure_and_stage(&binding_sources());
 }
 
-/// Each bound needle, removed from a copy of the source, makes the binder
-/// refuse for that bind. One plant per bind (not per unique needle), so a
-/// shared pin needle still proves every closure row. The text stays inside
-/// a comment, so a raw search would still pass.
+/// Each bound needle, removed from a copy of the source, makes that bind's
+/// own check refuse. One plant per bind (not per unique needle), and the
+/// panic must name that bind's file, function, call, and needle: a shared
+/// pin needle still proves every closure row, and no plant shares another's
+/// assertion. The text stays inside a comment, so a raw search would still
+/// pass.
 #[test]
 fn each_bound_needle_stripped_from_a_copy_makes_the_binder_refuse() {
     let sources = binding_sources();
@@ -1547,7 +1591,7 @@ fn each_bound_needle_stripped_from_a_copy_makes_the_binder_refuse() {
         16,
         "a bound row or needle was added or dropped"
     );
-    for bind in binds {
+    for bind in &binds {
         let planted = sources
             .iter()
             .map(|(file, text)| {
@@ -1557,15 +1601,29 @@ fn each_bound_needle_stripped_from_a_copy_makes_the_binder_refuse() {
                 )
             })
             .collect();
+        let index = function_index(&planted);
         let refused = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            bind_closure_and_stage(&planted);
+            check_bind(&index, &planted, bind);
         }));
+        let Err(payload) = refused else {
+            panic!(
+                "binder still accepts after planting {}::{} [{}] needle {}",
+                bind.file, bind.function, bind.call, bind.needle
+            );
+        };
+        let msg = panic_text(payload);
+        let call_marker = format!("[{}]", bind.call);
         assert!(
-            refused.is_err(),
-            "binder still accepts after planting {}::{} needle {}",
+            msg.contains(bind.file)
+                && msg.contains(bind.function)
+                && msg.contains(&call_marker)
+                && msg.contains(bind.needle),
+            "plant for {}::{} [{}] needle {} panicked as a different bind: {}",
             bind.file,
             bind.function,
-            bind.needle
+            bind.call,
+            bind.needle,
+            msg
         );
     }
 }
