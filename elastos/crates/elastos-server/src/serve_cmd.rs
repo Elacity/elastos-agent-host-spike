@@ -314,6 +314,7 @@ pub async fn run_serve(
                     manifest.name
                 );
 
+                let _ = elastos_server::local_apps::await_local_apps_decision(&data_dir).await;
                 let run_result = runtime.run_local(&capsule_dir, vec![]).await;
                 if let Some(service) = collaboration_service.as_mut() {
                     service.shutdown().await?;
@@ -405,7 +406,7 @@ pub async fn run_serve(
     };
 
     println!("ElastOS Runtime");
-    if let Some(sentence) = elastos_server::local_apps::local_apps_refusal(&data_dir) {
+    if let Some(sentence) = elastos_server::local_apps::await_local_apps_decision(&data_dir).await {
         println!(
             "{}",
             elastos_server::local_apps::local_apps_health_line(&sentence)

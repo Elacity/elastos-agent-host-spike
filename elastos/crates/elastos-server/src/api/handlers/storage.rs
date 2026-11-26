@@ -123,7 +123,7 @@ async fn refuse_local_apps(
     path: &str,
     op: &str,
 ) -> Result<(), StorageApiError> {
-    let Some(sentence) = crate::local_apps::local_apps_refusal(&state.data_dir) else {
+    let Some(sentence) = crate::local_apps::await_local_apps_decision(&state.data_dir).await else {
         return Ok(());
     };
     if owner_shell(session, headers) {

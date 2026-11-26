@@ -1928,7 +1928,27 @@ pub fn update_can_roll_back(data_dir: &Path) -> bool {
 }
 
 #[rustfmt::skip]
-pub fn update_receipt_is_damaged(data_dir: &Path) -> bool { path_present(&data_dir.join(DIRECTORY).join(RECEIPT)).map_or(true, |p| p && installed_writer_binary(data_dir).is_err()) }
+pub fn update_receipt_is_damaged(data_dir: &Path) -> bool {
+    matches!(path_present(&data_dir.join(DIRECTORY).join(RECEIPT)), Ok(true)) && installed_writer_binary(data_dir).is_err()
+}
+
+/// Named remedy when a rollback wait cannot clear itself. A real pending update returns None.
+#[rustfmt::skip]
+pub fn update_rollback_fault_remedy(data_dir: &Path) -> Option<&'static str> {
+    let dir = data_dir.join(DIRECTORY);
+    if path_present(&dir).is_err() || path_present(&dir.join(RECEIPT)).is_err() {
+        Some("update-controller cannot be read. Make it readable, then restart.")
+    } else if update_receipt_is_damaged(data_dir) {
+        Some("update-controller/receipt.json is damaged. Delete it, then restart.")
+    } else if matches!(installed_writer_binary(data_dir), Ok(None)) && crate::sources::load_trusted_sources(data_dir).is_err() {
+        Some("sources.json is damaged. Replace it with a valid trusted-sources file, then restart.")
+    } else {
+        let gone = matches!(fs::symlink_metadata(dir.join(ACTIVE_REQUEST)), Err(e) if e.kind() == std::io::ErrorKind::NotFound);
+        let orphan = matches!(installed_writer_binary(data_dir), Ok(None))
+            && !crate::install_transaction::installed_binary(data_dir, None).ok().flatten().as_deref().is_some_and(InstallTransaction::has_pending_recovery);
+        (!gone && orphan).then_some("update-controller/active-request.json is stuck. Delete it, then restart.")
+    }
+}
 
 /// The retained receipt locates the writer lock even during an interrupted sources rename.
 pub(crate) fn installed_writer_binary(data_dir: &Path) -> Result<Option<PathBuf>> {

@@ -85,14 +85,20 @@ pub fn header_is_device_key_envelope(header: &[u8]) -> bool {
         && matches!(header[digit_at], b'0'..=b'9' | b'a'..=b'f')
 }
 
+/// Cut-off old header when `header` is all bytes the file has (`len`), or bad hex shows.
 #[rustfmt::skip]
 pub fn header_looks_like_device_key_envelope(header: &[u8]) -> bool {
-    const HEAD: &[u8] = br#"{"version":1,"nonce":""#; const MID: &[u8] = br#"","ciphertext":""#;
+    header_looks_like_device_key_envelope_at(header, header.len() as u64)
+}
+
+#[rustfmt::skip]
+pub fn header_looks_like_device_key_envelope_at(header: &[u8], len: u64) -> bool {
+    const HEAD: &[u8] = br#"{"version":1,"nonce":""#;
+    if header.len() > 1 && HEAD.starts_with(header) { return true; }
+    if !header.starts_with(HEAD) || header_is_device_key_envelope(header) { return false; }
     let mid_at = HEAD.len() + 24;
-    if header.is_empty() || (HEAD.starts_with(header) && header.len() < HEAD.len()) { return !header.is_empty(); }
-    header.len() >= mid_at + MID.len() && header.starts_with(HEAD)
-        && header[HEAD.len()..mid_at].iter().any(|b| !matches!(b, b'0'..=b'9' | b'a'..=b'f'))
-        && header[mid_at..mid_at + MID.len()] == *MID
+    let bad = header.len() >= mid_at && header[HEAD.len()..mid_at].iter().any(|b| !matches!(b, b'0'..=b'9' | b'a'..=b'f'));
+    bad || header.len() as u64 >= len
 }
 
 #[rustfmt::skip]
@@ -151,7 +157,7 @@ mod scan {
         // A header this Home writes, new or old, is an envelope at every size. Do not scan the body.
         if super::header_is_file_key_envelope(header) { return Ok((Some(2), 0)); }
         if super::header_is_device_key_envelope(header) { return Ok((Some(1), 0)); }
-        if super::header_looks_like_device_key_envelope(header) { return Ok((Some(1), 0)); }
+        if super::header_looks_like_device_key_envelope_at(header, len) { return Ok((Some(1), 0)); }
         if header_rules_out_envelope(header) || len <= ENVELOPE_BYTE_LIMIT { return Ok(((!header_rules_out_envelope(header)).then_some(0), 0)); }
         let mut s = Src { rest, n: 0, b: [0; 8192], i: 0, j: header.len().min(8192), v: 0 };
         s.b[..s.j].copy_from_slice(&header[..s.j]);
@@ -582,25 +588,41 @@ mod tests {
     }
 
     #[test]
-    fn a_cut_prefix_and_a_flipped_nonce_read_as_old_format() {
-        let prefix = &br#"{"version":1,"nonce""#[..20];
-        assert!(header_looks_like_device_key_envelope(prefix));
-        assert!(!header_is_device_key_envelope(prefix));
-        let (version, _) = envelope_version(prefix, ENVELOPE_BYTE_LIMIT + 1, &mut Boom).unwrap();
-        assert_eq!(version, Some(1));
-        let mut sealed = encrypt_bytes(&[4; 32], b"x").unwrap();
-        sealed[br#"{"version":1,"nonce":""#.len()] = b'g';
-        assert!(header_looks_like_device_key_envelope(
-            &sealed[..ENVELOPE_HEADER]
+    fn cut_off_old_header_lengths_and_a_plain_brace() {
+        const HEAD: &[u8] = br#"{"version":1,"nonce":""#;
+        let nonce = b"00112233445566778899aabb";
+        let mid = br#"","ciphertext":""#;
+        let full = [HEAD, nonce.as_slice(), mid.as_slice()].concat();
+        assert_eq!(full.len(), 62);
+        for (bytes, cut) in [
+            (&full[..1], false), // "{"
+            (&full[..21], true),
+            (&full[..28], true),
+            (&full[..62], true),
+        ] {
+            assert_eq!(
+                header_looks_like_device_key_envelope_at(bytes, bytes.len() as u64),
+                cut,
+                "{bytes:?}"
+            );
+            assert!(!header_is_device_key_envelope(bytes));
+        }
+        let mut bad = full.clone();
+        bad.push(b'z');
+        assert!(!header_is_device_key_envelope(&bad));
+        assert!(header_looks_like_device_key_envelope_at(
+            &bad,
+            bad.len() as u64
         ));
-        assert!(!header_is_device_key_envelope(&sealed[..ENVELOPE_HEADER]));
-        let (version, _) = envelope_version(
-            &sealed[..ENVELOPE_HEADER],
-            ENVELOPE_BYTE_LIMIT + 1,
-            &mut Boom,
-        )
-        .unwrap();
-        assert_eq!(version, Some(1));
+        // A compact prefix of a larger file is not cut off yet; the body still streams.
+        assert!(!header_looks_like_device_key_envelope_at(
+            &full,
+            ENVELOPE_BYTE_LIMIT + 1
+        ));
+        assert!(!header_looks_like_device_key_envelope(b"{"));
+        let (plain, _) =
+            reads_as_plain_bytes(b"{", ENVELOPE_BYTE_LIMIT + 1, &mut &b""[..]).unwrap();
+        assert!(plain);
     }
 
     #[test]

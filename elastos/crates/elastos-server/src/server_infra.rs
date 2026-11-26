@@ -700,9 +700,9 @@ async fn refuse_localhost(
     helper: Option<provider::CheckedExecutable>,
 ) {
     use crate::localhost_file_migration::{localhost_bringup, localhost_start_bringup, LocalhostBringup as Bringup, LOCALHOST_FILES_CHECKING, LOCALHOST_FILES_MOVING};
-    tracing::error!(target: "elastos", "{sentence}");
     let checking = sentence == LOCALHOST_FILES_CHECKING;
     let moving = sentence == LOCALHOST_FILES_MOVING;
+    if checking { tracing::info!(target: "elastos", "{sentence}"); } else { tracing::error!(target: "elastos", "{sentence}"); }
     elastos_server::local_apps::set_local_apps_refusal(data_dir, Some(sentence.clone()));
     registry.register(Arc::new(elastos_server::local_apps::RefusingLocalhostProvider::new(sentence))).await;
     if !checking && !moving { return; }
@@ -711,13 +711,14 @@ async fn refuse_localhost(
     tokio::spawn(async move {
         async fn apply(registry: &Arc<provider::ProviderRegistry>, data_dir: &Path, helper: &Option<provider::CheckedExecutable>, bringup: Bringup) {
             let sentence = match (bringup, helper) {
-                (Bringup::Start(_), None) => { registry.unregister("localhost").await; return; }
+                (Bringup::Start(_), None) => { tracing::error!(target: "elastos", "local apps on"); registry.unregister("localhost").await; return; }
                 (Bringup::Start(config), Some(helper)) => {
                     elastos_server::local_apps::set_local_apps_refusal(data_dir, Some(LOCALHOST_FILES_CHECKING.to_string()));
                     match provider::ProviderBridge::spawn(helper, config).await {
                         Ok(bridge) => {
                             registry.register(Arc::new(provider::CapsuleProvider::new(Arc::new(bridge)))).await;
                             elastos_server::local_apps::set_local_apps_refusal(data_dir, None);
+                            tracing::error!(target: "elastos", "local apps on");
                             return;
                         }
                         Err(err) => format!("localhost-provider did not start ({err}). Restart Home."),
@@ -726,7 +727,10 @@ async fn refuse_localhost(
                 (Bringup::Refuse(sentence), _) => sentence,
             };
             elastos_server::local_apps::set_local_apps_refusal(data_dir, Some(sentence.clone()));
-            registry.register(Arc::new(elastos_server::local_apps::RefusingLocalhostProvider::new(sentence))).await;
+            registry.register(Arc::new(elastos_server::local_apps::RefusingLocalhostProvider::new(sentence.clone()))).await;
+            tracing::error!(target: "elastos", "{sentence}");
+            println!("{}", elastos_server::local_apps::local_apps_health_line(&sentence));
+            let _ = std::io::Write::flush(&mut std::io::stdout());
         }
         if checking {
             let pending = elastos_server::update_controller::update_can_roll_back(&data_dir);
@@ -735,6 +739,7 @@ async fn refuse_localhost(
             match walk.await {
                 Ok(Bringup::Start(config)) => return apply(&registry, &data_dir, &helper, Bringup::Start(config)).await,
                 Ok(Bringup::Refuse(got)) if got == LOCALHOST_FILES_MOVING => {
+                    tracing::info!(target: "elastos", "{LOCALHOST_FILES_MOVING}");
                     elastos_server::local_apps::set_local_apps_refusal(&data_dir, Some(LOCALHOST_FILES_MOVING.to_string()));
                     registry.register(Arc::new(elastos_server::local_apps::RefusingLocalhostProvider::new(LOCALHOST_FILES_MOVING.to_string()))).await;
                 }
@@ -742,14 +747,14 @@ async fn refuse_localhost(
                 Err(err) => return apply(&registry, &data_dir, &helper, Bringup::Refuse(format!("The local app file check stopped ({err}). Restart Home."))).await,
             }
         }
-        let mut corrupt_ticks = 0u32;
+        let mut fault_ticks = 0u32;
         while elastos_server::update_controller::update_can_roll_back(&data_dir) {
-            if elastos_server::update_controller::update_receipt_is_damaged(&data_dir) {
-                corrupt_ticks = corrupt_ticks.saturating_add(1);
-                if corrupt_ticks >= 5 {
-                    return apply(&registry, &data_dir, &helper, Bringup::Refuse("update-controller/receipt.json is damaged. Delete it, then restart.".into())).await;
+            if let Some(remedy) = elastos_server::update_controller::update_rollback_fault_remedy(&data_dir) {
+                fault_ticks = fault_ticks.saturating_add(1);
+                if fault_ticks >= 5 {
+                    return apply(&registry, &data_dir, &helper, Bringup::Refuse(remedy.into())).await;
                 }
-            } else { corrupt_ticks = 0; }
+            } else { fault_ticks = 0; }
             tokio::time::sleep(Duration::from_secs(1)).await;
         }
         let dir = data_dir.clone();
@@ -8943,32 +8948,54 @@ mod tests {
     }
 
     #[test]
-    fn a_cut_prefix_and_a_flipped_nonce_are_refused_as_cut_off() {
+    fn cut_off_old_header_rows_and_a_plain_brace_are_recognised() {
         let _guard = LocalAppsGuard::lock();
         let device_key = [0x27; 32];
-        let root = TempDir::new().unwrap();
-        let prefix = root.path().join("Users/prefix.bin");
-        fs::create_dir_all(prefix.parent().unwrap()).unwrap();
-        fs::write(&prefix, &br#"{"version":1,"nonce""#[..20]).unwrap();
-        match localhost_bringup(root.path(), &device_key) {
-            LocalhostBringup::Refuse(got) => assert_eq!(
-                got,
-                "Users/prefix.bin is cut off or damaged. Move it aside, then restart."
-            ),
-            LocalhostBringup::Start(_) => panic!("a 20-byte prefix left local apps on"),
+        let head = br#"{"version":1,"nonce":""#;
+        let nonce = b"00112233445566778899aabb";
+        let mid = br#"","ciphertext":""#;
+        let full = [head.as_slice(), nonce.as_slice(), mid.as_slice()].concat();
+        assert_eq!(full.len(), 62);
+        let cut_rows: &[(&[u8], &str)] = &[
+            (&full[..21], "Users/n21.bin"),
+            (&full[..28], "Users/n28.bin"),
+            (&full[..62], "Users/n62.bin"),
+        ];
+        for (bytes, label) in cut_rows {
+            let root = TempDir::new().unwrap();
+            let path = root.path().join(label);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(&path, bytes).unwrap();
+            match localhost_bringup(root.path(), &device_key) {
+                LocalhostBringup::Refuse(got) => assert_eq!(
+                    got,
+                    format!("{label} is cut off or damaged. Move it aside, then restart.")
+                ),
+                LocalhostBringup::Start(_) => panic!("{label} left local apps on"),
+            }
+            elastos_server::local_apps::clear_local_apps_refusals();
         }
-        fs::remove_file(&prefix).unwrap();
-        elastos_server::local_apps::clear_local_apps_refusals();
-        let flipped = root.path().join("Users/flip.bin");
-        let mut sealed = localhost_provider::encrypt_bytes(&device_key, b"flip").unwrap();
-        sealed[br#"{"version":1,"nonce":""#.len()] = b'g';
-        fs::write(&flipped, &sealed).unwrap();
+        let root = TempDir::new().unwrap();
+        let bad = root.path().join("Users/badhex.bin");
+        fs::create_dir_all(bad.parent().unwrap()).unwrap();
+        let mut bad_bytes = full.clone();
+        bad_bytes.push(b'z');
+        fs::write(&bad, &bad_bytes).unwrap();
         match localhost_bringup(root.path(), &device_key) {
             LocalhostBringup::Refuse(got) => assert_eq!(
                 got,
-                "Users/flip.bin is cut off or damaged. Move it aside, then restart."
+                "Users/badhex.bin is cut off or damaged. Move it aside, then restart."
             ),
-            LocalhostBringup::Start(_) => panic!("a flipped nonce left local apps on"),
+            LocalhostBringup::Start(_) => panic!("bad hex left local apps on"),
+        }
+        elastos_server::local_apps::clear_local_apps_refusals();
+        let plain = TempDir::new().unwrap();
+        let brace = plain.path().join("Users/brace.bin");
+        fs::create_dir_all(brace.parent().unwrap()).unwrap();
+        fs::write(&brace, b"{").unwrap();
+        match localhost_bringup(plain.path(), &device_key) {
+            LocalhostBringup::Start(_) => {}
+            LocalhostBringup::Refuse(got) => panic!("plain brace refused: {got}"),
         }
     }
 
@@ -9027,6 +9054,126 @@ mod tests {
                 .map(|b| { localhost_provider::header_is_device_key_envelope(&b) }),
             Some(true)
         );
+    }
+
+    #[tokio::test]
+    async fn an_update_with_no_old_files_keeps_the_old_key_until_commit() {
+        let _guard = LocalAppsGuard::lock();
+        let device_key = [0x2a; 32];
+        let root = TempDir::new().unwrap();
+        let data = root.path();
+        let bin = TempDir::new().unwrap();
+        let sources = serde_json::json!({
+            "schema": "elastos.trusted-sources/v1",
+            "sources": [{ "name": "t", "install_path": bin.path().join("elastos") }],
+        });
+        fs::write(data.join("sources.json"), sources.to_string()).unwrap();
+        let journal = bin.path().join(".elastos.update-journal.json");
+        fs::write(&journal, b"{}").unwrap();
+        let request = data.join("update-controller/active-request.json");
+        fs::create_dir_all(request.parent().unwrap()).unwrap();
+        fs::write(&request, b"{}").unwrap();
+        // No old-format files. Pass 1 must still hold the key until commit.
+        fs::create_dir_all(data.join("Users")).unwrap();
+        let moving = crate::localhost_file_migration::LOCALHOST_FILES_MOVING;
+        let registry = Arc::new(provider::ProviderRegistry::new());
+        lc_check(&registry, data, &device_key, None).await;
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while elastos_server::local_apps::local_apps_refusal(data).as_deref() != Some(moving) {
+            assert!(
+                Instant::now() < deadline,
+                "never reached moving with empty roots"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(!data.join("identity/localhost-file-key-v1").exists());
+        // A write under the old release key while the update can still roll back.
+        let path = data.join("Users/new.bin");
+        let planted = localhost_provider::encrypt_bytes(&device_key, b"kept").unwrap();
+        fs::write(&path, &planted).unwrap();
+        // Roll back: drop the candidate signals. The old release must read the file.
+        fs::remove_file(&journal).unwrap();
+        fs::remove_file(&request).unwrap();
+        let opened =
+            localhost_provider::decrypt_bytes(&device_key, &fs::read(&path).unwrap()).unwrap();
+        assert_eq!(opened, b"kept");
+        assert!(!localhost_provider::header_is_file_key_envelope(
+            &fs::read(&path).unwrap()
+        ));
+    }
+
+    #[tokio::test]
+    async fn damaged_sources_stuck_request_and_unreadable_controller_name_their_remedy() {
+        use std::os::unix::fs::PermissionsExt;
+        let _guard = LocalAppsGuard::lock();
+        let device_key = [0x2b; 32];
+        let cases = [
+            (
+                "sources",
+                "sources.json is damaged. Replace it with a valid trusted-sources file, then restart.",
+            ),
+            (
+                "request",
+                "update-controller/active-request.json is stuck. Delete it, then restart.",
+            ),
+            (
+                "controller",
+                "update-controller cannot be read. Make it readable, then restart.",
+            ),
+        ];
+        for (name, want) in cases {
+            let root = TempDir::new().unwrap();
+            let data = root.path();
+            plant_device_envelope(&data.join("Users/a.bin"), &device_key, b"a");
+            match name {
+                "sources" => fs::write(data.join("sources.json"), b"not-json").unwrap(),
+                "request" => {
+                    let sources = serde_json::json!({
+                        "schema": "elastos.trusted-sources/v1",
+                        "sources": [{ "name": "t", "install_path": "/tmp/elastos-no-journal" }],
+                    });
+                    fs::write(data.join("sources.json"), sources.to_string()).unwrap();
+                    let request = data.join("update-controller/active-request.json");
+                    fs::create_dir_all(request.parent().unwrap()).unwrap();
+                    fs::write(&request, b"{}").unwrap();
+                }
+                _ => {
+                    let dir = data.join("update-controller");
+                    fs::create_dir_all(&dir).unwrap();
+                    let mut perms = fs::metadata(&dir).unwrap().permissions();
+                    perms.set_mode(0o000);
+                    fs::set_permissions(&dir, perms).unwrap();
+                }
+            }
+            assert!(elastos_server::update_controller::update_can_roll_back(
+                data
+            ));
+            assert_eq!(
+                elastos_server::update_controller::update_rollback_fault_remedy(data),
+                Some(want)
+            );
+            let registry = Arc::new(provider::ProviderRegistry::new());
+            lc_check(&registry, data, &device_key, None).await;
+            let deadline = Instant::now() + Duration::from_secs(20);
+            loop {
+                let got = elastos_server::local_apps::local_apps_refusal(data);
+                if got.as_deref() == Some(want) {
+                    break;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "{name} never refused, got {got:?}"
+                );
+                tokio::time::sleep(Duration::from_millis(200)).await;
+            }
+            if name == "controller" {
+                let dir = data.join("update-controller");
+                let mut perms = fs::metadata(&dir).unwrap().permissions();
+                perms.set_mode(0o755);
+                fs::set_permissions(&dir, perms).unwrap();
+            }
+            elastos_server::local_apps::clear_local_apps_refusals();
+        }
     }
 
     #[tokio::test]

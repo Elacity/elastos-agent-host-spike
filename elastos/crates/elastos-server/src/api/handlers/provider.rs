@@ -69,7 +69,8 @@ pub async fn provider_proxy(
     // The owner's shell hears the file sentence before the body is parsed.
     // Every other caller meets the grant check first.
     if scheme.eq_ignore_ascii_case("localhost") && owner_shell {
-        if let Some(sentence) = crate::local_apps::local_apps_refusal(&state.data_dir) {
+        if let Some(sentence) = crate::local_apps::await_local_apps_decision(&state.data_dir).await
+        {
             return Err((StatusCode::SERVICE_UNAVAILABLE, sentence));
         }
     }
@@ -149,7 +150,8 @@ pub async fn provider_proxy(
 
     enforce_capability(&state, &session, &headers, &resource, required_action).await?;
     if scheme.eq_ignore_ascii_case("localhost") {
-        if let Some(sentence) = crate::local_apps::local_apps_refusal(&state.data_dir) {
+        if let Some(sentence) = crate::local_apps::await_local_apps_decision(&state.data_dir).await
+        {
             return Err((
                 StatusCode::SERVICE_UNAVAILABLE,
                 crate::local_apps::local_apps_refusal_body(&sentence, owner_shell),

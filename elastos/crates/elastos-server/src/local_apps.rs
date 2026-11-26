@@ -7,11 +7,15 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{LazyLock, Mutex};
+use std::time::Duration;
 
 use elastos_runtime::provider::{Provider, ProviderError, ResourceRequest, ResourceResponse};
 
 /// The provider error starts with this mark and a newline, then the sentence.
 pub const LOCAL_APPS_REFUSAL_MARK: &str = "local-apps-off\n";
+
+/// Set while the background file check has not finished. Not a final refusal.
+pub const LOCAL_APPS_CHECKING: &str = "checking local app files";
 
 pub fn marked_local_apps_refusal(sentence: &str) -> String {
     format!("{LOCAL_APPS_REFUSAL_MARK}{sentence}")
@@ -129,6 +133,20 @@ pub fn local_apps_refusal(data_dir: &Path) -> Option<String> {
         .expect("local apps refusal")
         .get(&refusal_key(data_dir))
         .cloned()
+}
+
+/// Wait out [`LOCAL_APPS_CHECKING`]. `None` means local apps are on.
+#[rustfmt::skip]
+pub async fn await_local_apps_decision(data_dir: &Path) -> Option<String> {
+    let end = tokio::time::Instant::now() + Duration::from_secs(120);
+    loop {
+        match local_apps_refusal(data_dir) {
+            None => return None,
+            Some(s) if s != LOCAL_APPS_CHECKING => return Some(s),
+            Some(_) if tokio::time::Instant::now() >= end => return Some("The local app file check timed out. Restart Home.".into()),
+            Some(_) => tokio::time::sleep(Duration::from_millis(50)).await,
+        }
+    }
 }
 
 #[cfg(test)]

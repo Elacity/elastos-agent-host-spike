@@ -650,7 +650,7 @@ fn seen_file(meta: &std::fs::Metadata, hard: bool) -> SeenFile {
     }
 }
 
-#[cfg(all(unix, test))]
+#[cfg(unix)]
 #[rustfmt::skip]
 fn parse_seen(bytes: &[u8]) -> std::collections::HashMap<String, SeenFile> {
     let mut seen = std::collections::HashMap::new();
@@ -857,15 +857,17 @@ fn migrate_localhost_envelope(
         .read(&mut header)
         .with_context(|| localhost_refused(path, "cannot be read"))?;
     note_bytes_read(read);
-    let (version, extra) = localhost_provider::envelope_version(&header[..read], opened.len.max(localhost_provider::ENVELOPE_BYTE_LIMIT + 1), &mut file).with_context(|| localhost_refused(path, "cannot be read"))?;
+    let head = &header[..read];
+    if !localhost_provider::header_is_device_key_envelope(head)
+        && localhost_provider::header_looks_like_device_key_envelope_at(head, opened.len)
+    {
+        return Err(localhost_refused(path, "is cut off"));
+    }
+    let (version, extra) = localhost_provider::envelope_version(head, opened.len.max(localhost_provider::ENVELOPE_BYTE_LIMIT + 1), &mut file).with_context(|| localhost_refused(path, "cannot be read"))?;
     note_bytes_read(extra as usize);
     // A file-key envelope, in any key order or spacing, stays unread at start.
     if version.is_none_or(|version| version == 2) {
         return Ok(MigratedFile::Settled);
-    }
-    let head = &header[..read];
-    if !localhost_provider::header_is_device_key_envelope(head) && localhost_provider::header_looks_like_device_key_envelope(head) {
-        return Err(localhost_refused(path, "is cut off"));
     }
     if extra > 0 { std::io::Seek::seek(&mut file, std::io::SeekFrom::Start(read as u64)).map_err(|_| localhost_refused(path, "cannot be read"))?; }
     if opened.len > localhost_provider::SEALED_READ_HARD_LIMIT {
@@ -944,6 +946,8 @@ fn migrate_localhost_tree(
     use std::os::unix::fs::{FileTypeExt, MetadataExt};
 
     sweep_rewrite_temps(dir)?;
+    let mut spins = 0u32;
+    loop {
     let names = directory_names(dir)?;
     for name in &names {
         let path = dir.join(name);
@@ -1009,11 +1013,10 @@ fn migrate_localhost_tree(
             }
         }
     }
-    let again = directory_names(dir)?;
-    if names != again {
-        return Err(localhost_refused(dir, "changed while it was being read"));
+    if names == directory_names(dir)? { return Ok(()); }
+    spins = spins.saturating_add(1);
+    if spins >= 16 { return Err(localhost_refused(dir, "changed while it was being read")); }
     }
-    Ok(())
 }
 
 #[cfg(unix)]
@@ -1258,7 +1261,10 @@ fn migrate_localhost_files_to_file_key(
     #[cfg(test)]
     run_before_walk();
     let seen_path = identity.join(LOCALHOST_SEEN);
-    let seen = std::collections::HashMap::new();
+    let seen = std::fs::read(&seen_path)
+        .ok()
+        .map(|bytes| parse_seen(&bytes))
+        .unwrap_or_default();
     let mut next = std::collections::HashMap::new();
     let mut over_hard = Vec::new();
     let mut walk = || -> anyhow::Result<()> {
@@ -1294,6 +1300,9 @@ fn migrate_localhost_files_to_file_key(
     if HELD.with(|slot| slot.get()) {
         if !move_now { return Err(anyhow::anyhow!(LOCALHOST_FILES_MOVING)); }
         PASS_TWO.with(|slot| slot.set(true)); walk()?;
+    }
+    if !move_now && matches!(plan, MarkerPlan::Write) {
+        return Err(anyhow::anyhow!(LOCALHOST_FILES_MOVING));
     }
     if next != seen || !seen_path.is_file() {
         write_seen(&seen_path, &next)?;
@@ -1347,7 +1356,7 @@ pub(crate) enum LocalhostBringup {
 
 /// Local apps stay off with this sentence while old files wait for the second pass.
 pub(crate) const LOCALHOST_FILES_MOVING: &str = "Local app files are moving to the new key.";
-pub(crate) const LOCALHOST_FILES_CHECKING: &str = "checking local app files";
+pub(crate) const LOCALHOST_FILES_CHECKING: &str = elastos_server::local_apps::LOCAL_APPS_CHECKING;
 
 pub(crate) fn localhost_bringup(data_dir: &Path, device_key: &[u8; 32]) -> LocalhostBringup {
     match localhost_provider_bridge_config(data_dir, device_key) {
