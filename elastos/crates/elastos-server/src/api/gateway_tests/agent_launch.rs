@@ -1682,6 +1682,50 @@ async fn agents_audit_stops_the_agent_when_its_completion_row_cannot_be_appended
 }
 
 #[tokio::test]
+async fn a_crash_after_the_unrecorded_start_stop_signs_once_on_restart() {
+    let world = world().await;
+    fail_agent_lifecycle_audit_append_for_test(&world.home.data, 2);
+    super::seams::arm_grant_kind(&world.home.data, "after-stop");
+    let token = step_up(&world.app, &world.admin, &world.agent_a).await;
+    let (status, body) = start(&world, &world.admin, &world.agent_a, &token).await;
+    assert_ne!(status, StatusCode::OK, "{body}");
+    let owed = crate::agents::owed_stop_rows(&world.home.data);
+    let row = owed
+        .iter()
+        .find(|row| row.result == "stopping" && row.reason.contains("unrecorded_start"))
+        .expect("the settle stop was not owed");
+    let session = row.session_id.clone().expect("session");
+    let owed_id = row.event_id.clone();
+    assert!(
+        signed_audit_rows(&world, "agent.stopped").is_empty(),
+        "the crash signed the stop"
+    );
+    for _ in 0..2 {
+        crate::agent_record_audit::reconcile_owed_stops(&world.home.data).unwrap();
+        super::super::gateway_agents::confirm_stopping_rows(&world.home.data)
+            .await
+            .unwrap();
+    }
+    let stopped = signed_audit_rows(&world, "agent.stopped");
+    assert_eq!(
+        stopped.iter().filter(|row| row.event_id == owed_id).count(),
+        1,
+        "{stopped:?}"
+    );
+    assert_eq!(
+        stopped
+            .iter()
+            .filter(|row| {
+                row.result == "ok" && row.session_id.as_deref() == Some(session.as_str())
+            })
+            .count(),
+        1,
+        "{stopped:?}"
+    );
+    assert!(crate::agents::owed_stop_rows(&world.home.data).is_empty());
+}
+
+#[tokio::test]
 async fn agents_audit_failed_launch_writes_completed_failed() {
     let world = world().await;
     let token = step_up(&world.app, &world.admin, &world.agent_a).await;

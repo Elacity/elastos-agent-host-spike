@@ -30,6 +30,7 @@ import {
   ownerNoteRelative,
   refusalIncludes,
   runtimeHealthOk,
+  names,
   shellFailStatuses,
   signedAgentStarts,
   signedStartAudit,
@@ -336,18 +337,7 @@ test("created agent stores the creating owner", () => {
 
 test("a shell failure does not pass a row the node did not check", () => {
   const later = shellFailStatuses("u3_agent_started");
-  const byName = (statusList, name) => statusList[[
-    "release_signed", "signing_key_deleted", "installed_identity_recorded",
-    "gateway_started", "owner_passkey_created", "home_runtime_ensured", "runtime_started",
-    "u3_agents_enabled", "u3_owner_field_refused", "u3_agent_created",
-    "u3_unknown_id_refused", "u3_guest_refused", "u3_agent_activated",
-    "u3_agent_started", "u4_second_agent_created", "u4_both_running",
-    "u4_distinct_roots", "u4_cross_root_bus_read_gap", "journal_in_agent_root",
-    "plan_card_captured", "one_pending_record", "approve_without_step_up_refused",
-    "step_up_approve", "one_authorised_write", "owner_document_unchanged",
-    "one_result_and_receipt", "signed_start_audit", "signed_completion_audit",
-    "card_removed", "replay_zero", "restart_zero",
-  ].indexOf(name)];
+  const byName = (statusList, name) => statusList[names.indexOf(name)];
   assert.equal(byName(later, "u3_agent_started"), "fail");
   assert.equal(byName(later, "gateway_started"), "not reached");
   assert.equal(byName(later, "runtime_started"), "not reached");

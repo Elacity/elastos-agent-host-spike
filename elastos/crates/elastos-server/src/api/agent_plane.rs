@@ -175,6 +175,7 @@ impl std::fmt::Debug for AgentPlane {
 }
 
 /// One guest Off asked the plane to end, and what was true afterwards.
+#[derive(Clone)]
 pub(crate) struct EndedGuest {
     pub(crate) agent_id: String,
     pub(crate) session_id: String,
@@ -258,6 +259,7 @@ impl Drop for AgentPlane {
         }
         let _ = std::fs::remove_file(&self.coords_path);
         clear_fault(&self.data_dir);
+        clear_ended_guests(&self.data_dir);
         #[cfg(all(test, unix))]
         clear_registry(&self.data_dir);
     }
@@ -1051,7 +1053,7 @@ fn spawn_agent_server(config: ServerConfig, data_dir: PathBuf) -> RunningServer 
         if let Err(error) = server.await {
             if error.is_panic() {
                 note_fault(&data_dir, TASK_ENDED);
-                end_plane_guests_after_task_panic(&data_dir).await;
+                crate::api::gateway::finish_task_ended(&data_dir).await;
             }
         }
     });
@@ -1061,18 +1063,70 @@ fn spawn_agent_server(config: ServerConfig, data_dir: PathBuf) -> RunningServer 
     }
 }
 
+fn ended_guest_memory() -> &'static Mutex<HashMap<PathBuf, Vec<EndedGuest>>> {
+    static ENDED_GUESTS: OnceLock<Mutex<HashMap<PathBuf, Vec<EndedGuest>>>> = OnceLock::new();
+    ENDED_GUESTS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn ended_guests(data_dir: &Path) -> Vec<EndedGuest> {
+    ended_guest_memory()
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+        .get(data_dir)
+        .cloned()
+        .unwrap_or_default()
+}
+
+fn remember_ended_guests(data_dir: &Path, ended: &[EndedGuest]) {
+    ended_guest_memory()
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+        .insert(data_dir.to_path_buf(), ended.to_vec());
+}
+
+fn clear_ended_guests(data_dir: &Path) {
+    ended_guest_memory()
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+        .remove(data_dir);
+}
+
 /// The listener task ended in a panic, or Stop met `TASK_ENDED`. Stop every
-/// live guest on the in-process plane runtime and revoke its grants.
-pub(crate) async fn end_plane_guests_after_task_panic(data_dir: &Path) {
+/// live guest on the in-process plane runtime. The sessions stay remembered
+/// until this plane is dropped, so a later Stop can report them.
+pub(crate) async fn end_plane_guests_after_task_panic(data_dir: &Path) -> Vec<EndedGuest> {
     let Some(runtime) = plane_runtime(data_dir) else {
-        return;
+        return ended_guests(data_dir);
     };
+    let mut ended = Vec::new();
     for info in runtime.list_capsules().await {
         if info.ended_at.is_some() {
             continue;
         }
-        let _ = runtime.stop_capsule_with_reason(&info.id, TASK_ENDED).await;
+        let session_id = info.id.clone();
+        let agent_id = info.principal.unwrap_or_default();
+        let _ = runtime
+            .stop_capsule_with_reason(&session_id, TASK_ENDED)
+            .await;
+        let after = runtime.get_capsule(&session_id).await;
+        let effect_inflight = runtime.plan_effect_inflight(&session_id);
+        let (status, session_ended) = match &after {
+            Some(info) => (info.status.clone(), info.ended_at.is_some()),
+            None => ("stopped".to_string(), true),
+        };
+        ended.push(EndedGuest {
+            agent_id,
+            session_id,
+            status,
+            ended: session_ended,
+            effect_inflight,
+        });
     }
+    if ended.is_empty() {
+        return ended_guests(data_dir);
+    }
+    remember_ended_guests(data_dir, &ended);
+    ended
 }
 
 #[cfg(unix)]

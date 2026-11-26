@@ -43,6 +43,7 @@ use url::form_urlencoded;
 
 #[path = "gateway_agents.rs"]
 mod gateway_agents;
+pub(in crate::api) use gateway_agents::finish_task_ended;
 pub(in crate::api) use gateway_agents::stop_agents_after_admin_lost;
 #[path = "gateway_assistant.rs"]
 mod gateway_assistant;

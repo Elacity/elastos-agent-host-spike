@@ -837,6 +837,36 @@ fn unknown_step_outcome() -> String {
     "unknown".to_string()
 }
 
+fn runtime_stop_from_guests(
+    agent_id: &str,
+    session_id: Option<&str>,
+    guests: Vec<crate::api::agent_plane::EndedGuest>,
+) -> RuntimeAgentStop {
+    let mut outcome = RuntimeAgentStop::default();
+    for guest in guests {
+        if guest.agent_id != agent_id {
+            continue;
+        }
+        if session_id.is_some_and(|id| id != guest.session_id) {
+            continue;
+        }
+        let row = StoppedRuntimeAgent {
+            session_id: guest.session_id,
+            status: guest.status,
+            ended: guest.ended,
+        };
+        if guest.ended && !guest.effect_inflight {
+            outcome.stopped.push(row);
+        } else {
+            outcome.stopping.push(row);
+        }
+    }
+    if outcome.stopped.is_empty() && outcome.stopping.is_empty() {
+        outcome.already = Some("ended".to_string());
+    }
+    outcome
+}
+
 fn stopped_agent(session: RuntimeStoppedSession) -> StoppedRuntimeAgent {
     StoppedRuntimeAgent {
         session_id: session.session_id,
@@ -885,15 +915,8 @@ async fn stop_runtime_agent_rows(
     let coords = match live_agent_coords(data_dir).await {
         Ok(coords) => coords,
         Err(error) if error.to_string() == crate::api::agent_plane::TASK_ENDED => {
-            // Listener gone: end any guests still on the in-process plane, then
-            // answer as already ended so Stop/Retire/demote can sign.
-            crate::api::agent_plane::end_plane_guests_after_task_panic(data_dir).await;
-            return Ok(RuntimeAgentStop {
-                stopped: Vec::new(),
-                stopping: Vec::new(),
-                unknown: Vec::new(),
-                already: Some("ended".to_string()),
-            });
+            let guests = crate::api::agent_plane::end_plane_guests_after_task_panic(data_dir).await;
+            return Ok(runtime_stop_from_guests(agent_id, session_id, guests));
         }
         Err(error) if error.to_string() == "agent runtime is not running" => {
             let body = serde_json::to_vec(&RuntimeAgentStopRequest {

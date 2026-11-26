@@ -242,10 +242,7 @@ pub(super) async fn start_gateway_server_with_shutdown(
             (&mut server).await
         }
     };
-    let (_, closed) = crate::api::agent_plane::stop_running(&data_dir).await;
-    if let Err(error) = closed {
-        tracing::warn!("agent plans were not closed while the gateway stopped: {error:#}");
-    }
+    super::gateway_agents::finish_gateway_stop(&data_dir).await;
     if let Some(task) = backup_cleanup {
         task.abort();
     }

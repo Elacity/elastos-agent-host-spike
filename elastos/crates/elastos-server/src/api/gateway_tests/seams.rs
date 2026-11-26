@@ -64,8 +64,8 @@ pub(crate) fn take_grant_fault(data_dir: &Path, crash: bool) -> bool {
 }
 
 /// One named fault for this Home: `before-send`, `after-mint`, `minted-row`,
-/// `timeout`, `sent`, `started`, `after-signed-stop`, `plan-file`, or
-/// `after-off-stop`.
+/// `timeout`, `sent`, `started`, `after-signed-stop`, `plan-file`,
+/// `after-stop`, or `after-off-stop`.
 pub(crate) fn arm_grant_kind(data_dir: &Path, kind: &str) {
     guard(&GRANT_KINDS).insert(data_dir.to_path_buf(), kind.to_string());
 }

@@ -4263,3 +4263,282 @@ async fn a_crash_after_agents_off_stops_signs_both_once_on_restart() {
     }
     assert!(crate::agents::owed_stop_rows(&home.data).is_empty());
 }
+
+async fn restart_twice(data: &Path) {
+    for _ in 0..2 {
+        let mut restarted = Gateway::start(data).await;
+        let _ = restarted.stop.take().unwrap().send(());
+        restarted.task.await.unwrap().unwrap();
+    }
+}
+
+fn one_owed_session(data: &Path, session: &str) -> String {
+    let owed = crate::agents::owed_stop_rows(data);
+    let ids: Vec<String> = owed
+        .iter()
+        .filter(|row| row.result == "stopping" && row.session_id.as_deref() == Some(session))
+        .map(|row| row.event_id.clone())
+        .collect();
+    assert_eq!(ids.len(), 1, "the stop was not owed once: {owed:?}");
+    assert_eq!(
+        ok_stops(data, session),
+        0,
+        "a stop was signed before restart"
+    );
+    ids[0].clone()
+}
+
+fn assert_owed_settled_once(data: &Path, session: &str, owed_id: &str) {
+    assert_eq!(
+        ok_stops(data, session),
+        1,
+        "restart did not sign the stop once"
+    );
+    let signed = stopped_rows(data);
+    assert_eq!(
+        signed.iter().filter(|row| row.event_id == owed_id).count(),
+        1,
+        "the owed stop was not signed once: {signed:?}"
+    );
+    assert!(
+        crate::agents::owed_stop_rows(data).is_empty(),
+        "the owed stop was left open"
+    );
+}
+
+async fn crash_one_stop(home: &Home, gateway: Gateway, session: &str, path: &str, body: &str) {
+    super::seams::arm_grant_kind(&home.data, "after-stop");
+    let (status, text) = post_json(&gateway.addr, &system_token(home), path, body).await;
+    assert_ne!(status, 200, "{text}");
+    assert!(text.contains("crash after the stop"), "{text}");
+    let owed_id = one_owed_session(&home.data, session);
+    gateway.shutdown().await;
+    restart_twice(&home.data).await;
+    assert_owed_settled_once(&home.data, session, &owed_id);
+}
+
+#[tokio::test]
+async fn a_crash_after_owner_stop_signs_once_on_restart() {
+    let (home, dir) = live_home();
+    let agent = home.create_agent("Live", &sign_probe(&dir));
+    let gateway = Gateway::start(&home.data).await;
+    let session = home.launch(&agent, &dir).await;
+    crash_one_stop(
+        &home,
+        gateway,
+        &session,
+        "/api/apps/system/agents/stop",
+        &json!({ "agent_id": agent }).to_string(),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn a_crash_after_activate_false_signs_once_on_restart() {
+    let (home, dir) = live_home();
+    let agent = home.create_agent("Live", &sign_probe(&dir));
+    let gateway = Gateway::start(&home.data).await;
+    let session = home.launch(&agent, &dir).await;
+    crash_one_stop(
+        &home,
+        gateway,
+        &session,
+        "/api/apps/system/agents/activate",
+        &json!({ "agent_id": agent, "active": false }).to_string(),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn a_crash_after_retire_signs_once_on_restart() {
+    let (home, dir) = live_home();
+    let agent = home.create_agent("Live", &sign_probe(&dir));
+    let gateway = Gateway::start(&home.data).await;
+    let session = home.launch(&agent, &dir).await;
+    crash_one_stop(
+        &home,
+        gateway,
+        &session,
+        "/api/apps/system/agents/retire",
+        &json!({ "agent_id": agent }).to_string(),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn a_crash_after_admin_loss_signs_once_on_restart() {
+    let home = Home::open();
+    let (owner, other) = admins(&home, "crash-demote");
+    let dir = home._temp.path().join("probe");
+    let agent = create_owned_agent(&home.data, &owner, &sign_probe(&dir));
+    let gateway = Gateway::start(&home.data).await;
+    let session = launch_owned(&home, &owner, &agent).await;
+    super::seams::arm_grant_kind(&home.data, "after-stop");
+    let (status, body) = home_http(
+        &gateway.addr,
+        &other.system_token,
+        reqwest::Method::POST,
+        &format!("/api/auth/passkeys/{}/demote-guest", owner.proof_binding_id),
+    )
+    .await;
+    assert_ne!(status, 200, "{body}");
+    let owed_id = one_owed_session(&home.data, &session);
+    gateway.shutdown().await;
+    restart_twice(&home.data).await;
+    assert_owed_settled_once(&home.data, &session, &owed_id);
+}
+
+#[tokio::test]
+async fn a_crash_after_gateway_stop_signs_once_on_restart() {
+    let (home, dir) = live_home();
+    let agent = home.create_agent("Live", &sign_probe(&dir));
+    let gateway = Gateway::start(&home.data).await;
+    let session = home.launch(&agent, &dir).await;
+    super::seams::arm_grant_kind(&home.data, "after-stop");
+    gateway.shutdown().await;
+    let owed_id = one_owed_session(&home.data, &session);
+    restart_twice(&home.data).await;
+    assert_owed_settled_once(&home.data, &session, &owed_id);
+}
+
+#[tokio::test]
+async fn a_crash_after_a_failed_stop_retry_signs_once_on_restart() {
+    let (home, dir) = live_home();
+    let agent = home.create_agent("Live", &sign_probe(&dir));
+    let gateway = Gateway::start(&home.data).await;
+    let session = home.launch(&agent, &dir).await;
+    let failed = audit_row(
+        &home.owner,
+        None,
+        "agent.stopped",
+        "failed",
+        json!({ "agent_id": agent, "cause": "retry" }).to_string(),
+    );
+    crate::agent_record_audit::append_agent_row(&home.data, failed).unwrap();
+    super::seams::arm_grant_kind(&home.data, "after-stop");
+    super::super::gateway_agents::confirm_stopping_rows(&home.data)
+        .await
+        .unwrap();
+    let owed_id = one_owed_session(&home.data, &session);
+    gateway.shutdown().await;
+    restart_twice(&home.data).await;
+    assert_owed_settled_once(&home.data, &session, &owed_id);
+}
+
+#[tokio::test]
+async fn a_panicked_runtime_signs_the_stop_and_stop_reports_it() {
+    let (home, dir) = live_home();
+    let agent = home.create_agent("Live", &sign_probe(&dir));
+    let gateway = Gateway::start(&home.data).await;
+    let session = home.launch(&agent, &dir).await;
+    crate::api::agent_plane::plant_task_panic();
+    let mut signed = false;
+    for _ in 0..100 {
+        signed = stopped_rows(&home.data)
+            .iter()
+            .any(|row| row.session_id.as_deref() == Some(session.as_str()));
+        if signed {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(signed, "the panic path did not sign the stop");
+    let before = stopped_rows(&home.data).len();
+    let (status, body) = post_json(
+        &gateway.addr,
+        &system_token(&home),
+        "/api/apps/system/agents/stop",
+        &json!({ "agent_id": agent }).to_string(),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    let reply: Value = serde_json::from_str(&body).unwrap();
+    let listed = reply["stopped"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .chain(reply["stopping"].as_array().into_iter().flatten())
+        .any(|row| row["session_id"] == session);
+    assert!(listed, "stop did not report the ended session: {body}");
+    let (again, again_body) = post_json(
+        &gateway.addr,
+        &system_token(&home),
+        "/api/apps/system/agents/stop",
+        &json!({ "agent_id": agent }).to_string(),
+    )
+    .await;
+    assert_eq!(again, 200, "{again_body}");
+    assert_eq!(
+        stopped_rows(&home.data).len(),
+        before,
+        "stop signed a second row"
+    );
+    gateway.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_failed_note_after_the_signed_ok_does_not_append_again() {
+    let home = Home::open();
+    let (owner, _) = admins(&home, "note-ok");
+    let reason = json!({ "agent_id": "agent-noted" }).to_string();
+    let stopping = audit_row(
+        &owner.principal_id,
+        Some("session-noted"),
+        "agent.stopped",
+        "stopping",
+        reason,
+    );
+    crate::agent_record_audit::append_agent_row(&home.data, stopping).unwrap();
+    super::seams::arm_grant_kind(&home.data, "after-signed-stop");
+    let crashed = crate::agent_record_audit::confirm_stopping_rows(&home.data, |_| true);
+    assert!(
+        crashed.is_err(),
+        "the note after the signed ok did not fail"
+    );
+    let once = stopped_rows(&home.data)
+        .iter()
+        .filter(|row| row.result == "ok" && row.session_id.as_deref() == Some("session-noted"))
+        .count();
+    assert_eq!(once, 1, "the ok row was not signed");
+    crate::agent_record_audit::confirm_stopping_rows(&home.data, |_| true).unwrap();
+    let retry = stopped_rows(&home.data)
+        .iter()
+        .filter(|row| row.result == "ok" && row.session_id.as_deref() == Some("session-noted"))
+        .count();
+    assert_eq!(retry, 1, "the retry appended a second ok row");
+    for _ in 0..600 {
+        let pad = audit_row(&owner.principal_id, None, "audit.pad", "ok", "pad".into());
+        crate::auth::append_audit_event(&home.data, pad).unwrap();
+    }
+    assert!(
+        stopped_rows(&home.data)
+            .iter()
+            .all(|row| row.session_id.as_deref() != Some("session-noted")),
+        "the pad did not roll the ok row off"
+    );
+    let marked = audit_row(
+        &owner.principal_id,
+        Some("session-rolled"),
+        "agent.stopped",
+        "stopping",
+        json!({ "agent_id": "agent-rolled" }).to_string(),
+    );
+    crate::agent_record_audit::append_agent_row(&home.data, marked).unwrap();
+    super::seams::arm_grant_kind(&home.data, "after-signed-stop");
+    let rolled = crate::agent_record_audit::confirm_stopping_rows(&home.data, |_| true);
+    assert!(rolled.is_err(), "the rolled note did not fail");
+    for _ in 0..600 {
+        let pad = audit_row(&owner.principal_id, None, "audit.pad", "ok", "pad".into());
+        crate::auth::append_audit_event(&home.data, pad).unwrap();
+    }
+    assert!(
+        stopped_rows(&home.data).is_empty(),
+        "the second pad did not wrap"
+    );
+    crate::agent_record_audit::confirm_stopping_rows(&home.data, |_| true).unwrap();
+    assert!(
+        stopped_rows(&home.data).is_empty(),
+        "a rolled-off ok was appended again"
+    );
+    assert!(crate::agents::owed_stop_rows(&home.data).is_empty());
+}

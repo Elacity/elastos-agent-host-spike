@@ -64,12 +64,85 @@ pub(crate) fn append_agent_row(data_dir: &Path, event: RuntimeAuditEventV1) -> a
         crate::agents::note_stop_rows(data_dir, row)?;
         return crate::auth::append_audit_event(data_dir, event);
     }
+    if event.event_type == "agent.stopped" && event.result == "ok" {
+        if let Some(session) = event.session_id.as_deref() {
+            if settling_stop_landed(data_dir, session)? {
+                return crate::agents::note_stop_rows(data_dir, row);
+            }
+            mark_confirm(data_dir, session)?;
+        }
+    }
     crate::auth::append_audit_event(data_dir, event.clone())?;
     #[cfg(test)]
     if crate::api::gateway::seams::take_grant_kind(data_dir, "after-signed-stop") {
         anyhow::bail!("crash after the signed stop row");
     }
     crate::agents::note_stop_rows(data_dir, row)
+}
+
+/// An `ok` stop for this session is already in the kept chain, or the confirm
+/// was marked and that mark has rolled off the anchor. A retry then clears
+/// the owed row and does not append a second one.
+fn settling_stop_landed(data_dir: &Path, session: &str) -> anyhow::Result<bool> {
+    let state = crate::auth::load_auth_state(data_dir)?;
+    if state.audit.iter().any(|row| {
+        row.event_type == "agent.stopped"
+            && row.result == "ok"
+            && row.session_id.as_deref() == Some(session)
+    }) {
+        return Ok(true);
+    }
+    let owed = crate::agents::owed_stop_rows(data_dir);
+    let Some(row) = owed
+        .iter()
+        .find(|row| row.result == "stopping" && row.session_id.as_deref() == Some(session))
+    else {
+        return Ok(false);
+    };
+    let Some(at) = confirm_marked_at(row) else {
+        return Ok(false);
+    };
+    Ok(chain_rolled_off(&state, at))
+}
+
+pub(crate) fn signed_stop_kept(data_dir: &Path, session_id: &str) -> anyhow::Result<bool> {
+    let state = crate::auth::load_auth_state(data_dir)?;
+    Ok(state.audit.iter().any(|row| {
+        row.event_type == "agent.stopped" && row.session_id.as_deref() == Some(session_id)
+    }))
+}
+
+fn confirm_marked_at(row: &RuntimeAuditEventV1) -> Option<u64> {
+    let id = row.challenge_id.as_deref()?;
+    let stamp = id.strip_prefix("audit:stop-confirm|")?;
+    stamp.parse().ok()
+}
+
+fn chain_rolled_off(state: &crate::auth::AuthState, at: u64) -> bool {
+    let oldest = state.audit.first().map(|event| event.occurred_at);
+    !(state.audit_chain_anchor.is_none() || oldest.is_some_and(|oldest| oldest < at))
+}
+
+/// Remember the confirm time on the owed `stopping` row before the `ok` row
+/// is appended. The result stays `stopping`, so a crash here still owes the
+/// stop. A later retry whose `ok` row has rolled off the anchor sees the mark.
+fn mark_confirm(data_dir: &Path, session: &str) -> anyhow::Result<()> {
+    let owed = crate::agents::owed_stop_rows(data_dir);
+    let Some(mut row) = owed
+        .into_iter()
+        .find(|row| row.result == "stopping" && row.session_id.as_deref() == Some(session))
+    else {
+        return Ok(());
+    };
+    if confirm_marked_at(&row).is_some() {
+        return Ok(());
+    }
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0);
+    row.challenge_id = Some(format!("audit:stop-confirm|{now}"));
+    crate::agents::note_stop_rows(data_dir, std::slice::from_ref(&row))
 }
 
 /// At start, an owed row the kept chain lacks is signed once. Then the kept

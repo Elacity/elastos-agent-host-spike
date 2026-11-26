@@ -53,7 +53,7 @@ const unknownId = "agent:v2:" + "f".repeat(32);
 const noSuchAgent = "the caller owns no agent with that id";
 const adminRequired = "admin passkey required";
 const freshPasskey = "fresh passkey is required to approve an agent plan";
-const names = [
+export const names = [
   "release_signed", "signing_key_deleted", "installed_identity_recorded",
   "gateway_started", "owner_passkey_created", "home_runtime_ensured", "runtime_started",
   "u3_agents_enabled", "u3_owner_field_refused", "u3_agent_created",
