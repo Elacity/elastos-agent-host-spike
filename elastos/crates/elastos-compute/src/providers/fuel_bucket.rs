@@ -24,6 +24,38 @@ const V2_INSTANCES: usize = 16;
 const V2_MEMORIES: usize = 4;
 const V2_TABLES: usize = 32;
 
+/// One host wait. It parks only after a tick with no guest code.
+#[derive(Default)]
+struct GuestWait {
+    since: Option<Instant>,
+    ran: bool,
+}
+impl GuestWait {
+    fn begin(&mut self, now: Instant) {
+        if self.since.is_none() {
+            self.since = Some(now);
+            self.ran = false;
+        }
+    }
+    fn note(&mut self) {
+        if self.since.is_some() {
+            self.ran = true;
+        }
+    }
+    fn parks(&mut self, now: Instant, tick: Duration) -> bool {
+        let Some(since) = self.since.take() else {
+            return false;
+        };
+        let ran = self.ran;
+        self.ran = false;
+        !ran && now.saturating_duration_since(since) > tick
+    }
+    fn clear(&mut self) {
+        self.since = None;
+        self.ran = false;
+    }
+}
+
 pub(crate) struct FuelBucket {
     capacity: u64,
     balance: u64,
@@ -37,10 +69,8 @@ pub(crate) struct FuelBucket {
     /// Ticks since the last wake from a parked wait. An event that arrives
     /// while the guest is executing does not refill this.
     pub(crate) window_ticks: u64,
-    /// An event read is pending. The epoch callback marks [`Self::event_wait_ran`]
-    /// if the guest executes before the read completes.
-    event_wait_since: Option<Instant>,
-    event_wait_ran: bool,
+    event_wait: GuestWait,
+    sleep_wait: GuestWait,
     /// Refill below one fuel unit, kept across wakes.
     remainder: u64,
     /// `get_fuel` or `set_fuel` failed. The run ends with this name.
@@ -60,8 +90,8 @@ impl FuelBucket {
             open: false,
             parked: false,
             window_ticks: 0,
-            event_wait_since: None,
-            event_wait_ran: false,
+            event_wait: GuestWait::default(),
+            sleep_wait: GuestWait::default(),
             remainder: 0,
             fault: None,
             clock_ms: 0,
@@ -106,38 +136,34 @@ impl FuelBucket {
         self.open = false;
     }
 
+    #[cfg(test)]
     pub(crate) fn park(&mut self) {
         self.parked = true;
     }
 
-    /// An event read went pending. This is not yet a parked wait: the guest
-    /// may still be burning. A second poll does not restart the clock.
     pub(crate) fn begin_event_wait(&mut self, now: Instant) {
-        if self.event_wait_since.is_none() {
-            self.event_wait_since = Some(now);
-            self.event_wait_ran = false;
-        }
+        self.event_wait.begin(now);
     }
-
-    /// The guest executed while that read was still pending.
-    pub(crate) fn note_event_wait_ran(&mut self) {
-        if self.event_wait_since.is_some() {
-            self.event_wait_ran = true;
-        }
+    pub(crate) fn begin_sleep_wait(&mut self, now: Instant) {
+        self.sleep_wait.clear();
+        self.sleep_wait.begin(now);
     }
-
-    /// The read finished. A gap longer than one tick, with no guest execution
-    /// in it, was a suspension: mark `parked` so the wake refills the window.
-    /// A burn beside the read is left as it is.
+    pub(crate) fn note_guest_ran(&mut self) {
+        self.event_wait.note();
+        self.sleep_wait.note();
+    }
     pub(crate) fn end_event_wait(&mut self, now: Instant, tick: Duration) {
-        let Some(since) = self.event_wait_since.take() else {
-            return;
-        };
-        let ran = self.event_wait_ran;
-        self.event_wait_ran = false;
-        if !ran && now.saturating_duration_since(since) > tick {
+        if self.event_wait.parks(now, tick) {
             self.parked = true;
         }
+    }
+    pub(crate) fn end_sleep_wait(&mut self, now: Instant, tick: Duration) {
+        if self.sleep_wait.parks(now, tick) {
+            self.parked = true;
+        }
+    }
+    pub(crate) fn clear_sleep_wait(&mut self) {
+        self.sleep_wait.clear();
     }
 
     /// The store-level burn sets the gap to zero so the assertion is the
@@ -365,5 +391,63 @@ mod tests {
         bucket.window_ticks = 9;
         bucket.wake_from_park();
         assert_eq!(bucket.window_ticks, 9, "an executing guest keeps its ticks");
+    }
+
+    #[test]
+    fn a_wait_parks_only_after_a_quiet_tick() {
+        let tick = Duration::from_millis(10);
+        let start = Instant::now();
+        let mut bucket = FuelBucket::full(10, start);
+        bucket.window_ticks = 9;
+        bucket.begin_sleep_wait(start);
+        assert!(!bucket.parked, "starting a sleep is not a park");
+        bucket.clear_sleep_wait();
+        bucket.wake_from_park();
+        assert_eq!(bucket.window_ticks, 9, "a cancelled sleep keeps its ticks");
+
+        bucket.begin_sleep_wait(start);
+        bucket.end_sleep_wait(start + Duration::from_millis(1), tick);
+        bucket.wake_from_park();
+        assert_eq!(bucket.window_ticks, 9, "a short sleep keeps its ticks");
+
+        bucket.begin_sleep_wait(start);
+        bucket.note_guest_ran();
+        bucket.end_sleep_wait(start + Duration::from_secs(1), tick);
+        bucket.wake_from_park();
+        assert_eq!(
+            bucket.window_ticks, 9,
+            "guest code during the sleep keeps its ticks"
+        );
+
+        bucket.begin_event_wait(start);
+        bucket.end_event_wait(start + Duration::from_millis(1), tick);
+        bucket.wake_from_park();
+        assert_eq!(bucket.window_ticks, 9, "a short event read keeps its ticks");
+
+        bucket.begin_sleep_wait(start);
+        bucket.end_sleep_wait(start + tick + Duration::from_millis(1), tick);
+        assert!(bucket.parked);
+        bucket.wake_from_park();
+        assert_eq!(
+            bucket.window_ticks, 0,
+            "a quiet sleep longer than a tick refills"
+        );
+
+        bucket.window_ticks = 9;
+        bucket.begin_event_wait(start);
+        bucket.note_guest_ran();
+        bucket.end_event_wait(start + tick + Duration::from_millis(1), tick);
+        bucket.wake_from_park();
+        assert_eq!(
+            bucket.window_ticks, 9,
+            "guest code during the read keeps its ticks"
+        );
+        bucket.begin_event_wait(start);
+        bucket.end_event_wait(start + tick + Duration::from_millis(1), tick);
+        bucket.wake_from_park();
+        assert_eq!(
+            bucket.window_ticks, 0,
+            "a quiet event read longer than a tick refills"
+        );
     }
 }

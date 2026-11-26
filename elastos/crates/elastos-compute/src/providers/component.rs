@@ -1485,7 +1485,7 @@ impl ComponentProvider {
             // tick. `FuelBucket::wake_from_park` is the one refill, and only
             // while `parked` is still set because the guest never ran.
             bucket.parked = false;
-            bucket.note_event_wait_ran();
+            bucket.note_guest_ran();
             let used = bucket.window_ticks.saturating_add(1);
             bucket.window_ticks = used;
             if used >= max_ticks {
@@ -1921,13 +1921,15 @@ fn charge_bucket(
     Ok(true)
 }
 
-/// Clears `open` if the host future is dropped before it resumes.
+/// Clears `open` if the host future is dropped. A drop is not a park.
 struct ResumeOnDrop(Option<Arc<Mutex<crate::providers::fuel_bucket::FuelBucket>>>);
 
 impl Drop for ResumeOnDrop {
     fn drop(&mut self) {
         if let Some(bucket) = self.0.take() {
-            bucket.lock().expect("fuel").resume();
+            let mut slot = bucket.lock().expect("fuel");
+            slot.open = false;
+            slot.clear_sleep_wait();
         }
     }
 }
@@ -3100,10 +3102,13 @@ impl v2::elastos::bus::clock::HostWithStore<ComponentState> for HasSelf<Componen
             return;
         }
         if let Some(bucket) = &bucket {
-            bucket.lock().expect("fuel").park();
+            bucket
+                .lock()
+                .expect("fuel")
+                .begin_sleep_wait(Instant::now());
         }
         let _guard = resume_guard(&bucket);
-        // One wait. Cancel or stop notifies; the sleep is not sliced.
+        // Cancel, drop, or a wait inside one tick does not park.
         // A positive wait is at least [`V2_SLEEP_FLOOR`], so a 1 ms loop yields.
         let host_wait = wait.max(V2_SLEEP_FLOOR);
         let notified = wake.notified();
@@ -3111,14 +3116,24 @@ impl v2::elastos::bus::clock::HostWithStore<ComponentState> for HasSelf<Componen
         if let Some(flag) = &sleeping {
             flag.store(true, Ordering::Release);
         }
+        let mut finished = false;
         if !cancel.load(Ordering::Acquire) && !stop.load(Ordering::Acquire) {
-            tokio::select! {
-                _ = &mut notified => {}
-                _ = tokio::time::sleep(host_wait) => {}
-            }
+            finished = tokio::select! {
+                biased;
+                _ = &mut notified => false,
+                _ = tokio::time::sleep(host_wait) => true,
+            };
         }
         if let Some(flag) = &sleeping {
             flag.store(false, Ordering::Release);
+        }
+        if let Some(bucket) = &bucket {
+            let mut slot = bucket.lock().expect("fuel");
+            if finished {
+                slot.end_sleep_wait(Instant::now(), DEADLINE_TICK);
+            } else {
+                slot.clear_sleep_wait();
+            }
         }
         accessor.with(|mut access| release_access(&mut access));
     }
@@ -4584,12 +4599,19 @@ mod tests {
         )));
         {
             bucket.lock().unwrap().open = true;
-            bucket.lock().unwrap().parked = true;
+            bucket.lock().unwrap().window_ticks = 9;
+            bucket.lock().unwrap().begin_sleep_wait(Instant::now());
             let _guard = resume_guard(&Some(Arc::clone(&bucket)));
             assert!(bucket.lock().unwrap().open);
+            assert!(!bucket.lock().unwrap().parked);
         }
-        assert!(!bucket.lock().unwrap().open);
-        assert!(!bucket.lock().unwrap().parked);
+        let slot = bucket.lock().unwrap();
+        assert!(!slot.open);
+        assert!(!slot.parked);
+        assert_eq!(
+            slot.window_ticks, 9,
+            "a dropped sleep does not refill the window"
+        );
     }
 
     #[test]
@@ -8013,7 +8035,8 @@ mod tests {
             .await
             .get_mut(&handle.id)
             .unwrap()
-            .test_max_ticks = 4;
+            // A 1 ms sleep ends inside one tick, so it does not clear the window.
+            .test_max_ticks = 500;
         provider.start(&handle).await.expect("the sleeper starts");
         let started = Instant::now();
         let ending = tokio::time::timeout(Duration::from_secs(25), async {
@@ -8584,6 +8607,119 @@ mod tests {
         assert!(
             ending.contains(ENDING_EPOCH_DEADLINE),
             "an unawaited sleep left the burn running: {ending}"
+        );
+    }
+
+    async fn burn_sleep_guest(cancel: bool) -> (ComponentProvider, CapsuleHandle) {
+        let provider = ComponentProvider::new();
+        let source = include_str!("../../../../tests/fixtures/components/v2-tick-burn.wat");
+        let source = if cancel {
+            source.replacen(
+                "(i32.const 0)) ;; park-mode",
+                "(i32.const 1)) ;; park-mode",
+                1,
+            )
+        } else {
+            source.to_string()
+        };
+        assert!(
+            source.contains(if cancel {
+                "(i32.const 1)) ;; park-mode"
+            } else {
+                "(i32.const 0)) ;; park-mode"
+            }),
+            "the park mode was not patched"
+        );
+        let handle = load_v2_fixture(&provider, wat::parse_str(&source).unwrap()).await;
+        {
+            let mut entries = provider.instances.write().await;
+            let guest = entries.get_mut(&handle.id).unwrap();
+            guest.test_max_ticks = 10;
+            guest.test_wall_clock = true;
+        }
+        (provider, handle)
+    }
+
+    /// Cheap burn, then cancel and drop a sleep, on every pass. The sleep never
+    /// parks, so the tick window reaches the bound.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_burn_and_a_cancelled_sleep_ends_at_the_tick_bound() {
+        let (provider, handle) = burn_sleep_guest(true).await;
+        provider.start(&handle).await.expect("the burner starts");
+        let ending = tokio::time::timeout(Duration::from_secs(3), v2_ending(&provider, &handle))
+            .await
+            .expect("a cancelled sleep must not keep the burn alive");
+        assert!(
+            ending.contains(ENDING_EPOCH_DEADLINE),
+            "a cancelled sleep left the burn running: {ending}"
+        );
+    }
+
+    /// Cheap burn, then sleep for one guest millisecond, on every pass. That
+    /// wait ends inside one tick, so the window reaches the bound.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_burn_and_a_one_millisecond_sleep_ends_at_the_tick_bound() {
+        let (provider, handle) = burn_sleep_guest(false).await;
+        provider.start(&handle).await.expect("the burner starts");
+        let ending = tokio::time::timeout(Duration::from_secs(3), v2_ending(&provider, &handle))
+            .await
+            .expect("a 1 ms sleep must not keep the burn alive");
+        assert!(
+            ending.contains(ENDING_EPOCH_DEADLINE),
+            "a 1 ms sleep left the burn running: {ending}"
+        );
+    }
+
+    /// A 40 ms burn and an invoke, then a real one-second sleep, four times.
+    /// The sleep is a park, so the tick window starts again and the guest returns.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_one_second_sleep_between_invokes_keeps_the_guest() {
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let seen = calls.clone();
+        let provider = ComponentProvider::new();
+        provider.set_bus_hostcall_async(Arc::new(move |_line, _capsule, _principal| {
+            let seen = seen.clone();
+            Box::pin(async move {
+                seen.fetch_add(1, Ordering::Release);
+                Ok("{}".to_string())
+            })
+        }));
+        let bytes = wat::parse_str(include_str!(
+            "../../../../tests/fixtures/components/v2-sleep-between-invokes.wat"
+        ))
+        .unwrap();
+        let handle = load_v2_fixture(&provider, bytes).await;
+        provider
+            .testing_hold_grant(&handle.id, "g", "localhost://Local/note.txt", "read")
+            .await;
+        {
+            let mut entries = provider.instances.write().await;
+            let guest = entries.get_mut(&handle.id).unwrap();
+            guest.test_max_ticks = 10;
+            guest.test_wall_clock = true;
+        }
+        provider.start(&handle).await.expect("the sleeper starts");
+        let started = Instant::now();
+        let ending = tokio::time::timeout(Duration::from_secs(12), async {
+            loop {
+                if let Some(ending) = provider.endings.read().await.get(&handle.id).cloned() {
+                    return ending;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("four one-second sleeps did not finish");
+        let elapsed = started.elapsed();
+        assert_eq!(ending, "returned", "{ending} after {elapsed:?}");
+        assert_eq!(
+            calls.load(Ordering::Acquire),
+            4,
+            "one invoke before each sleep"
+        );
+        assert!(
+            elapsed >= Duration::from_millis(3_500),
+            "four 1 s sleeps finished in {elapsed:?}"
         );
     }
 
