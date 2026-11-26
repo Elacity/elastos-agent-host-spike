@@ -9,11 +9,13 @@
 !/core/src/lib.rs
 !/core/src/tests.rs
 !/derive_manifest.py
+!/falsify.py
 !/journey/
 !/journey/README.md
 !/journey/falsify-journey.sh
 !/journey/journey-browser.mjs
 !/journey/run-journey.sh
+!/LOG.md
 !/prepare_bundles.py
 !/rows_test.py
 !/verify.sh

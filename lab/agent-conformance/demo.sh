@@ -131,8 +131,8 @@ if [ -z "$rows" ]; then
 fi
 
 mkdir -p "$receipts"
-kept="$receipts/$(date -u +%Y%m%dT%H%M%SZ)"
-mkdir "$kept"
+# A second run in the same UTC second used to collide on the timestamp name.
+kept=$(mktemp -d "$receipts/kept.XXXXXX")
 cp -R "$(dirname -- "$receipt")/." "$kept/"
 cp "$output" "$kept/demo-output.log"
 printf 'receipt folder: %s\n' "$kept"

@@ -24,7 +24,7 @@
 //! `identity/localhost-file-key.lock` logs that. The walk runs from
 //! `setup_server_infrastructure`. `elastos serve` runs it and then spawns the
 //! helper (`spawn_host_providers`). `elastos serve`
-//! takes `host_lock.rs` `acquire_host_process_lock` before that
+//! takes `host_lock.rs` `start_host_for_agents` before that
 //! (`serve_cmd.rs` `run_serve`) and skips the lock when
 //! `ELASTOS_ALLOW_SUBORDINATE_RUNTIME_HOST=1`. `elastos gateway`, including
 //! its public mode, and `elastos home --browser` take that same lock and call

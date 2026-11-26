@@ -60,7 +60,7 @@ POST_MERGE_GUARD = "${{ github.event_name == 'push' || github.event_name == 'sch
 REQUIRED_NEEDS = ("source-gate", "fork-gate", "pr-substance", "test-behaviour", "cargo-audit", "core-size", "engine-llama-amd64",
                   "engine-llama-arm64",
                   "lint", "lab-gates", "lab-standin", "lab-operator-effects-macos", "lab-wasm-capsule", "test-elastos", "test-capsules", "custody-harness-smoke", "release-upstream-paths",
-                  "release-upstream-assets", "installed-app-paths", "source-home-linux", "source-home-linux-arm64",
+                  "release-upstream-assets", "installed-app-paths", "archive-viewer-paths", "archive-viewer-parser", "source-home-linux", "source-home-linux-arm64",
                   "source-home-macos", "update-hop-linux", "musl-check-linux", "musl-check-linux-arm64")
 # Read the fixed job/step indentation used here; actionlint checks YAML syntax.
 def jobs(source):
@@ -127,6 +127,9 @@ def event_context(event, ref, ref_type="", override="", head_ref=None, **extra):
         "github.head_ref": head_ref,
         # installed-app-paths answers run on every event but a notes-only pull request.
         "needs.installed-app-paths.outputs.run": "true",
+        # archive-viewer-paths answers run on a merge queue, a manual run, and a
+        # pull request whose decision step did not say run=false.
+        "needs.archive-viewer-paths.outputs.run": "true",
     }
     context.update(extra)
     return context
@@ -1203,6 +1206,13 @@ class ReleasePolicyTests(unittest.TestCase):
         source_gate = JOBS["source-gate"]
         self.assertNotRegex(source_gate, r"(?i)sccache|RUSTC_WRAPPER|rust-compile-cache")
         self.assertIn("run: ./scripts/test-source-gate.sh release", source_gate)
+        self.assertIn("run: ./scripts/test-source-gate.sh audit", source_gate)
+        self.assertIn("run: ./scripts/test-source-gate.sh trusted", source_gate)
+        self.assertIn("python3 -I scripts/audit-re-review.py", SOURCE_GATE)
+        self.assertIn("python3 -I scripts/trusted-code-test.py", SOURCE_GATE)
+        self.assertIn('output="$(python3 -I scripts/trusted-code.py)"', SOURCE_GATE)
+        self.assertNotIn("trusted-code.py >/dev/null", SOURCE_GATE)
+        self.assertIn("printf '%s\\n' \"$output\" >&2", SOURCE_GATE)
         self.assertNotIn("python3 scripts/install-bootstrap-test.py", SOURCE_GATE)
         self.assertEqual(SOURCE_GATE.count("python3 scripts/release-platform-input-test.py"), 1)
         nested = (WORKFLOW.parents[2] / "scripts/release-platform-input-test.py").read_text()
@@ -1805,6 +1815,13 @@ class ReleasePolicyTests(unittest.TestCase):
         self.assertFalse(glob_regex("elastos/crates/elastos-protected-content-*/**").match("elastos/crates/x/elastos-protected-content-a/b"))
 
     def test_only_pr_runs_share_a_cancellable_concurrency_group(self):
+        # A burst of pushes to spike/agent-host shares one group and does not
+        # cancel a run that has started, so the header must not say every merge.
+        self.assertNotIn("runs for every merge onto this branch", SOURCE)
+        self.assertIn(
+            "the macOS proof runs for that started merge and for the newest merge still queued on this branch",
+            SOURCE,
+        )
         concurrency = SOURCE.split("\nconcurrency:\n", 1)[1].split("\nenv:\n", 1)[0]
         group = field(concurrency, "group")
         for event, ref, _, _, _ in CASES:
@@ -2146,6 +2163,8 @@ class ReleasePolicyTests(unittest.TestCase):
             "release-upstream-paths": ("release-upstream-paths", "ubuntu-24.04"),
             "release-upstream-assets": ("release-upstream-assets (${{ matrix.platform }})", "${{ matrix.os }}"),
             "installed-app-paths": ("installed-app-paths", "ubuntu-24.04"),
+            "archive-viewer-paths": ("archive-viewer-paths", "ubuntu-24.04"),
+            "archive-viewer-parser": ("archive-viewer-parser", "ubuntu-24.04"),
             "source-home-linux": ("source-home-linux (${{ matrix.os }})", "${{ matrix.os }}"),
             "source-home-linux-arm64": ("source-home-linux (${{ matrix.check_name || matrix.os }})", "${{ matrix.os }}"),
             "source-home-macos": ("source-home-macos", "macos-15"),
@@ -2217,14 +2236,16 @@ class ReleasePolicyTests(unittest.TestCase):
             "lab-gates": "fork-gate", "lab-standin": "fork-gate", "lab-operator-effects-macos": "fork-gate", "lab-wasm-capsule": "fork-gate", "test-elastos": "fork-gate", "test-capsules": "fork-gate",
             "custody-harness-smoke": "fork-gate",
             "release-upstream-paths": None, "release-upstream-assets": "[release-upstream-paths, engine-llama-arm64]",
-            "installed-app-paths": None, "source-home-linux": "[installed-app-paths, engine-llama-amd64]",
+            "installed-app-paths": None, "archive-viewer-paths": None,
+            "archive-viewer-parser": "[archive-viewer-paths, fork-gate]",
+            "source-home-linux": "[installed-app-paths, engine-llama-amd64]",
             "source-home-linux-arm64": "[installed-app-paths, engine-llama-arm64]",
             "source-home-macos": "source-gate", "update-hop-linux": "[installed-app-paths, fork-gate]",
             "musl-check-linux": "[installed-app-paths, fork-gate]", "musl-check-linux-arm64": "[installed-app-paths, fork-gate]",
             "cancel-on-failure": None,
             "required": "[source-gate, fork-gate, pr-substance, test-behaviour, cargo-audit, core-size, engine-llama-amd64, engine-llama-arm64, "
                         "lint, lab-gates, lab-standin, lab-operator-effects-macos, lab-wasm-capsule, test-elastos, test-capsules, custody-harness-smoke, release-upstream-paths, "
-                        "release-upstream-assets, installed-app-paths, source-home-linux, source-home-linux-arm64, source-home-macos, "
+                        "release-upstream-assets, installed-app-paths, archive-viewer-paths, archive-viewer-parser, source-home-linux, source-home-linux-arm64, source-home-macos, "
                         "update-hop-linux, musl-check-linux, musl-check-linux-arm64]",
         }
         graph = {job: (re.search(r"(?m)^    needs: (.+)$", block) or [None, None])[1] for job, block in JOBS.items()}
@@ -2275,9 +2296,10 @@ class ReleasePolicyTests(unittest.TestCase):
             self.assertEqual(self.run_fork_gate([None, conclusion, "success"]), (1, 2),
                              f"a source-gate {conclusion} must stop a fork pull request's compile jobs")
 
-    def run_required(self, context, results, upstream="false", installed="true"):
+    def run_required(self, context, results, upstream="false", installed="true", archive=None):
         """Run the required job's check as Actions would for this context; return its exit status.
-        installed is the installed-app-paths output; None leaves the output out."""
+        installed is the installed-app-paths output; None leaves the output out.
+        archive is the archive-viewer-paths output; None leaves that output out."""
         step, = steps("required")
         env = {name: str(evaluate(field(step, name), context)).lower()
                for name in ("SPARK_PULL_REQUEST", "POST_MERGE", "PULL_REQUEST", "CUSTODY_EVENT")}
@@ -2285,6 +2307,8 @@ class ReleasePolicyTests(unittest.TestCase):
         needs["release-upstream-paths"]["outputs"]["run"] = upstream
         if installed is not None:
             needs["installed-app-paths"]["outputs"]["run"] = installed
+        if archive is not None:
+            needs["archive-viewer-paths"]["outputs"]["run"] = archive
         for job, result in results.items():
             needs[job]["result"] = result
         # The run block is its 10-space lines; the next job's leading comment follows it.
@@ -2325,6 +2349,7 @@ class ReleasePolicyTests(unittest.TestCase):
             ("upstream assets skipped though their inputs changed", pr, {**mac, **assets}, "true", 1),
             ("a cancelled job", pr, {**mac, **assets, "lint": "cancelled"}, "false", 1),
             ("custody skipped on a PR", pr, {**mac, **assets, "custody-harness-smoke": "skipped"}, "false", 1),
+            ("core-size failed", pr, {**mac, **assets, "core-size": "failure"}, "false", 1),
         ]
         for name, context, results, upstream, expected in cases:
             self.assertEqual(self.run_required(context, results, upstream), expected, name)
@@ -2355,6 +2380,82 @@ class ReleasePolicyTests(unittest.TestCase):
             cases.append((f"only {job} skipped on an ordinary PR", pr, {**base, job: "skipped"}, "true", 1))
         for name, context, results, answer, expected in cases:
             self.assertEqual(self.run_required(context, results, installed=answer), expected, name)
+
+    def test_archive_parser_skips_only_on_exact_run_false_for_a_pull_request_or_after_merge(self):
+        pr = event_context("pull_request", "refs/pull/9/merge")
+        push = event_context("push", "refs/heads/spike/agent-host")
+        merge = event_context("merge_group", "refs/heads/gh-readonly-queue/develop/pr-1")
+        manual = event_context("workflow_dispatch", "refs/heads/main")
+        mac, assets = {"source-home-macos": "skipped"}, {"release-upstream-assets": "skipped"}
+        skipped = {"archive-viewer-parser": "skipped"}
+        after = {**assets, "pr-substance": "skipped"}
+        # The exact answer run=false may skip on a pull request and after the merge.
+        self.assertEqual(self.run_required(pr, {**mac, **assets, **skipped}, archive="false"), 0)
+        self.assertEqual(self.run_required(push, {**after, **skipped}, archive="false"), 0)
+        # An empty answer and a missing answer do not allow the skip.
+        self.assertEqual(self.run_required(pr, {**mac, **assets, **skipped}, archive=""), 1)
+        self.assertEqual(self.run_required(pr, {**mac, **assets, **skipped}, archive=None), 1)
+        self.assertEqual(self.run_required(push, {**after, **skipped}, archive=""), 1)
+        self.assertEqual(self.run_required(push, {**after, **skipped}, archive=None), 1)
+        # A merge queue does not skip, including when the answer is run=false.
+        self.assertEqual(self.run_required(merge, {**after, **skipped}, archive="false"), 1)
+        self.assertEqual(self.run_required(merge, {**after, **skipped}, archive=""), 1)
+        self.assertEqual(self.run_required(merge, {**after, **skipped}, archive=None), 1)
+        # A manual run does not skip either. The word true still means the parser ran.
+        self.assertEqual(self.run_required(manual, {**after, **skipped}, archive="false"), 1)
+        self.assertEqual(self.run_required(pr, {**mac, **assets, **skipped}, archive="true"), 1)
+        self.assertEqual(self.run_required(pr, {**mac, **assets, **skipped}, archive="False"), 1)
+        self.assertEqual(self.run_required(pr, {**mac, **assets}, archive="true"), 0)
+        self.assertEqual(self.run_required(merge, {**after, **skipped}, archive="true"), 1)
+
+    def test_source_gate_shows_trusted_code_output_when_it_fails(self):
+        start = SOURCE_GATE.index("trusted() {\n")
+        end = SOURCE_GATE.index("\n}\n", start)
+        function = SOURCE_GATE[start:end] + "\n}\n"
+        script = "set -euo pipefail\n" + function + "\ntrusted\n"
+        stub = textwrap.dedent("""\
+            #!/bin/bash
+            printf '%s\\n' "$*" >> "$CALLS"
+            case "$*" in
+              *trusted-code-test.py*) exit 0 ;;
+              *trusted-code.py*)
+                if [ "$TRUSTED_MODE" = fail ]; then
+                  printf '%s\\n' "missing file: planted.rs"
+                  exit 1
+                fi
+                printf '%s\\n' "trusted-code report"
+                exit 0
+                ;;
+              *) exit 9 ;;
+            esac
+            """)
+
+        def run(mode):
+            with tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                bindir = root / "bin"
+                bindir.mkdir()
+                python = bindir / "python3"
+                python.write_text(stub)
+                python.chmod(0o755)
+                calls = root / "calls"
+                result = subprocess.run(
+                    ["bash", "-c", script], cwd=root, capture_output=True, text=True, timeout=10,
+                    env={**os.environ, "PATH": f"{bindir}{os.pathsep}{os.environ['PATH']}",
+                         "CALLS": str(calls), "TRUSTED_MODE": mode})
+                return result, calls.read_text()
+
+        failed, calls = run("fail")
+        self.assertEqual(failed.returncode, 1, failed.stdout + failed.stderr)
+        self.assertIn("missing file: planted.rs", failed.stderr)
+        self.assertNotIn("missing file: planted.rs", failed.stdout)
+        self.assertIn("-I scripts/trusted-code.py", calls)
+        self.assertIn("-I scripts/trusted-code-test.py", calls)
+        passed, calls = run("pass")
+        self.assertEqual(passed.returncode, 0, passed.stderr)
+        self.assertNotIn("trusted-code report", passed.stdout)
+        self.assertNotIn("trusted-code report", passed.stderr)
+        self.assertIn("-I scripts/trusted-code.py", calls)
 
     def test_installed_app_jobs_skip_only_on_a_notes_only_pull_request(self):
         paths_job = JOBS["installed-app-paths"]
@@ -2591,7 +2692,8 @@ class ReleasePolicyTests(unittest.TestCase):
         # cargo-audit, and core-size's budget verdict alone, report in their own red job without cancelling.
         verdict = "core size against elastos/CORE-BUDGET"
         tests = [("core-size tests", "success"), ("measure the core", "success"), (verdict, "failure")]
-        for job in (("cargo-audit", "completed", "failure"), ("core-size", "completed", "failure", tests)):
+        for job in (("cargo-audit", "completed", "failure"), ("core-size", "completed", "failure", tests),
+                    ("required", "completed", "failure")):
             red = [watch, gate, job, ("source-home-macos", "completed", "success")]
             self.assertEqual(self.run_cancel_watcher([red, red]), (0, [], 2), job)
         # Any other core-size failure cancels: its counter tests, a refusal while measuring, a timeout.
@@ -2605,6 +2707,7 @@ class ReleasePolicyTests(unittest.TestCase):
         # Refusals and an unknown mode fail the measure step in both modes.
         self.assertIn("    env:\n      # enforced since 25 Nov 2026 (Sash); it was advisory before\n"
                       "      CORE_BUDGET_MODE: enforce\n", JOBS["core-size"])
+        self.assertNotRegex(JOBS["core-size"], r"(?m)^\s+(?:if|continue-on-error):")
         self.assertNotRegex("".join(steps("core-size")), r"CORE_BUDGET_MODE\s*[:=]")  # no step overrides it
         # The filter names the verdict step, which only runs --check; measuring, with --base, comes first.
         names = [step.splitlines()[0] for step in steps("core-size")]

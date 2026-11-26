@@ -7661,6 +7661,72 @@ mod tests {
         assert_eq!(fs::read(&marker).unwrap(), bytes);
     }
 
+    fn warn_text(body: impl FnOnce()) -> String {
+        use std::io::Write;
+        use std::sync::{Arc, Mutex};
+
+        #[derive(Clone)]
+        struct WarnWriter(Arc<Mutex<Vec<u8>>>);
+
+        impl Write for WarnWriter {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let buf = Arc::new(Mutex::new(Vec::new()));
+        let writer = WarnWriter(buf.clone());
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::WARN)
+            .with_ansi(false)
+            .without_time()
+            .with_writer(move || writer.clone())
+            .finish();
+        tracing::subscriber::with_default(subscriber, body);
+        let text = String::from_utf8(buf.lock().unwrap().clone()).unwrap();
+        text
+    }
+
+    #[test]
+    fn a_refused_prepare_then_start_skips_the_spend_heal() {
+        let _guard = LocalAppsGuard::lock();
+        let root = TempDir::new().unwrap();
+        plant_key_0600(root.path(), &[0xd4; 32]);
+        let marker = root.path().join("identity/localhost-file-key-v1");
+        fs::write(&marker, b"elastos-localhost-file-v1 1 aa\n").unwrap();
+        let log = warn_text(|| {
+            for role in ["gateway", "gateway-public", "serve"] {
+                elastos_server::host_lock::start_host_for_agents(
+                    root.path(),
+                    role,
+                    "127.0.0.1:9",
+                    crate::localhost_file_migration::prepare_localhost_files,
+                )
+                .unwrap_or_else(|err| panic!("{role} stopped Home: {err}"));
+            }
+        });
+        assert_eq!(log.matches("agent spend heal skipped").count(), 3, "{log}");
+        elastos_server::gateway_cmd::verify_ready_after_prepare(root.path())
+            .expect("the audit check stopped Home");
+        for name in ["AppCapsules", "ElastOS", "Local", "Users", "UsersAI"] {
+            assert!(!root.path().join(name).exists(), "{name} was created");
+        }
+        let sentence = elastos_server::local_apps::local_apps_refusal(root.path())
+            .expect("local apps stayed on");
+        assert!(
+            sentence.contains("is not the migration record"),
+            "{sentence}"
+        );
+        let line = elastos_server::local_apps::local_apps_health_line(&sentence);
+        assert!(line.contains("Local apps are off."), "{line}");
+        home_stays_up(root.path(), &sentence);
+    }
+
     #[test]
     fn prepare_refusal_symlink_marker_leaves_elastos_unmade() {
         let _guard = LocalAppsGuard::lock();

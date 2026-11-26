@@ -17,6 +17,9 @@ python3 -I "${REPO_ROOT}/examples/capsule-kit/scripts/check-manifest.py" \
     gba-viewer-core
 cargo test --locked --manifest-path "${VIEWER_DIR}/core/Cargo.toml"
 
+# Each core rule and each derive_manifest rule: break it, see its test fail.
+python3 -I "${VIEWER_DIR}/falsify.py"
+
 python3 -I "${VIEWER_DIR}/verify_gate_test.py"
 python3 -I "${VIEWER_DIR}/verify_gate_test.py" --falsify
 

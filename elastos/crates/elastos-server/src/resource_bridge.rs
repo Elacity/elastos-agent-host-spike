@@ -1112,6 +1112,14 @@ async fn authorize_and_dispatch_resource_invoke(
         return finish_component_invoke(bridge_ctx, &audit_id, &dispatch, "denied", refusal);
     }
 
+    // An agent whose launch released its account is refused by name before the
+    // hosted-run gate and before any send. A person with neither still runs.
+    if dispatch.scheme == "model" {
+        if let Some(refusal) = agent_run_without_account(bridge_ctx, &dispatch.operation) {
+            return finish_component_invoke(bridge_ctx, &audit_id, &dispatch, "denied", refusal);
+        }
+    }
+
     // A model run is bound to this bridge's caller, never to the body.
     if dispatch.scheme == "model" && dispatch.operation != "offers_list" {
         match crate::api::gateway::bus_model_provider_request(
@@ -1180,10 +1188,7 @@ async fn authorize_and_dispatch_resource_invoke(
                     &audit_id,
                     &dispatch,
                     "denied",
-                    resource_error_response(
-                        "denied",
-                        "model_budget_exceeded: agent account unavailable",
-                    ),
+                    resource_error_response("denied", AGENT_ACCOUNT_UNAVAILABLE),
                 );
             }
             if let Some(ref budget) = bridge_ctx.model_budget {
@@ -1687,6 +1692,41 @@ impl ModelBudgetRefusal {
     }
 }
 
+const AGENT_ACCOUNT_UNAVAILABLE: &str = "model_budget_exceeded: agent account unavailable";
+
+/// An admitted agent whose launch holds neither a ceiling nor an account.
+/// This applies when the build has agents. A stored person is not this
+/// refusal. A verified device principal runs as before. A principal this
+/// Home cannot show, including one the owner file no longer carries, is refused.
+fn agent_run_without_account(ctx: &BridgeContext, operation: &str) -> Option<serde_json::Value> {
+    if operation != "runs_create" || !crate::agents::build_allows() {
+        return None;
+    }
+    if ctx.model_token_ceiling.is_some() || ctx.model_budget.is_some() {
+        return None;
+    }
+    let (Some(data_dir), Some(principal_id)) =
+        (ctx.data_dir.as_deref(), ctx.principal_id.as_deref())
+    else {
+        return None;
+    };
+    if principal_id.starts_with("device:")
+        && crate::auth::ResolvedPrincipalRoot::resolve(data_dir, data_dir, principal_id).is_ok()
+    {
+        return None;
+    }
+    let stored = match crate::auth::stored_principal_record(data_dir, principal_id) {
+        Ok(Some(stored)) => stored,
+        Ok(None) | Err(_) => {
+            return Some(resource_error_response("denied", AGENT_ACCOUNT_UNAVAILABLE));
+        }
+    };
+    if stored.kind != crate::auth::PrincipalKind::Agent {
+        return None;
+    }
+    Some(resource_error_response("denied", AGENT_ACCOUNT_UNAVAILABLE))
+}
+
 /// Refuse a model invoke when the admitted agent's signed ceiling is 0.
 /// `None` means this capsule is not an admitted agent: there is no ceiling
 /// entry, and the model rule does not apply. The request is not an argument.
@@ -1776,36 +1816,55 @@ fn reserve_model_create(
         .map_err(|_| invalid("invalid model run binding"))?;
     budget
         .account
-        .reserve(
+        .reserve_for_offer(
             &budget.agent,
             &RunKey::of(&binding, &bound.revision),
             bound.tokens,
+            Some(offer_id),
         )
-        .map_err(|refusal| match refusal {
-            BudgetRefusal::ConflictingRetry => resource_error_response(
-                "invalid_resource_invoke",
-                "request_id conflicts with an existing model hold",
-            ),
-            BudgetRefusal::OverCap {
-                asked,
-                held,
-                ceiling,
-            } => resource_error_response(
-                "denied",
-                &format!(
-                    "model_budget_exceeded: run needs {asked} tokens; {held} of {ceiling} held"
-                ),
-            ),
-            _ => resource_error_response(
-                "denied",
-                "model_budget_exceeded: agent account unavailable",
-            ),
-        })?;
+        .map_err(budget_refusal_response)?;
     Ok(serde_json::json!({
         "op": "runs_create", "offer_id": offer_id, "operation": operation,
         "input": input, "runtime_binding": binding,
         "expected_execution_binding_hash": bound.revision,
     }))
+}
+
+fn budget_refusal_response(refusal: BudgetRefusal) -> serde_json::Value {
+    match refusal {
+        BudgetRefusal::ConflictingRetry => resource_error_response(
+            "invalid_resource_invoke",
+            "request_id conflicts with an existing model hold",
+        ),
+        BudgetRefusal::OverCap {
+            asked,
+            held,
+            ceiling,
+        } => resource_error_response(
+            "denied",
+            &format!("model_budget_exceeded: run needs {asked} tokens; {held} of {ceiling} held"),
+        ),
+        BudgetRefusal::Record(name) => record_refusal_response(name),
+        BudgetRefusal::HoldsFull => {
+            resource_error_response("denied", "model_budget_exceeded: holds are full")
+        }
+        BudgetRefusal::HostedRun => resource_error_response(
+            crate::api::gateway::HOSTED_AGENT_RUN_REFUSED,
+            crate::api::gateway::HOSTED_AGENT_RUN_SENTENCE,
+        ),
+        _ => resource_error_response("denied", AGENT_ACCOUNT_UNAVAILABLE),
+    }
+}
+
+/// A stored-record refusal. `LOCK_ORDER` stays an internal sentence.
+fn record_refusal_response(name: &'static str) -> serde_json::Value {
+    if name == crate::agents::LOCK_ORDER {
+        return resource_error_response(
+            "agent_record_unavailable",
+            "The agent record cannot be charged for this run.",
+        );
+    }
+    resource_error_response("agent_record_unavailable", name)
 }
 
 fn resource_error_response(code: &str, message: &str) -> serde_json::Value {
@@ -4266,6 +4325,23 @@ pub(crate) mod tests {
         text.len()
     }
 
+    /// The first test-only attribute this counter drops. `#[cfg(test)]` is the
+    /// plain mark. A macOS test item uses the compound mark, which does not
+    /// contain that text.
+    fn next_cfg_test_attr(rest: &str) -> Option<usize> {
+        ["#[cfg(test)]", "#[cfg(all(test, target_os = \"macos\"))]"]
+            .into_iter()
+            .filter_map(|marker| rest.find(marker))
+            .min()
+    }
+
+    fn cfg_test_attr_end(rest: &str, start: usize) -> usize {
+        rest[start..]
+            .find(']')
+            .map(|at| start + at + 1)
+            .unwrap_or(rest.len())
+    }
+
     /// The byte index just past the `}` that closes the block opening at
     /// `open` (`open` indexes the `{`). Line and block comments, string
     /// literals, raw strings, byte/char literals and lifetimes are skipped, so
@@ -4401,9 +4477,10 @@ pub(crate) mod tests {
 
     /// The production text of a source file with each `tests` module dropped by
     /// brace match, then `#[cfg(test)]` items and statement-level
-    /// `#[cfg(test)]` lines dropped, then comment lines dropped. This is
-    /// stricter than `production_text`, whose first-marker cut keeps a
-    /// `#[cfg(test)]` item written before the test module and drops all
+    /// `#[cfg(test)]` lines dropped, then comment lines dropped. A macOS test
+    /// item marked `#[cfg(all(test, target_os = "macos"))]` is dropped the same
+    /// way. This is stricter than `production_text`, whose first-marker cut
+    /// keeps a `#[cfg(test)]` item written before the test module and drops all
     /// production code written after one.
     fn production_text_ignoring_cfg_test(source: &str) -> String {
         let mut kept_source = String::new();
@@ -4416,9 +4493,9 @@ pub(crate) mod tests {
         let source: &str = &kept_source;
         let mut kept = String::new();
         let mut rest = source;
-        while let Some(start) = rest.find("#[cfg(test)]") {
+        while let Some(start) = next_cfg_test_attr(rest) {
             kept.push_str(&rest[..start]);
-            let after = &rest[start + "#[cfg(test)]".len()..];
+            let after = &rest[cfg_test_attr_end(rest, start)..];
             let trimmed = after.trim_start();
             let skipped = after.len() - trimmed.len();
             let item_end = cfg_test_item_end(trimmed);
@@ -9200,6 +9277,200 @@ pub(crate) mod tests {
         assert_eq!(provider.requests.lock().await.len(), 1);
     }
 
+    /// The ceiling is held, the capabilities are already copied, then the launch
+    /// drops the ceiling before the account read. With agents built in, the run
+    /// is refused by the account sentence and the hosted gate does not answer.
+    /// With agents off, the account check does not answer, so the hosted gate
+    /// refuses the run. The provider is not asked in either build.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_released_launch_refuses_an_agent_run_before_the_gate() {
+        let (mut ctx, provider, temp) = model_bus(Some(ALICE), "capsule-released").await;
+        let agent = crate::agents::tests::plant_for_dispatch(temp.path(), ALICE, ALICE);
+        ctx.principal_id = Some(agent.clone());
+        assert!(
+            !ctx.manifest_capabilities.is_empty(),
+            "capabilities were copied before the account read"
+        );
+        let planted =
+            crate::runtime::tests::plant_held_model_launch("capsule-released", &agent, 64);
+        crate::runtime::tests::arm_launch_release_plant("capsule-released");
+        let (ceiling, budget) = crate::runtime::tests::read_planted_model_launch(&planted);
+        assert!(ceiling.is_none(), "the plant left the ceiling in the read");
+        assert!(budget.is_none(), "the plant left the account in the read");
+        ctx.model_token_ceiling = ceiling;
+        ctx.model_budget = budget;
+        let response = model_invoke(
+            &ctx,
+            "runs_create",
+            Action::Execute,
+            model_create("model:openrouter"),
+        )
+        .await;
+        let message = response["response"]["message"].as_str().unwrap_or("");
+        let code = response["response"]["code"].as_str().unwrap_or("");
+        if crate::agents::build_allows() {
+            assert!(message.contains(AGENT_ACCOUNT_UNAVAILABLE), "{response}");
+            assert_ne!(code, "hosted_agent_run_refused");
+        } else {
+            assert_eq!(code, "hosted_agent_run_refused", "{response}");
+            assert!(!message.contains(AGENT_ACCOUNT_UNAVAILABLE), "{response}");
+        }
+        assert!(
+            provider.requests.lock().await.is_empty(),
+            "the provider was asked"
+        );
+    }
+
+    /// Agents are off, so the owner file no longer shows the agent. The run is
+    /// refused and the provider is not asked.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_agent_absent_from_the_owner_file_is_refused_before_dispatch() {
+        let (mut ctx, provider, temp) = model_bus(Some(ALICE), "capsule-absent").await;
+        let agent = crate::agents::tests::plant_for_dispatch(temp.path(), ALICE, ALICE);
+        crate::agents::tests::stop_dispatch_agent(temp.path(), ALICE, &agent, true);
+        ctx.principal_id = Some(agent);
+        let response = model_invoke(
+            &ctx,
+            "runs_create",
+            Action::Execute,
+            model_create("model:local"),
+        )
+        .await;
+        let message = response["response"]["message"].as_str().unwrap_or("");
+        if crate::agents::build_allows() {
+            assert!(message.contains(AGENT_ACCOUNT_UNAVAILABLE), "{response}");
+        } else {
+            assert!(!message.contains("agent account unavailable"), "{response}");
+            assert_eq!(
+                response["response"]["code"], "principal_context_required",
+                "{response}"
+            );
+        }
+        assert!(
+            provider.requests.lock().await.is_empty(),
+            "the provider was asked"
+        );
+    }
+
+    /// A verified device principal runs a local model in either build.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_verified_device_principal_runs_a_local_model() {
+        let (mut ctx, provider, temp) = model_bus(Some(ALICE), "capsule-device").await;
+        let (_identity, did) = elastos_identity::load_or_create_did(temp.path()).unwrap();
+        let principal = format!("device:{did}");
+        ctx.principal_id = Some(principal.clone());
+        let response = model_invoke(&ctx, "runs_create", Action::Execute, model_create("m")).await;
+        assert_eq!(
+            response["response"]["type"], "resource_result",
+            "{response}"
+        );
+        let message = response["response"]["message"].as_str().unwrap_or("");
+        assert!(!message.contains(AGENT_ACCOUNT_UNAVAILABLE), "{response}");
+        let sent = provider.requests.lock().await.clone();
+        assert_eq!(sent.len(), 1, "{sent:?}");
+        assert_eq!(sent[0]["runtime_binding"]["principal_id"], principal);
+    }
+
+    /// Hosted agent rows. The body is a test file the feature reader skips.
+    /// The next module is the row a build without agents lists, with the reason.
+    mod hosted_agent_rows;
+    mod hosted_agent_rows_feature_off;
+
+    /// The seven macOS rows stay declared from this module. Linux CI runs this
+    /// count in job `test-elastos`, in the step that tests the agents build.
+    /// A Studio receipt of that library test on a Mac runs the seven rows.
+    /// The default Studio receipt is featureless, so it lists the ignored row
+    /// and does not run the seven. Job `source-home-macos`, step "hosted agent
+    /// rows", runs the seven after merge and requires 7 passed. The rows file
+    /// names the cargo line.
+    #[test]
+    fn hosted_agent_rows_stay_in_the_agents_build() {
+        const HOSTED_AGENT_ROWS: usize = 7;
+        const NAMES: [&str; HOSTED_AGENT_ROWS] = [
+            "fn agent_hosted_run_reaches_the_egress_broker_once",
+            "fn agent_hosted_run_without_admin_owner_is_refused",
+            "fn agent_hosted_run_over_its_ceiling_is_refused_before_dispatch",
+            "fn spent_total_survives_a_new_runtime_and_blocks_the_next_create",
+            "fn unreadable_agent_record_refuses_the_create_by_name",
+            "fn two_runtimes_refuse_from_the_stored_total_before_dispatch",
+            "fn http_caller_with_an_agent_principal_is_refused",
+        ];
+        let bridge = include_str!("resource_bridge.rs");
+        let rows = include_str!("resource_bridge/tests/hosted_agent_rows.rs");
+        assert!(
+            declares_hosted_rows_module(bridge),
+            "mod hosted_agent_rows is not declared from this file"
+        );
+        assert_eq!(NAMES.len(), HOSTED_AGENT_ROWS);
+        assert_eq!(rows.matches("#[tokio::test]").count(), HOSTED_AGENT_ROWS);
+        let feature = ["prototype", "-agents"].concat();
+        let gate = format!("#![cfg(feature = \"{feature}\")]");
+        assert_eq!(
+            rows.matches(&gate).count(),
+            1,
+            "the rows file is missing its one feature gate"
+        );
+        for name in NAMES {
+            let at = rows
+                .find(name)
+                .unwrap_or_else(|| panic!("{name} vanished from the agents build"));
+            let window = &rows[at.saturating_sub(240)..at];
+            assert!(
+                window.contains("target_os = \"macos\""),
+                "{name} left the macOS rows: {window}"
+            );
+        }
+    }
+
+    /// True when this file declares the hosted rows module. The needle is
+    /// built here so this test's own text is not that declaration.
+    fn declares_hosted_rows_module(source: &str) -> bool {
+        let name = format!("{}{}", "hosted_agent_", "rows");
+        let line = format!("mod {name};");
+        source.lines().any(|item| item.trim() == line)
+    }
+
+    /// A stored-record refusal uses its own code. The lock-order sentence
+    /// stays off that response.
+    #[test]
+    fn a_record_refusal_has_its_own_code_and_the_lock_order_stays_internal() {
+        let record = budget_refusal_response(crate::model_budget::Refusal::Record(
+            crate::agents::CANNOT_READ,
+        ));
+        assert_eq!(record["code"], "agent_record_unavailable");
+        assert_eq!(record["message"], crate::agents::CANNOT_READ);
+        let record_message = record["message"].as_str().unwrap();
+        assert!(!record_message.contains("model_budget_exceeded"));
+        let lock = budget_refusal_response(crate::model_budget::Refusal::Record(
+            crate::agents::LOCK_ORDER,
+        ));
+        assert_eq!(lock["code"], "agent_record_unavailable");
+        let message = lock["message"].as_str().unwrap();
+        assert_eq!(message, "The agent record cannot be charged for this run.");
+        assert!(!message.contains("agent file lock"));
+        assert!(!message.contains("budget mutex"));
+        assert!(!message.contains("model_budget_exceeded"));
+        let named_sentence = budget_refusal_response(crate::model_budget::Refusal::Record(
+            crate::api::gateway::HOSTED_AGENT_RUN_SENTENCE,
+        ));
+        assert_eq!(named_sentence["code"], "agent_record_unavailable");
+        let hosted = budget_refusal_response(crate::model_budget::Refusal::HostedRun);
+        assert_eq!(
+            hosted["code"],
+            crate::api::gateway::HOSTED_AGENT_RUN_REFUSED
+        );
+        assert_eq!(
+            hosted["message"],
+            crate::api::gateway::HOSTED_AGENT_RUN_SENTENCE
+        );
+        let full = budget_refusal_response(crate::model_budget::Refusal::HoldsFull);
+        assert_eq!(full["code"], "denied");
+        assert_eq!(full["message"], "model_budget_exceeded: holds are full");
+    }
+
     /// The gateway walker keeps production code written after a `tests`
     /// module, counts an inline call whose first argument starts right after
     /// the paren, and still drops the module body (including a brace inside a
@@ -9240,6 +9511,30 @@ pub async fn production_after() {
             3,
             "two production calls, one of them inline: {text}"
         );
+    }
+
+    /// A macOS test item is dropped. The production items around it stay.
+    #[test]
+    fn production_text_ignoring_cfg_test_drops_a_macos_test_item() {
+        let source = "\
+fn kept() {
+    stay();
+}
+
+#[cfg(all(test, target_os = \"macos\"))]
+fn dropped() {
+    go();
+}
+
+fn after() {
+    stay();
+}
+";
+        let text = production_text_ignoring_cfg_test(source);
+        assert!(!text.contains("fn dropped"), "{text}");
+        assert!(!text.contains("go()"), "{text}");
+        assert!(text.contains("fn kept()"), "{text}");
+        assert!(text.contains("fn after()"), "{text}");
     }
 
     /// Shared detector 1 for the gateway fence cells: source pins over the

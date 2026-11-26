@@ -354,6 +354,38 @@ class Rows(unittest.TestCase):
             )
             self.assertEqual(list(victim.iterdir()), [])
 
+    def test_r11_a_cid_that_is_not_cid_form_is_refused(self):
+        """r11 a cid that is not CIDv1 base32 is refused by name"""
+        with tempfile.TemporaryDirectory(prefix="gba-r11-") as temporary:
+            out = pathlib.Path(temporary).resolve() / "page"
+            result = derive(PAGE_MANIFEST, out, "not-a-cid", CORE_NAME)
+            self.assertEqual(result.returncode, 1, result.stdout)
+            self.assertEqual(result.stderr, "derive_manifest_cid_invalid: not-a-cid\n")
+            self.assertFalse(out.exists())
+
+    def test_r12_a_requires_name_that_is_not_plain_is_refused(self):
+        """r12 a requires name that is not plain is refused by name"""
+        with tempfile.TemporaryDirectory(prefix="gba-r12-") as temporary:
+            out = pathlib.Path(temporary).resolve() / "page"
+            result = derive(PAGE_MANIFEST, out, CORE_CID, "bad name")
+            self.assertEqual(result.returncode, 1, result.stdout)
+            self.assertEqual(
+                result.stderr, "derive_manifest_requires_name_invalid: bad name\n",
+            )
+            self.assertFalse(out.exists())
+
+    def test_r13_a_content_requires_name_that_is_not_the_viewer_is_refused(self):
+        """r13 content refuses a requires name that is not the manifest's viewer"""
+        with tempfile.TemporaryDirectory(prefix="gba-r13-") as temporary:
+            out = pathlib.Path(temporary).resolve() / "content"
+            result = derive(CONTENT_MANIFEST, out, PAGE_CID, "not-the-viewer")
+            self.assertEqual(result.returncode, 1, result.stdout)
+            self.assertEqual(
+                result.stderr,
+                "derive_manifest_requires_name_not_viewer: not-the-viewer\n",
+            )
+            self.assertFalse(out.exists())
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

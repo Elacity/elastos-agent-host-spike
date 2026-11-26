@@ -99,9 +99,10 @@ where
     eprintln!("[gateway] ElastOS {} starting on {}", ELASTOS_VERSION, addr);
 
     let data_dir = default_data_dir();
-    let _host_guard = crate::host_lock::acquire_host_process_lock(&data_dir, "gateway", &addr)?;
-    // After the host lock, before auth creates ElastOS/System/Auth.
-    prepare_files(&data_dir)?;
+    let _host_guard = crate::host_lock::start_host_for_agents(&data_dir, "gateway", &addr, |_| {
+        prepare_files(&data_dir)?;
+        Ok(())
+    })?;
     crate::host_lock::spawn_installed_binary_supersession_watch(&data_dir, "gateway");
     verify_ready_after_prepare(&data_dir)?;
     let cache_path = cache_dir.unwrap_or_else(|| data_dir.join("gateway-cache"));
@@ -149,9 +150,10 @@ where
 
     let data_dir = default_data_dir();
     let _host_guard =
-        crate::host_lock::acquire_host_process_lock(&data_dir, "gateway-public", &addr)?;
-    // After the host lock, before auth creates ElastOS/System/Auth.
-    prepare_files(&data_dir)?;
+        crate::host_lock::start_host_for_agents(&data_dir, "gateway-public", &addr, |_| {
+            prepare_files(&data_dir)?;
+            Ok(())
+        })?;
     crate::host_lock::spawn_installed_binary_supersession_watch(&data_dir, "gateway-public");
     verify_ready_after_prepare(&data_dir)?;
     let components_path = data_dir.join("components.json");

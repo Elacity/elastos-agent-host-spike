@@ -1,12 +1,19 @@
-# Archive viewer: design (no code)
+# Archive viewer: design
+
+The app lists one archive and shows a small text entry. The code is in this folder.
+`src/zip.rs` is the ZIP parser and `src/tar.rs` is the ustar tar parser. Inflate
+is `miniz_oxide` 0.9.1. The fuel gate is `FUEL_CEILING` in
+`host-test/tests/component.rs`: 36,600,000. This note started as a design; the
+sentences below that name a parser, a format or the ceiling are the code.
 
 The next app from the capsule kit: wave B, roadmap 2.6 ("move apps one at a time"). It replaces what
 `capsules/archive-manager` does for reading: list an archive's entries and show a text entry inside it (image
 entries on Bus v2). It is read-only. It never extracts anything to disk; extraction becomes a Runtime operation
 the person approves, outside this app.
 
-Branch `claude/photo-archive-design`, from `spike/photo-viewer` `cf4eab03`. Design only: no code, no Runtime
-change. The code comes after #32 merges and the kit's shared crate exists (see [Order of work](#order-of-work)).
+Branch `claude/photo-archive-design`, from `spike/photo-viewer` `cf4eab03`. The
+parsers and the fuel ceiling above are the code. The Runtime is unchanged by
+this example.
 
 ## In one paragraph
 
@@ -118,7 +125,7 @@ draws no image on Bus v1.
 | Order | Format | Why |
 |---|---|---|
 | 1 | **ZIP**, stored and deflate only | The central directory lists every entry without reading or inflating any of them, and each entry can be reached by offset: it fits the read window. It is also the most common format in Library and the one with the most known tricks. |
-| 2 | **tar** (uncompressed) | No directory: listing walks a 512-byte header per entry. On Bus v1 each header costs about 212,000 fuel to read, so a run can list only about 64 entries. Worth doing after ZIP, with the same path and size rules. |
+| 2 | **tar** (uncompressed ustar) | The parser is `src/tar.rs`: a 512-byte header per entry, the same path and size rules as ZIP. |
 | 3 | **tar.gz, .gz** | No random access: listing means inflating from the start. Only with Bus v2 streams, and only up to a fixed decompressed total, with the listing marked as cut short. |
 | - | 7z, rar, xz, bz2, zst | Listed by today's capsule as "unsupported family"; the same here. Each is a new decoder in the sandbox; none is needed for a first app. |
 
@@ -133,11 +140,11 @@ has any import, so none would add a WASI or host import to the component. Sizes 
 
 | Crate | Version | Licence | Dependencies (wasm32) | Imports | Probe size | Use |
 |---|---|---|---|---|---|---|
-| **rawzip** | 0.5.2 | MIT | none | none | 15.5 KB | **Chosen** for the ZIP structure. Zero dependencies, `#![forbid(unsafe_code)]`, `no_std` capable. It reads through a `ReaderAt` trait (read N bytes at an offset), which maps onto the Bus read window, and lets the caller bring the decompressor. It has CRC-32 built in. |
+| **rawzip** | 0.5.2 | MIT | none | none | 15.5 KB | Not used. The ZIP parser is the code in `src/zip.rs`. |
 | **miniz_oxide** | 0.9.1 | MIT OR Zlib OR Apache-2.0 | adler2 (0BSD OR MIT OR Apache-2.0) | none | 26.4 KB | **Chosen** to inflate. Streaming inflate into a caller's fixed buffer, so the core counts every output byte and stops at its cap mid-stream. Pure Rust, `no_std` with `alloc`. The Runtime already uses it (through flate2). |
 | zip | 9.0.5 | MIT | 13 crates (flate2, miniz_oxide, indexmap, hashbrown, typed-path, memchr, ...) | none | 137 KB | Not chosen: wants `Read + Seek` over the archive, builds the whole directory in memory, and ties in its decompressor, so a cap is outside it rather than in the loop. The Runtime uses 2.4.2 today. |
 | flate2 | 1.1.10 | MIT OR Apache-2.0 | miniz_oxide, crc32fast, adler2, simd-adler32 | none | 66.4 KB | Not needed: a `Read` wrapper over miniz_oxide. Would be the gzip reader for format 3. |
-| tar | 0.4.46 | MIT OR Apache-2.0 | filetime, cfg-if | none | 55.9 KB | For format 2, or a small ustar reader of our own (the format is a fixed 512-byte header). Decide when tar is built. |
+| tar | 0.4.46 | MIT OR Apache-2.0 | filetime, cfg-if | none | 55.9 KB | Not used. The ustar parser is the code in `src/tar.rs`. |
 | unicode-normalization | 0.1.26 | (MIT OR Apache-2.0) AND Unicode-3.0 | tinyvec (Zlib OR Apache-2.0 OR MIT) | none | 145.8 KB | **Not used** (decision 3). It would only serve a collision check, which belongs to the extraction operation. |
 
 The builds and checks were throwaway probes in the scratchpad, not in this branch.
@@ -292,7 +299,7 @@ not carried over.
 
 | # | What | Why it matters here | Where it belongs |
 |---|---|---|---|
-| M1 | A counted positioned reader | rawzip reads through `ReaderAt`; every byte it reads must be counted against the budget before anything returns | **Done in #35:** `capsule_kit_guest::read_counted`. Still to write, in this app: the `ReaderAt` adapter over it (see [Notes](#notes-for-the-next-builder)) |
+| M1 | A counted positioned reader | every byte the parser reads is counted against the budget before anything returns | **Done.** `capsule_kit_guest::read_counted`, and the parsers in `src/zip.rs` and `src/tar.rs`. rawzip is not used. |
 | M2 | The text checks as a kit item | text entries are checked exactly as documents are | **Done in #35:** `capsule_kit_guest::text` (`check_head`, `check_whole`). The typed blocks are still `docs-model` (markdown to blocks), not the kit |
 | M3 | The image header checks as a kit item | image previews on Bus v2 need the same checks, on bytes from the decompressor instead of the object | **Done in #35:** `capsule_kit_guest::image` (`sniff`, `header_dimensions`, `jpeg_dimensions`, `HEADER_BYTES`); the dimension caps stay the photo viewer's constants |
 | M4 | Hostile-archive fixtures: a builder for ZIPs that lie (wrong counts, overlapping ranges, local and directory names that differ) | none of the kit's fixtures are archives, and real tools refuse to write these | test support in this app, then the kit if a second format needs it |
@@ -405,6 +412,8 @@ Written on 23 Oct 2026, when the Photo track moved to its own lane. Read with `e
 
 ### Traps in this app's own code
 
+The parsers in the code are `src/zip.rs` (ZIP) and `src/tar.rs` (ustar). They do not use rawzip. The two bullets that follow are the earlier crate survey.
+
 - **The `ReaderAt` adapter.** rawzip's `ReaderAt::read_at(&self, …)` takes `&self` and returns
   `std::io::Result`. So the adapter needs interior mutability over the Bus and the budget (a `RefCell`), and:
   - it must never call `read_counted` with more than is left: `read_counted` asserts that, and a panic in the
@@ -413,9 +422,7 @@ Written on 23 Oct 2026, when the Photo track moved to its own lane. Read with `e
   - it must keep a `Refusal` (an authority failure) aside and return it after rawzip gives up. If the refusal
     is folded into an `io::Error`, a denied read becomes a skipped entry, which breaks the stop/skip rule.
     Test it: `a_denied_read_during_the_directory_read_stops_the_run` (F42).
-- **rawzip's own checks are not the design's checks.** It parses; L1 to L9 and P1 to P9 are still this app's
-  to write and test. I did not check what rawzip's `try_normalize` accepts; test P1 to P4 against this app's
-  own rules, not against it.
+- **rawzip's own checks are not the design's checks.** The survey crate only parses. L1 to L9 and P1 to P9 are this app's checks, in `src/zip.rs` and `src/tar.rs`. The survey did not check what rawzip's `try_normalize` accepts; the rows test this app's own rules.
 - **The request's URI prefix.** `check_object_uri(uri, prefix)` takes one prefix. `localhost://Users/self/` alone
   would also take the app's own `.AppData/App/archive-viewer/view.json` and any other app's AppData. Refuse
   `.AppData/` explicitly (or take a fixed list of the person's folders) and test it:

@@ -226,12 +226,12 @@ pub struct RecoveryKitImportResponse {
 }
 
 #[derive(Debug, Clone)]
-struct RecoveryKitMaterialImport {
-    principal_id: String,
-    localhost_root: String,
-    kit: RecoveryKitV1,
-    did_recovery_proof: Option<DidRecoveryProofV1>,
-    reassign_to_current_principal: bool,
+pub(crate) struct RecoveryKitMaterialImport {
+    pub(crate) principal_id: String,
+    pub(crate) localhost_root: String,
+    pub(crate) kit: RecoveryKitV1,
+    pub(crate) did_recovery_proof: Option<DidRecoveryProofV1>,
+    pub(crate) reassign_to_current_principal: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1304,6 +1304,7 @@ pub(in crate::api) fn principal_root_recovery_status_for_verified_principal(
         }
         status.objects_needing_attention = objects_needing_attention;
         status.objects_needing_attention_count = objects_needing_attention_count;
+        status.agents_built = crate::agents::build_allows();
         return Ok(status);
     };
     // Header-level only: contents are authenticated when each file is opened.
@@ -1338,6 +1339,7 @@ pub(in crate::api) fn principal_root_recovery_status_for_verified_principal(
         recovery_configured,
         recovery_download_available,
         protection_configured,
+        agents_built: crate::agents::build_allows(),
         required_actions,
         crypto: protection.crypto,
         objects_needing_attention,
@@ -1705,6 +1707,18 @@ fn full_recovery_bundle_establish_kit(
         "label": input.label,
         "download_password": input.download_password,
     });
+    let _agent_writer = if crate::auth::load_principal_root_protection(
+        &state.data_dir,
+        &principal.principal_id,
+        &principal.localhost_root,
+    )?
+    .is_some_and(|protection| recovery_archive_from_protection(&protection).is_none())
+    {
+        let guard = crate::agents::hold_unarchived(&state.data_dir, &principal.principal_id)?;
+        Some(guard)
+    } else {
+        None
+    };
     // The approval is validated and consumed before the scan, so a scan of
     // any length cannot outlive it. A refusal after this point costs one
     // more passkey approval: nothing was written yet, and the used approval
@@ -1765,6 +1779,19 @@ fn full_recovery_bundle_establish_kit(
         );
     }
     Ok(kit)
+}
+
+const AGENTS_STAY_ON_THIS_HOME: &str = "Agents and their data stay on the Home where you created them; this bundle does not carry them.";
+
+fn full_recovery_bundle_instructions() -> Vec<&'static str> {
+    let mut instructions = vec![
+        "Keep this Full Recovery Bundle offline. Anyone with it can recover this ElastOS user root, included built-in Wallet accounts, and the signed People identity with its contacts.",
+        "Import it only through ElastOS System recovery on a runtime you control.",
+    ];
+    if crate::agents::build_allows() {
+        instructions.push(AGENTS_STAY_ON_THIS_HOME);
+    }
+    instructions
 }
 
 async fn full_recovery_bundle_export_inner(
@@ -1838,10 +1865,7 @@ async fn full_recovery_bundle_export_inner(
             "people_identity": people_identity_included
         },
         "created_at": now,
-        "instructions": [
-            "Keep this Full Recovery Bundle offline. Anyone with it can recover this ElastOS user root, included built-in Wallet accounts, and the signed People identity with its contacts.",
-            "Import it only through ElastOS System recovery on a runtime you control."
-        ]
+        "instructions": full_recovery_bundle_instructions()
     });
     if let Some(people_identity) = people_identity {
         bundle
@@ -3017,7 +3041,7 @@ fn b64_decode_field(value: &Value, field: &str) -> anyhow::Result<Vec<u8>> {
         .map_err(|_| anyhow::anyhow!("full recovery bundle package invalid {field}"))
 }
 
-async fn recovery_kit_import_inner(
+pub(crate) async fn recovery_kit_import_inner(
     state: &GatewayState,
     headers: &HeaderMap,
     input: RecoveryKitMaterialImport,
@@ -3152,6 +3176,36 @@ async fn recovery_kit_import_inner(
         },
         None => None,
     };
+    // Every import that stores a protection takes the writer first. The
+    // stored protection is loaded inside that writer, and the writer is held
+    // until the store below returns. A same-owner import still stores, so it
+    // is not a no-op that can skip the writer. The DID provider wait above
+    // is finished, so the writer is not held across it.
+    let next_owner_id = if input.reassign_to_current_principal {
+        kit.principal_id.as_str()
+    } else {
+        principal.principal_id.as_str()
+    };
+    let _agent_writer = crate::agents::hold_agent_writer_for_root_change(
+        &state.data_dir,
+        &principal.principal_id,
+        next_owner_id,
+        || {
+            crate::auth::load_principal_root_protection(
+                &state.data_dir,
+                &principal.principal_id,
+                &principal.localhost_root,
+            )
+            .map(|stored| stored.is_some_and(|stored| stored.data_key_id != kit.data_key_id))
+        },
+    )?;
+    if !crate::auth::load_principal_for_proof_binding(&state.data_dir, &principal.proof_binding_id)
+        .is_ok_and(|record| record.principal_id == principal.principal_id)
+    {
+        return Err(
+            crate::agents::Refused(crate::agents::PASSKEY_NO_LONGER_NAMES.to_string()).into(),
+        );
+    }
     let protected_object_inventory =
         principal_root_protected_object_inventory(&state.data_dir, &kit.localhost_root);
     let _protection_activation =
@@ -3512,6 +3566,38 @@ async fn verify_did_recovery_import_proof(
     protector.verified_at = Some(now);
     protector.archive = None;
     Ok(protector)
+}
+
+pub(crate) fn agent_key_open(
+    data_dir: &std::path::Path,
+    owner_id: &str,
+    protection: &PrincipalRootProtectionV1,
+) -> Option<bool> {
+    let root = crate::auth::principal_stored_localhost_root(Some(data_dir), owner_id).ok()?;
+    let owner = crate::auth::load_principal_root_protection(data_dir, owner_id, &root).ok()??;
+    let archive = recovery_archive_from_protection(&owner)?;
+    let path =
+        elastos_common::localhost::rooted_localhost_fs_path(data_dir, "ElastOS/System/Auth")?
+            .join("recovery-archive.key");
+    let meta = std::fs::symlink_metadata(&path).ok()?;
+    if !meta.is_file() || meta.len() != 32 {
+        return None;
+    }
+    let kit = crate::auth::recovery_kit_from_archive(data_dir, archive).ok()?;
+    crate::auth::verify_recovery_kit_material(&kit).ok()?;
+    if kit.principal_id != owner.principal_id
+        || kit.localhost_root != owner.localhost_root
+        || kit.data_key_id != owner.data_key_id
+    {
+        return None;
+    }
+    crate::auth::recovery_kit_data_key(&kit).ok()?;
+    let (_, nonce, wrapped) = crate::agents::stored_wrap(data_dir, protection).ok()?;
+    let key = crate::auth::owner_root_wrap_key(data_dir, owner_id, &root, protection).ok()??;
+    let opened = crate::auth::decrypt_aes256_gcm_bytes(key.as_slice(), &nonce, &wrapped).ok();
+    Some(opened.is_some_and(|bytes| {
+        bytes.len() == 32 && crate::auth::principal_data_key_id(&bytes) == protection.data_key_id
+    }))
 }
 
 fn recovery_archive_from_protection(
@@ -4861,7 +4947,7 @@ pub(in crate::api) fn auth_error_response(err: anyhow::Error) -> Response {
         )
             .into_response();
     }
-    if err.is::<RecoveryKitPreparationRefused>() {
+    if err.is::<RecoveryKitPreparationRefused>() || crate::agents::refusal_text(&err).is_some() {
         return (StatusCode::CONFLICT, err.to_string()).into_response();
     }
     let text = err.to_string();
@@ -11609,6 +11695,33 @@ mod tests {
         assert_eq!(
             crate::auth::active_admin_passkey_principal_count(temp.path()).unwrap(),
             1
+        );
+    }
+
+    #[test]
+    fn recovery_bundle_instructions_name_agents_only_when_this_build_has_them() {
+        let lines = full_recovery_bundle_instructions();
+        let stay = AGENTS_STAY_ON_THIS_HOME;
+        if crate::agents::build_allows() {
+            assert_eq!(lines.last().copied(), Some(stay));
+        } else {
+            assert!(lines.iter().all(|line| *line != stay));
+        }
+        assert!(lines.len() >= 2);
+    }
+
+    #[tokio::test]
+    async fn an_agent_refusal_answers_conflict() {
+        let response = auth_error_response(
+            crate::agents::Refused(crate::agents::agents_would_stop_opening(1)).into(),
+        );
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(
+            String::from_utf8(body.to_vec()).unwrap(),
+            crate::agents::agents_would_stop_opening(1)
         );
     }
 }

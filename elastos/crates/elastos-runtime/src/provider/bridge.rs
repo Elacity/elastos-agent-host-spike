@@ -2099,9 +2099,10 @@ impl ProviderBridge {
     #[cfg(target_os = "macos")]
     pub fn confined_model_identity(&self) -> Option<(u32, u64)> {
         let pid = self._local_provider_pid.load(Ordering::Acquire);
-        let birth = self._local_provider_birth.load(Ordering::Acquire);
-        (pid != 0 && super::local_model_broker::process_birth(pid) == Some(birth))
-            .then_some((pid, birth))
+        let stored = self._local_provider_birth.load(Ordering::Acquire);
+        // A provider process presents its own birth. `from_io` leaves the pid at 0.
+        (pid != 0 && super::local_model_broker::process_birth(pid) == Some(stored))
+            .then_some((pid, stored))
     }
 
     #[cfg(target_os = "macos")]
@@ -2629,7 +2630,8 @@ impl ProviderBridge {
         }
     }
 
-    /// Create a bridge from existing I/O handles (for testing).
+    /// Create a bridge from existing I/O handles (for testing). The pid stays 0,
+    /// so this bridge is not a confined model process.
     pub fn from_io(
         reader: impl AsyncBufRead + Unpin + Send + 'static,
         writer: impl AsyncWrite + Unpin + Send + 'static,
@@ -3268,6 +3270,18 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
         panic!("expected test provider marker {} to exist", path.display());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn from_io_does_not_admit_this_process() {
+        let (reader, _) = tokio::io::duplex(64);
+        let (writer, _) = tokio::io::duplex(64);
+        let bridge = ProviderBridge::from_io(tokio::io::BufReader::new(reader), writer);
+        assert!(
+            bridge.confined_model_identity().is_none(),
+            "from_io named this process"
+        );
     }
 
     #[cfg(target_os = "macos")]

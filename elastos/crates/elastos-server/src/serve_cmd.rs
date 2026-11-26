@@ -40,11 +40,15 @@ pub async fn run_serve(
         .ok()
         .as_deref()
         == Some("1");
+    // The managed runtime does not take this lock and does not heal.
     let _host_guard = if subordinate_host {
         None
     } else {
-        Some(elastos_server::host_lock::acquire_host_process_lock(
-            &data_dir, "serve", &addr,
+        Some(elastos_server::host_lock::start_host_for_agents(
+            &data_dir,
+            "serve",
+            &addr,
+            crate::localhost_file_migration::prepare_localhost_files,
         )?)
     };
     if !subordinate_host {

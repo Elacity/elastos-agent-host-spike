@@ -175,23 +175,18 @@ The honesty tests prove these rules through unittest itself:
 ## Accepted named rights (model profile only)
 
 Four model-provider allows are owner-approved named rights, not escapes.
-`py/named_rights.py` lists each with its finding id, its decision line in
-`~/Sparks/office/DECISIONS.md` and its M1a lab measurement
-(`evidence/b3-m1a-rights/probe/`):
+`py/named_rights.py` holds each finding id, the profile lines it accepts, and
+the decision and measurement text the probe prints.
 
 - `CRITICAL-cc-model-confine-051`, `model-engine-process`:
-  `(allow process-fork)`. Decision line 4497 (20 Nov 2026, launch inputs,
-  "start its own engine process"); measurement row X2.
+  `(allow process-fork)`.
 - `CRITICAL-cc-model-confine-064`, `model-gpu`: the one
   `iokit-open-user-client` line for `AGXDeviceUserClient` and
-  `IOSurfaceRootUserClient`. Decision line 4468 (20 Nov 2026, the GPU right);
-  measurement row X5. The probe may open the IOSurfaceRoot client only.
+  `IOSurfaceRootUserClient`. The probe may open the IOSurfaceRoot client only.
 - `CRITICAL-cc-model-confine-059`, `model-device-reads`: the `/dev/urandom`
-  read line and the `/dev/null` read-and-write-data line. Decision lines
-  4525-4526 (21 Nov 2026, device permissions); measurement PROOFS.txt:68-72.
+  read line and the `/dev/null` read-and-write-data line.
 - `CRITICAL-cc-model-confine-069`, `model-null-write`: the `/dev/null`
-  read-and-write-data line, and no other `/dev` write. Same decision;
-  measurement PROOFS.txt:70-71.
+  read-and-write-data line, and no other `/dev` write.
 
 A right applies only to a launch of the live
 `capsules/model-provider/confine.sb`, only while that file carries each named
