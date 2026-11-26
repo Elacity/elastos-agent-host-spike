@@ -314,7 +314,6 @@ pub async fn run_serve(
                     manifest.name
                 );
 
-                let _ = elastos_server::local_apps::await_local_apps_decision(&data_dir).await;
                 let run_result = runtime.run_local(&capsule_dir, vec![]).await;
                 if let Some(service) = collaboration_service.as_mut() {
                     service.shutdown().await?;
@@ -406,20 +405,13 @@ pub async fn run_serve(
     };
 
     println!("ElastOS Runtime");
-    if let Some(sentence) = elastos_server::local_apps::await_local_apps_decision(&data_dir).await {
-        println!(
-            "{}",
-            elastos_server::local_apps::local_apps_health_line(&sentence)
-        );
-    } else {
-        println!("  Capsule  localhost-provider  {}", infra.provider_cid);
-    }
+    println!("  Capsule  localhost-provider  {}", infra.provider_cid);
     if let Some(ref cid) = infra.shell_cid {
         println!("  Capsule  shell           {}", cid);
     }
     println!("  API:     http://{}", addr);
-    // A piped stdout is block-buffered. The refusal sentence has to reach a
-    // parent before this process settles into the server loop.
+    // A piped stdout is block-buffered. Bind first; apply() prints the health
+    // or refusal line when the file check finishes.
     let _ = std::io::Write::flush(&mut std::io::stdout());
 
     let components_path = data_dir.join("components.json");

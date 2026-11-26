@@ -114,8 +114,9 @@ fn owner_shell(session: &Session, headers: &HeaderMap) -> bool {
     session.is_shell() && !headers.contains_key("X-Elastos-Capsule-Id")
 }
 
-/// A caller who would be refused anyway gets that 403 first. The owner's
-/// shell sees the file sentence. A guest shell is ambient and sees one plain line.
+/// Principal and capability checks run first for every caller. An ungranted
+/// caller is refused at once and learns nothing about the file check. The
+/// owner's shell then sees the file sentence; everyone else sees one plain line.
 async fn refuse_local_apps(
     state: &ProviderStorageState,
     session: &Session,
@@ -123,17 +124,14 @@ async fn refuse_local_apps(
     path: &str,
     op: &str,
 ) -> Result<(), StorageApiError> {
-    let Some(sentence) = crate::local_apps::await_local_apps_decision(&state.data_dir).await else {
-        return Ok(());
-    };
-    if owner_shell(session, headers) {
-        return Err(StorageApiError::LocalApps(sentence));
-    }
     let path = normalize_path(path);
     reject_principal_root_storage_path(&path)?;
     enforce_capability(state, session, headers, &path, row_right(op)?).await?;
+    let Some(sentence) = crate::local_apps::await_local_apps_decision(&state.data_dir).await else {
+        return Ok(());
+    };
     Err(StorageApiError::LocalApps(
-        crate::local_apps::local_apps_refusal_body(&sentence, false),
+        crate::local_apps::local_apps_refusal_body(&sentence, owner_shell(session, headers)),
     ))
 }
 

@@ -1,9 +1,11 @@
 //! The localhost file-key walker.
 //!
 //! A migration problem does not stop Home (`api/routes.rs` `health`,
-//! `api/server.rs` `ServeDir`). The helper stays down, including `MyWebSite`
-//! and `Public`, and every localhost route refuses with one sentence: the
-//! relative path, the cause, and what to do. Nothing starts unfenced.
+//! `api/server.rs` `ServeDir`). The localhost helper and `/api/localhost`
+//! routes stay off with one sentence: the relative path, the cause, and what
+//! to do (move the named file out of its folder, then restart). `MyWebSite`
+//! and `Public` are plaintext and are not in the encrypted walk. Nothing
+//! starts unfenced.
 //!
 //! `identity/localhost-file-key-v1` is format `1` plus
 //! SHA-256(`elastos-localhost-file-key-fingerprint-v1\0` || file key). A
@@ -21,20 +23,20 @@
 //! Pass 1 verifies each old file and keeps nothing. A refusal in that pass leaves every old file in place. Pass 2 rewrites; an ordinary start runs one bringup (not three).
 //! Home binds first; the check runs in the background ("checking local app files"). When it finds an old file, local apps stay off ("Local app files are moving") until the second pass runs once no update can put the previous release back. A rollback or crash before then leaves every file old.
 //! The second pass walks again and rekeys one file at a time. A crash in the middle of the move is finished by the next start. A later
-//! start uses the size and time stored beside the marker and does not open a file
-//! that still matches. The walk logs a count every few seconds. A waiter on
-//! `identity/localhost-file-key.lock` logs that. The walk runs from
-//! `setup_server_infrastructure`. `elastos serve` runs it and then spawns the
-//! helper (`spawn_host_providers`). `elastos serve`
-//! takes `host_lock.rs` `start_host_for_agents` before that
-//! (`serve_cmd.rs` `run_serve`) and skips the lock when
+//! start opens each file once; a new-format header or a plain file is settled
+//! unread, and the done marker skips the walk. The walk logs a count every few
+//! seconds. A waiter on `identity/localhost-file-key.lock` logs that. The walk
+//! runs from `setup_server_infrastructure`. `elastos serve` binds HTTP first,
+//! then the background check finishes in `apply`. `elastos serve` takes
+//! `host_lock.rs` `start_host_for_agents` before that (`serve_cmd.rs`
+//! `run_serve`) and skips the lock when
 //! `ELASTOS_ALLOW_SUBORDINATE_RUNTIME_HOST=1`. `elastos gateway`, including
 //! its public mode, and `elastos home --browser` take that same lock and call
 //! `prepare_localhost_files` only after the lock is held, before auth creates
 //! `ElastOS` (`gateway_cmd.rs`). A second one of these stops with "another ElastOS
 //! host already owns". Gateway and `home --browser` call
 //! `setup_gateway_infrastructure` or `setup_control_plane_infrastructure`
-//! (`spawn_host_providers` is false). They run this same walk. A foreign, undecryptable, cut-off or damaged old-format file turns local apps off, and the sentence names it and says to move it aside, then restart. They register the refusing provider so
+//! (`spawn_host_providers` is false). They run this same walk. A foreign, undecryptable, cut-off or damaged old-format file turns local apps off, and the sentence names it and says to move it out of the folder, then restart. They register the refusing provider so
 //! System can show the sentence. They do not spawn the localhost helper.
 //! Update and the provider host take the same lock and do not run this walk.
 //! `elastos run` of a data capsule and `elastos open` call `serve_web_capsule`
@@ -54,8 +56,8 @@
 //! and before `rename`. After that check returns and before `rename` returns, a
 //! same-user swap can still replace the file. This platform has no
 //! inode-conditional rename. At the start of a walk, identity/ loses the
-//! marker and seen temporary files when each is a regular file this Home
-//! owns. A symlink stays, with its target, and any other name stays.
+//! marker temporary file when it is a regular file this Home owns. A symlink
+//! stays, with its target, and any other name stays.
 
 use std::path::Path;
 
@@ -74,8 +76,6 @@ const LOCALHOST_MIGRATION_LOCK: &str = "localhost-file-key.lock";
 const LOCALHOST_MIGRATION_RECORD: &[u8] = b"elastos-localhost-file-v1\n";
 #[cfg(unix)]
 const LOCALHOST_REWRITE_SUFFIX: &str = ".elastos-localhost-file-key-v1.tmp";
-#[cfg(unix)]
-const LOCALHOST_SEEN: &str = "localhost-file-key-v1.seen";
 #[cfg(unix)]
 const ENVELOPE_HEADER: usize = 64;
 #[cfg(unix)]
@@ -348,7 +348,7 @@ fn localhost_refused(path: &Path, why: &str) -> anyhow::Error {
         ("linked", "Remove the link, then restart.")
     } else if why.contains("decrypt") {
         return anyhow::anyhow!(
-            "{rel} does not decrypt. Restore identity/device.key, or move the file aside, then restart."
+            "{rel} does not decrypt. Restore identity/device.key, or move the file out of the folder, then restart."
         );
     } else if why.contains("socket") {
         ("a socket", "Remove the socket, then restart.")
@@ -368,7 +368,7 @@ fn localhost_refused(path: &Path, why: &str) -> anyhow::Error {
             "not a regular file",
             "Replace it with a regular file, then restart.",
         )
-    } else if why.contains("cut off") { ("cut off or damaged", "Move it aside, then restart.")
+    } else if why.contains("cut off") { ("cut off or damaged", "Move it out of the folder, then restart.")
     } else if why.contains("another path") { ("linked from another path", "Remove the other names for this file, or copy it to a new name and delete it, then restart.")
     } else if why.contains("link") {
         (
@@ -621,105 +621,11 @@ fn read_nofollow(path: &Path) -> std::io::Result<Vec<u8>> {
 }
 
 #[cfg(unix)]
-#[derive(Clone, PartialEq, Eq)]
-struct SeenFile {
-    len: u64,
-    mtime: i64,
-    mtime_nsec: i64,
-    stamp: (u64, u64, i64, i64),
-    hard: bool,
-}
-
-#[cfg(unix)]
 enum MigratedFile {
     Settled,
     OverHard,
     Held,
     Written,
-}
-
-#[cfg(unix)]
-fn seen_file(meta: &std::fs::Metadata, hard: bool) -> SeenFile {
-    use std::os::unix::fs::MetadataExt;
-    SeenFile {
-        len: meta.len(),
-        mtime: meta.mtime(),
-        mtime_nsec: meta.mtime_nsec(),
-        stamp: (meta.dev(), meta.ino(), meta.ctime(), meta.ctime_nsec()),
-        hard,
-    }
-}
-
-#[cfg(unix)]
-#[rustfmt::skip]
-fn parse_seen(bytes: &[u8]) -> std::collections::HashMap<String, SeenFile> {
-    let mut seen = std::collections::HashMap::new();
-    let mut lines = std::str::from_utf8(bytes).unwrap_or("").lines();
-    if lines.next() != Some("3") {
-        return seen;
-    }
-    for line in lines {
-        let mut parts = line.splitn(9, ' ');
-        let (Some(len), Some(mtime), Some(mtime_nsec), Some(dev), Some(ino), Some(ctime), Some(ctime_nsec), Some(flag), Some(hex_rel)) = (
-            parts.next().and_then(|text| text.parse().ok()),
-            parts.next().and_then(|text| text.parse().ok()),
-            parts.next().and_then(|text| text.parse().ok()),
-            parts.next().and_then(|text| text.parse().ok()),
-            parts.next().and_then(|text| text.parse().ok()),
-            parts.next().and_then(|text| text.parse().ok()),
-            parts.next().and_then(|text| text.parse().ok()),
-            parts.next(),
-            parts.next(),
-        ) else {
-            return std::collections::HashMap::new();
-        };
-        let Some(rel) = hex::decode(hex_rel)
-            .ok()
-            .and_then(|raw| String::from_utf8(raw).ok())
-        else {
-            return std::collections::HashMap::new();
-        };
-        if rel.is_empty() || (flag != "s" && flag != "h") {
-            return std::collections::HashMap::new();
-        }
-        seen.insert(
-            rel,
-            SeenFile {
-                len,
-                mtime,
-                mtime_nsec,
-                stamp: (dev, ino, ctime, ctime_nsec),
-                hard: flag == "h",
-            },
-        );
-    }
-    seen
-}
-
-#[cfg(unix)]
-#[rustfmt::skip]
-fn write_seen(
-    path: &Path,
-    seen: &std::collections::HashMap<String, SeenFile>,
-) -> anyhow::Result<()> {
-    let mut keys: Vec<&String> = seen.keys().collect();
-    keys.sort();
-    let mut text = String::from("3\n");
-    for key in keys {
-        let item = &seen[key];
-        let flag = if item.hard { "h" } else { "s" };
-        let coded = hex::encode(key.as_bytes());
-        let line = format!("{} {} {} {} {} {} {} {} {}\n", item.len, item.mtime, item.mtime_nsec, item.stamp.0, item.stamp.1, item.stamp.2, item.stamp.3, flag, coded);
-        if text.len() + line.len() > localhost_provider::ENVELOPE_BYTE_LIMIT as usize { break; }
-        text.push_str(&line);
-    }
-    let parent = path
-        .parent()
-        .ok_or_else(|| localhost_refused(path, "cannot be read"))?;
-    ensure_identity_dir(parent)?;
-    replace_file_fsync_rename(path, text.as_bytes(), 0o600, None)
-        .map_err(|err| migration_io(path, "cannot be replaced", err))?;
-    Ok(())
 }
 
 #[cfg(unix)]
@@ -939,8 +845,7 @@ fn migrate_localhost_tree(
     dir: &Path,
     device_key: &[u8; 32],
     file_key: &[u8; 32],
-    seen: &std::collections::HashMap<String, SeenFile>,
-    next: &mut std::collections::HashMap<String, SeenFile>,
+    done: &mut std::collections::HashSet<String>,
     over_hard: &mut Vec<String>,
 ) -> anyhow::Result<()> {
     use std::os::unix::fs::{FileTypeExt, MetadataExt};
@@ -969,7 +874,7 @@ fn migrate_localhost_tree(
             return Err(localhost_refused(&path, why));
         }
         if file_type.is_dir() {
-            migrate_localhost_tree(&path, device_key, file_key, seen, next, over_hard)?;
+            migrate_localhost_tree(&path, device_key, file_key, done, over_hard)?;
             continue;
         }
         if !file_type.is_file() {
@@ -979,37 +884,15 @@ fn migrate_localhost_tree(
             return Err(localhost_refused(&path, "is linked from another path"));
         }
         let rel = relative_path(&path);
-        if PASS_TWO.with(|slot| slot.get()) && next.contains_key(&rel) { continue; }
-        if let Some(old) = seen.get(&rel) {
-            if old.len == meta.len()
-                && old.mtime == meta.mtime()
-                && old.mtime_nsec == meta.mtime_nsec()
-                && old.stamp == (meta.dev(), meta.ino(), meta.ctime(), meta.ctime_nsec())
-            {
-                if old.hard {
-                    over_hard.push(rel.clone());
-                }
-                next.insert(rel, old.clone());
-                continue;
-            }
-        }
-        let remembered = seen_file(&meta, false);
+        if PASS_TWO.with(|slot| slot.get()) && done.contains(&rel) { continue; }
         match migrate_localhost_envelope(&path, device_key, file_key)? {
             MigratedFile::Settled | MigratedFile::Written => {
-                let after = std::fs::symlink_metadata(&path)
-                    .with_context(|| localhost_refused(&path, "cannot be read"))?;
-                next.insert(rel, seen_file(&after, false));
+                done.insert(rel);
             }
             MigratedFile::Held => {}
             MigratedFile::OverHard => {
                 over_hard.push(rel.clone());
-                next.insert(
-                    rel,
-                    SeenFile {
-                        hard: true,
-                        ..remembered
-                    },
-                );
+                done.insert(rel);
             }
         }
     }
@@ -1202,11 +1085,8 @@ fn sweep_identity_temps(identity: &Path) -> anyhow::Result<()> {
         return Ok(());
     }
     let owner = std::os::unix::fs::MetadataExt::uid(&home);
-    for name in [LOCALHOST_MIGRATION_MARKER, LOCALHOST_SEEN] {
-        let path = rewrite_temp_path(&identity.join(name))?;
-        let Ok(meta) = std::fs::symlink_metadata(&path) else {
-            continue;
-        };
+    let path = rewrite_temp_path(&identity.join(LOCALHOST_MIGRATION_MARKER))?;
+    if let Ok(meta) = std::fs::symlink_metadata(&path) {
         if meta.file_type().is_file() && std::os::unix::fs::MetadataExt::uid(&meta) == owner {
             std::fs::remove_file(&path)
                 .map_err(|err| localhost_write_refused(&path, &err.to_string()))?;
@@ -1252,20 +1132,11 @@ fn migrate_localhost_files_to_file_key(
     let plan = plan_for_this_home(data_dir, &marker, &file_key)?;
     sweep_identity_temps(&identity)?;
     if matches!(plan, MarkerPlan::Keep) {
-        let seen = identity.join(LOCALHOST_SEEN);
-        if let Ok(meta) = std::fs::symlink_metadata(&seen) {
-            refuse_special(&seen, &meta, "is a link")?;
-        }
         return Ok(());
     }
     #[cfg(test)]
     run_before_walk();
-    let seen_path = identity.join(LOCALHOST_SEEN);
-    let seen = std::fs::read(&seen_path)
-        .ok()
-        .map(|bytes| parse_seen(&bytes))
-        .unwrap_or_default();
-    let mut next = std::collections::HashMap::new();
+    let mut done = std::collections::HashSet::new();
     let mut over_hard = Vec::new();
     let mut walk = || -> anyhow::Result<()> {
     for root in LOCALHOST_ENCRYPTED_ROOTS {
@@ -1281,8 +1152,7 @@ fn migrate_localhost_files_to_file_key(
                     &path,
                     device_key,
                     &file_key,
-                    &seen,
-                    &mut next,
+                    &mut done,
                     &mut over_hard,
                 )?;
             }
@@ -1303,9 +1173,6 @@ fn migrate_localhost_files_to_file_key(
     }
     if !move_now && matches!(plan, MarkerPlan::Write) {
         return Err(anyhow::anyhow!(LOCALHOST_FILES_MOVING));
-    }
-    if next != seen || !seen_path.is_file() {
-        write_seen(&seen_path, &next)?;
     }
     if matches!(plan, MarkerPlan::Write) {
         write_localhost_marker(&marker, &localhost_marker_record(&file_key))?;
@@ -1360,10 +1227,7 @@ pub(crate) const LOCALHOST_FILES_CHECKING: &str = elastos_server::local_apps::LO
 
 pub(crate) fn localhost_bringup(data_dir: &Path, device_key: &[u8; 32]) -> LocalhostBringup {
     match localhost_provider_bridge_config(data_dir, device_key) {
-        Ok(config) => {
-            elastos_server::local_apps::set_local_apps_refusal(data_dir, None);
-            LocalhostBringup::Start(config)
-        }
+        Ok(config) => LocalhostBringup::Start(config),
         Err(err) => refused(data_dir, err.to_string()),
     }
 }
@@ -1457,31 +1321,9 @@ mod windows_header {
 #[cfg(all(test, unix))]
 mod tests {
     use super::{
-        localhost_provider_bridge_config, parse_seen, take_localhost_migration_bytes_read,
-        take_localhost_migration_opens, write_seen, SeenFile,
+        localhost_provider_bridge_config, take_localhost_migration_bytes_read,
+        take_localhost_migration_opens,
     };
-
-    #[test]
-    fn a_seen_file_stays_within_the_envelope_cap() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("localhost-file-key-v1.seen");
-        let mut seen = std::collections::HashMap::new();
-        let kept = SeenFile {
-            len: 1,
-            mtime: 2,
-            mtime_nsec: 3,
-            stamp: (4, 5, 6, 7),
-            hard: false,
-        };
-        seen.insert("Users/a.bin".to_string(), kept.clone());
-        seen.insert("z".repeat(20_000_000), kept);
-        write_seen(&path, &seen).unwrap();
-        let bytes = std::fs::read(&path).unwrap();
-        assert!(bytes.len() as u64 <= localhost_provider::ENVELOPE_BYTE_LIMIT);
-        let parsed = parse_seen(&bytes);
-        assert!(parsed.contains_key("Users/a.bin"));
-        assert_eq!(parsed.len(), 1);
-    }
 
     fn peak_resident_bytes() -> i64 {
         let mut usage: libc::rusage = unsafe { std::mem::zeroed() };

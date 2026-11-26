@@ -711,7 +711,12 @@ async fn refuse_localhost(
     tokio::spawn(async move {
         async fn apply(registry: &Arc<provider::ProviderRegistry>, data_dir: &Path, helper: &Option<provider::CheckedExecutable>, bringup: Bringup) {
             let sentence = match (bringup, helper) {
-                (Bringup::Start(_), None) => { tracing::error!(target: "elastos", "local apps on"); registry.unregister("localhost").await; return; }
+                (Bringup::Start(_), None) => {
+                    registry.unregister("localhost").await;
+                    elastos_server::local_apps::set_local_apps_refusal(data_dir, None);
+                    tracing::error!(target: "elastos", "local apps on");
+                    return;
+                }
                 (Bringup::Start(config), Some(helper)) => {
                     elastos_server::local_apps::set_local_apps_refusal(data_dir, Some(LOCALHOST_FILES_CHECKING.to_string()));
                     match provider::ProviderBridge::spawn(helper, config).await {
@@ -4953,7 +4958,9 @@ mod tests {
         );
         assert!(message.contains("does not decrypt"), "{message}");
         assert!(
-            message.contains("Restore identity/device.key, or move the file aside, then restart."),
+            message.contains(
+                "Restore identity/device.key, or move the file out of the folder, then restart.",
+            ),
             "{message}"
         );
         assert!(!message.contains("Remove it"), "{message}");
@@ -6020,7 +6027,7 @@ mod tests {
     }
 
     #[test]
-    fn a_seen_record_keeps_a_newline_in_a_name() {
+    fn a_newline_in_a_name_still_moves_without_a_seen_file() {
         let _guard = LocalAppsGuard::lock();
         let device_key = [0x93; 32];
         let file_key = expected_localhost_file_key(&device_key);
@@ -6029,12 +6036,10 @@ mod tests {
         let path = root.path().join("Users").join(name);
         plant_device_envelope(&path, &device_key, b"line");
         migrate_again(root.path(), &device_key);
-        let seen = fs::read(root.path().join("identity/localhost-file-key-v1.seen")).unwrap();
-        let text = String::from_utf8(seen).unwrap();
-        assert!(
-            text.contains(&hex::encode(format!("Users/{name}").as_bytes())),
-            "the seen file dropped the newline: {text}"
-        );
+        assert!(!root
+            .path()
+            .join("identity/localhost-file-key-v1.seen")
+            .exists());
         assert_envelope_opens_with_exactly_one_key(&path, b"line", &device_key, &file_key);
         let _ = take_localhost_migration_opens();
         let _ = take_localhost_migration_bytes_read();
@@ -6831,7 +6836,10 @@ mod tests {
 
     fn migrate_again(root: &std::path::Path, device_key: &[u8; 32]) {
         match localhost_bringup(root, device_key) {
-            LocalhostBringup::Start(_) => {}
+            LocalhostBringup::Start(_) => {
+                // Product clears only in apply(); tests that skip apply clear here.
+                elastos_server::local_apps::set_local_apps_refusal(root, None);
+            }
             LocalhostBringup::Refuse(got) => panic!("{got}"),
         }
     }
@@ -6839,7 +6847,7 @@ mod tests {
     fn sentence(relative: &str, cause: &str) -> String {
         if cause == "does not decrypt" {
             return format!(
-                "{relative} does not decrypt. Restore identity/device.key, or move the file aside, then restart."
+                "{relative} does not decrypt. Restore identity/device.key, or move the file out of the folder, then restart."
             );
         }
         let remedy = match cause {
@@ -6888,6 +6896,7 @@ mod tests {
         match localhost_bringup(unread.path(), &device_key) {
             LocalhostBringup::Start(config) => {
                 assert_eq!(config.encryption_key, hex::encode(file_key));
+                elastos_server::local_apps::set_local_apps_refusal(unread.path(), None);
             }
             LocalhostBringup::Refuse(got) => panic!("{got}"),
         }
@@ -6994,7 +7003,7 @@ mod tests {
         match localhost_bringup(huge.path(), &device_key) {
             LocalhostBringup::Refuse(got) => assert_eq!(
                 got,
-                "Users/over.bin is cut off or damaged. Move it aside, then restart."
+                "Users/over.bin is cut off or damaged. Move it out of the folder, then restart."
             ),
             LocalhostBringup::Start(_) => panic!("a damaged old file left local apps on"),
         }
@@ -7179,12 +7188,7 @@ mod tests {
         fs::create_dir_all(&auth).unwrap();
         let lock = auth.join("audit-chain-required.json.lock");
         fs::write(&lock, b"lock").unwrap();
-        match localhost_bringup(root.path(), &new_key) {
-            LocalhostBringup::Start(_) => {}
-            LocalhostBringup::Refuse(got) => {
-                panic!("startup recreated the roots before the marker decision: {got}")
-            }
-        }
+        migrate_again(root.path(), &new_key);
         home_is_up(root.path());
         assert_current_marker(root.path(), &new_key);
         assert_eq!(fs::read(&lock).unwrap(), b"lock");
@@ -7236,11 +7240,7 @@ mod tests {
         assert_eq!(fs::read(&note).unwrap(), sealed);
         assert_eq!(fs::read(&marker_path).unwrap(), marker);
 
-        match localhost_bringup(root.path(), &device_key) {
-            LocalhostBringup::Start(_) => {}
-            LocalhostBringup::Refuse(got) => panic!("restoring the device key refused: {got}"),
-        }
-        assert!(elastos_server::local_apps::local_apps_refusal(root.path()).is_none());
+        migrate_again(root.path(), &device_key);
         assert_eq!(fs::read(&note).unwrap(), sealed);
         assert_envelope_opens_with_exactly_one_key(&note, b"kept", &device_key, &file_key);
         assert_eq!(fs::read(&marker_path).unwrap(), marker);
@@ -7263,11 +7263,7 @@ mod tests {
             root.path().file_name().unwrap().to_string_lossy()
         ));
         fs::rename(root.path().join("AppCapsules"), &aside).unwrap();
-        match localhost_bringup(root.path(), &other_key) {
-            LocalhostBringup::Start(_) => {}
-            LocalhostBringup::Refuse(got) => panic!("empty start refused: {got}"),
-        }
-        assert!(elastos_server::local_apps::local_apps_refusal(root.path()).is_none());
+        migrate_again(root.path(), &other_key);
         assert!(aside.is_dir());
         assert!(!root.path().join("AppCapsules").exists());
         assert!(!note.exists());
@@ -7284,8 +7280,9 @@ mod tests {
         let look = root.join("Users/look.json");
         let named = root.join("Users/named.json");
         let real = root.join("Users/real.bin");
-        fs::create_dir_all(look.parent().unwrap()).unwrap();
-        let look_bytes = br#"{"version":1,"nonce":"abcd","ciphertext":"zz"}"#;
+        fs::create_dir_all(named.parent().unwrap()).unwrap();
+        // Plain JSON that mentions envelope keys but is not a device-key header prefix.
+        let look_bytes = br#"{"note":"plain","nonce":"abcd","ciphertext":"zz"}"#;
         let named_bytes =
             br#"{"nonce":"00112233445566778899aabb","ciphertext":"00112233445566778899aabbccddeeff","version":1}"#;
         fs::write(&look, look_bytes).unwrap();
@@ -7298,7 +7295,9 @@ mod tests {
         assert!(text.contains("Users/named.json"), "{text}");
         assert!(text.contains("does not decrypt"), "{text}");
         assert!(
-            text.contains("Restore identity/device.key, or move the file aside, then restart."),
+            text.contains(
+                "Restore identity/device.key, or move the file out of the folder, then restart.",
+            ),
             "{text}"
         );
         assert!(!text.contains("Remove it"), "{text}");
@@ -7399,7 +7398,7 @@ mod tests {
             .to_string();
         assert_eq!(
             err,
-            "Users/over.bin is cut off or damaged. Move it aside, then restart."
+            "Users/over.bin is cut off or damaged. Move it out of the folder, then restart."
         );
         let read = take_localhost_migration_bytes_read();
         let opens = take_localhost_migration_opens();
@@ -7732,7 +7731,7 @@ mod tests {
     }
 
     #[test]
-    fn a_crash_temp_of_the_marker_and_the_seen_file_is_removed_at_start() {
+    fn a_crash_temp_of_the_marker_is_removed_at_start() {
         let device_key = [0x23; 32];
         let temp = TempDir::new().unwrap();
         let note = temp.path().join("Users/note.bin");
@@ -7740,13 +7739,9 @@ mod tests {
         localhost_provider_bridge_config(temp.path(), &device_key).unwrap();
         let identity = temp.path().join("identity");
         let marker = identity.join("localhost-file-key-v1");
-        let seen = identity.join("localhost-file-key-v1.seen");
         let marker_bytes = fs::read(&marker).unwrap();
-        let seen_bytes = fs::read(&seen).unwrap();
         let marker_temp = rewrite_temp_path(&marker).unwrap();
-        let seen_temp = rewrite_temp_path(&seen).unwrap();
         fs::write(&marker_temp, b"marker-temp").unwrap();
-        fs::write(&seen_temp, b"seen-temp").unwrap();
         let mut near = marker_temp
             .file_name()
             .unwrap()
@@ -7762,10 +7757,9 @@ mod tests {
         fs::write(&near, b"near").unwrap();
         localhost_provider_bridge_config(temp.path(), &device_key).unwrap();
         assert!(!marker_temp.exists());
-        assert!(!seen_temp.exists());
         assert_eq!(fs::read(&near).unwrap(), b"near");
         assert_eq!(fs::read(&marker).unwrap(), marker_bytes);
-        assert_eq!(fs::read(&seen).unwrap(), seen_bytes);
+        assert!(!identity.join("localhost-file-key-v1.seen").exists());
 
         let keeper = temp.path().join("keeper.bin");
         fs::write(&keeper, b"keep-me").unwrap();
@@ -8016,10 +8010,7 @@ mod tests {
         elastos_server::auth::verify_auth_audit_chain_ready(root.path()).unwrap();
         elastos_server::api::auth_gateway::verify_configured_principal_roots_ready(root.path())
             .unwrap();
-        match localhost_bringup(root.path(), &new_key) {
-            LocalhostBringup::Start(_) => {}
-            LocalhostBringup::Refuse(got) => panic!("after chmod: {got}"),
-        }
+        migrate_again(root.path(), &new_key);
         home_is_up(root.path());
         assert_current_marker(root.path(), &new_key);
         assert!(elastos_server::local_apps::local_apps_refusal(root.path()).is_none());
@@ -8391,7 +8382,7 @@ mod tests {
     }
 
     #[test]
-    fn a_pipe_marker_and_a_socket_seen_file_do_not_say_directory() {
+    fn a_pipe_marker_does_not_say_directory() {
         use std::os::unix::fs::FileTypeExt;
 
         let _guard = LocalAppsGuard::lock();
@@ -8418,31 +8409,6 @@ mod tests {
         fs::remove_file(&marker).unwrap();
         migrate_again(marker_root.path(), &device_key);
         assert_envelope_opens_with_exactly_one_key(&marker_note, b"note", &device_key, &file_key);
-
-        let seen_root = TempDir::new().unwrap();
-        let seen_note = seen_root.path().join("Users/note.bin");
-        plant_device_envelope(&seen_note, &device_key, b"note");
-        localhost_provider_bridge_config(seen_root.path(), &device_key).unwrap();
-        let seen = seen_root.path().join("identity/localhost-file-key-v1.seen");
-        fs::remove_file(&seen).unwrap();
-        std::os::unix::net::UnixListener::bind(&seen).unwrap();
-        let sentence = match localhost_bringup(seen_root.path(), &device_key) {
-            LocalhostBringup::Refuse(got) => got,
-            LocalhostBringup::Start(_) => panic!("a socket seen file started local apps"),
-        };
-        assert!(
-            sentence.contains("is a socket. Remove the socket, then restart."),
-            "{sentence}"
-        );
-        assert!(!sentence.contains("Remove the directory"), "{sentence}");
-        assert!(!sentence.contains("is a pipe"), "{sentence}");
-        assert!(
-            sentence.contains("localhost-file-key-v1.seen"),
-            "{sentence}"
-        );
-        fs::remove_file(&seen).unwrap();
-        migrate_again(seen_root.path(), &device_key);
-        assert_envelope_opens_with_exactly_one_key(&seen_note, b"note", &device_key, &file_key);
     }
 
     fn file_identity(path: &std::path::Path) -> (u64, u64, i64, i64, u64, i64, i64) {
@@ -8704,12 +8670,7 @@ mod tests {
         assert_eq!(fs::read(&small).unwrap(), small_bytes);
         let outside = root.path().join("huge-out.bin");
         fs::rename(&huge, &outside).unwrap();
-        match localhost_bringup(root.path(), &device_key) {
-            LocalhostBringup::Start(_) => {}
-            LocalhostBringup::Refuse(got) => {
-                panic!("moving the file out did not restore apps: {got}")
-            }
-        }
+        migrate_again(root.path(), &device_key);
         home_is_up(root.path());
         assert_eq!(
             fs::metadata(&outside).unwrap().len(),
@@ -8862,7 +8823,9 @@ mod tests {
             match localhost_bringup(root.path(), &device_key) {
                 LocalhostBringup::Refuse(got) => assert_eq!(
                     got,
-                    format!("{label} is cut off or damaged. Move it aside, then restart.")
+                    format!(
+                        "{label} is cut off or damaged. Move it out of the folder, then restart."
+                    )
                 ),
                 LocalhostBringup::Start(_) => panic!("{label} left local apps on"),
             }
@@ -8969,7 +8932,9 @@ mod tests {
             match localhost_bringup(root.path(), &device_key) {
                 LocalhostBringup::Refuse(got) => assert_eq!(
                     got,
-                    format!("{label} is cut off or damaged. Move it aside, then restart.")
+                    format!(
+                        "{label} is cut off or damaged. Move it out of the folder, then restart."
+                    )
                 ),
                 LocalhostBringup::Start(_) => panic!("{label} left local apps on"),
             }
@@ -8984,7 +8949,7 @@ mod tests {
         match localhost_bringup(root.path(), &device_key) {
             LocalhostBringup::Refuse(got) => assert_eq!(
                 got,
-                "Users/badhex.bin is cut off or damaged. Move it aside, then restart."
+                "Users/badhex.bin is cut off or damaged. Move it out of the folder, then restart."
             ),
             LocalhostBringup::Start(_) => panic!("bad hex left local apps on"),
         }
@@ -9036,7 +9001,8 @@ mod tests {
         let registry = Arc::new(provider::ProviderRegistry::new());
         lc_check(&registry, root.path(), &device_key, None).await;
         let deadline = Instant::now() + Duration::from_secs(20);
-        let want = "update-controller/receipt.json is damaged. Delete it, then restart.";
+        let want =
+            "Local apps stay off until the pending update finishes; run elastos update --check.";
         loop {
             let got = elastos_server::local_apps::local_apps_refusal(root.path());
             if got.as_deref() == Some(want) {
@@ -9103,30 +9069,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn damaged_sources_stuck_request_and_unreadable_controller_name_their_remedy() {
+    async fn stuck_request_and_unreadable_controller_use_one_update_sentence() {
         use std::os::unix::fs::PermissionsExt;
         let _guard = LocalAppsGuard::lock();
         let device_key = [0x2b; 32];
-        let cases = [
-            (
-                "sources",
-                "sources.json is damaged. Replace it with a valid trusted-sources file, then restart.",
-            ),
-            (
-                "request",
-                "update-controller/active-request.json is stuck. Delete it, then restart.",
-            ),
-            (
-                "controller",
-                "update-controller cannot be read. Make it readable, then restart.",
-            ),
-        ];
-        for (name, want) in cases {
+        let want =
+            "Local apps stay off until the pending update finishes; run elastos update --check.";
+        let cases = ["request", "request-with-receipt", "controller"];
+        for name in cases {
             let root = TempDir::new().unwrap();
             let data = root.path();
             plant_device_envelope(&data.join("Users/a.bin"), &device_key, b"a");
             match name {
-                "sources" => fs::write(data.join("sources.json"), b"not-json").unwrap(),
                 "request" => {
                     let sources = serde_json::json!({
                         "schema": "elastos.trusted-sources/v1",
@@ -9136,6 +9090,18 @@ mod tests {
                     let request = data.join("update-controller/active-request.json");
                     fs::create_dir_all(request.parent().unwrap()).unwrap();
                     fs::write(&request, b"{}").unwrap();
+                }
+                "request-with-receipt" => {
+                    let sources = serde_json::json!({
+                        "schema": "elastos.trusted-sources/v1",
+                        "sources": [{ "name": "t", "install_path": "/tmp/elastos-no-journal" }],
+                    });
+                    fs::write(data.join("sources.json"), sources.to_string()).unwrap();
+                    let dir = data.join("update-controller");
+                    fs::create_dir_all(&dir).unwrap();
+                    // A forged receipt keeps installed_writer_binary failing closed as damaged.
+                    fs::write(dir.join("receipt.json"), b"not-a-receipt").unwrap();
+                    fs::write(dir.join("active-request.json"), b"{}").unwrap();
                 }
                 _ => {
                     let dir = data.join("update-controller");

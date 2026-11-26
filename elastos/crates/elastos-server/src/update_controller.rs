@@ -1932,22 +1932,46 @@ pub fn update_receipt_is_damaged(data_dir: &Path) -> bool {
     matches!(path_present(&data_dir.join(DIRECTORY).join(RECEIPT)), Ok(true)) && installed_writer_binary(data_dir).is_err()
 }
 
-/// Named remedy when a rollback wait cannot clear itself. A real pending update returns None.
-#[rustfmt::skip]
+/// Named remedy when a rollback wait cannot clear itself. A real pending update
+/// (journal, or active request while the controller lease is held) returns None.
+/// There is no `elastos update status`; the check command is `elastos update --check`.
 pub fn update_rollback_fault_remedy(data_dir: &Path) -> Option<&'static str> {
+    const MSG: &str =
+        "Local apps stay off until the pending update finishes; run elastos update --check.";
     let dir = data_dir.join(DIRECTORY);
-    if path_present(&dir).is_err() || path_present(&dir.join(RECEIPT)).is_err() {
-        Some("update-controller cannot be read. Make it readable, then restart.")
-    } else if update_receipt_is_damaged(data_dir) {
-        Some("update-controller/receipt.json is damaged. Delete it, then restart.")
-    } else if matches!(installed_writer_binary(data_dir), Ok(None)) && crate::sources::load_trusted_sources(data_dir).is_err() {
-        Some("sources.json is damaged. Replace it with a valid trusted-sources file, then restart.")
-    } else {
-        let gone = matches!(fs::symlink_metadata(dir.join(ACTIVE_REQUEST)), Err(e) if e.kind() == std::io::ErrorKind::NotFound);
-        let orphan = matches!(installed_writer_binary(data_dir), Ok(None))
-            && !crate::install_transaction::installed_binary(data_dir, None).ok().flatten().as_deref().is_some_and(InstallTransaction::has_pending_recovery);
-        (!gone && orphan).then_some("update-controller/active-request.json is stuck. Delete it, then restart.")
+    if path_present(&dir).is_err() {
+        return Some(MSG);
     }
+    let journal = match installed_writer_binary(data_dir) {
+        Ok(kept) => crate::install_transaction::installed_binary(data_dir, kept)
+            .ok()
+            .flatten()
+            .is_some_and(|path| InstallTransaction::has_pending_recovery(&path)),
+        Err(_) => return Some(MSG),
+    };
+    if journal {
+        return None;
+    }
+    match fs::symlink_metadata(dir.join(ACTIVE_REQUEST)) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(_) => Some(MSG),
+        Ok(_) if controller_lease_free(&dir) => Some(MSG),
+        Ok(_) => None,
+    }
+}
+
+#[cfg(unix)]
+fn controller_lease_free(directory: &Path) -> bool {
+    let path = directory.join("controller.lock");
+    let Ok(file) = OpenOptions::new().read(true).write(true).open(&path) else {
+        return true;
+    };
+    FileLock::try_exclusive(file).is_ok()
+}
+
+#[cfg(not(unix))]
+fn controller_lease_free(_directory: &Path) -> bool {
+    true
 }
 
 /// The retained receipt locates the writer lock even during an interrupted sources rename.
