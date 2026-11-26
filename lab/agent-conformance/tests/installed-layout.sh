@@ -28,7 +28,11 @@ case "$(uname -s)-$(uname -m)" in
     *) printf 'installed-layout.sh: no release platform for this machine\n' >&2; exit 1 ;;
 esac
 digest() {
-    shasum -a 256 "$1" | cut -d ' ' -f 1
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$1" | cut -d ' ' -f 1
+    else
+        shasum -a 256 "$1" | cut -d ' ' -f 1
+    fi
 }
 
 mkdir "$root"

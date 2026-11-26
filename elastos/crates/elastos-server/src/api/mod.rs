@@ -42,6 +42,8 @@ pub use model_provider_config::{model_provider_bridge_config, model_provider_con
 pub(crate) use model_provider_config::{
     remove_hosted_offer, seed_model_provider_operator_offers_for_test,
 };
+#[cfg(all(test, unix))]
+pub(crate) use model_provider_egress_decision::{approved_for_owner, plant_offer_approval};
 pub mod routes;
 pub mod server;
 pub mod viewer_gateway;

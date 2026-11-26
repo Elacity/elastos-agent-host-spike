@@ -209,7 +209,7 @@ fn pack_inner(
         }
         manifest["requires"] = Value::Array(list);
     }
-    // This test code stands in for the Runtime's launch by CID, which does not exist yet.
+    // This stand-in is not the Runtime start by CID (Runtime::start_by_bundle in elastos/crates/elastos-server/src/runtime.rs; POST /api/launch/open in elastos/crates/elastos-server/src/api/routes.rs).
     // Validate the final manifest, including command-line requirements,
     // through the same profile owner used by dependency resolution.
     let content = manifest["role"] == "content";
@@ -230,7 +230,7 @@ fn pack_inner(
 
     // What ships, as paths relative to the source.
     let mut files: Vec<String> = Vec::new();
-    // This test code stands in for the Runtime's launch by CID, which does not exist yet.
+    // This stand-in is not the Runtime start by CID (Runtime::start_by_bundle in elastos/crates/elastos-server/src/runtime.rs; POST /api/launch/open in elastos/crates/elastos-server/src/api/routes.rs).
     if content || manifest.get("execution").and_then(Value::as_str) == Some("web-projection") {
         if segments.len() < 2 {
             return Err(Refusal::PackEntrypointMissing(format!(
@@ -296,7 +296,7 @@ fn pack_inner(
             .filter(|file| *file != "capsule.json")
             .map(String::as_str),
     );
-    // This test code stands in for the Runtime's launch by CID, which does not exist yet.
+    // This stand-in is not the Runtime start by CID (Runtime::start_by_bundle in elastos/crates/elastos-server/src/runtime.rs; POST /api/launch/open in elastos/crates/elastos-server/src/api/routes.rs).
     if content {
         validate_content_stand_in(&manifest, "unpacked", &planned)?;
     }

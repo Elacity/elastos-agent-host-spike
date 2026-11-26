@@ -1,5 +1,14 @@
 # Archive viewer: handoff log
 
+## Builders and reviewers of #1626
+
+Taken from `git log` of the commits reachable from merge `45f049d0a15b3f64d55f59a8268918330fa3f1c7` (`Merge pull request #1626 from Elacity/claude/ap3-009-shared-listing-rules`) through its second parent and not its first. 33 commits. The git author of each is SashaMIT <sash@ela.city>.
+
+- Built-by: DeepSeek
+- Co-Authored-By: Claude Fable 5.2 <noreply@anthropic.com>
+- Reviewed-by: not recorded here
+- A reviewer named in the commit text: not recorded here
+
 ## 2026-10-24: task 001, the core (request, end record, directory)
 
 Built `examples/archive-viewer` as a Bus v1 guest crate on `capsule-kit-guest`

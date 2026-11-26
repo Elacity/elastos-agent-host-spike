@@ -814,6 +814,25 @@ test("an agent that is off has Stop and no Start", async () => {
   assert.deepEqual(stopped[0].body, { agent_id: AGENT_ID });
 });
 
+test("an empty list says agents stay on the Home where they were created", async () => {
+  const ui = mount(() => Promise.resolve({ agents: [] }));
+  await ui.load();
+  assert.equal(ui.list.children.length, 1);
+  assert.equal(
+    ui.list.children[0].textContent,
+    "You have no agents on this Home. Agents created on another Home stay there.",
+  );
+});
+
+test("a build without agents does not show that sentence", async () => {
+  const ui = mount(() => Promise.reject(new Error(`request failed: 409 ${NOT_BUILT}`)));
+  await ui.load();
+  assert.equal(ui.status.textContent, "Agents are not built into this Runtime");
+  assert.equal(ui.list.children.length, 0);
+  const shown = JSON.stringify(ui.list.children) + ui.status.textContent;
+  assert.equal(shown.includes("another Home"), false);
+});
+
 test("the page's two refusal sentences are the server's", () => {
   const rust = sourceLines(new URL("../elastos/crates/elastos-server/src/agents.rs", import.meta.url));
   const page = sourceLines(new URL("../capsules/system/browser/agents-section.js", import.meta.url));

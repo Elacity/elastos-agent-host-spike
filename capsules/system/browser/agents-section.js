@@ -116,7 +116,7 @@ export function bindAgents(doc, request, confirmStepUp) {
       row.append(copy, actions);
       return row;
     });
-    if (gate === "ready" && !rows.length && !failure && pendingId !== "create") rows.push(el(doc, "p", "pc2-card-sublabel", "You have no agents."));
+    if (gate === "ready" && !rows.length && !failure && pendingId !== "create") rows.push(el(doc, "p", "pc2-card-sublabel", "You have no agents on this Home. Agents created on another Home stay there."));
     listNode.replaceChildren(...rows);
   }
 

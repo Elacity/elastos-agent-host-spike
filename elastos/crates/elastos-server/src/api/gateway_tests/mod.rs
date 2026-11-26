@@ -1186,12 +1186,26 @@ include!("support_runtime.rs");
 
 #[cfg(all(unix, feature = "prototype-agents"))]
 mod agent_host_wait;
+
+/// A consumed passkey step-up leaves a file under the auth root. Absent means unspent.
+fn step_up_was_spent(data_dir: &std::path::Path) -> bool {
+    let root = crate::auth::auth_state_path(data_dir)
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join("passkey-step-up")
+        .join("consumed");
+    root.is_dir() && std::fs::read_dir(root).unwrap().any(|entry| entry.is_ok())
+}
+
 #[cfg(all(unix, feature = "prototype-agents"))]
 mod agent_launch;
 mod agent_plan;
 #[cfg(all(unix, feature = "prototype-agents"))]
 mod agent_plane;
 mod agent_routes;
+#[cfg(all(unix, feature = "prototype-agents"))]
+mod agent_same_id;
 mod assistant_workspace_v2;
 mod browser_profile;
 mod browser_reconciliation;
@@ -1233,6 +1247,8 @@ mod wallet;
 
 #[path = "../gateway_home_update/tests.rs"]
 mod home_update;
+#[cfg(unix)]
+mod tests;
 
 /// Each of the three mappers answers the held-root refusal with 403 and the
 /// bare text, including under the path context `home_state_write_error` puts

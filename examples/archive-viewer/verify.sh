@@ -5,11 +5,15 @@
 # ComponentProvider with its admission check, the F35 grant stop and the F36
 # fuel gate (the host-test crate), and their falsifiers.
 #
-# Usage: verify.sh [--runtime | --guest-only | --recorded-hash-only]
+# Usage: verify.sh [--runtime | --guest-only | --recorded-hash-only | --parser]
 #
 # --runtime     also build the component and run the host-test crate and its
 #               runtime falsifiers (this Mac; needs wasm32 and the repository
 #               component builder).
+# --parser      the guest tests and the host-test fuel gate only. A pull
+#               request runs this when this folder or its check files change.
+#               The nightly examples workflow runs this script with --runtime,
+#               which is the whole gate.
 # --guest-only  the guest checks only, for a machine without the component
 #               build.
 # no argument   guest checks only. The lane gate runs this script with no
@@ -73,6 +77,7 @@ install_snapshot_traps() {
 RUNTIME=0
 GATE=0
 HASH_ONLY=0
+PARSER=0
 case "${GATE_LIST:-}" in
     # run-lane.sh exports the gate commands (the substring is `gates-photo`),
     # and older forms may carry the name; either way this is the lane gate.
@@ -88,8 +93,9 @@ else
             --runtime) RUNTIME=1 ;;
             --guest-only) RUNTIME=0 ;;
             --recorded-hash-only) HASH_ONLY=1 ;;
+            --parser) PARSER=1 ;;
             *)
-                echo "usage: $0 [--runtime | --guest-only | --recorded-hash-only]" >&2
+                echo "usage: $0 [--runtime | --guest-only | --recorded-hash-only | --parser]" >&2
                 exit 2
                 ;;
         esac
@@ -100,6 +106,32 @@ fi
 if [[ $GATE -eq 1 && $RUNTIME -ne 1 && $HASH_ONLY -eq 0 ]]; then
     echo "verify.sh: the lane gate requires the runtime step; drop --guest-only" >&2
     exit 1
+fi
+
+# The parser part: the guest tests, then the fuel gate on the built component.
+# It stops here. The rest of this script is the whole gate.
+if [[ $PARSER -eq 1 ]]; then
+    if [[ $RUNTIME -eq 1 || $HASH_ONLY -eq 1 ]]; then
+        echo "usage: $0 [--runtime | --guest-only | --recorded-hash-only | --parser]" >&2
+        exit 2
+    fi
+    cargo test --locked --manifest-path "${VIEWER_DIR}/Cargo.toml"
+    "${VIEWER_DIR}/build.sh"
+    test -f "${VIEWER_DIR}/archive-viewer.component.wasm"
+    # The fuel test must have run. A renamed or deleted test makes cargo exit 0
+    # with 0 passed, so the result line is part of the gate.
+    fuel="$(CARGO_TERM_COLOR=never cargo test --locked --manifest-path "${VIEWER_DIR}/host-test/Cargo.toml" \
+        --test component worst_archives_stay_under_their_fuel_ceiling -- --exact 2>&1)" || {
+        printf '%s\n' "$fuel"
+        exit 1
+    }
+    printf '%s\n' "$fuel"
+    if ! printf '%s\n' "$fuel" | grep -Eq '^test result: ok\. 1 passed; 0 failed;'; then
+        echo "archive-viewer parser: the fuel gate did not report 1 passed and 0 failed" >&2
+        exit 1
+    fi
+    echo "archive-viewer parser: guest tests and fuel gate OK"
+    exit 0
 fi
 
 # The recorded container hash: the whole record, the check itself, and the

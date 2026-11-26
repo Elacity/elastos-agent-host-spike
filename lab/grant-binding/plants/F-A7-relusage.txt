@@ -4,5 +4,5 @@ test: ledger::model_reported_usage_does_not_keep_the_released_hold
 --- old
         ledger.held -= amount;
 --- new
-        ledger.held -= amount.saturating_sub(request.reported_usage);
+        ledger.held -= amount.saturating_sub(_request.reported_usage);
 --- end
