@@ -1033,6 +1033,7 @@ fn argument_is_object(head: &str) -> bool {
 /// sets `ELASTOS_MUSL_HELPER_FENCE` and the three binary paths. A normal
 /// `cargo test` leaves the flag unset and does not look for those binaries.
 #[cfg(all(
+    not(elastos_unsupported_os_check),
     target_os = "linux",
     any(target_arch = "x86_64", target_arch = "aarch64")
 ))]
@@ -1410,6 +1411,7 @@ async fn musl_release_helpers_start_under_the_fence() {
 #[cfg(any(
     all(not(elastos_unsupported_os_check), target_os = "macos"),
     all(
+        not(elastos_unsupported_os_check),
         target_os = "linux",
         any(target_arch = "x86_64", target_arch = "aarch64")
     )
@@ -1427,6 +1429,7 @@ fn helper_authority() -> elastos_common::ProviderAuthority {
 #[cfg(any(
     all(not(elastos_unsupported_os_check), target_os = "macos"),
     all(
+        not(elastos_unsupported_os_check),
         target_os = "linux",
         any(target_arch = "x86_64", target_arch = "aarch64")
     )
@@ -1442,6 +1445,7 @@ fn pinned_helper(path: &Path, data_dir: &Path) -> elastos_runtime::provider::Che
 #[cfg(any(
     all(not(elastos_unsupported_os_check), target_os = "macos"),
     all(
+        not(elastos_unsupported_os_check),
         target_os = "linux",
         any(target_arch = "x86_64", target_arch = "aarch64")
     )
@@ -1462,6 +1466,7 @@ fn helper_data_root() -> (tempfile::TempDir, PathBuf) {
 #[cfg(any(
     all(not(elastos_unsupported_os_check), target_os = "macos"),
     all(
+        not(elastos_unsupported_os_check),
         target_os = "linux",
         any(target_arch = "x86_64", target_arch = "aarch64")
     )
@@ -1478,6 +1483,7 @@ fn file_mode(path: &Path) -> u32 {
 #[cfg(any(
     all(not(elastos_unsupported_os_check), target_os = "macos"),
     all(
+        not(elastos_unsupported_os_check),
         target_os = "linux",
         any(target_arch = "x86_64", target_arch = "aarch64")
     )
@@ -1489,6 +1495,7 @@ fn recovery_key_path(data: &Path) -> PathBuf {
 #[cfg(any(
     all(not(elastos_unsupported_os_check), target_os = "macos"),
     all(
+        not(elastos_unsupported_os_check),
         target_os = "linux",
         any(target_arch = "x86_64", target_arch = "aarch64")
     )
@@ -1504,6 +1511,7 @@ fn auth_record_paths(data: &Path) -> (PathBuf, PathBuf) {
 #[cfg(any(
     all(not(elastos_unsupported_os_check), target_os = "macos"),
     all(
+        not(elastos_unsupported_os_check),
         target_os = "linux",
         any(target_arch = "x86_64", target_arch = "aarch64")
     )
@@ -1521,6 +1529,7 @@ async fn exchange_ok(
 #[cfg(any(
     all(not(elastos_unsupported_os_check), target_os = "macos"),
     all(
+        not(elastos_unsupported_os_check),
         target_os = "linux",
         any(target_arch = "x86_64", target_arch = "aarch64")
     )
@@ -1552,6 +1561,7 @@ async fn spawn_object(
 #[cfg(any(
     all(not(elastos_unsupported_os_check), target_os = "macos"),
     all(
+        not(elastos_unsupported_os_check),
         target_os = "linux",
         any(target_arch = "x86_64", target_arch = "aarch64")
     )
@@ -1848,6 +1858,7 @@ async fn fenced_library_publish_rename_move_share_survive_restart() {
 #[cfg(any(
     all(not(elastos_unsupported_os_check), target_os = "macos"),
     all(
+        not(elastos_unsupported_os_check),
         target_os = "linux",
         any(target_arch = "x86_64", target_arch = "aarch64")
     )
@@ -1899,6 +1910,7 @@ async fn recovery_kit_touch(binary: &Path) {
 #[cfg(any(
     all(not(elastos_unsupported_os_check), target_os = "macos"),
     all(
+        not(elastos_unsupported_os_check),
         target_os = "linux",
         any(target_arch = "x86_64", target_arch = "aarch64")
     )

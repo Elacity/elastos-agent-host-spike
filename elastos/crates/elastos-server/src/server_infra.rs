@@ -2868,6 +2868,7 @@ mod tests {
     #[cfg(any(
         all(target_os = "macos", not(elastos_unsupported_os_check)),
         all(
+            not(elastos_unsupported_os_check),
             target_os = "linux",
             any(target_arch = "x86_64", target_arch = "aarch64")
         )
@@ -2956,6 +2957,7 @@ mod tests {
     #[cfg(any(
         all(target_os = "macos", not(elastos_unsupported_os_check)),
         all(
+            not(elastos_unsupported_os_check),
             target_os = "linux",
             any(target_arch = "x86_64", target_arch = "aarch64")
         )
