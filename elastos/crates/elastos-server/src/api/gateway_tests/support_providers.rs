@@ -4890,6 +4890,9 @@ impl Provider for MockWalletProvider {
 struct RecordingWalletProvider {
     provider: MockWalletProvider,
     requests: TokioMutex<Vec<serde_json::Value>>,
+    /// While set, a rights-signature request stays pending until its id is approved.
+    hold_rights_signatures: std::sync::atomic::AtomicBool,
+    approved_rights: std::sync::Mutex<HashSet<String>>,
 }
 
 #[async_trait::async_trait]
@@ -4911,6 +4914,47 @@ impl Provider for RecordingWalletProvider {
         request: &serde_json::Value,
     ) -> Result<serde_json::Value, ProviderError> {
         self.requests.lock().await.push(request.clone());
+        if request.get("op").and_then(Value::as_str) == Some(WALLET_BUS_OPERATION)
+            && self
+                .hold_rights_signatures
+                .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            let request_bytes =
+                serde_json::to_vec(request.get("request").ok_or_else(|| {
+                    ProviderError::Provider("missing Wallet Bus v2 request".into())
+                })?)
+                .map_err(|err| ProviderError::Provider(err.to_string()))?;
+            let wallet_request =
+                WalletProviderRequestV2::decode_at(&request_bytes, crate::auth::now_ts())
+                    .map_err(|err| ProviderError::Provider(err.to_string()))?;
+            let approved = self
+                .approved_rights
+                .lock()
+                .expect("rights approval set")
+                .contains(&wallet_request.request_id);
+            if !approved
+                && matches!(
+                    &wallet_request.operation,
+                    WalletProviderOperationV2::RequestProtectedContentRightsSignature { .. }
+                )
+            {
+                let response = WalletProviderResponseV2::for_request(
+                    &wallet_request,
+                    WalletResultV2::Ok {
+                        data: json!({
+                            "approval_request": {
+                                "schema": "elastos.wallet.approval_request/v1",
+                                "request_id": wallet_request.request_id,
+                                "status": "pending",
+                            },
+                            "requires_approval": true,
+                            "signature": Value::Null,
+                        }),
+                    },
+                );
+                return Ok(json!({"status": "ok", "data": response}));
+            }
+        }
         self.provider.send_raw(request).await
     }
 }
@@ -4920,11 +4964,25 @@ impl RecordingWalletProvider {
         Self {
             provider,
             requests: TokioMutex::default(),
+            hold_rights_signatures: std::sync::atomic::AtomicBool::new(false),
+            approved_rights: std::sync::Mutex::default(),
         }
     }
 
     async fn clear_requests(&self) {
         self.requests.lock().await.clear();
+    }
+
+    fn hold_rights_signatures(&self) {
+        self.hold_rights_signatures
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    fn approve_rights_signature(&self, request_id: &str) {
+        self.approved_rights
+            .lock()
+            .expect("rights approval set")
+            .insert(request_id.to_string());
     }
 
     async fn recorded_v2_operation_kinds(&self) -> Vec<WalletOperationKind> {

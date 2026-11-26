@@ -10832,6 +10832,7 @@ mod route_17_two_person_purchases {
         p_read_segment: serde_json::Value,
         clear_init: Vec<u8>,
         clear_segments: Vec<Vec<u8>>,
+        wallet: std::sync::Arc<RecordingWalletProvider>,
     }
 
     fn parsed_mint(mint_hex: &str) -> elastos_protected_content_contracts::Digest32 {
@@ -11028,8 +11029,30 @@ mod route_17_two_person_purchases {
     /// `open_clock` scripts the fixture's P open as `(behind, step)`: the
     /// open's first reading is `now - behind` and every later reading is that
     /// value plus `step` (a negative step models a backward step). `None`
-    /// leaves the wall clock alone.
+    /// leaves the wall clock alone. The readings are taken at the open.
     async fn two_person_purchase_fixture(open_clock: Option<(u64, i64)>) -> Route17Fixture {
+        let clock = match open_clock {
+            None => Route17OpenClock::Wall,
+            Some((behind, step)) => Route17OpenClock::BehindStep { behind, step },
+        };
+        purchase_two_people(clock, true).await
+    }
+
+    /// How P's open reads the wall clock. Readings are computed at the open.
+    enum Route17OpenClock {
+        Wall,
+        BehindStep {
+            behind: u64,
+            step: i64,
+        },
+        /// Open and the release reading are 12 s behind availability and the
+        /// response readings, so a provider stamp at the wall is `release + 12`.
+        ResponseStamp,
+    }
+
+    /// `open_p` false returns after P's purchase, while mint A is still the
+    /// published object, so a test can open P itself.
+    async fn purchase_two_people(clock: Route17OpenClock, open_p: bool) -> Route17Fixture {
         let dir = tempfile::tempdir().unwrap();
         enable_protected_content(dir.path());
         crate::protected_content_runtime::tests::write_device_key(dir.path(), 0x5a);
@@ -11154,75 +11177,113 @@ mod route_17_two_person_purchases {
         // published protected object. A caller may script the open's wall-clock
         // reading so the open can be shown to consume one value for its own
         // decisions while later decisions read the stepped clock.
-        let armed = open_clock.map(|(behind, step)| {
-            let first = crate::auth::now_ts().saturating_sub(behind);
-            let later = first.saturating_add_signed(step);
-            // The published availability receipt is stamped when the fresh
-            // `ensure` finishes, which is the later reading, so the open's
-            // availability check must read at that time (clamped at `first`).
-            set_mock_published_protected_content_receipt_checked_at(first.max(later));
-            (crate::test_clock::arm(first, later), first)
-        });
-        let p_open = player_open(&app, &p_player_token, &mint_a_hex, &p.principal_id).await;
-        let p_open_reads = crate::test_clock::reads();
-        let p_open_clock = armed.map(|(guard, first)| {
-            drop(guard);
-            first
-        });
-        assert_eq!(p_open["status"], "ok", "{p_open}");
-        let p_handle = p_open["data"]["viewer_session_handle"]
-            .as_str()
-            .unwrap()
-            .to_string();
-        let p_read_init = player_read(
-            &app,
-            &p_player_token,
-            &mint_a_hex,
-            &p_handle,
-            &p.principal_id,
-            None,
-        )
-        .await;
-        let p_read_segment = player_read(
-            &app,
-            &p_player_token,
-            &mint_a_hex,
-            &p_handle,
-            &p.principal_id,
-            Some(0),
-        )
-        .await;
+        let steps = match clock {
+            Route17OpenClock::Wall => None,
+            Route17OpenClock::BehindStep { behind, step } => {
+                let first = crate::auth::now_ts().saturating_sub(behind);
+                let later = first.saturating_add_signed(step);
+                Some(vec![first, later])
+            }
+            Route17OpenClock::ResponseStamp => {
+                let wall = crate::auth::now_ts();
+                let release_at = wall.saturating_sub(12);
+                Some(vec![release_at, wall, release_at, wall])
+            }
+        };
+        let (p_open, p_open_reads, p_open_clock, p_read_init, p_read_segment) = if open_p {
+            let armed = steps.as_ref().map(|steps| {
+                let first = steps[0];
+                let verification = steps.iter().copied().max().unwrap_or(first);
+                // The published availability receipt is stamped when the fresh
+                // `ensure` finishes. The open's availability check must read at
+                // that time (clamped at the open's own reading).
+                set_mock_published_protected_content_receipt_checked_at(verification);
+                (crate::test_clock::arm_steps(steps), first)
+            });
+            let p_open = player_open(&app, &p_player_token, &mint_a_hex, &p.principal_id).await;
+            let p_open_reads = crate::test_clock::reads();
+            let p_open_clock = armed.map(|(guard, first)| {
+                drop(guard);
+                first
+            });
+            assert_eq!(p_open["status"], "ok", "{p_open}");
+            let p_handle = p_open["data"]["viewer_session_handle"]
+                .as_str()
+                .unwrap()
+                .to_string();
+            let p_read_init = player_read(
+                &app,
+                &p_player_token,
+                &mint_a_hex,
+                &p_handle,
+                &p.principal_id,
+                None,
+            )
+            .await;
+            let p_read_segment = player_read(
+                &app,
+                &p_player_token,
+                &mint_a_hex,
+                &p_handle,
+                &p.principal_id,
+                Some(0),
+            )
+            .await;
+            (
+                p_open,
+                p_open_reads,
+                p_open_clock,
+                p_read_init,
+                p_read_segment,
+            )
+        } else {
+            let _ = steps;
+            (
+                serde_json::Value::Null,
+                0,
+                None,
+                serde_json::Value::Null,
+                serde_json::Value::Null,
+            )
+        };
 
-        write_library_bytes_for_principal(
-            &app,
-            &creator_token,
-            &creator.principal_id,
-            &uri_b,
-            b"media-b",
-        )
-        .await;
-        let mint_b_hex = publish_listing(
-            &app,
-            &creator_token,
-            &wallet_provider,
-            &creator,
-            &creator_account_id,
-            &replacement_creator_account_id,
-            &uri_b,
-            30,
-            40,
-        )
-        .await;
-        assert_ne!(mint_a_hex, mint_b_hex);
-        buy_listing(
-            &app,
-            &q_token,
-            &wallet_provider,
-            &q,
-            &q_account_id,
-            &mint_b_hex,
-        )
-        .await;
+        // Mint B replaces the one published object. A deferred open of mint A
+        // must still see A, so B is published only after that open has run.
+        let mint_b_hex = if open_p {
+            write_library_bytes_for_principal(
+                &app,
+                &creator_token,
+                &creator.principal_id,
+                &uri_b,
+                b"media-b",
+            )
+            .await;
+            let mint_b_hex = publish_listing(
+                &app,
+                &creator_token,
+                &wallet_provider,
+                &creator,
+                &creator_account_id,
+                &replacement_creator_account_id,
+                &uri_b,
+                30,
+                40,
+            )
+            .await;
+            assert_ne!(mint_a_hex, mint_b_hex);
+            buy_listing(
+                &app,
+                &q_token,
+                &wallet_provider,
+                &q,
+                &q_account_id,
+                &mint_b_hex,
+            )
+            .await;
+            mint_b_hex
+        } else {
+            mint_a_hex.clone()
+        };
 
         Route17Fixture {
             dir,
@@ -11243,6 +11304,7 @@ mod route_17_two_person_purchases {
             p_read_segment,
             clear_init,
             clear_segments,
+            wallet: wallet_provider,
         }
     }
 
@@ -11528,6 +11590,132 @@ mod route_17_two_person_purchases {
         assert_eq!(
             fixture.p_open_reads, 11,
             "every decision must read once even when the step is backward"
+        );
+    }
+
+    /// The release reading is 12 s behind the readings that check provider
+    /// stamps. A stamp at the wall is `release_now + 12`, inside the response
+    /// clock and 7 s outside the operation clock. The session still expires
+    /// 50 s after the release reading.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn route_17_open_checks_provider_stamps_on_the_response_clock() {
+        let _guard = protected_content_gateway_mock_test_guard().lock().await;
+        let fixture = purchase_two_people(Route17OpenClock::ResponseStamp, true).await;
+        let release_at = fixture.p_open_clock.expect("armed open clock");
+
+        assert_eq!(fixture.p_open["status"], "ok", "{}", fixture.p_open);
+        assert_eq!(
+            fixture.p_open["data"]["expires_at"].as_u64(),
+            Some(release_at.saturating_add(
+                crate::protected_content_runtime::RELEASE_CONTRIBUTION_WINDOW_SECS
+            )),
+            "the viewer window must derive from the release reading"
+        );
+        assert_eq!(
+            fixture.p_open_reads, 11,
+            "availability and the response checks must read the later clock"
+        );
+    }
+
+    /// The last second at which the whole release still fits every lifetime
+    /// opens. One second later is refused by name before the Wallet is asked,
+    /// and that pending approval is still usable at the last good second.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn route_17_resume_at_the_last_fitting_second_opens_and_the_next_is_refused() {
+        let _guard = protected_content_gateway_mock_test_guard().lock().await;
+        let fixture = purchase_two_people(Route17OpenClock::Wall, false).await;
+        fixture.wallet.hold_rights_signatures();
+        let latest = crate::protected_content_runtime::latest_custody_resume_offset_secs();
+        // The pending open and the refusal run before this second, so the
+        // successful resume starts as the provider stamps that second.
+        const SLACK_SECS: u64 = 45;
+        let avail = crate::auth::now_ts();
+        let last_good = avail.saturating_add(SLACK_SECS);
+        let open_at = last_good.saturating_sub(latest);
+        set_mock_published_protected_content_receipt_checked_at(avail);
+        let pending = {
+            let _clock = crate::test_clock::arm(open_at, avail);
+            player_open(
+                &fixture.app,
+                &fixture.p_player_token,
+                &fixture.mint_a_hex,
+                &fixture.p.principal_id,
+            )
+            .await
+        };
+        assert_eq!(
+            pending["message"],
+            crate::protected_content_runtime::RUNTIME_CUSTODY_OPEN_PENDING_MESSAGE,
+            "{pending}"
+        );
+        let approval_id = pending["detail"]
+            .as_str()
+            .and_then(|detail| detail.split("approval_request_id=").nth(1))
+            .expect("pending approval id");
+
+        fixture.wallet.clear_requests().await;
+        set_mock_published_protected_content_receipt_checked_at(last_good.saturating_add(1));
+        let refused = {
+            let _clock =
+                crate::test_clock::arm(last_good.saturating_add(1), last_good.saturating_add(1));
+            player_open(
+                &fixture.app,
+                &fixture.p_player_token,
+                &fixture.mint_a_hex,
+                &fixture.p.principal_id,
+            )
+            .await
+        };
+        assert_eq!(
+            refused["message"],
+            crate::protected_content_runtime::RUNTIME_CUSTODY_RELEASE_WINDOW_CLOSED_MESSAGE,
+            "{refused}"
+        );
+        let refused_kinds = fixture.wallet.recorded_v2_operation_kinds().await;
+        assert!(
+            refused_kinds
+                .iter()
+                .all(|kind| *kind != WalletOperationKind::RequestProtectedContentRightsSignature),
+            "the closed window must be refused before the Wallet is asked: {refused_kinds:?}"
+        );
+
+        fixture.wallet.approve_rights_signature(approval_id);
+        fixture.wallet.clear_requests().await;
+        let now = crate::auth::now_ts();
+        if last_good > now {
+            tokio::time::sleep(std::time::Duration::from_secs(last_good - now)).await;
+        }
+        set_mock_published_protected_content_receipt_checked_at(last_good);
+        let opened = {
+            let _clock = crate::test_clock::arm(last_good, last_good);
+            player_open(
+                &fixture.app,
+                &fixture.p_player_token,
+                &fixture.mint_a_hex,
+                &fixture.p.principal_id,
+            )
+            .await
+        };
+        assert_eq!(opened["status"], "ok", "{opened}");
+        assert_eq!(
+            opened["data"]["expires_at"].as_u64(),
+            Some(last_good.saturating_add(
+                crate::protected_content_runtime::RELEASE_CONTRIBUTION_WINDOW_SECS
+            )),
+            "{opened}"
+        );
+        let opened_kinds = fixture.wallet.recorded_v2_operation_kinds().await;
+        assert_eq!(
+            opened_kinds
+                .iter()
+                .filter(|kind| {
+                    **kind == WalletOperationKind::RequestProtectedContentRightsSignature
+                })
+                .count(),
+            1,
+            "the last fitting second asks the Wallet once: {opened_kinds:?}"
         );
     }
 }

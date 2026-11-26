@@ -33,7 +33,7 @@ use elastos_protected_content_contracts::{
     RuntimeSessionBindingV1, SignedCustodyCommitteeAuthorizationV1, SignedCustodyEpochV1,
     SignedCustodyPoolV1, SignedRuntimeReleaseOperationV1, SignedTerminalReceiptV1,
     TerminalReceiptIssuerKey, TerminalReceiptStatementV1, WalletSignedRightsRequestV1,
-    MAX_RECIPIENT_KEY_AUTHORIZATION_LIFETIME_SECS,
+    MAX_RECIPIENT_KEY_AUTHORIZATION_LIFETIME_SECS, RIGHTS_CLOCK_SKEW_SECS,
 };
 use elastos_protected_content_provider_contracts::{
     CencFmp4MediaIdentityV1, DecryptProviderRequestOpV1, DecryptProviderRequestV1,
@@ -178,6 +178,36 @@ pub(crate) const RUNTIME_CUSTODY_RELEASE_APPROVAL_UNAVAILABLE_MESSAGE: &str =
 /// identical open, which resumes the persisted release.
 pub(crate) const RUNTIME_CUSTODY_OPEN_PENDING_MESSAGE: &str =
     "Runtime custody viewer release is pending exact Wallet approval";
+pub(crate) const RUNTIME_CUSTODY_RELEASE_WINDOW_CLOSED_MESSAGE: &str =
+    "Runtime custody viewer release window has closed";
+pub(crate) const RELEASE_ISSUE_SKEW_SECS: u64 = RIGHTS_CLOCK_SKEW_SECS;
+pub(crate) const RELEASE_CONTRIBUTION_WINDOW_SECS: u64 = 50;
+pub(crate) const WHOLE_RELEASE_SECS: u64 =
+    RELEASE_CONTRIBUTION_WINDOW_SECS + RIGHTS_CLOCK_SKEW_SECS;
+pub(crate) const RELEASE_OPERATION_ISSUE_SKEW_SECS: u64 = 3;
+pub(crate) const RIGHTS_REQUEST_AHEAD_SECS: u64 = 180;
+pub(crate) fn custody_release_round_fits(
+    round: u64,
+    rights_issued_at: u64,
+    rights_expires_at: u64,
+    prepared_expires_at: u64,
+    pending_expires_at: u64,
+) -> bool {
+    round.saturating_sub(RELEASE_ISSUE_SKEW_SECS) >= rights_issued_at
+        && round.saturating_add(WHOLE_RELEASE_SECS) <= rights_expires_at
+        && round.saturating_add(RELEASE_CONTRIBUTION_WINDOW_SECS) <= prepared_expires_at
+        && round < prepared_expires_at.min(pending_expires_at)
+}
+
+#[cfg(test)]
+pub(crate) fn latest_custody_resume_offset_secs() -> u64 {
+    let prepared_after =
+        MAX_RECIPIENT_KEY_AUTHORIZATION_LIFETIME_SECS.saturating_sub(RELEASE_ISSUE_SKEW_SECS);
+    RIGHTS_REQUEST_AHEAD_SECS
+        .saturating_sub(WHOLE_RELEASE_SECS)
+        .min(prepared_after.saturating_sub(RELEASE_CONTRIBUTION_WINDOW_SECS))
+        .min(prepared_after.saturating_sub(1))
+}
 
 /// Fail-closed mapping for the viewer release path: logs the cause and source
 /// line at warn and keeps the stable message outermost while carrying the
@@ -6348,8 +6378,8 @@ pub(crate) async fn open_runtime_custody_viewer(
                 runtime_session_binding,
                 audit_request_id,
                 runtime_issuer,
-                now.saturating_sub(5),
-                now.saturating_sub(5)
+                now.saturating_sub(RELEASE_ISSUE_SKEW_SECS),
+                now.saturating_sub(RELEASE_ISSUE_SKEW_SECS)
                     .saturating_add(MAX_RECIPIENT_KEY_AUTHORIZATION_LIFETIME_SECS),
             )
             .await
@@ -6380,20 +6410,39 @@ pub(crate) async fn open_runtime_custody_viewer(
             }
             (prepared, open_pending, audit_request_id, None)
         };
+    let wallet_invocation = RuntimeReleaseWalletInvocation {
+        principal_id: &input.principal_id,
+        account_id: &purchase.account_id,
+        proof_binding_id,
+        session_id,
+        grant_id,
+        mint_id,
+        runtime_session_binding,
+    };
+    if let Some(bytes) = replay_wallet_request.as_deref() {
+        let (_, rights) = runtime_release_wallet_request(
+            &buy,
+            prepared.recipient_identity(),
+            &wallet_invocation,
+            Some(bytes),
+            now,
+        )?;
+        if !custody_release_round_fits(
+            now,
+            rights.issued_at(),
+            rights.expires_at(),
+            prepared.expires_at(),
+            open_pending.expires_at,
+        ) {
+            anyhow::bail!(RUNTIME_CUSTODY_RELEASE_WINDOW_CLOSED_MESSAGE);
+        }
+    }
     let (release_wallet_request, release_wallet_response, signed_rights) =
         match invoke_runtime_release_wallet(
             registry.as_ref(),
             &buy,
             prepared.recipient_identity(),
-            RuntimeReleaseWalletInvocation {
-                principal_id: &input.principal_id,
-                account_id: &purchase.account_id,
-                proof_binding_id,
-                session_id,
-                grant_id,
-                mint_id,
-                runtime_session_binding,
-            },
+            wallet_invocation,
             replay_wallet_request.as_deref(),
             now,
         )
@@ -6481,8 +6530,8 @@ pub(crate) async fn open_runtime_custody_viewer(
             .map_err(release_unavailable!())?,
         RightsActionV1::View,
         prepared.recipient_identity().clone(),
-        release_now.saturating_sub(5),
-        release_now + 55,
+        release_now.saturating_sub(RELEASE_ISSUE_SKEW_SECS),
+        release_now.saturating_add(WHOLE_RELEASE_SECS),
         ReplayNonce16::new(audit_nonce_bytes(audit_request_id)),
     ) {
         Ok(request) => request,
@@ -6547,8 +6596,8 @@ pub(crate) async fn open_runtime_custody_viewer(
             evidence_request,
             custody_epoch: composition.signed_epoch.clone(),
             audit_request_id,
-            issued_at: release_now.saturating_sub(3),
-            expires_at: release_now + 50,
+            issued_at: release_now.saturating_sub(RELEASE_OPERATION_ISSUE_SKEW_SECS),
+            expires_at: release_now.saturating_add(RELEASE_CONTRIBUTION_WINDOW_SECS),
         },
         release_now,
     ) {
@@ -7645,8 +7694,8 @@ fn runtime_release_wallet_request(
             .map_err(release_unavailable!())?,
         buy.action(),
         recipient.clone(),
-        now.saturating_sub(5),
-        now + 180,
+        now.saturating_sub(RELEASE_ISSUE_SKEW_SECS),
+        now.saturating_add(RIGHTS_REQUEST_AHEAD_SECS),
         ReplayNonce16::new(replay_nonce),
     )
     .map_err(release_unavailable!())?;

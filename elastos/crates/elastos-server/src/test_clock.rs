@@ -14,8 +14,9 @@ use std::cell::Cell;
 
 #[derive(Clone, Copy)]
 struct Script {
-    first: u64,
-    rest: u64,
+    /// Readings in order. The last one repeats for every later read.
+    steps: [u64; 4],
+    len: u8,
     reads: u64,
 }
 
@@ -39,26 +40,34 @@ impl Drop for ClockGuard {
 /// Script `first` for the operation's first clock read and `rest` for every
 /// later read.
 pub(crate) fn arm(first: u64, rest: u64) -> ClockGuard {
+    arm_steps(&[first, rest])
+}
+
+/// Script up to four readings. The last one repeats after the list is used.
+pub(crate) fn arm_steps(steps: &[u64]) -> ClockGuard {
+    assert!(!steps.is_empty() && steps.len() <= 4);
+    let mut stored = [0; 4];
+    stored[..steps.len()].copy_from_slice(steps);
     SCRIPT.with(|slot| {
         slot.set(Some(Script {
-            first,
-            rest,
+            steps: stored,
+            len: u8::try_from(steps.len()).expect("step count fits"),
             reads: 0,
         }));
     });
     ClockGuard(std::marker::PhantomData)
 }
 
+fn step_index(script: &Script) -> usize {
+    usize::try_from(script.reads.min(u64::from(script.len - 1))).expect("step index")
+}
+
 /// The next scripted reading, or `None` when no test armed the seam.
 pub(crate) fn next() -> Option<u64> {
     SCRIPT.with(|slot| {
         let mut script = slot.get()?;
+        let value = script.steps[step_index(&script)];
         script.reads += 1;
-        let value = if script.reads == 1 {
-            script.first
-        } else {
-            script.rest
-        };
         slot.set(Some(script));
         Some(value)
     })
@@ -73,11 +82,8 @@ pub(crate) fn set_next(value: u64) {
         let Some(mut script) = slot.get() else {
             return;
         };
-        if script.reads == 0 {
-            script.first = value;
-        } else {
-            script.rest = value;
-        }
+        let index = step_index(&script);
+        script.steps[index] = value;
         slot.set(Some(script));
     });
 }
