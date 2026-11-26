@@ -182,7 +182,9 @@ fn start_path_allow_os(
         })
         .map_err(|error| match error {
             failure_record::LaunchError::BeforeFork(reason) => reason,
-            failure_record::LaunchError::ChildFailed { reason, .. } => reason,
+            failure_record::LaunchError::ChildFailed { pid, reason } => {
+                format!("{reason} (child pid {pid})")
+            }
         })?;
         Ok(Launched {
             pid,
@@ -349,7 +351,9 @@ fn dispatch(
     )
     .map_err(|error| match error {
         failure_record::LaunchError::BeforeFork(reason) => reason,
-        failure_record::LaunchError::ChildFailed { reason, .. } => reason,
+        failure_record::LaunchError::ChildFailed { pid, reason } => {
+            format!("{reason} (child pid {pid})")
+        }
     })?;
     Ok(Launched {
         pid,

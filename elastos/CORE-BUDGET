@@ -64,4 +64,6 @@
 # -39: round 34 removes the object helper's live restart and its one-lock swap (-37);
 # the object fence already covers Users and UsersAI, where every capsule storage root
 # lives. last_errno reads errno through std (-2). Measured 26 Nov 2026.
-15269
+# +4: round 36 names the failed child's pid in the two launch errors the operator sees.
+# Measured 27 Nov 2026.
+15273
