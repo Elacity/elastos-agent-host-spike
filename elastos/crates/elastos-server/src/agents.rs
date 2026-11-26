@@ -2414,22 +2414,37 @@ fn row_agent(event: &RuntimeAuditEventV1) -> Option<String> {
     reason.get("agent_id")?.as_str().map(str::to_string)
 }
 
-/// Keeps an owed stop row until a row of its session, or of its agent if failed, settles it.
-pub(crate) fn note_stop_row(data_dir: &Path, event: &RuntimeAuditEventV1) -> anyhow::Result<()> {
-    let started = event.event_type == "agent.start.completed" && event.result == "ok";
-    if event.event_type != "agent.stopped" && !started {
-        return Ok(());
+fn is_stop_row(event: &RuntimeAuditEventV1) -> bool {
+    event.event_type == "agent.stopped"
+        || (event.event_type == "agent.start.completed" && event.result == "ok")
+}
+
+/// A row settles the owed row of its session, and of its agent if failed.
+fn fold_stop_row(owed: &mut Vec<RuntimeAuditEventV1>, event: &RuntimeAuditEventV1) {
+    if !is_stop_row(event) {
+        return;
     }
     let (agent, session) = (row_agent(event), event.session_id.as_deref());
-    let opened = open(data_dir, true)?;
-    let mut after = opened.file.clone();
-    after.owed_stops.retain(|owed| {
+    owed.retain(|owed| {
         let run = owed.session_id.is_some() && owed.session_id.as_deref() == session;
         !run && (owed.result != "failed" || agent.is_none() || row_agent(owed) != agent)
     });
-    let owes = !started && matches!(event.result.as_str(), "stopping" | "failed");
+    let owes = event.event_type == "agent.stopped"
+        && matches!(event.result.as_str(), "stopping" | "failed");
     if owes && (session.is_some() || agent.is_some()) {
-        after.owed_stops.push(event.clone());
+        owed.push(event.clone());
+    }
+}
+
+/// Folds `rows`, in order, over the owed stops under the agent lock.
+pub(crate) fn note_stop_rows(data_dir: &Path, rows: &[RuntimeAuditEventV1]) -> anyhow::Result<()> {
+    if !rows.iter().any(is_stop_row) {
+        return Ok(());
+    }
+    let opened = open(data_dir, true)?;
+    let mut after = opened.file.clone();
+    for row in rows {
+        fold_stop_row(&mut after.owed_stops, row);
     }
     if after.owed_stops == opened.file.owed_stops {
         return Ok(());

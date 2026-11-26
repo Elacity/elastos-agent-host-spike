@@ -54,15 +54,34 @@ pub(crate) fn repair_recorded_audit(
     )
 }
 
-/// Appends one signed agent row; the agent file keeps owed stops past the audit list.
+/// The agent file's owed stops change first, and a failed write is the
+/// answer. The signed row follows. `reconcile_owed_stops` settles a crash
+/// between the two at the next start.
 pub(crate) fn append_agent_row(data_dir: &Path, event: RuntimeAuditEventV1) -> anyhow::Result<()> {
-    let owes = event.event_type == "agent.stopped" && event.result != "ok";
-    let kept = !owes || crate::agents::note_stop_row(data_dir, &event).is_ok();
-    crate::auth::append_audit_event(data_dir, event.clone())?;
-    if !kept || (!owes && crate::agents::note_stop_row(data_dir, &event).is_err()) {
-        tracing::warn!("the agent file's owed stops were not updated");
+    crate::agents::note_stop_rows(data_dir, std::slice::from_ref(&event))?;
+    crate::auth::append_audit_event(data_dir, event)
+}
+
+/// At start, an owed row the kept chain lacks is signed once. Then the kept
+/// stop rows fold over the owed list in order: a signed later row settles an
+/// owed stop, and a signed open stop the file lost is owed again. A trimmed
+/// chain that no longer reaches an owed row's time does not sign it again.
+pub(crate) fn reconcile_owed_stops(data_dir: &Path) -> anyhow::Result<()> {
+    let state = crate::auth::load_auth_state(data_dir)?;
+    let oldest = state.audit.first().map(|event| event.occurred_at);
+    for owed in crate::agents::owed_stop_rows(data_dir) {
+        let reached = state.audit_chain_anchor.is_none()
+            || oldest.is_some_and(|oldest| oldest < owed.occurred_at);
+        let present = state
+            .audit
+            .iter()
+            .any(|event| event.event_id == owed.event_id);
+        if reached && !present {
+            crate::auth::append_audit_event(data_dir, owed)?;
+        }
     }
-    Ok(())
+    let signed = crate::auth::load_auth_state(data_dir)?.audit;
+    crate::agents::note_stop_rows(data_dir, &signed)
 }
 
 /// Sessions whose latest `agent.stopped` row is still `stopping`.

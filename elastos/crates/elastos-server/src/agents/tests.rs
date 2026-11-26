@@ -2577,6 +2577,92 @@ fn a_later_started_run_clears_a_failed_stop() {
     assert_eq!(owed(&home), 1, "a later failed stop is owed again");
 }
 
+fn stop_plant(home: &Home, id: &str, event_type: &str, result: &str) -> RuntimeAuditEventV1 {
+    RuntimeAuditEventV1 {
+        schema: RuntimeAuditEventV1::SCHEMA.to_string(),
+        event_id: format!("audit:owed-plant:{id}"),
+        event_type: event_type.to_string(),
+        principal_id: Some(home.owner.principal_id.clone()),
+        proof_binding_id: Some(home.owner.proof_binding_id.clone()),
+        session_id: Some("session-owed".to_string()),
+        challenge_id: None,
+        capsule_id: None,
+        result: result.to_string(),
+        reason: serde_json::json!({ "agent_id": "agent-owed", "cause": "owner" }).to_string(),
+        occurred_at: crate::auth::now_ts(),
+        signer_did: None,
+        signature: None,
+    }
+}
+
+fn signed_rows(home: &Home, result: &str) -> usize {
+    home.audit()
+        .into_iter()
+        .filter(|event| event.event_type == "agent.stopped" && event.result == result)
+        .count()
+}
+
+/// The owed-stop write comes first. Its failure is the answer, and no signed
+/// row exists for a stop the agent file does not hold.
+#[test]
+fn a_failed_owed_stop_write_is_reported_and_signs_nothing() {
+    let home = Home::new();
+    let fault = fail_spend_file_write();
+    let error = crate::agent_record_audit::append_agent_row(
+        home.path(),
+        stop_plant(&home, "1", "agent.stopped", "stopping"),
+    )
+    .unwrap_err();
+    drop(fault);
+    assert!(error.to_string().contains(CANNOT_WRITE), "{error:#}");
+    assert_eq!(signed_rows(&home, "stopping"), 0);
+    assert!(crate::agents::owed_stop_rows(home.path()).is_empty());
+}
+
+/// A crash after the owed row and before its signed row: the next start
+/// signs that row once, and the stopping session settles once.
+#[test]
+fn a_crash_before_the_signed_stop_row_settles_once_after_restart() {
+    let home = Home::new();
+    let stopping = stop_plant(&home, "2", "agent.stopped", "stopping");
+    crate::agents::note_stop_rows(home.path(), std::slice::from_ref(&stopping)).unwrap();
+    assert_eq!(signed_rows(&home, "stopping"), 0);
+    for _ in 0..2 {
+        crate::agent_record_audit::reconcile_owed_stops(home.path()).unwrap();
+        crate::agent_record_audit::confirm_stopping_rows(home.path(), |_| true).unwrap();
+    }
+    assert_eq!(signed_rows(&home, "stopping"), 1);
+    assert_eq!(signed_rows(&home, "ok"), 1);
+    assert!(crate::agents::owed_stop_rows(home.path()).is_empty());
+}
+
+/// A crash after a settling row cleared the file and before that row was
+/// signed: the next start owes the signed open stop again, once.
+#[test]
+fn a_crash_before_the_signed_settle_owes_the_stop_again() {
+    let home = Home::new();
+    for (id, result) in [("3", "stopping"), ("4", "failed")] {
+        crate::agent_record_audit::append_agent_row(
+            home.path(),
+            stop_plant(&home, id, "agent.stopped", result),
+        )
+        .unwrap();
+    }
+    let started = stop_plant(&home, "5", "agent.start.completed", "ok");
+    crate::agents::note_stop_rows(home.path(), std::slice::from_ref(&started)).unwrap();
+    assert!(crate::agents::owed_stop_rows(home.path()).is_empty());
+    for _ in 0..2 {
+        crate::agent_record_audit::reconcile_owed_stops(home.path()).unwrap();
+    }
+    let owed = crate::agents::owed_stop_rows(home.path());
+    assert_eq!(owed.len(), 1, "{owed:?}");
+    assert_eq!(owed[0].result, "failed");
+    assert_eq!(
+        crate::agent_record_audit::latest_failed_agent_stops(home.path()).len(),
+        1
+    );
+}
+
 #[test]
 fn rename_changes_display_name_only() {
     let home = Home::new();

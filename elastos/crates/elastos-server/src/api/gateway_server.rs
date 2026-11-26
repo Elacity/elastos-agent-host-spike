@@ -158,6 +158,9 @@ pub(super) async fn start_gateway_server_with_shutdown(
         if let Err(error) = super::gateway_inbox::settle_unminted_agent_grants(&data_dir).await {
             eprintln!("[gateway] grant settle skipped: {error:#}");
         }
+        if let Err(error) = crate::agent_record_audit::reconcile_owed_stops(&data_dir) {
+            eprintln!("[gateway] owed stop reconcile skipped: {error:#}");
+        }
         if let Err(error) = super::gateway_agents::confirm_stopping_rows(&data_dir).await {
             eprintln!("[gateway] stopping confirm skipped: {error:#}");
         }

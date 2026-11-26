@@ -3587,6 +3587,33 @@ async fn a_409_stop_answer_is_signed_failed_and_owed() {
     gateway.shutdown().await;
 }
 
+/// A crash after the owed `stopping` row and before its signed row, then two
+/// real gateway starts: the row is signed once and settles once as `ok`.
+#[tokio::test]
+async fn a_crash_between_the_owed_and_signed_stop_rows_settles_once_after_restart() {
+    let home = Home::open();
+    let (owner, _) = admins(&home, "crash-owed");
+    let reason = json!({ "agent_id": "agent-crashed" }).to_string();
+    let stopping = audit_row(
+        &owner.principal_id,
+        Some("session-crashed"),
+        "agent.stopped",
+        "stopping",
+        reason,
+    );
+    crate::agents::note_stop_rows(&home.data, std::slice::from_ref(&stopping)).unwrap();
+    assert!(stopped_rows(&home.data).is_empty());
+    for _ in 0..2 {
+        let gateway = Gateway::start(&home.data).await;
+        gateway.shutdown().await;
+    }
+    let rows = stopped_rows(&home.data);
+    let count = |result: &str| rows.iter().filter(|row| row.result == result).count();
+    assert_eq!((count("stopping"), count("ok")), (1, 1), "{rows:?}");
+    assert!(rows.iter().any(|row| row.event_id == stopping.event_id));
+    assert!(crate::agents::owed_stop_rows(&home.data).is_empty());
+}
+
 fn stopped_rows(data: &Path) -> Vec<elastos_runtime::auth::RuntimeAuditEventV1> {
     crate::auth::load_auth_state(data)
         .unwrap()
