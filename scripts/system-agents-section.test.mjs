@@ -694,6 +694,37 @@ test("a refused Start with the already-running code stays Running and does not o
   assert.equal(ui.button("Start").disabled, false);
 });
 
+test("a live step labels the agent Running and a landing step labels it Stopping", async () => {
+  let landing = false;
+  const ui = mount((path, init = {}) => {
+    if ((init.method || "GET") === "GET") {
+      return Promise.resolve({
+        agents: [{ agent_id: AGENT_ID, display_name: "Helper", active: true }],
+      });
+    }
+    return landing
+      ? refusal("agent_stopping", "this agent is stopping")
+      : refusal("agent_already_running", "this agent is already running");
+  }, () => Promise.resolve("step-token"));
+  await ui.load();
+  ui.button("Start").click();
+  await flush();
+  await flush();
+  await flush();
+  assert.equal(ui.state(AGENT_ID), "Running");
+  assert.equal(ui.status.textContent, "this agent is already running");
+  assert.equal(ui.button("Start").disabled, true);
+  landing = true;
+  await ui.load();
+  ui.button("Start").click();
+  await flush();
+  await flush();
+  await flush();
+  assert.equal(ui.state(AGENT_ID), "Stopping");
+  assert.equal(ui.status.textContent, "this agent is stopping");
+  assert.equal(ui.button("Start").disabled, true);
+});
+
 test("a refused Start with the stopping code stays Stopping", async () => {
   const ui = mount((path, init = {}) => {
     if ((init.method || "GET") === "GET") {

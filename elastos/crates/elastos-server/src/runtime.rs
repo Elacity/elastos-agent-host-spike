@@ -969,7 +969,7 @@ fn note_stop_ticket_wait_done(session_id: &str, waited: std::time::Duration) {
         .push((session_id.to_string(), waited));
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 fn stop_ticket_wait_noted(session_id: &str) -> bool {
     STOP_TICKET_WAIT_NOTES
         .lock()
@@ -978,7 +978,7 @@ fn stop_ticket_wait_noted(session_id: &str) -> bool {
         .any(|id| id == session_id)
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 fn stop_ticket_wait_done(session_id: &str) -> Option<std::time::Duration> {
     STOP_TICKET_WAIT_DONE
         .lock()
@@ -2434,7 +2434,7 @@ impl Runtime {
         let _turn = turn.lock().await;
         // Read the plan book before `agent_launches`. The plan lock is not
         // taken while that gate is held.
-        let effect_landing = !self.inflight_plan_sessions(facts.agent_id).is_empty();
+        let effect_landing = self.ended_flight_is_landing(facts.agent_id);
         let live_run = {
             let mut state = self.agent_launches.lock().await;
             if Self::refuse_start_for_stop(
@@ -2715,6 +2715,16 @@ impl Runtime {
             .any(|flight| flight.session_id == session_id)
     }
 
+    // A flight whose session has ended or is stopping. A live run's own
+    // step is not this, so Start says already running. Routes, Start, and
+    // the System list all ask this.
+    fn ended_flight_is_landing(&self, agent_id: &str) -> bool {
+        let book = plan_book(&self.plan_book);
+        book.inflight.values().any(|flight| {
+            flight.agent_id == agent_id && session_has_ended(&book, &flight.session_id)
+        })
+    }
+
     pub(crate) fn inflight_plan_sessions(&self, agent_id: &str) -> Vec<String> {
         let mut sessions: Vec<String> = plan_book(&self.plan_book)
             .inflight
@@ -2871,8 +2881,8 @@ impl Runtime {
             .holds(agent_id)
     }
 
-    /// While any Stop token is set, or an effect of this agent is still
-    /// landing, Start is refused and the committed mark is left set. The row
+    /// While any Stop token is set, or a flight of an ended or stopping
+    /// session is still open, Start is refused and the mark is left set. The row
     /// test applies only to that mark once nothing is in flight. No signal
     /// does not read the registry. No live row, and no landing effect,
     /// clears the mark. Each Stop clears only its own token, in
@@ -2902,7 +2912,7 @@ impl Runtime {
     }
 
     pub(crate) async fn agent_is_stopping(&self, agent_id: &str) -> bool {
-        let effect_landing = !self.inflight_plan_sessions(agent_id).is_empty();
+        let effect_landing = self.ended_flight_is_landing(agent_id);
         let capsules = &self.running_capsules;
         // The launch gate first, then `stop_marks`, the same order as Start.
         let _gate = self.agent_launches.lock().await;

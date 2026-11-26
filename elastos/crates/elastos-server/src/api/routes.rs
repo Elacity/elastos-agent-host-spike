@@ -9240,6 +9240,147 @@ pub(crate) mod tests {
         );
     }
 
+    /// What `start_agent_once` answers. The launch route returns this sentence
+    /// once admission has passed, and System paints Running or Stopping from it.
+    #[cfg(unix)]
+    async fn start_sentence(runtime: &Arc<Runtime>, agent: &str, launch_id: &str) -> String {
+        let expires = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs()
+            + 3600;
+        let err = runtime
+            .start_agent_once(
+                std::path::Path::new("unused"),
+                crate::agent_admission::AdmissionContext::for_test(agent),
+                crate::runtime::AgentStartFacts {
+                    agent_id: agent,
+                    owner: "person:owner",
+                    host_cid: "cid",
+                    launch_id,
+                    expires_at: expires,
+                },
+            )
+            .await
+            .expect_err("Start was accepted");
+        match err {
+            elastos_common::ElastosError::InvalidManifest(message) => message,
+            other => panic!("Start returned {other}"),
+        }
+    }
+
+    /// The launch route System Start calls, before a grant is presented.
+    /// Stopping is decided here. Already running is decided in `start_agent_once`
+    /// after the grant, which this call does not reach.
+    #[cfg(unix)]
+    async fn launch_route_body(runtime: &Arc<Runtime>, agent: &str) -> (StatusCode, String) {
+        match launch_capsule(
+            Extension(runtime.clone()),
+            Extension(Arc::new(AuditLog::new())),
+            Extension(Some(std::path::PathBuf::from("unused-home"))),
+            Json(LaunchRequest {
+                path: "unused".to_string(),
+                principal_id: None,
+                launch_grant: None,
+                agent_id: Some(agent.to_string()),
+            }),
+        )
+        .await
+        {
+            Ok(answer) => (StatusCode::OK, answer.0.id),
+            Err((status, body)) => (status, body),
+        }
+    }
+
+    /// The agent's own live run has a plan step in flight. Start says already
+    /// running. The launch route does not say stopping.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_live_run_with_a_held_step_says_already_running() {
+        let (runtime, _dir) = crate::runtime::tests::test_runtime().await;
+        let runtime = Arc::new(runtime);
+        let agent = "agent:r10-live";
+        let session = "session-r10-live";
+        runtime.plant_open_agent_stop_for_test(agent, session).await;
+        let guard =
+            Runtime::try_enter_plan_effect(&runtime.plan_book(), session, agent, "step-r10-live")
+                .expect("the live step enters");
+        assert!(
+            !runtime.agent_is_stopping(agent).await,
+            "a live step made the agent stopping"
+        );
+        assert_eq!(
+            start_sentence(&runtime, agent, "launch:r10-live").await,
+            Runtime::AGENT_ALREADY_RUNNING
+        );
+        let (status, body) = launch_route_body(&runtime, agent).await;
+        assert!(
+            status != StatusCode::CONFLICT || body != Runtime::AGENT_STOPPING,
+            "the launch route said stopping for a live step: {status} {body}"
+        );
+        drop(guard);
+    }
+
+    /// The run has ended and a plan step is still landing. Start says stopping,
+    /// and the launch route says the same sentence.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_stopped_run_with_a_landing_step_says_stopping() {
+        let (runtime, _dir) = crate::runtime::tests::test_runtime().await;
+        let runtime = Arc::new(runtime);
+        let agent = "agent:r10-land";
+        let session = "session-r10-land";
+        runtime.plant_open_agent_stop_for_test(agent, session).await;
+        let guard =
+            Runtime::try_enter_plan_effect(&runtime.plan_book(), session, agent, "step-r10-land")
+                .expect("the landing step enters");
+        runtime.note_plan_instance_ended(session);
+        assert!(runtime.agent_is_stopping(agent).await);
+        assert_eq!(
+            start_sentence(&runtime, agent, "launch:r10-land").await,
+            Runtime::AGENT_STOPPING
+        );
+        let (status, body) = launch_route_body(&runtime, agent).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        assert_eq!(body, Runtime::AGENT_STOPPING);
+        drop(guard);
+    }
+
+    /// System Start goes through the launch route. A live step is already
+    /// running. A step that is still landing after the run ended is stopping.
+    /// The page paints Running and Stopping from those two sentences.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_system_list_labels_a_live_step_running_and_a_landing_step_stopping() {
+        if crate::agents::require_build().is_err() {
+            return;
+        }
+        let home = ProbeLaunch::new(&[]).await;
+        let (dir, cid) = home.spin_host();
+        let agent = home.create_agent_for_host("r10-label", &cid);
+        let first = home
+            .launch_from(&dir, &agent)
+            .await
+            .expect("the run starts")
+            .0;
+        home.wait_running(&first.id).await;
+        let guard = Runtime::try_enter_plan_effect(
+            &home.runtime.plan_book(),
+            &first.id,
+            &agent,
+            "step-r10-label",
+        )
+        .expect("the live step enters");
+        assert!(!home.runtime.agent_is_stopping(&agent).await);
+        assert_already_running(home.launch_from(&dir, &agent).await);
+        home.runtime.note_plan_instance_ended(&first.id);
+        assert!(home.runtime.agent_is_stopping(&agent).await);
+        assert_stopping(home.launch_from(&dir, &agent).await);
+        guard.release();
+        let (status, body) = stop_route(&home, &first.id, Some("owner")).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+    }
+
     #[cfg(unix)]
     fn panic_message(payload: Box<dyn std::any::Any + Send>) -> String {
         if let Some(message) = payload.downcast_ref::<String>() {
