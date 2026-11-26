@@ -1261,16 +1261,6 @@ fn native_provider_spawn_routes_keep_the_checked_executable() {
             "checked_executable(data_dir)",
         ),
         (
-            "elastos-server/src/setup.rs",
-            "write_installed_manifest",
-            "after_capsule_install_saved(data_dir)",
-        ),
-        (
-            "elastos-server/src/setup.rs",
-            "ensure_capsule_component_for_home_launch",
-            "after_capsule_install_saved(data_dir)",
-        ),
-        (
             "elastos-server/src/protected_content_runtime.rs",
             "register_inactive_custody_provider",
             "checked_native_provider_with_data_dir(data_dir, binary_path)",

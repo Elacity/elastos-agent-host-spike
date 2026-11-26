@@ -42,7 +42,6 @@ pub(crate) struct ServerInfrastructure {
     pub(crate) collaboration_context: api::gateway::GatewayCollaborationContext,
     pub(crate) collaboration_service:
         Option<elastos_server::collaboration_startup::CollaborationRuntimeService>,
-    _object_helper_kick: Option<tokio::sync::mpsc::UnboundedSender<()>>,
 }
 
 const CONTENT_REPAIR_SCHEDULER_ENV: &str = "ELASTOS_CONTENT_REPAIR_SCHEDULER";
@@ -582,32 +581,6 @@ async fn spawn_allow_listed_provider(
     Ok(Arc::clone(confined.bridge()))
 }
 
-#[rustfmt::skip]
-fn object_helper_restart_give_up(data_dir: &Path, kick: &tokio::sync::mpsc::UnboundedSender<()>, why: impl Into<String>) {
-    let why = why.into(); tracing::error!("object helper restart failed: {why}");
-    if elastos_server::library::object_helper_restart_failed(data_dir, &why) { let _ = kick.send(()); }
-}
-
-#[rustfmt::skip]
-async fn restart_object_helper_for_roots(
-    registry: &provider::ProviderRegistry, data_dir: &Path, key: &[u8; 32], kick: tokio::sync::mpsc::UnboundedSender<()>,
-) {
-    let (Ok(config), Ok(Some(path))) = (
-        object_provider_bridge_config(data_dir, key),
-        binaries::resolve_verified_native_provider_binary_with_data_dir(data_dir, "object-provider"),
-    ) else { return object_helper_restart_give_up(data_dir, &kick, "object helper config or binary"); };
-    let roots = elastos_server::library::storage_roots_from_helper_extra(&config.extra);
-    let checked = checked_native_provider_with_data_dir(data_dir, &path);
-    let Ok(bridge) = spawn_allow_listed_provider("object-provider", &checked, data_dir, config).await
-    else { return object_helper_restart_give_up(data_dir, &kick, "spawn refused"); };
-    let provider: Arc<dyn provider::Provider> = Arc::new(provider::CapsuleProvider::with_scheme(bridge, "object"));
-    if let Err(err) = registry.replace_sub_provider("object", provider).await {
-        return object_helper_restart_give_up(data_dir, &kick, format!("replace refused: {err}"));
-    }
-    elastos_server::library::store_object_helper_roots(data_dir, roots);
-    elastos_server::library::after_capsule_install_saved(data_dir);
-}
-
 /// Windows fences are P2-11, parked. This arm keeps `ProviderBridge::spawn`,
 /// the call Home used before the Unix fence. On Windows that spawn refuses
 /// before a process (`bridge_windows`). Home itself does not start on Windows
@@ -1133,7 +1106,6 @@ async fn setup_server_infrastructure_impl(
     ipfs_role: elastos_server::ipfs::IpfsHostRole,
 ) -> anyhow::Result<ServerInfrastructure> {
     let data_dir = default_data_dir();
-    let mut _object_helper_kick = None;
     let carrier_bind_addr = configured_carrier_bind_addr(&data_dir)?;
     let _ = ownership::repair_path_recursive(&data_dir);
     let collaboration_configuration =
@@ -1350,8 +1322,6 @@ async fn setup_server_infrastructure_impl(
         Ok(Some(path)) => match object_provider_bridge_config(&data_dir, &device_key) {
             Err(err) => tracing::error!("object helper spawn refused: {err}"),
             Ok(object_config) => {
-                let object_roots =
-                    elastos_server::library::storage_roots_from_helper_extra(&object_config.extra);
                 // One line: the loader census names this exact call.
                 let object_bridge =
                     spawn_allow_listed_provider("object-provider", &path, &data_dir, object_config);
@@ -1368,27 +1338,6 @@ async fn setup_server_infrastructure_impl(
                                 "Failed to register elastos://object sub-provider: {}",
                                 e
                             );
-                        } else {
-                            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-                            let weak = tx.downgrade();
-                            elastos_server::library::remember_object_helper(
-                                &data_dir,
-                                object_roots,
-                                &tx,
-                            );
-                            _object_helper_kick = Some(tx);
-                            let (registry, key, dir) = (
-                                Arc::clone(&provider_registry),
-                                *device_key,
-                                data_dir.clone(),
-                            );
-                            tokio::spawn(async move {
-                                while rx.recv().await.is_some() {
-                                    let Some(kick) = weak.upgrade() else { break };
-                                    restart_object_helper_for_roots(&registry, &dir, &key, kick)
-                                        .await;
-                                }
-                            });
                         }
                         tracing::info!("object-provider capsule from {}", path.display());
                     }
@@ -2205,7 +2154,6 @@ async fn setup_server_infrastructure_impl(
         carrier_service,
         collaboration_context,
         collaboration_service,
-        _object_helper_kick,
     })
 }
 

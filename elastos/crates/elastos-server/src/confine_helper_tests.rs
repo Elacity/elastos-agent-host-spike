@@ -595,6 +595,9 @@ async fn an_updated_home_reads_existing_files_through_the_fence() {
 /// That function creates every file-backed root before the first helper spawn.
 /// Chain's own directory is created inside `spawn_path_allow` before start.
 /// Audit-checkpoint state is ready before the object helper starts.
+/// Every Library object is under a principal root, `Users/<id>` or
+/// `UsersAI/<id>`, so capsule storage roots are too. The object fence covers
+/// both parents, and Home starts the object helper once.
 #[test]
 fn file_backed_roots_exist_before_the_first_helper_spawn() {
     let server = include_str!("server_infra.rs");
@@ -607,7 +610,6 @@ fn file_backed_roots_exist_before_the_first_helper_spawn() {
     let local = server
         .find("spawn_allow_listed_provider(\"localhost-provider\"")
         .expect("localhost");
-    // Restart also calls spawn_allow_listed_provider("object-provider"); take the setup site.
     let object = server[local..]
         .find("spawn_allow_listed_provider(\"object-provider\"")
         .map(|i| local + i)
@@ -617,18 +619,25 @@ fn file_backed_roots_exist_before_the_first_helper_spawn() {
         .map(|i| object + i)
         .expect("chain");
     assert!(roots < auth && auth < local && local < object && object < chain);
-    let restart = server
-        .find("async fn restart_object_helper_for_roots")
-        .expect("restart");
-    let replace = server[restart..]
-        .find("replace_sub_provider(\"object\"")
-        .map(|i| restart + i)
-        .expect("atomic replace");
-    let unregister = server[restart..replace].find("unregister_sub_provider(\"object\"");
-    assert!(
-        unregister.is_none(),
-        "restart must swap under one write lock, not unregister then register"
+    assert_eq!(
+        server
+            .matches("spawn_allow_listed_provider(\"object-provider\"")
+            .count(),
+        1,
+        "Home starts the object helper once; it does not restart it when storage roots change"
     );
+    let path_allow = include_str!("../../elastos-runtime/src/provider/path_allow.rs");
+    let object_roots = path_allow
+        .split("const OBJECT_ROOTS")
+        .nth(1)
+        .and_then(|rest| rest.split("];").next())
+        .expect("OBJECT_ROOTS");
+    for parent in ["(\"Users\", \"Users\")", "(\"UsersAI\", \"UsersAI\")"] {
+        assert!(
+            object_roots.contains(parent),
+            "the object fence must cover {parent}, the parent of every Library root"
+        );
+    }
     let bridge = include_str!("../../elastos-runtime/src/provider/bridge.rs");
     let chain_root = bridge
         .find("Self::ensure_chain_provider_root(data_dir)")
@@ -682,6 +691,112 @@ async fn fresh_data_dir_auth_ready_then_object_roots_answer() {
         "roots must answer: {roots}"
     );
     object.bridge().shutdown().await.unwrap();
+}
+
+/// The object helper starts before the capsule is installed, as when Home is
+/// already running. The new grant's root is under `Users`, which the fence
+/// already covers, so the Library write lands without a helper restart.
+#[cfg(all(
+    not(elastos_unsupported_os_check),
+    any(
+        target_os = "macos",
+        all(
+            target_os = "linux",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        )
+    )
+))]
+#[tokio::test]
+async fn capsule_install_while_home_runs_writes_under_users_fence() {
+    use base64::Engine;
+    let (_hold, data) = helper_data_root();
+    crate::auth::verify_auth_audit_chain_ready(&data)
+        .unwrap_or_else(|err| panic!("audit checkpoint was not ready: {err:#}"));
+    let principal = "person:local:ada";
+    let protection = crate::auth::store_test_principal_root_protection(&data, principal);
+    let root = protection.localhost_root;
+    let (_, did) = elastos_identity::load_or_create_did(&data).unwrap();
+    let object = spawn_object(&provider_binary("object-provider"), &data, &did).await;
+    let bridge = object.bridge();
+
+    let capsule = data.join("capsules/notes");
+    std::fs::create_dir_all(&capsule).unwrap();
+    std::fs::write(
+        capsule.join("index.html"),
+        "<!doctype html><title>Notes</title>",
+    )
+    .unwrap();
+    std::fs::write(
+        capsule.join("capsule.json"),
+        serde_json::to_vec(&serde_json::json!({
+            "schema": "elastos.capsule/v1",
+            "name": "notes",
+            "version": "0.1.0",
+            "description": "Notes",
+            "author": "elastos",
+            "role": "app",
+            "type": "data",
+            "entrypoint": "index.html",
+            "permissions": { "storage": ["localhost://Users/self/Notes/*"] }
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    std::fs::write(
+        data.join("components.json"),
+        serde_json::to_vec(&serde_json::json!({
+            "external": {
+                "notes": { "install_path": "capsules/notes", "platforms": {} }
+            },
+            "capsules": {},
+            "profiles": {}
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let grants = crate::api::capsule_inventory::read_active_storage_grants(&data)
+        .unwrap_or_else(|err| panic!("grant read: {err}"));
+    assert!(
+        grants.iter().any(|grant| grant.contains("Notes")),
+        "installed grant missing: {grants:?}"
+    );
+    for grant in &grants {
+        let path = elastos_common::localhost::rooted_localhost_fs_path(&data, grant)
+            .unwrap_or_else(|| panic!("grant is not file-backed: {grant}"));
+        let under_users =
+            path.starts_with(data.join("Users")) || path.starts_with(data.join("UsersAI"));
+        assert!(
+            under_users,
+            "every capsule storage root must live under Users or UsersAI: {grant} -> {}",
+            path.display()
+        );
+    }
+
+    let uri = format!("{root}/Notes/hello.txt");
+    let payload = base64::engine::general_purpose::STANDARD.encode(b"hello after install");
+    let wrote = exchange_ok(
+        bridge,
+        serde_json::json!({
+            "op": "write",
+            "principal_id": principal,
+            "uri": uri,
+            "data": payload
+        }),
+    )
+    .await;
+    assert_eq!(wrote["status"], "ok", "{wrote}");
+    assert!(
+        data.join(uri.trim_start_matches("localhost://")).is_file(),
+        "write under the new grant must land without restarting the helper"
+    );
+    let read = exchange_ok(
+        bridge,
+        serde_json::json!({"op": "read", "principal_id": principal, "uri": uri}),
+    )
+    .await;
+    assert_eq!(read["status"], "ok", "{read}");
+    assert_eq!(read["data"]["data"], payload);
+    bridge.shutdown().await.unwrap();
 }
 
 /// Library list through the fenced object-provider binary.

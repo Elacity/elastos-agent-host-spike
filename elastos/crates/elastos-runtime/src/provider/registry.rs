@@ -998,40 +998,6 @@ impl ProviderRegistry {
         Ok(())
     }
 
-    /// Ready swap under the write lock; old shutdown is logged, never ignored.
-    #[rustfmt::skip]
-    pub async fn replace_sub_provider(&self, name: &str, provider: Arc<dyn Provider>) -> Result<(), ProviderError> {
-        let key = name.to_lowercase();
-        if !RESERVED_SUB_NAMES.contains(&key.as_str()) {
-            return Err(ProviderError::Provider(format!("sub-provider '{key}' is not a reserved name")));
-        }
-        let old = {
-            let mut map = self.sub_providers.write().await;
-            let previous = match map.get(&key) {
-                Some(SubProviderRegistration::Ready { provider, visibility: ProviderTargetVisibility::CapsuleResource }) => Some(provider.clone()),
-                Some(SubProviderRegistration::Settling { visibility, .. }) => {
-                    let label = ["sub-provider", "runtime provider target"][usize::from(*visibility == ProviderTargetVisibility::RuntimeOnly)];
-                    return Err(ProviderError::Unavailable(format!("{label} '{key}' shutdown is already settling")));
-                }
-                Some(SubProviderRegistration::Ready { visibility: ProviderTargetVisibility::RuntimeOnly, .. }) => {
-                    return Err(ProviderError::Provider(format!("runtime provider target '{key}' is already registered")));
-                }
-                None => None,
-            };
-            map.insert(key.clone(), SubProviderRegistration::Ready { provider, visibility: ProviderTargetVisibility::CapsuleResource });
-            previous
-        };
-        if let Some(old) = old {
-            match old.shutdown().await {
-                Ok(()) => tracing::info!("Replaced sub-provider '{}' for elastos://{}/...", old.name(), key),
-                Err(error) => tracing::error!("replaced sub-provider '{}' left a failed shutdown: {error}", old.name()),
-            }
-        } else {
-            tracing::info!("Registered sub-provider for elastos://{}/... via replace", key);
-        }
-        Ok(())
-    }
-
     /// Unregister a sub-provider from `elastos://` hierarchical dispatch.
     ///
     /// No-op if the name is not currently registered.
@@ -5193,86 +5159,6 @@ mod tests {
             .register_sub_provider("storage", Arc::new(MockProvider::new()))
             .await
             .unwrap();
-    }
-
-    #[tokio::test]
-    async fn replace_sub_provider_keeps_a_ready_route_while_the_old_helper_shuts_down() {
-        let registry = Arc::new(ProviderRegistry::new());
-        let old = Arc::new(BlockingShutdownProvider::new());
-        registry
-            .register_sub_provider("storage", old.clone())
-            .await
-            .unwrap();
-        let new = Arc::new(MockProvider::new());
-        let replace_registry = registry.clone();
-        let replace_new = new.clone();
-        let replace_task = tokio::spawn(async move {
-            replace_registry
-                .replace_sub_provider("storage", replace_new)
-                .await
-                .unwrap();
-        });
-        old.entered_shutdown.notified().await;
-        let current = registry
-            .get_sub_provider("storage")
-            .await
-            .expect("Library read stays on a Ready route during swap");
-        assert_eq!(current.name(), "mock-localhost");
-        let read = registry
-            .route(
-                "elastos://storage/note.txt",
-                "test-capsule",
-                ResourceAction::Write,
-                Some(b"alive".to_vec()),
-            )
-            .await
-            .unwrap();
-        assert!(matches!(read, ResourceResponse::Written { bytes: 5 }));
-        let read = registry
-            .route(
-                "elastos://storage/note.txt",
-                "test-capsule",
-                ResourceAction::Read,
-                None,
-            )
-            .await
-            .unwrap();
-        assert!(matches!(read, ResourceResponse::Data(bytes) if bytes == b"alive"));
-        old.release_shutdown.notify_waiters();
-        replace_task.await.unwrap();
-        assert_eq!(
-            registry.get_sub_provider("storage").await.unwrap().name(),
-            "mock-localhost"
-        );
-    }
-
-    #[tokio::test]
-    async fn replace_sub_provider_keeps_the_new_helper_when_old_shutdown_fails() {
-        let registry = Arc::new(ProviderRegistry::new());
-        let old = Arc::new(BlockingShutdownProvider::failing());
-        registry
-            .register_sub_provider("storage", old.clone())
-            .await
-            .unwrap();
-        let new = Arc::new(MockProvider::new());
-        let replace_registry = registry.clone();
-        let replace_task = tokio::spawn(async move {
-            replace_registry
-                .replace_sub_provider("storage", new)
-                .await
-                .unwrap();
-        });
-        old.entered_shutdown.notified().await;
-        assert_eq!(
-            registry.get_sub_provider("storage").await.unwrap().name(),
-            "mock-localhost"
-        );
-        old.release_shutdown.notify_waiters();
-        replace_task.await.unwrap();
-        assert_eq!(
-            registry.get_sub_provider("storage").await.unwrap().name(),
-            "mock-localhost"
-        );
     }
 
     #[tokio::test]

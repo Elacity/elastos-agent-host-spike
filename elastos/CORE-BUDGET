@@ -59,4 +59,7 @@
 # Measured 26 Nov 2026.
 # +35: round 33 swaps the object helper under one write lock and gates
 # CHECKED_DIRECTORY to Linux and tests. Measured 26 Nov 2026.
-15298
+# -39: round 34 removes the object helper's live restart and its one-lock swap (-37);
+# the object fence already covers Users and UsersAI, where every capsule storage root
+# lives. last_errno reads errno through std (-2). Measured 26 Nov 2026.
+15259

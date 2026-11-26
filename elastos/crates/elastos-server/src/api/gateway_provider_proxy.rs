@@ -2010,16 +2010,7 @@ pub(super) async fn gateway_provider_proxy(
         }
     }
 
-    let mut response = if let Some(message) = (scheme == "object")
-        .then(|| crate::library::object_write_roots_change_message(&state.data_dir, &op))
-        .flatten()
-    {
-        serde_json::json!({
-            "status": "error",
-            "code": "library_error",
-            "message": message,
-        })
-    } else if scheme == "object"
+    let mut response = if scheme == "object"
         && (library_operation_needs_runtime_coordinator(&op)
             || library_request_targets_webspace(&request))
     {

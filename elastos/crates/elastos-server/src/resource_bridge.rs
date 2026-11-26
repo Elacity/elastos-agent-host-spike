@@ -1199,10 +1199,6 @@ async fn authorize_and_dispatch_resource_invoke(
         }
     }
 
-    if let Some(refusal) = object_roots_change_refusal(bridge_ctx, &dispatch) {
-        return finish_component_invoke(bridge_ctx, &audit_id, &dispatch, "denied", refusal);
-    }
-
     match bridge_ctx
         .provider_registry
         .send_raw(&dispatch.scheme, &dispatch.request)
@@ -1537,12 +1533,6 @@ fn agent_path_refusal(rooted: &str, operation: &str) -> Option<serde_json::Value
 }
 
 /// The Agents rule for a localhost invoke, on the scoped path the provider would use.
-#[rustfmt::skip]
-fn object_roots_change_refusal(bridge_ctx: &BridgeContext, dispatch: &ResourceInvokeDispatch) -> Option<serde_json::Value> {
-    let dir = bridge_ctx.data_dir.as_deref().filter(|_| dispatch.scheme == "object")?;
-    Some(resource_error_response("denied", &crate::library::object_write_roots_change_message(dir, &dispatch.operation)?))
-}
-
 fn agents_area_dispatch_refusal(dispatch: &ResourceInvokeDispatch) -> Option<serde_json::Value> {
     if dispatch.scheme != "localhost" {
         return None;
