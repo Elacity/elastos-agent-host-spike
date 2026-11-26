@@ -83,14 +83,18 @@ pub(crate) fn ensure_regular_auth_parent(_data_dir: &Path, _parent: &Path) -> an
 #[rustfmt::skip]
 pub(crate) fn open_regular_lock_file(path: &Path, label: &str) -> anyhow::Result<File> {
     if elastos_identity::object_helper_process() && path.file_name().is_some_and(|n| n == "audit-chain-required.json.lock") {
-        let dir = path.ancestors().nth(4).context("object helper audit lock has no home")?.join("Users");
-        std::fs::create_dir_all(&dir)?;
-        let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
-        let file_path = dir.join(format!(".helper-audit-{}-{stamp}.lock", std::process::id()));
-        let file = OpenOptions::new().create_new(true).read(true).write(true).mode(0o600).open(&file_path)
-            .with_context(|| format!("failed to open a private audit lock in {dir:?}"))?;
-        let _ = std::fs::remove_file(&file_path);
-        return Ok(file);
+        // Runtime holds this lock while it writes both records. Before Runtime
+        // makes it, the helper locks the Auth folder, which Runtime never locks.
+        let mut options = OpenOptions::new();
+        options.read(true).custom_flags(libc::O_NOFOLLOW);
+        match options.open(path) {
+            Ok(file) if file.metadata()?.is_file() => return Ok(file),
+            Ok(_) => anyhow::bail!("{label} lock must be a regular non-symlink file"),
+            Err(err) if err.kind() != ErrorKind::NotFound => return Err(err).with_context(|| format!("failed to open {label} lock {path:?}")),
+            Err(_) => {}
+        }
+        let folder = path.parent().context("audit lock has no folder")?;
+        return options.custom_flags(libc::O_NOFOLLOW | libc::O_DIRECTORY).open(folder).with_context(|| format!("failed to open {label} folder {folder:?}"));
     }
     let mut options = OpenOptions::new();
     options.create(true).truncate(false).read(true).write(true);

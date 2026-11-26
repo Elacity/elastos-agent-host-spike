@@ -2010,6 +2010,90 @@ async fn object_helper_leaves_a_split_sign_in_record_unchanged() {
     );
 }
 
+/// Runtime saves the sign-in record and its audit checkpoint in a loop while
+/// the helper reads. The helper takes Runtime's audit lock, so no read meets
+/// the two files mid-write. Without the lock file the helper locks the Auth
+/// folder and leaves no file behind.
+#[cfg(all(
+    not(elastos_unsupported_os_check),
+    any(
+        target_os = "macos",
+        all(
+            target_os = "linux",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        )
+    )
+))]
+#[tokio::test]
+async fn object_helper_reads_beside_runtime_saves_are_not_refused() {
+    let (_hold, data) = helper_data_root();
+    let ada = "person:local:ada";
+    crate::auth::store_test_human_principal(&data, ada);
+    let (_, did) = elastos_identity::load_or_create_did(&data).unwrap();
+    let object = spawn_object(&provider_binary("object-provider"), &data, &did).await;
+    let bridge = object.bridge();
+    let saves = 150u64;
+    let saver = std::thread::spawn({
+        let data = data.clone();
+        move || {
+            for index in 0..saves {
+                crate::auth::append_audit_event(
+                    &data,
+                    elastos_runtime::auth::RuntimeAuditEventV1 {
+                        schema: elastos_runtime::auth::RuntimeAuditEventV1::SCHEMA.to_string(),
+                        event_id: format!("audit:helper-race:{index}"),
+                        event_type: "test.audit".to_string(),
+                        principal_id: Some("person:local:ada".to_string()),
+                        proof_binding_id: None,
+                        session_id: Some("session:test".to_string()),
+                        challenge_id: None,
+                        capsule_id: Some("system".to_string()),
+                        result: "allowed".to_string(),
+                        reason: format!("helper race {index}"),
+                        occurred_at: index + 1,
+                        signer_did: None,
+                        signature: None,
+                    },
+                )
+                .unwrap();
+            }
+        }
+    });
+    let mut reads = 0u32;
+    while !saver.is_finished() {
+        let answer = exchange_ok(
+            bridge,
+            serde_json::json!({"op": "list", "principal_id": ada}),
+        )
+        .await;
+        assert_eq!(answer["status"], "ok", "read {reads}: {answer}");
+        reads += 1;
+    }
+    saver.join().unwrap();
+    assert!(reads >= 20, "only {reads} reads ran beside {saves} saves");
+    let lock = data.join("ElastOS/System/Auth/audit-chain-required.json.lock");
+    std::fs::remove_file(&lock).unwrap();
+    let names = |dir: &Path| -> Vec<std::ffi::OsString> {
+        let mut names: Vec<_> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        names.sort();
+        names
+    };
+    let users_before = names(&data.join("Users"));
+    let unlocked = exchange_ok(
+        bridge,
+        serde_json::json!({"op": "list", "principal_id": ada}),
+    )
+    .await;
+    assert_eq!(unlocked["status"], "ok", "{unlocked}");
+    assert!(!lock.exists(), "the helper made Runtime's lock file");
+    assert_eq!(names(&data.join("Users")), users_before);
+    bridge.shutdown().await.unwrap();
+    println!("{reads} helper reads beside {saves} Runtime saves; none refused");
+}
+
 /// `device:<did>` uses the DID Runtime passed in. An unknown principal keeps
 /// its own refusal. Neither opens the device key.
 #[cfg(all(
