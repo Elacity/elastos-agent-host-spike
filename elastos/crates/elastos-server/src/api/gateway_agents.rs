@@ -92,7 +92,7 @@ fn append_agent_lifecycle_audit(
             anyhow::bail!("injected signed agent audit append failure");
         }
     }
-    crate::auth::append_audit_event(
+    crate::agent_record_audit::append_agent_row(
         data_dir,
         RuntimeAuditEventV1 {
             schema: RuntimeAuditEventV1::SCHEMA.to_string(),
@@ -636,9 +636,6 @@ pub(super) async fn end_live_agent(
 }
 
 fn stop_found_no_live_guest(error: &anyhow::Error) -> bool {
-    if error.downcast_ref::<Refused>().is_some() {
-        return true;
-    }
     error.downcast_ref::<CodedRefusal>().is_some_and(|coded| {
         coded.code == "agent_no_session" || coded.code == "agent_already_stopped"
     })
@@ -1166,6 +1163,7 @@ fn owner_may_stop(
 
 /// A demote that did not come through the route. Another remaining admin
 /// signs the same stop. The route's own stop is claimed and does not reach here.
+#[cfg(test)]
 pub(super) fn schedule_demoted_owner_stop(data_dir: &std::path::Path, owner_id: &str) {
     let Some(other) = crate::agent_record_audit::another_live_admin(data_dir, owner_id) else {
         tracing::warn!("demoted owner '{owner_id}' still has agents and no admin to sign the stop");

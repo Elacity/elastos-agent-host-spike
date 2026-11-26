@@ -227,6 +227,9 @@ pub(crate) struct AgentRecordsFile {
     /// This field is one-way: an older build refuses a file that carries it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     last_audit: Option<LastAudit>,
+    /// Signed `stopping` and `failed` stop rows not yet settled, one per run.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    owed_stops: Vec<RuntimeAuditEventV1>,
 }
 
 /// The audit row a sequence promised. `confirmed` stays false until that row
@@ -284,6 +287,7 @@ impl AgentRecordsFile {
             enabled: None,
             agents: Vec::new(),
             last_audit: None,
+            owed_stops: Vec::new(),
         }
     }
 }
@@ -296,7 +300,7 @@ pub(crate) fn agent_file_path(data_dir: &Path) -> anyhow::Result<PathBuf> {
 #[derive(Debug)]
 enum AgentFile {
     Missing,
-    Loaded(AgentRecordsFile),
+    Loaded(Box<AgentRecordsFile>),
     Unavailable(&'static str),
 }
 
@@ -310,7 +314,7 @@ fn load(data_dir: &Path, owner_file: &[PrincipalRecord]) -> anyhow::Result<Agent
     };
     Ok(
         match parse_strict(&bytes).and_then(|file| check(&file, owner_file).map(|()| file)) {
-            Ok(file) => AgentFile::Loaded(file),
+            Ok(file) => AgentFile::Loaded(Box::new(file)),
             Err(reason) => AgentFile::Unavailable(reason),
         },
     )
@@ -851,13 +855,16 @@ impl Operation {
 /// - retire: one agent's `retired_at`, set once, and its `updated_at`;
 /// - set active: one agent's `active`, and its `updated_at`;
 /// - charge: one active agent's `model_tokens_spent`, raised by one block;
-/// - heal: any non-retired agent's `model_tokens_spent`, raised, nothing else.
+/// - heal: any non-retired agent's `model_tokens_spent`, raised, or else `owed_stops` alone.
 fn permits(operation: Operation, before: &AgentRecordsFile, after: &AgentRecordsFile) -> bool {
     if after.schema != before.schema || before.sequence.checked_add(1) != Some(after.sequence) {
         return false;
     }
     let same_agents = after.agents == before.agents;
     let same_enabled = after.enabled == before.enabled;
+    if after.owed_stops != before.owed_stops {
+        return operation == Operation::Heal && same_agents && same_enabled;
+    }
     match operation {
         Operation::Enable => same_agents && before.enabled.is_none() && after.enabled.is_some(),
         Operation::Disable => same_agents && before.enabled.is_some() && after.enabled.is_none(),
@@ -952,6 +959,7 @@ fn sets_active(old: &StoredAgent, new: &StoredAgent) -> bool {
 }
 
 /// Who asked for a write: a stored person, on their proof-bound session.
+#[derive(Default)]
 pub(crate) struct Caller<'a> {
     pub(crate) principal_id: &'a str,
     pub(crate) proof_binding_id: &'a str,
@@ -994,7 +1002,7 @@ fn open_for(data_dir: &Path, for_write: bool, wait: Option<Duration>) -> anyhow:
         .collect();
     let mut file = match load(data_dir, &owner_file)? {
         AgentFile::Missing => AgentRecordsFile::unwritten(),
-        AgentFile::Loaded(file) => file,
+        AgentFile::Loaded(file) => *file,
         AgentFile::Unavailable(reason) => return Err(Named(reason).into()),
     };
     if for_write {
@@ -2346,11 +2354,14 @@ pub(crate) fn owner_is_admin_now(data_dir: &Path, owner_id: &str) -> anyhow::Res
     Ok(admin && (!passkey || live_passkey))
 }
 
+#[cfg(test)]
 type OwnerDemotedHook = fn(&Path, &str);
+#[cfg(test)]
 static OWNER_DEMOTED_HOOK: std::sync::LazyLock<std::sync::Mutex<Option<OwnerDemotedHook>>> =
     std::sync::LazyLock::new(|| std::sync::Mutex::new(None));
 
 /// The gateway registers the stop that a direct demote runs.
+#[cfg(test)]
 pub(crate) fn set_owner_demoted_hook(hook: fn(&Path, &str)) {
     *OWNER_DEMOTED_HOOK
         .lock()
@@ -2396,6 +2407,40 @@ pub(crate) fn owner_of(data_dir: &Path, agent_id: &str) -> Option<String> {
         .into_iter()
         .find(|agent| agent.record.principal_id == agent_id)
         .and_then(|agent| agent.record.owner)
+}
+
+fn row_agent(event: &RuntimeAuditEventV1) -> Option<String> {
+    let reason: serde_json::Value = serde_json::from_str(&event.reason).ok()?;
+    reason.get("agent_id")?.as_str().map(str::to_string)
+}
+
+/// Keeps an owed stop row until a row of its session, or of its agent if failed, settles it.
+pub(crate) fn note_stop_row(data_dir: &Path, event: &RuntimeAuditEventV1) -> anyhow::Result<()> {
+    let started = event.event_type == "agent.start.completed" && event.result == "ok";
+    if event.event_type != "agent.stopped" && !started {
+        return Ok(());
+    }
+    let (agent, session) = (row_agent(event), event.session_id.as_deref());
+    let opened = open(data_dir, true)?;
+    let mut after = opened.file.clone();
+    after.owed_stops.retain(|owed| {
+        let run = owed.session_id.is_some() && owed.session_id.as_deref() == session;
+        !run && (owed.result != "failed" || agent.is_none() || row_agent(owed) != agent)
+    });
+    let owes = !started && matches!(event.result.as_str(), "stopping" | "failed");
+    if owes && (session.is_some() || agent.is_some()) {
+        after.owed_stops.push(event.clone());
+    }
+    if after.owed_stops == opened.file.owed_stops {
+        return Ok(());
+    }
+    after.sequence += 1;
+    let caller = Caller::default();
+    write(data_dir, &opened, Operation::Heal, &after, &caller, "", 0)
+}
+
+pub(crate) fn owed_stop_rows(data_dir: &Path) -> Vec<RuntimeAuditEventV1> {
+    open(data_dir, false).map_or(vec![], |f| f.file.owed_stops)
 }
 
 /// The stored agent, without the owner check. Stop uses this after it has

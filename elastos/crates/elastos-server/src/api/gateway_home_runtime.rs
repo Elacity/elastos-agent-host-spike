@@ -894,6 +894,15 @@ async fn stop_runtime_agent_rows(
                 already: Some("ended".to_string()),
             });
         }
+        Err(error) if error.to_string() == "agent runtime is not running" => {
+            let body = serde_json::to_vec(&RuntimeAgentStopRequest {
+                agent_id,
+                session_id,
+                cause,
+            })?;
+            let answer = crate::api::agent_plane::stop_on_retiring(data_dir, body).await;
+            return stop_answer(answer.ok_or(error)?).await;
+        }
         Err(error) => return Err(error),
     };
     let client = reqwest::Client::builder()
@@ -912,6 +921,10 @@ async fn stop_runtime_agent_rows(
         })
         .send()
         .await?;
+    stop_answer(response).await
+}
+
+async fn stop_answer(response: reqwest::Response) -> anyhow::Result<RuntimeAgentStop> {
     let status = response.status();
     if !status.is_success() {
         let text = response.text().await.unwrap_or_default();

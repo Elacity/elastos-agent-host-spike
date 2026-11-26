@@ -2102,7 +2102,7 @@ impl Runtime {
     /// beside [`Self::start_local_admitted`] because it is the call the launch
     /// route's F-sync falsifier restores, and the agent rows that assert a
     /// whole run use it.
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(all(test, unix))]
     pub(crate) async fn run_local_admitted(
         &self,
         path: &Path,
@@ -2670,11 +2670,7 @@ impl Runtime {
     }
 
     /// Test only: plant a start record the launch route did not write.
-    ///
-    /// The caller lives in the agents build's launch tests. This allow keeps
-    /// the helper when that build is off, where those tests are not compiled.
     #[cfg(test)]
-    #[allow(dead_code)]
     pub(crate) async fn insert_agent_session_for_test(&self, record: AgentSessionRecord) {
         let session_id = record.session_id.clone();
         self.agent_launches

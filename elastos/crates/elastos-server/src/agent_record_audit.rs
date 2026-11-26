@@ -54,10 +54,21 @@ pub(crate) fn repair_recorded_audit(
     )
 }
 
+/// Appends one signed agent row; the agent file keeps owed stops past the audit list.
+pub(crate) fn append_agent_row(data_dir: &Path, event: RuntimeAuditEventV1) -> anyhow::Result<()> {
+    let owes = event.event_type == "agent.stopped" && event.result != "ok";
+    let kept = !owes || crate::agents::note_stop_row(data_dir, &event).is_ok();
+    crate::auth::append_audit_event(data_dir, event.clone())?;
+    if !kept || (!owes && crate::agents::note_stop_row(data_dir, &event).is_err()) {
+        tracing::warn!("the agent file's owed stops were not updated");
+    }
+    Ok(())
+}
+
 /// Sessions whose latest `agent.stopped` row is still `stopping`.
 pub(crate) fn open_stopping_sessions(data_dir: &Path) -> anyhow::Result<Vec<String>> {
-    let state = crate::auth::load_auth_state(data_dir)?;
-    Ok(open_stopping(&state.audit).into_keys().collect())
+    let owed = crate::agents::owed_stop_rows(data_dir);
+    Ok(open_stopping(&owed).into_keys().collect())
 }
 
 fn open_stopping(
@@ -90,8 +101,8 @@ pub(crate) fn confirm_stopping_rows(
     use std::sync::Mutex;
     static CONFIRM: Mutex<()> = Mutex::new(());
     let _guard = CONFIRM.lock().unwrap_or_else(|error| error.into_inner());
-    let state = crate::auth::load_auth_state(data_dir)?;
-    let open = open_stopping(&state.audit);
+    let owed = crate::agents::owed_stop_rows(data_dir);
+    let open = open_stopping(&owed);
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|duration| duration.as_secs())
@@ -103,7 +114,7 @@ pub(crate) fn confirm_stopping_rows(
         if !session_has_ended(session) {
             continue;
         }
-        crate::auth::append_audit_event(
+        append_agent_row(
             data_dir,
             RuntimeAuditEventV1 {
                 schema: RuntimeAuditEventV1::SCHEMA.to_string(),
@@ -132,6 +143,7 @@ fn confirm_nonce() -> u64 {
 }
 
 /// Another admin with a live passkey. `owner_id` is not a candidate.
+#[cfg(test)]
 pub(crate) fn another_live_admin(
     data_dir: &Path,
     owner_id: &str,
@@ -166,7 +178,7 @@ pub(crate) fn latest_failed_agent_stops(data_dir: &Path) -> Vec<FailedAgentStop>
     };
     let mut latest =
         std::collections::HashMap::<String, (String, String, serde_json::Value)>::new();
-    for event in &auth.audit {
+    for event in &crate::agents::owed_stop_rows(data_dir) {
         let started = event.event_type == "agent.start.completed" && event.result == "ok";
         if event.event_type != "agent.stopped" && !started {
             continue;

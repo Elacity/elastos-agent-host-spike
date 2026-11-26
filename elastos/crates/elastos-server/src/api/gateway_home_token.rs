@@ -525,7 +525,6 @@ fn note_agent_launch_grant_minted(data_dir: &std::path::Path) {
 }
 
 #[cfg(test)]
-#[allow(dead_code)]
 pub(in crate::api) fn agent_launch_grants_minted_for_test(data_dir: &std::path::Path) -> u64 {
     AGENT_LAUNCH_GRANTS_MINTED
         .lock()

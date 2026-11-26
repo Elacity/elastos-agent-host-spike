@@ -1,8 +1,4 @@
-pub(super) use super::gateway_home_system_ai_provider::{
-    clear_hosted_ai_validate_doubles, install_openrouter_key_response,
-    install_openrouter_models_double, install_venice_validate_double, OpenRouterModelsDouble,
-    VeniceAuthDouble,
-};
+pub(super) use super::gateway_home_system_ai_provider::install_openrouter_key_response;
 use super::*;
 use crate::sources::{save_trusted_sources, TrustedSource, TrustedSourcesConfig};
 use axum::body::Body;
@@ -1294,4 +1290,11 @@ async fn inbox_kept_elsewhere_refusal_answers_403() {
         String::from_utf8_lossy(&body),
         "protected record is kept only on the Runtime this person signed in on"
     );
+}
+
+/// The mint counter starts at zero for a new Home, in every test build.
+#[test]
+fn a_new_home_has_minted_no_agent_launch_grant() {
+    let dir = tempfile::tempdir().unwrap();
+    assert_eq!(agent_launch_grants_minted_for_test(dir.path()), 0);
 }

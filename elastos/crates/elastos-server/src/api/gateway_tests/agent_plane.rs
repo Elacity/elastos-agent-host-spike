@@ -1921,7 +1921,7 @@ async fn an_effect_held_across_turn_off_is_not_signed_ok() {
         "step-held",
     )
     .expect("the effect hold");
-    crate::auth::append_audit_event(
+    crate::agent_record_audit::append_agent_row(
         &home.data,
         elastos_runtime::auth::RuntimeAuditEventV1 {
             schema: elastos_runtime::auth::RuntimeAuditEventV1::SCHEMA.to_string(),
@@ -2402,7 +2402,7 @@ async fn a_live_plane_does_not_hide_a_retiring_effect_or_stop() {
         })
         .await;
     crate::api::agent_plane::plant_retiring_runtime(&home.data, Arc::clone(&retiring));
-    crate::auth::append_audit_event(
+    crate::agent_record_audit::append_agent_row(
         &home.data,
         elastos_runtime::auth::RuntimeAuditEventV1 {
             schema: elastos_runtime::auth::RuntimeAuditEventV1::SCHEMA.to_string(),
@@ -3408,6 +3408,185 @@ async fn a_failed_demote_stop_is_signed_and_retried_at_the_next_start() {
     gateway.shutdown().await;
 }
 
+static ROW: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn audit_row(
+    principal: &str,
+    session: Option<&str>,
+    event_type: &str,
+    result: &str,
+    reason: String,
+) -> elastos_runtime::auth::RuntimeAuditEventV1 {
+    elastos_runtime::auth::RuntimeAuditEventV1 {
+        schema: elastos_runtime::auth::RuntimeAuditEventV1::SCHEMA.to_string(),
+        event_id: format!(
+            "audit:r16:{event_type}:{}",
+            ROW.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ),
+        event_type: event_type.to_string(),
+        principal_id: Some(principal.to_string()),
+        proof_binding_id: None,
+        session_id: session.map(str::to_string),
+        challenge_id: None,
+        capsule_id: None,
+        result: result.to_string(),
+        reason,
+        occurred_at: crate::auth::now_ts(),
+        signer_did: None,
+        signature: None,
+    }
+}
+
+/// A failed demote stop and an open `stopping` row, then 600 unrelated audit
+/// rows push both out of the sign-in file's 512-row list. The agent file still
+/// owes them: the retry runs once and the stopping row settles once.
+#[tokio::test]
+async fn owed_stops_outlive_a_full_audit_list() {
+    let home = Home::open();
+    let (owner, other) = admins(&home, "ring-wrap");
+    let dir = home._temp.path().join("probe");
+    let agent = create_owned_agent(&home.data, &owner, &sign_probe(&dir));
+    let gateway = Gateway::start(&home.data).await;
+    let session = launch_owned(&home, &owner, &agent).await;
+    crate::api::agent_plane::arm_task_fault(&home.data, "the plane did not stop the agent");
+    let (status, body) = home_http(
+        &gateway.addr,
+        &other.system_token,
+        reqwest::Method::POST,
+        &format!("/api/auth/passkeys/{}/demote-guest", owner.proof_binding_id),
+    )
+    .await;
+    assert_ne!(status, 200, "{body}");
+    crate::api::agent_plane::clear_task_fault(&home.data);
+    let reason = json!({ "agent_id": "agent-elsewhere" }).to_string();
+    let stopping = audit_row(
+        &owner.principal_id,
+        Some("session-gone"),
+        "agent.stopped",
+        "stopping",
+        reason,
+    );
+    crate::agent_record_audit::append_agent_row(&home.data, stopping).unwrap();
+    for _ in 0..600 {
+        let pad = audit_row(
+            &owner.principal_id,
+            None,
+            "audit.pad",
+            "ok",
+            "pad".to_string(),
+        );
+        crate::auth::append_audit_event(&home.data, pad).unwrap();
+    }
+    assert!(
+        stopped_rows(&home.data).is_empty(),
+        "the pad did not wrap the list"
+    );
+    for _ in 0..2 {
+        super::super::gateway_agents::confirm_stopping_rows(&home.data)
+            .await
+            .unwrap();
+    }
+    assert!(!capsule_live(&gateway.agent_url, &gateway.secret, &session).await);
+    let rows = stopped_rows(&home.data);
+    let settled = |id: &str| rows.iter().filter(|row| row.reason.contains(id)).count();
+    assert_eq!(
+        settled(&agent),
+        1,
+        "the failed stop is retried once: {rows:?}"
+    );
+    assert_eq!(
+        settled("agent-elsewhere"),
+        1,
+        "the stopping row settles once: {rows:?}"
+    );
+    assert!(rows.iter().all(|row| row.result == "ok"), "{rows:?}");
+    assert!(crate::agents::owed_stop_rows(&home.data).is_empty());
+    gateway.shutdown().await;
+}
+
+/// Agents Off while the guest is in a call it does not leave, then a demote:
+/// the stop reaches the guest on the retiring plane and is signed once.
+#[tokio::test]
+async fn a_demote_after_agents_off_stops_the_guest_on_the_retiring_plane() {
+    let home = Home::open();
+    let (owner, other) = admins(&home, "retiring-demote");
+    let dir = home._temp.path().join("probe");
+    let agent = create_owned_agent(&home.data, &owner, &sign_probe(&dir));
+    let gateway = Gateway::start(&home.data).await;
+    let session = launch_owned(&home, &owner, &agent).await;
+    let runtime = crate::api::agent_plane::plane_runtime(&home.data).unwrap();
+    crate::api::agent_plane::plant_retiring_runtime(&home.data, Arc::clone(&runtime));
+    std::fs::remove_file(crate::api::agent_plane::coords_path(&home.data)).unwrap();
+    assert!(crate::api::agent_plane::live_coords(&home.data)
+        .await
+        .is_none());
+    let (status, body) = home_http(
+        &gateway.addr,
+        &other.system_token,
+        reqwest::Method::POST,
+        &format!("/api/auth/passkeys/{}/demote-guest", owner.proof_binding_id),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    let info = runtime.get_capsule(&session).await;
+    assert!(
+        info.is_none_or(|info| info.ended_at.is_some()),
+        "the guest still runs"
+    );
+    let rows = stopped_rows(&home.data);
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!(rows[0].result, "ok", "{rows:?}");
+    gateway.shutdown().await;
+}
+
+/// A stop the plane answers 409 is a failed stop: signed `failed` and owed a
+/// retry, not taken for "nothing to end".
+#[tokio::test]
+async fn a_409_stop_answer_is_signed_failed_and_owed() {
+    let home = Home::open();
+    let (owner, other) = admins(&home, "stop-409");
+    let dir = home._temp.path().join("probe");
+    let agent = create_owned_agent(&home.data, &owner, &sign_probe(&dir));
+    let gateway = Gateway::start(&home.data).await;
+    let runtime = crate::api::agent_plane::plane_runtime(&home.data).unwrap();
+    runtime
+        .register_capsule(crate::runtime::RunningCapsuleInfo {
+            id: "session-no-start".to_string(),
+            name: "no start record".to_string(),
+            status: crate::runtime::CAPSULE_RUNNING.to_string(),
+            capsule_type: elastos_common::CapsuleType::Wasm,
+            handle: None,
+            session_id: "session-no-start".to_string(),
+            principal: Some(agent.clone()),
+            cause: None,
+            ended_at: None,
+        })
+        .await;
+    let (status, body) = home_http(
+        &gateway.addr,
+        &other.system_token,
+        reqwest::Method::POST,
+        &format!("/api/auth/passkeys/{}/demote-guest", owner.proof_binding_id),
+    )
+    .await;
+    assert_ne!(status, 200, "{body}");
+    let rows = stopped_rows(&home.data);
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!(rows[0].result, "failed", "{rows:?}");
+    let owed = crate::agents::owed_stop_rows(&home.data);
+    assert!(owed.iter().any(|row| row.result == "failed"), "{owed:?}");
+    super::super::gateway_agents::confirm_stopping_rows(&home.data)
+        .await
+        .unwrap();
+    assert_eq!(
+        stopped_rows(&home.data).len(),
+        1,
+        "a 409 retry is not signed ok"
+    );
+    runtime.unregister_capsule("session-no-start").await;
+    gateway.shutdown().await;
+}
+
 fn stopped_rows(data: &Path) -> Vec<elastos_runtime::auth::RuntimeAuditEventV1> {
     crate::auth::load_auth_state(data)
         .unwrap()
@@ -3581,7 +3760,7 @@ async fn a_failed_stop_is_not_retried_against_a_later_run() {
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     let second = launch_owned(&home, &owner, &agent).await;
-    crate::auth::append_audit_event(
+    crate::agent_record_audit::append_agent_row(
         &home.data,
         elastos_runtime::auth::RuntimeAuditEventV1 {
             schema: elastos_runtime::auth::RuntimeAuditEventV1::SCHEMA.to_string(),

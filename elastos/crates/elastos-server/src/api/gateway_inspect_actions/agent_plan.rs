@@ -24,7 +24,6 @@ use crate::inspect_provider::plan_scheme;
 /// agent acts for and who reads and decides the plan; the requester is the
 /// agent; the capsule and session are the component activation the Runtime
 /// started.
-#[cfg_attr(not(test), allow(dead_code))]
 pub(super) struct AgentPlanContext<'a> {
     pub(super) principal_id: &'a str,
     pub(super) requester_id: &'a str,
@@ -33,7 +32,6 @@ pub(super) struct AgentPlanContext<'a> {
 }
 
 /// Record one pending agent plan without any effect.
-#[cfg_attr(not(test), allow(dead_code))]
 pub(super) fn create_pending_agent_plan_record(
     data_dir: &Path,
     context: &AgentPlanContext<'_>,

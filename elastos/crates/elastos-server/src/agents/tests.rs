@@ -486,6 +486,7 @@ fn enabled_file(agents: Vec<StoredAgent>) -> AgentRecordsFile {
         }),
         agents,
         last_audit: None,
+        owed_stops: Vec::new(),
     }
 }
 
@@ -1347,7 +1348,7 @@ fn turn_on(home: &Home) {
 
 fn loaded(home: &Home) -> AgentRecordsFile {
     match home.load() {
-        AgentFile::Loaded(file) => file,
+        AgentFile::Loaded(file) => *file,
         other => panic!("the agent file did not load: {other:?}"),
     }
 }
@@ -2441,7 +2442,7 @@ fn an_off_agent_is_not_stored_for_its_root() {
 fn a_stopping_row_is_confirmed_once_from_the_file() {
     let home = Home::new();
     let session = "session-stopping-confirm";
-    crate::auth::append_audit_event(
+    crate::agent_record_audit::append_agent_row(
         home.path(),
         elastos_runtime::auth::RuntimeAuditEventV1 {
             schema: elastos_runtime::auth::RuntimeAuditEventV1::SCHEMA.to_string(),
@@ -2497,7 +2498,7 @@ fn a_stopping_row_is_confirmed_once_from_the_file() {
 fn a_stopping_row_stays_open_while_the_session_has_not_ended() {
     let home = Home::new();
     let session = "session-still-running";
-    crate::auth::append_audit_event(
+    crate::agent_record_audit::append_agent_row(
         home.path(),
         elastos_runtime::auth::RuntimeAuditEventV1 {
             schema: elastos_runtime::auth::RuntimeAuditEventV1::SCHEMA.to_string(),
@@ -2539,7 +2540,7 @@ fn a_stopping_row_stays_open_while_the_session_has_not_ended() {
 fn a_later_started_run_clears_a_failed_stop() {
     let home = Home::new();
     let row = |id: &str, event_type: &str, result: &str| {
-        crate::auth::append_audit_event(
+        crate::agent_record_audit::append_agent_row(
             home.path(),
             elastos_runtime::auth::RuntimeAuditEventV1 {
                 schema: elastos_runtime::auth::RuntimeAuditEventV1::SCHEMA.to_string(),

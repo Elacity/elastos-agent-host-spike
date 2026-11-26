@@ -780,6 +780,17 @@ async fn stop_and_settle(
         .await
 }
 
+/// The retiring plane's stop, in process: Agents Off removed its coordinates.
+pub(crate) async fn stop_on_retiring(dir: &Path, body: Vec<u8>) -> Option<reqwest::Response> {
+    let runtime = retiring_runtime(dir)?;
+    let (pending, _, _) = runtime.instance_authority_plane()?;
+    let (audit, held) = (Extension(Arc::new(AuditLog::new())), Extension(pending));
+    let answer = stop_and_settle(Extension(runtime), audit, held, body.into()).await;
+    let (head, body) = answer.into_parts();
+    let bytes = axum::body::to_bytes(body, 1 << 20).await.ok()?;
+    Some(Response::from_parts(head, bytes).into())
+}
+
 /// Deny every still-waiting ask of these sessions. `reason` names why.
 pub(crate) async fn deny_waiting_asks(
     store: &PendingRequestStore,

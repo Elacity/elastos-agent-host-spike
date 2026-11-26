@@ -194,7 +194,6 @@ pub(crate) use gateway_home_system::{
 };
 use gateway_home_terminal::*;
 #[cfg(test)]
-#[allow(unused_imports)]
 pub(super) use gateway_home_token::agent_launch_grants_minted_for_test;
 #[cfg(test)]
 pub(super) use gateway_home_token::bind_device_session_grant;
@@ -230,7 +229,6 @@ pub(super) use gateway_home_token::{
 use gateway_home_update::*;
 
 #[cfg(test)]
-#[allow(unused_imports)]
 pub(super) use gateway_home_system_ai_provider::{
     clear_hosted_ai_validate_doubles, install_openrouter_models_double,
     install_venice_validate_double, OpenRouterModelsDouble, VeniceAuthDouble,
