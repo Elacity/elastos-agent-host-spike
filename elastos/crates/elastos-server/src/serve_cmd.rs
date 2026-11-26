@@ -438,6 +438,7 @@ pub async fn run_serve(
             }
             s.set_capability_manager(infra.capability_manager.clone());
             s.set_pending_store(infra.pending_store.clone());
+            s.set_v2_guests(runtime.component_guests());
             Some(Arc::new(s))
         } else {
             None

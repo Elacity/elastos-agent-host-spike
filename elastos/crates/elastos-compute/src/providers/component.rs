@@ -684,9 +684,9 @@ impl ComponentProvider {
                 self.clear_bridge_principal(capsule_id).await;
                 return;
             };
+            raise_flag(&instance.stop_requested, &instance.wake);
             instance.grants.lock().expect("grant book").clear();
             self.frames.lock().expect("frames").remove(&capsule_id.0);
-            raise_flag(&instance.stop_requested, &instance.wake);
             drop(instance.events.take());
             let join = begin_v2_join(instance);
             if join.is_none() {

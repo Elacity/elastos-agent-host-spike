@@ -1129,8 +1129,9 @@ struct ComponentBridgeTables {
 }
 
 impl Runtime {
-    /// The v2 guests this runtime hosts. The owner's revoke routes tell them.
-    pub(crate) fn component_guests(&self) -> Option<Arc<ComponentProvider>> {
+    /// The v2 guests this runtime hosts. The owner's revoke routes tell them,
+    /// and `elastos serve` hands the same view to the Supervisor.
+    pub fn component_guests(&self) -> Option<Arc<ComponentProvider>> {
         self.component_provider.clone()
     }
 

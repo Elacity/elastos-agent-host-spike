@@ -2517,6 +2517,20 @@ mod tests {
     /// Fills the pending store to capacity around `keep`, ages past retention,
     /// and admits one new request so retirement runs.
     async fn push_past_retirement(state: &CapabilityState, keep: &str) {
+        fill_pending_to_capacity(state, keep).await;
+        age_past_capacity_retention(&state.pending_store).await;
+        let input = RequestCapabilityInput {
+            resource: "elastos://content/publish".to_string(),
+            action: "write".to_string(),
+            reason: String::new(),
+        };
+        let client = Extension(Session::new_capsule("vm-new".to_string()));
+        let reply = request_capability(State(state.clone()), client, Json(input)).await;
+        assert_eq!(reply.unwrap().0.status, "pending");
+    }
+
+    /// Fills the pending store to capacity around `keep` without retiring.
+    async fn fill_pending_to_capacity(state: &CapabilityState, keep: &str) {
         use elastos_runtime::capability::pending::{MAX_PENDING_PER_SESSION, MAX_PENDING_REQUESTS};
         let store = state.pending_store.clone();
         let resource = ResourceId::new("elastos://content/publish");
@@ -2532,15 +2546,30 @@ mod tests {
             assert_ne!(id, keep);
         }
         assert_eq!(store.list_requests().await.len(), MAX_PENDING_REQUESTS);
-        age_past_capacity_retention(&store).await;
-        let input = RequestCapabilityInput {
-            resource: "elastos://content/publish".to_string(),
-            action: "write".to_string(),
-            reason: String::new(),
-        };
-        let client = Extension(Session::new_capsule("vm-new".to_string()));
-        let reply = request_capability(State(state.clone()), client, Json(input)).await;
-        assert_eq!(reply.unwrap().0.status, "pending");
+    }
+
+    /// Retirement through the Supervisor microVM bridge's guests view.
+    async fn push_past_retirement_via_supervisor(
+        state: &CapabilityState,
+        keep: &str,
+        guests: Option<&elastos_compute::providers::ComponentProvider>,
+    ) {
+        fill_pending_to_capacity(state, keep).await;
+        age_past_capacity_retention(&state.pending_store).await;
+        let pending = create_request_retiring(
+            &state.pending_store,
+            &state.capability_manager,
+            guests,
+            SessionId::from_string("vm-supervisor-new"),
+            ResourceId::new("elastos://content/publish"),
+            Action::Write,
+            String::new(),
+        )
+        .await;
+        assert!(
+            pending.is_pending(),
+            "supervisor bridge admits a new request"
+        );
     }
 
     #[tokio::test]
@@ -2625,6 +2654,78 @@ mod tests {
         .expect("DELETE revokes the spent grant");
         assert!(open.pull(1).is_none(), "DELETE ends the stream");
         assert!(matches!(open.trailer(), Some(Err(_))));
+        ComputeProvider::stop(guests.as_ref(), &handle)
+            .await
+            .unwrap();
+    }
+
+    /// A spent once grant a live guest still holds stays listed and revocable
+    /// when capacity retirement runs through the Supervisor microVM bridge.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_spent_once_grant_stays_live_past_supervisor_bridge_retirement() {
+        use elastos_compute::ComputeProvider;
+        use elastos_runtime::provider::ProviderRegistry;
+
+        let (state, guests, handle, id, encoded, _) = spent_once_held_by_guest().await;
+        guests.testing_store_v2_frame(
+            handle.id.as_str(),
+            None,
+            vec![elastos_compute::providers::bus2_ui::FrameNode::Image {
+                grant: encoded.clone(),
+                resource: "localhost://Public/note.txt".into(),
+            }],
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let registry = Arc::new(ProviderRegistry::new());
+        let mut supervisor = crate::supervisor::Supervisor::new(
+            dir.path().to_path_buf(),
+            crate::setup::ComponentsManifest {
+                extra: Default::default(),
+                model_catalog: None,
+                collaboration_network: None,
+                external: Default::default(),
+                capsules: Default::default(),
+                profiles: Default::default(),
+            },
+        );
+        supervisor.set_provider_registry(registry.clone());
+        supervisor.set_capability_manager(state.capability_manager.clone());
+        supervisor.set_pending_store(state.pending_store.clone());
+        supervisor.set_v2_guests(Some(guests.clone()));
+        let manifest_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/fixtures/components/bus-v1/capsule.json");
+        let manifest: elastos_common::CapsuleManifest =
+            serde_json::from_slice(&std::fs::read(manifest_path).unwrap()).unwrap();
+        let bridge = supervisor
+            .microvm_bridge_context(registry, "cap-retire", None, &manifest)
+            .expect("supervisor bridge context");
+        let (_, ids) = live_view(&state).await;
+        assert!(ids.contains(&id), "all_sessions_live lists the spent grant");
+        push_past_retirement_via_supervisor(&state, &id, bridge.v2_guests.as_deref()).await;
+        assert!(
+            state.pending_store.get_request(&id).await.is_some(),
+            "supervisor retirement leaves a grant a guest still holds"
+        );
+        let (_, ids) = live_view(&state).await;
+        assert!(
+            ids.contains(&id),
+            "the spent grant stays listed after supervisor retirement"
+        );
+        let _ = revoke_capability(
+            State(state),
+            Extension(Session::new_shell("shell".into())),
+            Path(id),
+        )
+        .await
+        .expect("DELETE revokes the spent grant");
+        assert!(
+            guests
+                .read_v2_frame(None, handle.id.as_str())
+                .await
+                .is_none_or(|frame| frame.nodes.is_empty()),
+            "DELETE ends the image"
+        );
         ComputeProvider::stop(guests.as_ref(), &handle)
             .await
             .unwrap();
