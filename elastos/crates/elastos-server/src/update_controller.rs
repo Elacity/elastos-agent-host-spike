@@ -1927,52 +1927,6 @@ pub fn update_can_roll_back(data_dir: &Path) -> bool {
         || !matches!(request, Err(error) if error.kind() == std::io::ErrorKind::NotFound)
 }
 
-/// Named remedy when a rollback wait cannot clear itself; `elastos update --check`
-/// prints it. A real pending update (journal under a good receipt, or an active
-/// request while the controller lease is held) returns None. A pending journal is
-/// recovered before a damaged receipt.json is ever named for deletion.
-pub fn update_rollback_fault_remedy(data_dir: &Path) -> Option<&'static str> {
-    let dir = data_dir.join(DIRECTORY);
-    let request = fs::symlink_metadata(dir.join(ACTIVE_REQUEST));
-    let unread = matches!(&request, Err(error) if error.kind() != std::io::ErrorKind::NotFound);
-    if unread || path_present(&dir.join(RECEIPT)).is_err() {
-        return Some("update-controller cannot be read. Make it readable, then restart.");
-    }
-    let kept = installed_writer_binary(data_dir);
-    let journal = crate::install_transaction::installed_binary(
-        data_dir,
-        kept.as_ref().ok().cloned().flatten(),
-    )
-    .ok()
-    .flatten()
-    .is_some_and(|path| InstallTransaction::has_pending_recovery(&path));
-    match (journal, kept.is_err()) {
-        (true, true) => Some("An update waits to be recovered. Run elastos update, then restart."),
-        (true, false) => None,
-        (false, true) => {
-            Some("update-controller/receipt.json is damaged. Delete it, then restart.")
-        }
-        (false, false) if request.is_ok() && controller_lease_free(&dir) => {
-            Some("update-controller/active-request.json is stuck. Delete it, then restart.")
-        }
-        (false, false) => None,
-    }
-}
-
-#[cfg(unix)]
-fn controller_lease_free(directory: &Path) -> bool {
-    let path = directory.join("controller.lock");
-    let Ok(file) = OpenOptions::new().read(true).write(true).open(&path) else {
-        return true;
-    };
-    FileLock::try_exclusive(file).is_ok()
-}
-
-#[cfg(not(unix))]
-fn controller_lease_free(_directory: &Path) -> bool {
-    true
-}
-
 /// The retained receipt locates the writer lock even during an interrupted sources rename.
 pub(crate) fn installed_writer_binary(data_dir: &Path) -> Result<Option<PathBuf>> {
     let path = data_dir.join(DIRECTORY).join(RECEIPT);

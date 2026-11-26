@@ -21,7 +21,7 @@
 //! present, that call does not walk. An empty root that
 //! is still present is not moved aside. A matching (done) marker does no walk. A new-format header and a plain file are settled unread.
 //! Pass 1 verifies each old file and keeps nothing. A refusal in that pass leaves every old file in place. Pass 2 rewrites; an ordinary start runs one bringup (not three).
-//! Home binds first; the check runs in the background ("checking local app files"). When it finds an old file, local apps stay off ("Local app files are moving") until the second pass runs once no update can put the previous release back. A rollback or crash before then leaves every file old.
+//! Home binds first; the check runs in the background ("checking local app files"). When it finds an old file, local apps stay off ("Local app files are moving") until the second pass ends. While an update can still roll back (`update_can_roll_back`, read once per start), nothing moves, no marker is written, and local apps stay off with `LOCALHOST_FILES_PENDING_UPDATE`; a restart after the update is clean moves the files.
 //! The second pass walks again and rekeys one file at a time. A crash in the middle of the move is finished by the next start. A later
 //! start opens each file once; a new-format header or a plain file is settled
 //! unread, and the done marker skips the walk. The walk logs a count every few
@@ -1136,7 +1136,6 @@ impl Drop for ClearHeld { fn drop(&mut self) { HELD.with(|s| s.set(false)); PASS
 fn migrate_localhost_files_to_file_key(
     data_dir: &Path,
     device_key: &[u8; 32],
-    move_now: bool,
 ) -> anyhow::Result<()> {
     set_migration_root(data_dir);
     let _clear_held = ClearHeld;
@@ -1185,11 +1184,7 @@ fn migrate_localhost_files_to_file_key(
     };
     walk()?;
     if HELD.with(|slot| slot.get()) {
-        if !move_now { return Err(anyhow::anyhow!(LOCALHOST_FILES_MOVING)); }
         PASS_TWO.with(|slot| slot.set(true)); walk()?;
-    }
-    if !move_now && matches!(plan, MarkerPlan::Write) {
-        return Err(anyhow::anyhow!(LOCALHOST_FILES_MOVING));
     }
     if matches!(plan, MarkerPlan::Write) {
         write_localhost_marker(&marker, &localhost_marker_record(&file_key))?;
@@ -1213,10 +1208,14 @@ pub(crate) fn localhost_provider_bridge_config(
     data_dir: &Path,
     device_key: &[u8; 32],
 ) -> anyhow::Result<provider::BridgeProviderConfig> {
+    anyhow::ensure!(
+        !elastos_server::update_controller::update_can_roll_back(data_dir),
+        LOCALHOST_FILES_PENDING_UPDATE
+    );
     #[cfg(unix)]
     let (device_key_hex, given_file_key) = {
         use zeroize::Zeroize;
-        migrate_localhost_files_to_file_key(data_dir, device_key, true)?;
+        migrate_localhost_files_to_file_key(data_dir, device_key)?;
         let mut file_key = localhost_file_key(device_key)?;
         let file_key_hex = hex::encode(file_key);
         file_key.zeroize();
@@ -1238,24 +1237,19 @@ pub(crate) enum LocalhostBringup {
     Refuse(String),
 }
 
-/// Local apps stay off with this sentence while old files wait for the second pass.
+/// Local apps stay off with this sentence while the second pass rewrites old files.
 pub(crate) const LOCALHOST_FILES_MOVING: &str = "Local app files are moving to the new key.";
 pub(crate) const LOCALHOST_FILES_CHECKING: &str = elastos_server::local_apps::LOCAL_APPS_CHECKING;
+/// While an update can still roll back, nothing moves and no marker is written. `elastos update`
+/// recovers an interrupted update; a restart after it moves the files.
+pub(crate) const LOCALHOST_FILES_PENDING_UPDATE: &str =
+    "Local apps stay off until the pending update finishes; run elastos update.";
 
 pub(crate) fn localhost_bringup(data_dir: &Path, device_key: &[u8; 32]) -> LocalhostBringup {
     match localhost_provider_bridge_config(data_dir, device_key) {
         Ok(config) => LocalhostBringup::Start(config),
         Err(err) => refused(data_dir, err.to_string()),
     }
-}
-
-/// Pass 1 only. Old files stay put with [`LOCALHOST_FILES_MOVING`].
-pub(crate) fn localhost_start_bringup(data_dir: &Path, device_key: &[u8; 32]) -> LocalhostBringup {
-    #[cfg(unix)]
-    if let Err(err) = migrate_localhost_files_to_file_key(data_dir, device_key, false) {
-        return refused(data_dir, err.to_string());
-    }
-    localhost_bringup(data_dir, device_key)
 }
 
 /// The first refusal stays, except the checking and moving sentences, which a later walk replaces.
@@ -1276,6 +1270,7 @@ fn refused(data_dir: &Path, fresh: String) -> LocalhostBringup {
 /// before gateway creates `ElastOS/System/Auth` or serve creates the roots.
 /// An empty root the person left in place is still present. A refusal is
 /// kept and this returns Ok, so Home starts and the roots stay absent.
+/// While an update can still roll back, this returns early with that refusal.
 #[rustfmt::skip]
 pub(crate) fn prepare_localhost_files(data_dir: &Path) -> anyhow::Result<()> {
     #[cfg(unix)]
@@ -1284,6 +1279,9 @@ pub(crate) fn prepare_localhost_files(data_dir: &Path) -> anyhow::Result<()> {
         if let Err(err) = (|| -> anyhow::Result<()> {
         if !encrypted_roots_absent(data_dir)? {
             return Ok(());
+        }
+        if elastos_server::update_controller::update_can_roll_back(data_dir) {
+            return Err(anyhow::anyhow!(LOCALHOST_FILES_PENDING_UPDATE));
         }
         let device_key = elastos_identity::load_or_create_device_key(data_dir).map_err(|_| anyhow::anyhow!("identity/device.key cannot be read. Make it readable, or restore it with the identity/credentials.json it belongs to, then restart."))?;
         if let LocalhostBringup::Refuse(sentence) = localhost_bringup(data_dir, &device_key) {
