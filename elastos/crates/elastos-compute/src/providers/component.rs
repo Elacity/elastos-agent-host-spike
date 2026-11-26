@@ -294,6 +294,8 @@ pub const SEALED_BRIDGE: &str = "this capsule was started with no authority: it 
 pub const STOPPED_BEFORE_RUN: &str = "component was stopped before its run began";
 /// A v2 start that a stop interrupted before the guest was published.
 pub const STOPPED_DURING_START: &str = "v2 guest was stopped before it was published";
+/// A v2 start task that ended without answering. No stop was requested.
+const START_TASK_ENDED: &str = "v2 guest start task ended without answering";
 const BOOK_CLOSED: &str = "the grant book is closed";
 
 struct ComponentState {
@@ -371,8 +373,9 @@ pub struct ComponentProvider {
     /// the compile slot, so a test can act while a compile is in progress.
     #[cfg(test)]
     worker_gate: std::sync::Mutex<Option<tests::WorkerGate>>,
-    #[cfg(test)]
-    panic_next_v2: AtomicBool,
+    /// The next v2 start task panics. Tests and the server's fixture feature set it.
+    #[cfg(any(test, feature = "test-fixtures"))]
+    pub panic_next_v2: AtomicBool,
     /// v2 guest threads that have entered their run and not left it.
     #[cfg(test)]
     threads_live: Arc<AtomicUsize>,
@@ -2729,8 +2732,18 @@ fn sync_bridge(bridge: &OpenBridge) -> std::result::Result<String, String> {
     }
 }
 
+/// The bridge spent this use. The stamp is `response.use_spent` on the
+/// envelope, a JSON bool. The same text inside the body is file content.
 fn runtime_spent_use(raw: &str) -> bool {
-    raw.contains("\"use_spent\":true") || raw.contains("\"use_spent\": true")
+    let Ok(envelope) = serde_json::from_str::<serde_json::Value>(raw) else {
+        return false;
+    };
+    matches!(
+        envelope
+            .get("response")
+            .and_then(|response| response.get("use_spent")),
+        Some(serde_json::Value::Bool(true))
+    )
 }
 
 fn decode_bridge(
@@ -4743,6 +4756,92 @@ mod tests {
         state
             .begin_read(&read_of(&bare.id), false)
             .expect("the book was not spent alone");
+    }
+
+    /// A file whose bytes are the stamp text spends one use of a two-use grant.
+    /// The same text elsewhere in the envelope is not the stamp.
+    #[test]
+    fn a_file_that_says_use_spent_on_a_two_use_grant_leaves_one_use() {
+        let mut state = ComponentState::new(None, "capsule".into(), None);
+        let read_of = |id: &str| v2::elastos::bus::types::InvokeRequest {
+            resource: "localhost://Local/a".into(),
+            operation: "read".into(),
+            grant: Some(id.into()),
+            params: br#"{"max_bytes":64}"#.to_vec(),
+        };
+        let two = |state: &mut ComponentState, id: &str| {
+            let pending = one_read_grant(state);
+            state
+                .finish_grant(pending, Ok(token_line(id, r#","max_uses":2"#)))
+                .expect("two-use grant")
+        };
+        let file = r#""use_spent":true"#;
+        let grant = two(&mut state, "file");
+        let pending = state.begin_read(&read_of(&grant.id), false).expect("begin");
+        let prepared = state
+            .finish_read(
+                pending,
+                Ok(serde_json::json!({
+                    "id": 1,
+                    "response": {
+                        "type": "resource_result",
+                        "result": {
+                            "status": "ok",
+                            "data": { "content": file, "size": file.len() },
+                            "audit": "read-1"
+                        },
+                        "use_spent": true
+                    }
+                })
+                .to_string()),
+            )
+            .expect("the file is read");
+        assert_eq!(prepared.bytes, file.as_bytes());
+        let pending = state
+            .begin_read(&read_of(&grant.id), false)
+            .expect("one use remains");
+        state
+            .finish_read(pending, Ok(ok_text_read("hi")))
+            .expect("the last use");
+        let refused = state.begin_read(&read_of(&grant.id), false);
+        let Err(err) = refused else {
+            panic!("two uses are gone");
+        };
+        assert!(format!("{err:?}").contains("the grant is spent"), "{err:?}");
+
+        let body = two(&mut state, "body");
+        let pending = state.begin_read(&read_of(&body.id), false).expect("begin");
+        let raw = serde_json::json!({
+            "id": 1,
+            "response": {
+                "type": "error",
+                "code": "not_found",
+                "message": "missing",
+                "detail": {"use_spent": true}
+            }
+        })
+        .to_string();
+        assert!(raw.contains("\"use_spent\":true"), "{raw}");
+        state
+            .finish_read(pending, Ok(raw))
+            .expect_err("the read fails");
+        let pending = state
+            .begin_read(&read_of(&body.id), false)
+            .expect("the body text did not spend a use");
+        state
+            .finish_read(pending, Ok(ok_text_read("a")))
+            .expect("the first use");
+        let pending = state
+            .begin_read(&read_of(&body.id), false)
+            .expect("one use remains");
+        state
+            .finish_read(pending, Ok(ok_text_read("b")))
+            .expect("the second use");
+        let refused = state.begin_read(&read_of(&body.id), false);
+        let Err(err) = refused else {
+            panic!("both uses are gone");
+        };
+        assert!(format!("{err:?}").contains("the grant is spent"), "{err:?}");
     }
 
     /// The last use is spent when the read finishes. The product stop still
