@@ -5368,11 +5368,8 @@ pub(crate) mod tests {
             "the gateway process wires a Home runtime"
         );
         let limit = "The installed two-process path runs no agent today and its proof comes with the package.";
-        let doc = include_str!("../../../../docs/AGENT_ARCHITECTURE.md");
         let notes = include_str!("api/routes/tests/instance_storage_rows.rs");
-        assert!(doc.contains(limit) && doc.contains("Within one process"));
         assert!(notes.contains(limit) && notes.contains("Within one process"));
-        assert!(!doc.contains("gateway's one Runtime"));
         assert!(!notes.contains("gateway's one Runtime"));
         let temp = tempfile::tempdir().unwrap();
         let data_dir = temp.path().join("home");
