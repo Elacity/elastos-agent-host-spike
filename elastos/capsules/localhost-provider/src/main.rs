@@ -417,10 +417,7 @@ impl LocalProvider {
             if (offset.is_some() || length.is_some()) && localhost_provider::is_plain_localhost_file(&full_path)? {
                 return read_span();
             }
-            let plaintext = match read_sealed_localhost_file(key, &full_path, path) {
-                Ok(bytes) => bytes,
-                Err(err) => return Err(err),
-            };
+            let plaintext = read_sealed_localhost_file(key, &full_path, path)?;
 
             let off = offset.unwrap_or(0) as usize;
             if off >= plaintext.len() {

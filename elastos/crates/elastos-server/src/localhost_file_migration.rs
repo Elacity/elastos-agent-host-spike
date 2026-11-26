@@ -1458,7 +1458,7 @@ mod tests {
     fn peak_resident_bytes() -> i64 {
         let mut usage: libc::rusage = unsafe { std::mem::zeroed() };
         unsafe { libc::getrusage(libc::RUSAGE_SELF, &mut usage) };
-        let raw = i64::from(usage.ru_maxrss);
+        let raw: i64 = usage.ru_maxrss;
         if cfg!(target_os = "linux") {
             raw * 1024
         } else {
