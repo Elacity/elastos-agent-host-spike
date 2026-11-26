@@ -1328,9 +1328,19 @@ fn production_callers(
     sources: &BTreeMap<String, String>,
     function: &str,
 ) -> BTreeSet<(String, String)> {
+    callers_in(sources, function, |file| {
+        file.starts_with("elastos-server/src/")
+    })
+}
+
+fn callers_in(
+    sources: &BTreeMap<String, String>,
+    function: &str,
+    include_file: impl Fn(&str) -> bool,
+) -> BTreeSet<(String, String)> {
     let mut found = BTreeSet::new();
     for (file, text) in sources {
-        if !file.starts_with("elastos-server/src/") {
+        if !include_file(file) {
             continue;
         }
         let code = source::code_only(text);
@@ -1352,6 +1362,65 @@ fn production_callers(
         }
     }
     found
+}
+
+/// CapsuleManager launch, shell bootstrap, and fetched-capsule preparation.
+/// None of these checks bundle CID, publisher DID, or a dependency.
+fn legacy_launcher_functions() -> [&'static str; 6] {
+    [
+        "launch_local",
+        "launch_from_cid",
+        "launch_internal",
+        "prepare_fetched_capsule",
+        "ShellBootstrap",
+        "bootstrap",
+    ]
+}
+
+/// Calls inside the dead cluster. `production_callers` records the enclosing
+/// function, so a second call in one of these functions does not add a row.
+fn legacy_launcher_runtime_callers() -> BTreeSet<(String, String, String)> {
+    [
+        "bootstrap elastos-runtime/src/bootstrap/runtime_builder.rs start",
+        "launch_from_cid elastos-runtime/src/handler/request_handler.rs handle_launch_capsule",
+        "launch_internal elastos-runtime/src/capsule/manager.rs launch_from_cid",
+        "launch_internal elastos-runtime/src/capsule/manager.rs launch_local",
+        "launch_local elastos-runtime/src/bootstrap/shell.rs launch_local_shell",
+        "prepare_fetched_capsule elastos-runtime/src/handler/request_handler.rs handle_launch_capsule",
+        "ShellBootstrap elastos-runtime/src/bootstrap/runtime_builder.rs fmt",
+        "ShellBootstrap elastos-runtime/src/bootstrap/runtime_builder.rs start",
+    ]
+    .into_iter()
+    .map(|row| {
+        let mut parts = row.splitn(3, ' ');
+        (
+            parts.next().unwrap().to_string(),
+            parts.next().unwrap().to_string(),
+            parts.next().unwrap().to_string(),
+        )
+    })
+    .collect()
+}
+
+fn assert_legacy_launchers_unreachable(sources: &BTreeMap<String, String>) {
+    let mut runtime = BTreeSet::new();
+    for function in legacy_launcher_functions() {
+        let server = production_callers(sources, function);
+        assert!(
+            server.is_empty(),
+            "production callers changed for legacy launcher {function}: {server:?}"
+        );
+        for (file, caller) in callers_in(sources, function, |file| {
+            file.starts_with("elastos-runtime/src/")
+        }) {
+            runtime.insert((function.to_string(), file, caller));
+        }
+    }
+    assert_eq!(
+        runtime,
+        legacy_launcher_runtime_callers(),
+        "legacy launcher callers changed"
+    );
 }
 
 fn assert_caller_paths(sources: &BTreeMap<String, String>) {
@@ -1663,6 +1732,31 @@ fn new_unchecked_production_caller_turns_caller_path_red() {
         "\nfn planted_caller(registry: &std::sync::Arc<elastos_runtime::provider::ProviderRegistry>, path: &std::path::Path) { let _ = elastos_server::protected_content_runtime::register_protect_provider(registry, path); }\n",
     );
     assert!(std::panic::catch_unwind(|| assert_caller_paths(&sources)).is_err());
+}
+
+#[test]
+fn legacy_launchers_have_no_production_caller() {
+    assert_legacy_launchers_unreachable(&source::production_sources());
+}
+
+#[test]
+fn planted_legacy_launcher_caller_turns_the_row_red() {
+    let clean = source::production_sources();
+    for function in legacy_launcher_functions() {
+        let mut sources = clean.clone();
+        let file = "elastos-server/src/server_infra.rs";
+        sources
+            .get_mut(file)
+            .unwrap()
+            .push_str(&format!("\nfn planted_caller() {{ {function}(); }}\n"));
+        let refused = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            assert_legacy_launchers_unreachable(&sources);
+        }));
+        assert!(
+            refused.is_err(),
+            "planted production caller of {function} stayed green"
+        );
+    }
 }
 
 #[test]
