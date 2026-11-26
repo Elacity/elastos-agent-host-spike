@@ -51,7 +51,7 @@ fn over_cap_refusal(name: &str) -> io::Error {
 
 fn hard_limit_refusal(name: &str) -> io::Error {
     io::Error::new(
-        io::ErrorKind::InvalidData,
+        io::ErrorKind::FileTooLarge,
         format!("{name} is larger than this process can read. Move it out of the folder."),
     )
 }
@@ -87,12 +87,17 @@ pub fn header_is_device_key_envelope(header: &[u8]) -> bool {
 
 #[rustfmt::skip]
 fn open_new_format(key: &[u8; 32], bytes: Vec<u8>, name: &str) -> io::Result<Vec<u8>> {
-    let Some((mut body, nonce)) = ciphertext_in_place(bytes) else {
+    let Some((mut body, nonce, version)) = ciphertext_in_place(bytes) else {
         return Err(io::Error::new(io::ErrorKind::InvalidData, format!("{name} is cut off. Remove it.")));
+    };
+    let why = if version == FILE_KEY_ENVELOPE_VERSION {
+        format!("{name} does not decrypt. Move it aside, or remove it.")
+    } else {
+        format!("{name} does not decrypt. Restore identity/device.key, or move the file aside, then restart.")
     };
     Aes256Gcm::new_from_slice(key).map_err(|e| io::Error::other(format!("AES key init: {e}")))?
         .decrypt_in_place(&Nonce::from(nonce), b"", &mut body)
-        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, format!("{name} does not decrypt. Restore identity/device.key, or move the file aside, then restart.")))?;
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, why))?;
     Ok(body)
 }
 
@@ -134,8 +139,8 @@ mod scan {
             return Ok((false, 0));
         }
         if header_rules_out_envelope(header) || len <= ENVELOPE_BYTE_LIMIT { return Ok((header_rules_out_envelope(header), 0)); }
-        let mut s = Src { rest, n: 0, b: [0; 8192], i: 0, j: header.len() };
-        s.b[..header.len()].copy_from_slice(header);
+        let mut s = Src { rest, n: 0, b: [0; 8192], i: 0, j: header.len().min(8192) };
+        s.b[..s.j].copy_from_slice(&header[..s.j]);
         Ok((!s.open()?, s.n))
     }
     struct Src<'a> { rest: &'a mut dyn Read, n: u64, b: [u8; 8192], i: usize, j: usize }
@@ -385,7 +390,7 @@ pub fn rekey_device_envelope(
     file_key: &[u8; 32],
     data: Vec<u8>,
 ) -> io::Result<RekeyOutcome> {
-    let Some((mut buffer, nonce)) = ciphertext_in_place(data) else {
+    let Some((mut buffer, nonce, _)) = ciphertext_in_place(data) else {
         return Ok(RekeyOutcome::NotEnvelope);
     };
     let mut plain = match decrypt_parts(device_key, &nonce, &buffer) {
@@ -420,8 +425,8 @@ struct BorrowedEnvelope<'a> {
 }
 
 /// Decode the ciphertext into the front of `data` and keep its allocation.
-fn ciphertext_in_place(mut data: Vec<u8>) -> Option<(Vec<u8>, [u8; 12])> {
-    let (start, hex_len, nonce) = {
+fn ciphertext_in_place(mut data: Vec<u8>) -> Option<(Vec<u8>, [u8; 12], u8)> {
+    let (start, hex_len, nonce, version) = {
         let envelope = serde_json::from_slice::<BorrowedEnvelope>(&data).ok()?;
         if envelope.version != 1 && envelope.version != 2 {
             return None;
@@ -433,7 +438,12 @@ fn ciphertext_in_place(mut data: Vec<u8>) -> Option<(Vec<u8>, [u8; 12])> {
         if ptr < base || ptr + envelope.ciphertext.len() > base + data.len() {
             return None;
         }
-        (ptr - base, envelope.ciphertext.len(), nonce)
+        (
+            ptr - base,
+            envelope.ciphertext.len(),
+            nonce,
+            envelope.version,
+        )
     };
     if hex_len < 32 || hex_len % 2 != 0 || start + hex_len > data.len() {
         return None;
@@ -446,7 +456,7 @@ fn ciphertext_in_place(mut data: Vec<u8>) -> Option<(Vec<u8>, [u8; 12])> {
     }
     data.copy_within(start..start + n, 0);
     data.truncate(n);
-    Some((data, nonce))
+    Some((data, nonce, version))
 }
 
 fn hex_nibble(byte: u8) -> Option<u8> {
@@ -708,6 +718,7 @@ mod tests {
             .unwrap();
         let _ = take_sealed_read_bytes();
         let err = read_sealed_localhost_file(&[3u8; 32], &path, "Users/huge.bin").unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::FileTooLarge);
         let text = err.to_string();
         assert!(text.contains("Users/huge.bin"), "{text}");
         assert!(text.contains("larger than this process can read"), "{text}");

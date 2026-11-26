@@ -5564,7 +5564,11 @@ mod tests {
         symlink("real.bin", inside.path().join("Users/alias.bin")).unwrap();
         let _ = take_localhost_migration_opens();
         migrate_again(inside.path(), &device_key);
-        assert_eq!(take_localhost_migration_opens(), 1);
+        assert_eq!(
+            take_localhost_migration_opens(),
+            2,
+            "the check and the rekey each open the real file"
+        );
         assert_envelope_opens_with_exactly_one_key(&real, b"followed", &device_key, &file_key);
         assert!(fs::symlink_metadata(inside.path().join("Users/alias.bin"))
             .unwrap()
@@ -5577,7 +5581,11 @@ mod tests {
         symlink("sub", dir_link.path().join("Users/linked")).unwrap();
         let _ = take_localhost_migration_opens();
         migrate_again(dir_link.path(), &device_key);
-        assert_eq!(take_localhost_migration_opens(), 1);
+        assert_eq!(
+            take_localhost_migration_opens(),
+            2,
+            "the check and the rekey each open the nested file"
+        );
         assert_envelope_opens_with_exactly_one_key(&nested, b"nested", &device_key, &file_key);
 
         let cycle = TempDir::new().unwrap();
@@ -5589,6 +5597,222 @@ mod tests {
         let text = err.to_string();
         assert!(text.contains("Users/link-a"), "{text}");
         assert_eq!(fs::read(&kept).unwrap(), kept_bytes);
+    }
+
+    #[test]
+    fn several_old_files_stay_within_one_files_memory() {
+        const CHILD: &str = "ELASTOS_LOCALHOST_R22_CHILD";
+        if std::env::var(CHILD).as_deref() == Ok("1") {
+            let root =
+                std::path::PathBuf::from(std::env::var("ELASTOS_LOCALHOST_R22_ROOT").unwrap());
+            let raw = hex::decode(std::env::var("ELASTOS_LOCALHOST_R22_KEY").unwrap()).unwrap();
+            let mut device_key = [0u8; 32];
+            device_key.copy_from_slice(&raw);
+            let file_len: i64 = std::env::var("ELASTOS_LOCALHOST_R22_LEN")
+                .unwrap()
+                .parse()
+                .unwrap();
+            let before = resident_peak();
+            match localhost_bringup(&root, &device_key) {
+                LocalhostBringup::Start(_) => {}
+                LocalhostBringup::Refuse(got) => panic!("migration refused: {got}"),
+            }
+            let delta = resident_peak().saturating_sub(before);
+            let bound = file_len * 2 + 8 * 1024 * 1024;
+            eprintln!("SL_R22_MIGRATE_DELTA={delta} FILE={file_len} BOUND={bound}");
+            assert!(
+                delta <= bound,
+                "the rewrite held more than one file: delta {delta} file {file_len} bound {bound}"
+            );
+            return;
+        }
+
+        let _guard = LocalAppsGuard::lock();
+        let device_key = [0x52; 32];
+        let file_key = expected_localhost_file_key(&device_key);
+        let root = TempDir::new().unwrap();
+        let mut lens = Vec::new();
+        for (name, byte) in [("a.bin", 0x11u8), ("b.bin", 0x22u8), ("c.bin", 0x33u8)] {
+            let plain = vec![byte; 17 * 1024 * 1024];
+            let sealed = localhost_provider::encrypt_bytes(&device_key, &plain).unwrap();
+            let path = root.path().join("Users").join(name);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(&path, &sealed).unwrap();
+            lens.push((name, byte, sealed.len() as i64));
+        }
+        let one = lens.iter().map(|(_, _, len)| *len).max().unwrap();
+        let total: i64 = lens.iter().map(|(_, _, len)| *len).sum();
+        let bound = one * 2 + 8 * 1024 * 1024;
+        assert!(
+            total > bound,
+            "three files fit in one file's bound: total {total} one {one} bound {bound}"
+        );
+        let test = format!(
+            "{}::several_old_files_stay_within_one_files_memory",
+            module_path!().split_once("::").unwrap().1
+        );
+        let output = Command::new(std::env::current_exe().unwrap())
+            .env(CHILD, "1")
+            .env("ELASTOS_LOCALHOST_R22_ROOT", root.path())
+            .env("ELASTOS_LOCALHOST_R22_KEY", hex::encode(device_key))
+            .env("ELASTOS_LOCALHOST_R22_LEN", one.to_string())
+            .args(["--exact", test.as_str(), "--nocapture", "--test-threads=1"])
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success(),
+            "memory child failed\nstdout {stdout}\nstderr {stderr}"
+        );
+        let rss = stderr
+            .lines()
+            .find(|line| line.contains("SL_R22_MIGRATE_DELTA="))
+            .expect("child printed its peak");
+        eprintln!("{rss}");
+        for (name, byte, _) in lens {
+            let plain = vec![byte; 17 * 1024 * 1024];
+            assert_envelope_opens_with_exactly_one_key(
+                &root.path().join("Users").join(name),
+                &plain,
+                &device_key,
+                &file_key,
+            );
+        }
+        assert_current_marker(root.path(), &device_key);
+    }
+
+    #[test]
+    fn a_refused_file_in_the_first_pass_leaves_every_file_old() {
+        let _guard = LocalAppsGuard::lock();
+        let device_key = [0x54; 32];
+        let root = TempDir::new().unwrap();
+        let alpha = plant_device_envelope(&root.path().join("Users/a.bin"), &device_key, b"alpha");
+        let beta = plant_device_envelope(&root.path().join("Users/b.bin"), &device_key, b"beta");
+        let foreign = localhost_provider::encrypt_bytes(&[0x99; 32], b"other").unwrap();
+        fs::write(root.path().join("Users/z.bin"), &foreign).unwrap();
+        let err = localhost_provider_bridge_config(root.path(), &device_key).unwrap_err();
+        let text = err.to_string();
+        assert!(text.contains("Users/z.bin"), "{text}");
+        assert!(text.contains("does not decrypt"), "{text}");
+        assert!(text.contains("Restore identity/device.key"), "{text}");
+        assert_eq!(fs::read(root.path().join("Users/a.bin")).unwrap(), alpha);
+        assert_eq!(fs::read(root.path().join("Users/b.bin")).unwrap(), beta);
+        assert_eq!(fs::read(root.path().join("Users/z.bin")).unwrap(), foreign);
+        assert!(!root.path().join("identity/localhost-file-key-v1").exists());
+    }
+
+    #[test]
+    fn a_write_failure_on_the_second_file_finishes_on_restart() {
+        let _clear = ClearLocalhostMigrationFaults;
+        let _guard = LocalAppsGuard::lock();
+        let device_key = [0x53; 32];
+        let file_key = expected_localhost_file_key(&device_key);
+        let root = TempDir::new().unwrap();
+        let mut planted = Vec::new();
+        for (name, plain) in [
+            ("a.bin", b"one".as_slice()),
+            ("b.bin", b"two"),
+            ("c.bin", b"three"),
+        ] {
+            let path = root.path().join("Users").join(name);
+            let bytes = plant_device_envelope(&path, &device_key, plain);
+            planted.push((path, bytes, plain));
+        }
+        set_localhost_migration_before_rename(Some(Box::new(|path: &std::path::Path| {
+            if path.file_name().and_then(|name| name.to_str()) == Some("a.bin") {
+                set_localhost_migration_write_error(Some(libc::ENOSPC));
+            }
+        })));
+        let err = localhost_provider_bridge_config(root.path(), &device_key).unwrap_err();
+        set_localhost_migration_before_rename(None);
+        set_localhost_migration_write_error(None);
+        let text = err.to_string();
+        assert!(text.contains("Users/b.bin"), "{text}");
+        assert!(text.contains("could not be written"), "{text}");
+        assert!(text.contains("No space left on device"), "{text}");
+        assert_envelope_opens_with_exactly_one_key(
+            &planted[0].0,
+            planted[0].2,
+            &device_key,
+            &file_key,
+        );
+        assert!(
+            localhost_provider::decrypt_bytes(&device_key, &fs::read(&planted[0].0).unwrap())
+                .is_err()
+        );
+        assert_eq!(fs::read(&planted[1].0).unwrap(), planted[1].1);
+        assert_eq!(fs::read(&planted[2].0).unwrap(), planted[2].1);
+        assert!(!root.path().join("identity/localhost-file-key-v1").exists());
+        assert_no_localhost_rewrite_temps(root.path());
+        localhost_provider_bridge_config(root.path(), &device_key).unwrap();
+        for (path, _, plain) in &planted {
+            assert_envelope_opens_with_exactly_one_key(path, plain, &device_key, &file_key);
+            assert!(
+                localhost_provider::decrypt_bytes(&device_key, &fs::read(path).unwrap()).is_err()
+            );
+        }
+        assert_current_marker(root.path(), &device_key);
+        assert_no_localhost_rewrite_temps(root.path());
+    }
+
+    #[test]
+    fn two_over_hard_names_say_one_more_file() {
+        let _guard = LocalAppsGuard::lock();
+        let device_key = [0x55; 32];
+        let root = TempDir::new().unwrap();
+        let mut dir = root.path().join("Users");
+        fs::create_dir(&dir).unwrap();
+        for _ in 0..3 {
+            dir.push("d".repeat(180));
+            fs::create_dir(&dir).unwrap();
+        }
+        for name in ["one.bin", "two.bin"] {
+            plant_real_old_sealed(
+                &dir.join(name),
+                &device_key,
+                localhost_provider::SEALED_READ_HARD_LIMIT + 1,
+            );
+        }
+        let got = match localhost_bringup(root.path(), &device_key) {
+            LocalhostBringup::Refuse(got) => got,
+            LocalhostBringup::Start(_) => panic!("over-hard files started local apps"),
+        };
+        assert!(got.len() <= 512, "{got}");
+        assert!(
+            got.contains("1 more file is larger than this process can read"),
+            "{got}"
+        );
+        assert!(
+            got.contains("Move it out of the folder, then restart."),
+            "{got}"
+        );
+        assert!(!got.contains("1 more files"), "{got}");
+    }
+
+    #[test]
+    fn a_rewrite_temp_directory_is_refused_as_a_directory() {
+        let _guard = LocalAppsGuard::lock();
+        let device_key = [0x56; 32];
+        let root = TempDir::new().unwrap();
+        let note = root.path().join("Users/note.bin");
+        let original = plant_device_envelope(&note, &device_key, b"keep");
+        let temp_dir = root.path().join("Users").join(format!(
+            ".{}.elastos-localhost-file-key-v1.tmp",
+            "ab".repeat(32)
+        ));
+        fs::create_dir(&temp_dir).unwrap();
+        let err = localhost_provider_bridge_config(root.path(), &device_key).unwrap_err();
+        let text = err.to_string();
+        assert!(text.contains("is not a file"), "{text}");
+        assert!(
+            text.contains("Remove the directory, then restart."),
+            "{text}"
+        );
+        assert!(!text.contains("Free space"), "{text}");
+        assert!(temp_dir.is_dir());
+        assert_eq!(fs::read(&note).unwrap(), original);
+        assert!(!root.path().join("identity/localhost-file-key-v1").exists());
     }
 
     #[test]
@@ -5680,8 +5904,9 @@ mod tests {
         .to_string();
         assert_eq!(
             foreign_open,
-            "Users/foreign.bin does not decrypt. Restore identity/device.key, or move the file aside, then restart."
+            "Users/foreign.bin does not decrypt. Move it aside, or remove it."
         );
+        assert!(!foreign_open.contains("device.key"), "{foreign_open}");
         let cut_open =
             localhost_provider::read_sealed_localhost_file(&file_key, &cut, "Users/cut.bin")
                 .unwrap_err()
@@ -7621,8 +7846,8 @@ mod tests {
             LocalhostBringup::Refuse(got) => panic!("{got}"),
         }
         let read = take_localhost_migration_bytes_read();
-        assert!(read > 32 * 1024 * 1024, "{read}");
-        assert!(read < 80 * 1024 * 1024, "{read}");
+        assert!(read > reordered.len() as u64, "{read}");
+        assert!(read < reordered.len() as u64 * 5, "{read}");
         home_is_up(root.path());
         let now = fs::read(&env_path).unwrap();
         assert_ne!(now, reordered);
@@ -8657,10 +8882,10 @@ mod tests {
                 panic!("a later over-cap file turned local apps off: {got}")
             }
         }
-        assert_eq!(take_localhost_migration_opens(), 1);
+        assert_eq!(take_localhost_migration_opens(), 2);
         assert_eq!(
             take_localhost_migration_bytes_read(),
-            old_bytes.len() as u64
+            old_bytes.len() as u64 * 2
         );
         assert_envelope_opens_with_exactly_one_key(&later, &old_plain, &device_key, &file_key);
         assert_eq!(

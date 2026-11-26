@@ -419,7 +419,7 @@ impl LocalProvider {
             }
             let plaintext = match read_sealed_localhost_file(key, &full_path, path) {
                 Ok(bytes) => bytes,
-                Err(err) if err.to_string().contains("process can read") => if localhost_provider::is_plain_localhost_file(&full_path)? { return read_span(); } else { return Err(err); },
+                Err(err) if err.kind() == io::ErrorKind::FileTooLarge => if localhost_provider::is_plain_localhost_file(&full_path)? { return read_span(); } else { return Err(err); },
                 Err(err) => return Err(err),
             };
 
@@ -2021,11 +2021,44 @@ mod tests {
         fs::write(&path, &bad).unwrap();
         let err = refusal(&provider, "Users/reordered.bin", None, None);
         assert!(err.contains("does not decrypt"), "{err}");
+        assert!(err.contains("Move it aside, or remove it."), "{err}");
+        assert!(!err.contains("device.key"), "{err}");
+        assert!(!err.contains("restart"), "{err}");
+        assert!(!err.contains("larger than 32 MiB"), "{err}");
+        assert!(!err.contains("Remove it"), "{err}");
+    }
+
+    #[test]
+    fn a_bad_old_envelope_still_says_restore_the_device_key() {
+        let dir = setup_test_dir();
+        fs::create_dir(dir.path().join("Users")).unwrap();
+        let provider = make_encrypted_provider(&dir);
+        let key = test_key();
+        let mut sealed = localhost_provider::encrypt_bytes(&key, b"old-secret").unwrap();
+        let marker = br#""ciphertext":""#;
+        let at = sealed
+            .windows(marker.len())
+            .position(|window| window == marker)
+            .unwrap()
+            + marker.len();
+        sealed[at] = if sealed[at] == b'0' { b'1' } else { b'0' };
+        fs::write(dir.path().join("Users/old.bin"), &sealed).unwrap();
+        let err = refusal(&provider, "Users/old.bin", None, None);
+        assert!(err.contains("does not decrypt"), "{err}");
         assert!(
             err.contains("Restore identity/device.key, or move the file aside, then restart."),
             "{err}"
         );
-        assert!(!err.contains("larger than 32 MiB"), "{err}");
-        assert!(!err.contains("Remove it"), "{err}");
+        assert!(!err.contains("Move it aside, or remove it."), "{err}");
+    }
+
+    #[test]
+    fn a_long_header_does_not_panic_the_plain_scan() {
+        let header = vec![b'{'; 9000];
+        let mut rest = std::io::Cursor::new(Vec::<u8>::new());
+        let (plain, read) =
+            localhost_provider::reads_as_plain_bytes(&header, 40 * 1024 * 1024, &mut rest).unwrap();
+        assert!(plain, "a run of braces is not an envelope");
+        assert_eq!(read, 0);
     }
 }

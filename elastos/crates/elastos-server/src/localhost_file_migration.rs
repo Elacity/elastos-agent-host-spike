@@ -18,7 +18,9 @@
 //! calls it before `ensure_file_backed_roots`. When any of the five is already
 //! present, that call does not walk. An empty root that
 //! is still present is not moved aside. A matching marker still walks, so an
-//! older build's later device-key file is rewritten, one way: an older release cannot open it. A refused start does not rewrite an older-format file. A new-format header and a plain file are settled unread. A later
+//! older build's later device-key file is rewritten, one way: an older release cannot open it. A new-format header and a plain file are settled unread.
+//! The first pass reads each old file and keeps its name and identity. A refusal in that pass leaves every old file in place.
+//! The second pass rekeys one file at a time. A crash in the middle of the move is finished by the next start. A later
 //! start uses the size and time stored beside the marker and does not open a file
 //! that still matches. The walk logs a count every few seconds. A waiter on
 //! `identity/localhost-file-key.lock` logs that. The walk runs from
@@ -259,7 +261,8 @@ thread_local! {
         const { std::cell::RefCell::new(std::path::PathBuf::new()) };
     static PROGRESS_AT: std::cell::Cell<(u64, u64)> = const { std::cell::Cell::new((0, 0)) };
     static CANON_ROOT: std::cell::RefCell<std::path::PathBuf> = const { std::cell::RefCell::new(std::path::PathBuf::new()) };
-    static HELD: std::cell::RefCell<Vec<(std::path::PathBuf, Vec<u8>, OpenedIdentity)>> = const { std::cell::RefCell::new(Vec::new()) };
+    static HELD: std::cell::RefCell<Vec<(std::path::PathBuf, OpenedIdentity)>> = const { std::cell::RefCell::new(Vec::new()) };
+    static PASS_TWO: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 #[cfg(unix)]
@@ -609,6 +612,7 @@ enum MigratedFile {
     Settled,
     OverHard,
     Held,
+    Written,
 }
 
 #[cfg(unix)]
@@ -785,8 +789,13 @@ fn over_hard_sentence(names: &[String]) -> String {
     }
     let rest = names.len().saturating_sub(named);
     if rest > 0 {
+        let (noun, verb, whom) = if rest == 1 {
+            ("file", "is", "it")
+        } else {
+            ("files", "are", "them")
+        };
         let more = format!(
-            "{rest} more files are larger than this process can read. Move them out of the folder, then restart."
+            "{rest} more {noun} {verb} larger than this process can read. Move {whom} out of the folder, then restart."
         );
         let _ = put(more, 0);
     }
@@ -885,9 +894,15 @@ fn migrate_localhost_envelope(
         Ok(localhost_provider::RekeyOutcome::NotEnvelope)
         | Ok(localhost_provider::RekeyOutcome::AlreadyFileKey) => Ok(MigratedFile::Settled),
         Ok(localhost_provider::RekeyOutcome::Rewritten(sealed)) => {
-            opened_file_still_matches(path, &opened)?;
-            HELD.with(|slot| slot.borrow_mut().push((path.to_path_buf(), sealed, opened)));
-            Ok(MigratedFile::Held)
+            if PASS_TWO.with(|slot| slot.get()) {
+                replace_file_fsync_rename(path, &sealed, kept_mode(opened.mode), Some(&opened)).map_err(|err| migration_io(path, "cannot be replaced", err))?;
+                Ok(MigratedFile::Written)
+            } else {
+                drop(sealed);
+                opened_file_still_matches(path, &opened)?;
+                HELD.with(|slot| slot.borrow_mut().push((path.to_path_buf(), opened)));
+                Ok(MigratedFile::Held)
+            }
         }
         Err(err) if err.to_string().contains("does not decrypt") => {
             Err(localhost_refused(path, "does not decrypt"))
@@ -914,6 +929,9 @@ fn sweep_rewrite_temps(dir: &Path) -> anyhow::Result<()> {
             continue;
         }
         let path = dir.join(name);
+        if std::fs::symlink_metadata(&path).is_ok_and(|meta| meta.is_dir()) {
+            return Err(localhost_refused(&path, "is not a file"));
+        }
         std::fs::remove_file(&path)
             .map_err(|err| localhost_write_refused(&path, &err.to_string()))?;
     }
@@ -985,6 +1003,7 @@ fn migrate_localhost_tree(
                 next.insert(rel, seen_file(&after, false));
             }
             MigratedFile::Held => {}
+            MigratedFile::Written => return Err(localhost_refused(&path, "cannot be sealed")),
             MigratedFile::OverHard => {
                 over_hard.push(rel.clone());
                 next.insert(
@@ -1215,18 +1234,25 @@ fn write_localhost_marker(marker: &Path, record: &[u8]) -> anyhow::Result<()> {
 
 #[cfg(unix)]
 #[rustfmt::skip]
-fn commit_held(next: &mut std::collections::HashMap<String, SeenFile>) -> anyhow::Result<()> {
-    for (p, b, o) in HELD.with(|s| std::mem::take(&mut *s.borrow_mut())) {
-        replace_file_fsync_rename(&p, &b, kept_mode(o.mode), Some(&o)).map_err(|e| migration_io(&p, "cannot be replaced", e))?;
-        next.insert(relative_path(&p), seen_file(&std::fs::symlink_metadata(&p).with_context(|| localhost_refused(&p, "cannot be read"))?, false));
+fn commit_held(device_key: &[u8; 32], file_key: &[u8; 32], next: &mut std::collections::HashMap<String, SeenFile>) -> anyhow::Result<()> {
+    let pending = HELD.with(|slot| std::mem::take(&mut *slot.borrow_mut()));
+    PASS_TWO.with(|slot| slot.set(true));
+    for (path, opened) in pending {
+        opened_file_still_matches(&path, &opened)?;
+        if !matches!(migrate_localhost_envelope(&path, device_key, file_key)?, MigratedFile::Written) {
+            return Err(localhost_refused(&path, "cannot be sealed"));
+        }
+        let meta = std::fs::symlink_metadata(&path).with_context(|| localhost_refused(&path, "cannot be read"))?;
+        next.insert(relative_path(&path), seen_file(&meta, false));
     }
+    PASS_TWO.with(|slot| slot.set(false));
     Ok(())
 }
 #[cfg(unix)]
 struct ClearHeld;
 #[cfg(unix)]
 #[rustfmt::skip]
-impl Drop for ClearHeld { fn drop(&mut self) { HELD.with(|s| s.borrow_mut().clear()); } }
+impl Drop for ClearHeld { fn drop(&mut self) { HELD.with(|s| s.borrow_mut().clear()); PASS_TWO.with(|s| s.set(false)); } }
 
 #[cfg(unix)]
 #[rustfmt::skip]
@@ -1278,7 +1304,7 @@ fn migrate_localhost_files_to_file_key(
         }
     }
     if !over_hard.is_empty() { return Err(anyhow::anyhow!(over_hard_sentence(&over_hard))); }
-    commit_held(&mut next)?;
+    commit_held(device_key, &file_key, &mut next)?;
     if next != seen || !seen_path.is_file() {
         write_seen(&seen_path, &next)?;
     }
