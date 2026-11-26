@@ -136,6 +136,50 @@ thread_local! {
         const { std::cell::RefCell::new(None) };
 }
 
+/// The stored nodes of one resident when `caller` presented that frame.
+/// An image node still carries its grant id. The frame route's JSON leaves that out.
+pub(crate) async fn read_v2_frame_for_home(
+    provider: &elastos_compute::providers::ComponentProvider,
+    caller: Option<&str>,
+    id: &str,
+) -> Option<Vec<elastos_compute::providers::bus2_ui::FrameNode>> {
+    provider
+        .read_v2_frame(caller, id)
+        .await
+        .map(|frame| frame.nodes)
+}
+
+/// A legal stored frame fits under this. A larger answer is refused.
+pub const V2_FRAME_ANSWER_MAX: usize = 48 * 1024;
+
+/// JSON nodes for one principal's resident. No grant id and no image bytes.
+pub async fn v2_frame_answer(
+    provider: &elastos_compute::providers::ComponentProvider,
+    principal: &str,
+    app: &str,
+) -> std::result::Result<Vec<u8>, &'static str> {
+    let nodes = read_v2_frame_for_home(provider, Some(principal), app)
+        .await
+        .unwrap_or_default();
+    let nodes: Vec<serde_json::Value> = nodes
+        .into_iter()
+        .map(|node| match node {
+            elastos_compute::providers::bus2_ui::FrameNode::Text(text) => {
+                serde_json::json!({ "kind": "text", "text": text })
+            }
+            elastos_compute::providers::bus2_ui::FrameNode::Image { resource, .. } => {
+                serde_json::json!({ "kind": "image", "resource": resource })
+            }
+        })
+        .collect();
+    let bytes = serde_json::to_vec(&serde_json::json!({ "nodes": nodes }))
+        .map_err(|_| "frame answer is malformed")?;
+    if bytes.len() > V2_FRAME_ANSWER_MAX {
+        return Err("frame answer is over the bound");
+    }
+    Ok(bytes)
+}
+
 /// The public v1 component admission check for capsule kit host tests (kit
 /// item A2). Capsule and bundle starts use the manifest-aware check below.
 pub fn validate_component_imports(bytes: &[u8]) -> std::result::Result<(), String> {
@@ -334,6 +378,745 @@ mod tests {
         Component, ComponentImportSection, ComponentTypeRef as EncodedComponentTypeRef,
         ComponentTypeSection, InstanceType, PrimitiveValType,
     };
+
+    #[tokio::test]
+    async fn v2_frame_read_returns_nodes_and_grant_ids() {
+        use elastos_compute::providers::bus2_ui::{
+            present_frame, FrameNode, GrantBook, UI_MEDIA_TYPE,
+        };
+        use elastos_compute::providers::ComponentProvider;
+
+        let mut book = GrantBook::default();
+        let photo = "localhost://Users/self/Pictures/a.png";
+        book.hold("g1", photo, "read");
+        let replaced = present_frame(
+            UI_MEDIA_TYPE,
+            br#"{"frame":[{"text":"two"},{"image":{"grant":"g1"}}]}"#,
+            &book,
+        )
+        .unwrap();
+        let nodes = replaced.nodes;
+        assert_eq!(
+            nodes,
+            vec![
+                FrameNode::Text("two".into()),
+                FrameNode::Image {
+                    grant: "g1".into(),
+                    resource: photo.into(),
+                },
+            ]
+        );
+        let provider = ComponentProvider::new();
+        assert!(super::read_v2_frame_for_home(&provider, None, "other")
+            .await
+            .is_none());
+    }
+
+    /// A guest reads an object it holds and calls ui.present. Home's frame
+    /// read returns that frame. A second guest's frame stays its own.
+    #[tokio::test]
+    async fn v2_guest_present_reaches_the_home_frame_read() {
+        use elastos_compute::providers::bus2_ui::FrameNode;
+        use elastos_compute::providers::ComponentProvider;
+        use elastos_compute::ComputeProvider;
+        use std::collections::HashMap;
+        use std::sync::{Arc, Mutex};
+        use std::time::Duration;
+
+        let object_a = br#"{"frame":[{"text":"A"}]}"#.to_vec();
+        let object_b = br#"{"frame":[{"text":"B"}]}"#.to_vec();
+        let docs = Arc::new(Mutex::new(HashMap::<String, Vec<u8>>::new()));
+        let lines = Arc::new(Mutex::new(Vec::<(String, String)>::new()));
+        let provider = ComponentProvider::new();
+        let docs_for_call = docs.clone();
+        let lines_for_call = lines.clone();
+        provider.set_bus_hostcall(Arc::new(move |line, capsule, _principal| {
+            lines_for_call
+                .lock()
+                .expect("lines")
+                .push((capsule.to_string(), line.to_string()));
+            let value: serde_json::Value =
+                serde_json::from_str(line).map_err(|err| err.to_string())?;
+            let body = &value["request"]["body"];
+            let offset = body["offset"].as_u64().ok_or("offset")? as usize;
+            let length = body["length"].as_u64().ok_or("length")? as usize;
+            let doc = docs_for_call
+                .lock()
+                .expect("docs")
+                .get(capsule)
+                .cloned()
+                .ok_or_else(|| format!("no object for {capsule}"))?;
+            let start = offset.min(doc.len());
+            let end = start.saturating_add(length).min(doc.len());
+            let window = doc[start..end].to_vec();
+            let text = String::from_utf8(window.clone()).map_err(|err| err.to_string())?;
+            Ok(serde_json::json!({
+                "id": 1,
+                "response": {
+                    "type": "resource_result",
+                    "result": {
+                        "status": "ok",
+                        "data": { "content": text, "size": window.len() }
+                    },
+                    "audit": "read-1"
+                }
+            })
+            .to_string())
+        }));
+
+        let bytes = wat::parse_str(include_str!(
+            "../../../tests/fixtures/components/v2-present.wat"
+        ))
+        .expect("v2-present.wat parses");
+        let manifest_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/fixtures/components/bus-v1/capsule.json");
+        let mut manifest: CapsuleManifest =
+            serde_json::from_slice(&std::fs::read(manifest_path).unwrap()).unwrap();
+        manifest.bus_contract = Some(ELASTOS_BUS_V2_CONTRACT.into());
+        manifest.wit_world_sha256 = Some(elastos_common::elastos_bus_v2_wit_sha256());
+        let first = provider
+            .load_admitted(bytes.clone(), manifest.clone())
+            .await
+            .expect("first guest loads");
+        let second = provider
+            .load_admitted(bytes, manifest)
+            .await
+            .expect("second guest loads");
+        docs.lock()
+            .expect("docs")
+            .insert(first.id.as_str().to_string(), object_a);
+        docs.lock()
+            .expect("docs")
+            .insert(second.id.as_str().to_string(), object_b);
+
+        provider
+            .set_bridge_principal(&first.id, Some("person:local:a".into()))
+            .await;
+        for id in [&first.id, &second.id] {
+            provider
+                .testing_hold_grant(
+                    id,
+                    "grant-token",
+                    "localhost://Users/self/Documents/note.bin",
+                    "read",
+                )
+                .await;
+        }
+        provider.start(&first).await.expect("first guest starts");
+        provider.start(&second).await.expect("second guest starts");
+
+        let frame_of = |id: &str, caller: Option<&'static str>| {
+            let provider = &provider;
+            let id = id.to_string();
+            async move {
+                tokio::time::timeout(Duration::from_secs(3), async {
+                    loop {
+                        if let Some(nodes) = read_v2_frame_for_home(provider, caller, &id).await {
+                            return nodes;
+                        }
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                })
+                .await
+                .unwrap_or_else(|_| panic!("home frame read stayed empty for {id}"))
+            }
+        };
+        let nodes_a = frame_of(first.id.as_str(), Some("person:local:a")).await;
+        let nodes_b = frame_of(second.id.as_str(), None).await;
+        assert_eq!(nodes_a, vec![FrameNode::Text("A".into())]);
+        assert_eq!(nodes_b, vec![FrameNode::Text("B".into())]);
+        assert_eq!(
+            read_v2_frame_for_home(&provider, Some("person:local:a"), first.id.as_str()).await,
+            Some(vec![FrameNode::Text("A".into())]),
+            "the second guest does not replace the first frame"
+        );
+        assert!(read_v2_frame_for_home(&provider, None, first.id.as_str())
+            .await
+            .is_none());
+        assert!(
+            read_v2_frame_for_home(&provider, Some("person:local:a"), second.id.as_str())
+                .await
+                .is_none()
+        );
+        assert!(read_v2_frame_for_home(&provider, None, "other-guest")
+            .await
+            .is_none());
+
+        let seen = lines.lock().expect("lines").clone();
+        assert_eq!(seen.len(), 2, "each guest reads its object once: {seen:?}");
+        for (capsule, line) in &seen {
+            let value: serde_json::Value = serde_json::from_str(line).unwrap();
+            let request = &value["request"];
+            assert_eq!(request["type"], "resource_invoke");
+            assert_eq!(request["operation"], "read");
+            assert_eq!(request["token"], "grant-token");
+            assert_eq!(request["uri"], "localhost://Users/self/Documents/note.bin");
+            assert!(
+                capsule == first.id.as_str() || capsule == second.id.as_str(),
+                "{capsule}"
+            );
+        }
+        let mut callers: Vec<&str> = seen.iter().map(|(capsule, _)| capsule.as_str()).collect();
+        callers.sort();
+        let mut ids = vec![first.id.as_str(), second.id.as_str()];
+        ids.sort();
+        assert_eq!(callers, ids);
+
+        provider.stop(&first).await.unwrap();
+        provider.stop(&second).await.unwrap();
+        assert!(
+            read_v2_frame_for_home(&provider, Some("person:local:a"), first.id.as_str())
+                .await
+                .is_none()
+        );
+        assert!(read_v2_frame_for_home(&provider, None, second.id.as_str())
+            .await
+            .is_none());
+    }
+
+    /// A v2 guest asks on the real bridge. The owner grants that pending
+    /// request. The guest's read carries the token from that grant. A token
+    /// the bridge did not sign is refused, and a denial keeps the owner's text.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn v2_guest_obtains_a_grant_and_reads_with_that_token() {
+        use crate::resource_bridge::{handle_component_resource_request, BridgeContext};
+        use elastos_common::AuthorityBound;
+        use elastos_compute::providers::{ActivationOutcome, ComponentProvider};
+        use elastos_compute::ComputeProvider;
+        use elastos_runtime::capability::pending::PendingRequestStore;
+        use elastos_runtime::capability::{
+            Action, CapabilityManager, CapabilityStore, GrantDuration, RequestStatus, Settler,
+            TokenConstraints,
+        };
+        use elastos_runtime::primitives::audit::AuditLog;
+        use elastos_runtime::primitives::metrics::MetricsManager;
+        use elastos_runtime::provider::{
+            Provider, ProviderError, ProviderRegistry, ResourceRequest, ResourceResponse,
+        };
+        use std::sync::{Arc, Mutex};
+        use std::time::{Duration, Instant};
+
+        const RESOURCE: &str = "localhost://Local/SharedByLocalUsersAndBots/Home/note.txt";
+
+        struct NoteProvider {
+            calls: Arc<Mutex<Vec<serde_json::Value>>>,
+            note: Vec<u8>,
+        }
+
+        #[async_trait::async_trait]
+        impl Provider for NoteProvider {
+            async fn handle(
+                &self,
+                _: ResourceRequest,
+            ) -> std::result::Result<ResourceResponse, ProviderError> {
+                Err(ProviderError::Provider("raw only".into()))
+            }
+
+            fn schemes(&self) -> Vec<&'static str> {
+                vec!["localhost"]
+            }
+
+            fn name(&self) -> &'static str {
+                "note"
+            }
+
+            async fn send_raw(
+                &self,
+                request: &serde_json::Value,
+            ) -> std::result::Result<serde_json::Value, ProviderError> {
+                self.calls.lock().expect("calls").push(request.clone());
+                let offset = request["offset"].as_u64().unwrap_or(0) as usize;
+                let length = request["length"].as_u64().unwrap_or(0) as usize;
+                let start = offset.min(self.note.len());
+                let end = start.saturating_add(length).min(self.note.len());
+                Ok(serde_json::json!({
+                    "status": "ok",
+                    "data": { "content": String::from_utf8_lossy(&self.note[start..end]) }
+                }))
+            }
+        }
+
+        let audit = Arc::new(AuditLog::new());
+        let manager = Arc::new(CapabilityManager::new(
+            Arc::new(CapabilityStore::new()),
+            audit.clone(),
+            Arc::new(MetricsManager::new()),
+        ));
+        let pending = Arc::new(PendingRequestStore::new(audit));
+        let registry = Arc::new(ProviderRegistry::new());
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        registry
+            .register(Arc::new(NoteProvider {
+                calls: calls.clone(),
+                note: b"note".to_vec(),
+            }))
+            .await;
+        let lines = Arc::new(Mutex::new(Vec::<String>::new()));
+        let provider = ComponentProvider::new();
+        {
+            let registry = registry.clone();
+            let manager = manager.clone();
+            let pending = pending.clone();
+            let lines = lines.clone();
+            provider.set_bus_hostcall_async(Arc::new(move |line, capsule, principal| {
+                lines.lock().expect("lines").push(line.to_string());
+                let ctx = BridgeContext {
+                    provider_registry: registry.clone(),
+                    capability_manager: manager.clone(),
+                    pending_store: pending.clone(),
+                    capsule_id: capsule.to_string(),
+                    session_id: capsule.to_string(),
+                    principal_id: principal.map(str::to_string),
+                    manifest_capabilities: vec![AuthorityBound::from(
+                        "localhost://Local/SharedByLocalUsersAndBots/Home/*".to_string(),
+                    )],
+                    data_dir: None,
+                    launch: None,
+                    model_token_ceiling: None,
+                    model_budget: None,
+                    stop: None,
+                    v2_guests: None,
+                    plan_book: None,
+                };
+                let line = line.to_string();
+                Box::pin(async move {
+                    let response = handle_component_resource_request(&line, ctx)
+                        .await
+                        .map_err(|err| err.to_string())?;
+                    serde_json::to_string(&response).map_err(|err| err.to_string())
+                })
+                    as std::pin::Pin<
+                        Box<
+                            dyn std::future::Future<Output = std::result::Result<String, String>>
+                                + Send,
+                        >,
+                    >
+            }));
+        }
+
+        let bytes = wat::parse_str(include_str!(
+            "../../../tests/fixtures/components/v2-grant.wat"
+        ))
+        .expect("v2-grant.wat parses");
+        let manifest_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/fixtures/components/bus-v1/capsule.json");
+        let mut manifest: CapsuleManifest =
+            serde_json::from_slice(&std::fs::read(manifest_path).unwrap()).unwrap();
+        manifest.bus_contract = Some(ELASTOS_BUS_V2_CONTRACT.into());
+        manifest.wit_world_sha256 = Some(elastos_common::elastos_bus_v2_wit_sha256());
+        let handle = provider
+            .load_admitted(bytes, manifest)
+            .await
+            .expect("grant guest loads");
+        let mut resident = provider
+            .start_resident(&handle)
+            .await
+            .expect("grant guest starts");
+
+        let started = Instant::now();
+        let request = loop {
+            if let Some(request) = pending.list_pending().await.into_iter().next() {
+                break request;
+            }
+            if let Some(outcome) = resident.outcome() {
+                panic!("guest ended before a pending request: {outcome:?}");
+            }
+            if started.elapsed() > Duration::from_secs(5) {
+                panic!(
+                    "no pending request; lines: {:?}",
+                    lines.lock().expect("lines")
+                );
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        };
+        assert_eq!(request.resource.as_str(), RESOURCE);
+        assert_eq!(request.reason, "to read");
+        assert_eq!(request.action, Action::Read);
+        assert!(matches!(request.status, RequestStatus::Pending));
+        let token = manager.grant(
+            request.session_id.as_str(),
+            request.resource.clone(),
+            request.action,
+            TokenConstraints::default(),
+            None,
+        );
+        let encoded = token.to_base64().expect("token encodes");
+        pending
+            .grant_request(request.id.as_str(), token, GrantDuration::Session)
+            .await
+            .expect("owner grants");
+
+        let outcome = tokio::time::timeout(Duration::from_secs(10), resident.ended())
+            .await
+            .expect("guest timed out");
+        assert_eq!(outcome, ActivationOutcome::Returned, "guest ending");
+        let seen = lines.lock().expect("lines").clone();
+        let reads: Vec<serde_json::Value> = seen
+            .iter()
+            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+            .filter(|value| value["request"]["type"] == "resource_invoke")
+            .collect();
+        assert_eq!(reads.len(), 1, "one read: {seen:?}");
+        assert_eq!(reads[0]["request"]["token"], encoded);
+        assert_eq!(reads[0]["request"]["uri"], RESOURCE);
+        let dispatched = calls.lock().expect("calls").clone();
+        assert_eq!(
+            dispatched.len(),
+            1,
+            "the bridge dispatched the granted read"
+        );
+        assert_eq!(dispatched[0]["op"], "read");
+        assert_eq!(dispatched[0]["path"], RESOURCE);
+
+        let bad = handle_component_resource_request(
+            &serde_json::json!({
+                "id": 2,
+                "request": {
+                    "type": "resource_invoke",
+                    "uri": RESOURCE,
+                    "operation": "read",
+                    "body": { "path": RESOURCE, "offset": 0, "length": 8 },
+                    "token": "grant-token"
+                }
+            })
+            .to_string(),
+            BridgeContext {
+                provider_registry: registry.clone(),
+                capability_manager: manager.clone(),
+                pending_store: pending.clone(),
+                capsule_id: handle.id.0.clone(),
+                session_id: handle.id.0.clone(),
+                principal_id: None,
+                manifest_capabilities: vec![AuthorityBound::from(
+                    "localhost://Local/SharedByLocalUsersAndBots/Home/*".to_string(),
+                )],
+                data_dir: None,
+                launch: None,
+                model_token_ceiling: None,
+                model_budget: None,
+                stop: None,
+                v2_guests: None,
+                plan_book: None,
+            },
+        )
+        .await
+        .expect("bad token call");
+        assert_eq!(bad["response"]["code"], "invalid_token");
+        assert_eq!(
+            calls.lock().expect("calls").len(),
+            1,
+            "an ungranted token never reaches the provider"
+        );
+
+        let deny_line = serde_json::json!({
+            "id": 3,
+            "request": {
+                "type": "request_capability",
+                "resource": RESOURCE,
+                "action": "read",
+                "reason": "because"
+            }
+        })
+        .to_string();
+        let deny_ctx = BridgeContext {
+            provider_registry: registry,
+            capability_manager: manager,
+            pending_store: pending.clone(),
+            capsule_id: handle.id.0.clone(),
+            session_id: handle.id.0.clone(),
+            principal_id: None,
+            manifest_capabilities: vec![AuthorityBound::from(
+                "localhost://Local/SharedByLocalUsersAndBots/Home/*".to_string(),
+            )],
+            data_dir: None,
+            launch: None,
+            model_token_ceiling: None,
+            model_budget: None,
+            stop: None,
+            v2_guests: None,
+            plan_book: None,
+        };
+        let deny_pending = pending.clone();
+        let waiting = tokio::spawn(async move {
+            handle_component_resource_request(&deny_line, deny_ctx)
+                .await
+                .expect("denial call")
+        });
+        let started = Instant::now();
+        let denied = loop {
+            if let Some(request) = deny_pending.list_pending().await.into_iter().next() {
+                break request;
+            }
+            if started.elapsed() > Duration::from_secs(5) {
+                panic!("denial left no pending request");
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        };
+        deny_pending
+            .deny_request_by(denied.id.as_str(), "not now", Settler::Shell)
+            .await
+            .expect("owner denies");
+        let denied = waiting.await.expect("denial task");
+        assert_eq!(denied["response"]["code"], "denied");
+        assert_eq!(denied["response"]["message"], "not now");
+
+        provider.stop(&handle).await.unwrap();
+    }
+
+    /// One guest requests, reads, and presents. Home reads that frame. A
+    /// grant-revoked event then reaches the running guest, and its next
+    /// present is denied.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn v2_guest_presents_then_a_revoked_grant_denies_the_next_present() {
+        use crate::resource_bridge::{handle_component_resource_request, BridgeContext};
+        use elastos_common::AuthorityBound;
+        use elastos_compute::providers::bus2_ui::FrameNode;
+        use elastos_compute::providers::{ActivationOutcome, ComponentProvider};
+        use elastos_compute::ComputeProvider;
+        use elastos_runtime::capability::pending::PendingRequestStore;
+        use elastos_runtime::capability::{
+            Action, CapabilityManager, CapabilityStore, GrantDuration, RequestStatus,
+            TokenConstraints,
+        };
+        use elastos_runtime::primitives::audit::AuditLog;
+        use elastos_runtime::primitives::metrics::MetricsManager;
+        use elastos_runtime::provider::{
+            Provider, ProviderError, ProviderRegistry, ResourceRequest, ResourceResponse,
+        };
+        use std::sync::{Arc, Mutex};
+        use std::time::{Duration, Instant};
+
+        const RESOURCE: &str = "localhost://Local/SharedByLocalUsersAndBots/Home/note.txt";
+
+        struct NoteProvider {
+            calls: Arc<Mutex<u32>>,
+            note: Vec<u8>,
+        }
+
+        #[async_trait::async_trait]
+        impl Provider for NoteProvider {
+            async fn handle(
+                &self,
+                _: ResourceRequest,
+            ) -> std::result::Result<ResourceResponse, ProviderError> {
+                Err(ProviderError::Provider("raw only".into()))
+            }
+
+            fn schemes(&self) -> Vec<&'static str> {
+                vec!["localhost"]
+            }
+
+            fn name(&self) -> &'static str {
+                "note"
+            }
+
+            async fn send_raw(
+                &self,
+                request: &serde_json::Value,
+            ) -> std::result::Result<serde_json::Value, ProviderError> {
+                *self.calls.lock().expect("calls") += 1;
+                let offset = request["offset"].as_u64().unwrap_or(0) as usize;
+                let length = request["length"].as_u64().unwrap_or(0) as usize;
+                let start = offset.min(self.note.len());
+                let end = start.saturating_add(length).min(self.note.len());
+                Ok(serde_json::json!({
+                    "status": "ok",
+                    "data": { "content": String::from_utf8_lossy(&self.note[start..end]) }
+                }))
+            }
+        }
+
+        let audit = Arc::new(AuditLog::new());
+        let store = Arc::new(CapabilityStore::new());
+        let manager = Arc::new(CapabilityManager::new(
+            store.clone(),
+            audit.clone(),
+            Arc::new(MetricsManager::new()),
+        ));
+        let pending = Arc::new(PendingRequestStore::new(audit.clone()));
+        let registry = Arc::new(ProviderRegistry::new());
+        let calls = Arc::new(Mutex::new(0u32));
+        registry
+            .register(Arc::new(NoteProvider {
+                calls: calls.clone(),
+                note: b"note".to_vec(),
+            }))
+            .await;
+        let lines = Arc::new(Mutex::new(Vec::<String>::new()));
+        let provider = Arc::new(ComponentProvider::new());
+        {
+            let registry = registry.clone();
+            let manager = manager.clone();
+            let pending = pending.clone();
+            let lines = lines.clone();
+            provider.set_bus_hostcall_async(Arc::new(move |line, capsule, principal| {
+                lines.lock().expect("lines").push(line.to_string());
+                let ctx = BridgeContext {
+                    provider_registry: registry.clone(),
+                    capability_manager: manager.clone(),
+                    pending_store: pending.clone(),
+                    capsule_id: capsule.to_string(),
+                    session_id: capsule.to_string(),
+                    principal_id: principal.map(str::to_string),
+                    manifest_capabilities: vec![AuthorityBound::from(
+                        "localhost://Local/SharedByLocalUsersAndBots/Home/*".to_string(),
+                    )],
+                    data_dir: None,
+                    launch: None,
+                    model_token_ceiling: None,
+                    model_budget: None,
+                    stop: None,
+                    v2_guests: None,
+                    plan_book: None,
+                };
+                let line = line.to_string();
+                Box::pin(async move {
+                    let response = handle_component_resource_request(&line, ctx)
+                        .await
+                        .map_err(|err| err.to_string())?;
+                    serde_json::to_string(&response).map_err(|err| err.to_string())
+                })
+                    as std::pin::Pin<
+                        Box<
+                            dyn std::future::Future<Output = std::result::Result<String, String>>
+                                + Send,
+                        >,
+                    >
+            }));
+        }
+
+        let bytes = wat::parse_str(include_str!(
+            "../../../tests/fixtures/components/v2-journey.wat"
+        ))
+        .expect("v2-journey.wat parses");
+        let manifest_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/fixtures/components/bus-v1/capsule.json");
+        let mut manifest: CapsuleManifest =
+            serde_json::from_slice(&std::fs::read(manifest_path).unwrap()).unwrap();
+        manifest.bus_contract = Some(ELASTOS_BUS_V2_CONTRACT.into());
+        manifest.wit_world_sha256 = Some(elastos_common::elastos_bus_v2_wit_sha256());
+        let handle = provider
+            .load_admitted(bytes, manifest)
+            .await
+            .expect("journey guest loads");
+        let mut resident = provider
+            .start_resident(&handle)
+            .await
+            .expect("journey guest starts");
+
+        let started = Instant::now();
+        let request = loop {
+            if let Some(request) = pending.list_pending().await.into_iter().next() {
+                break request;
+            }
+            if let Some(outcome) = resident.outcome() {
+                panic!("guest ended before a pending request: {outcome:?}");
+            }
+            if started.elapsed() > Duration::from_secs(5) {
+                panic!("no pending request");
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        };
+        assert!(matches!(request.status, RequestStatus::Pending));
+        assert_eq!(request.action, Action::Read);
+        let token = manager.grant(
+            request.session_id.as_str(),
+            request.resource.clone(),
+            request.action,
+            TokenConstraints::default(),
+            None,
+        );
+        let encoded = token.to_base64().expect("token encodes");
+        pending
+            .grant_request(request.id.as_str(), token, GrantDuration::Session)
+            .await
+            .expect("owner grants");
+
+        let started = Instant::now();
+        let nodes = loop {
+            if let Some(nodes) =
+                read_v2_frame_for_home(provider.as_ref(), None, handle.id.as_str()).await
+            {
+                break nodes;
+            }
+            if let Some(outcome) = resident.outcome() {
+                panic!("guest ended before a frame: {outcome:?}");
+            }
+            if started.elapsed() > Duration::from_secs(8) {
+                panic!("no frame; lines {:?}", lines.lock().expect("lines"));
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        };
+        assert_eq!(
+            nodes,
+            vec![FrameNode::Image {
+                grant: encoded.clone(),
+                resource: RESOURCE.into(),
+            }]
+        );
+        assert_eq!(
+            *calls.lock().expect("calls"),
+            1,
+            "the read reached the provider"
+        );
+        let seen = lines.lock().expect("lines").clone();
+        assert!(
+            seen.iter().any(|line| {
+                serde_json::from_str::<serde_json::Value>(line)
+                    .ok()
+                    .is_some_and(|value| value["request"]["token"] == encoded)
+            }),
+            "the read used the granted token"
+        );
+
+        use tower::ServiceExt;
+        let session_registry = Arc::new(elastos_runtime::session::SessionRegistry::new(audit));
+        let shell = session_registry
+            .create_session(elastos_runtime::session::SessionType::Shell, None)
+            .await;
+        let state = crate::api::handlers::CapabilityState {
+            pending_store: pending.clone(),
+            capability_manager: manager.clone(),
+            capability_store: store,
+            policy_evaluator: Arc::new(elastos_runtime::capability::PolicyEvaluator::new(
+                Box::new(elastos_runtime::capability::evaluator::ShellPassthroughVerifier),
+                Arc::new(AuditLog::new()),
+            )),
+            v2_guests: Some(provider.clone()),
+        };
+        let app = crate::api::server::shell_capability_routes(
+            crate::api::middleware::ApiState { session_registry },
+            state,
+        );
+        let revoked = app
+            .oneshot(
+                axum::http::Request::delete(format!("/api/capability/{}", request.id.as_str()))
+                    .header(
+                        axum::http::header::AUTHORIZATION,
+                        format!("Bearer {}", shell.token),
+                    )
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .expect("the revoke route answers");
+        assert_eq!(revoked.status(), axum::http::StatusCode::OK);
+        assert!(
+            read_v2_frame_for_home(provider.as_ref(), None, handle.id.as_str())
+                .await
+                .is_none(),
+            "the route drops the frame that names the grant"
+        );
+        let outcome = tokio::time::timeout(Duration::from_secs(8), resident.ended())
+            .await
+            .expect("guest timed out");
+        assert_eq!(
+            outcome,
+            ActivationOutcome::Returned,
+            "the next present is denied and the guest returns"
+        );
+        provider.stop(&handle).await.unwrap();
+    }
 
     fn wat_imports(names: &[&str]) -> Vec<u8> {
         let imports = names

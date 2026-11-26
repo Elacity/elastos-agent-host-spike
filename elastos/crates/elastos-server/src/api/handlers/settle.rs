@@ -160,6 +160,18 @@ pub async fn settle_and_revoke(
     session_id: &str,
     cause: &str,
 ) -> Result<(), String> {
+    settle_and_revoke_guests(store, manager, data_dir, session_id, cause, None).await
+}
+
+/// [`settle_and_revoke`], and it tells `guests` that each grant of this session is revoked.
+pub(crate) async fn settle_and_revoke_guests(
+    store: &PendingRequestStore,
+    manager: &CapabilityManager,
+    data_dir: &Path,
+    session_id: &str,
+    cause: &str,
+    guests: Option<&elastos_compute::providers::ComponentProvider>,
+) -> Result<(), String> {
     let reason = format!("instance ended: {cause}");
     for request in store.list_session_pending(session_id).await {
         // Fails only if the request left Pending after the listing; a grant
@@ -177,14 +189,14 @@ pub async fn settle_and_revoke(
         .into_iter()
         .filter(|request| request.session_id.as_str() == session_id)
         .filter_map(|request| match request.status {
-            RequestStatus::Granted { token, .. } => Some((request.id, *token.id())),
+            RequestStatus::Granted { token, .. } => Some((request.id, token)),
             _ => None,
         })
         .collect();
     if grants.is_empty() {
         return Ok(());
     }
-    let tokens: Vec<TokenId> = grants.iter().map(|(_, token)| *token).collect();
+    let tokens: Vec<TokenId> = grants.iter().map(|(_, token)| *token.id()).collect();
     let kept = keep_pending(data_dir, &tokens);
     if let Err(list) = &kept {
         tracing::error!(%list, "settle {session_id}: pending revocations not saved");
@@ -192,8 +204,9 @@ pub async fn settle_and_revoke(
     let mut saved = Vec::new();
     let mut unsaved = None;
     for (request, token) in &grants {
-        match manager.revoke(*token, &reason).await {
-            Ok(()) => saved.push(*token),
+        crate::api::handlers::capability::tell_v2_grant_revoked(guests, session_id, token).await;
+        match manager.revoke(*token.id(), &reason).await {
+            Ok(()) => saved.push(*token.id()),
             Err(error) => {
                 tracing::error!(%error, "settle {session_id}: revocation persistence failed");
                 unsaved = Some(error);
@@ -291,6 +304,7 @@ mod tests {
                 Box::new(ShellPassthroughVerifier),
                 audit,
             )),
+            v2_guests: None,
         }
     }
 

@@ -93,6 +93,9 @@ fn load_capsule_manifest(
     manifest
         .validate()
         .map_err(|e| anyhow!("Invalid capsule manifest for '{}': {}", name, e))?;
+    if manifest.bus_contract.as_deref() == Some(elastos_common::ELASTOS_BUS_V2_CONTRACT) {
+        bail!(crate::runtime::BOUNDED_V2_REFUSAL);
+    }
     if manifest.name != name {
         bail!(
             "launch_name_not_walked: requested '{name}', walked '{}'",
@@ -346,5 +349,49 @@ mod tests {
         let error = load_capsule_manifest(directory.path(), "pinned-fixture").unwrap_err();
         let expected = "Invalid capsule manifest for 'pinned-fixture': unknown field `cid`";
         assert!(error.to_string().starts_with(expected), "{error}");
+    }
+
+    #[test]
+    fn the_capsule_command_refuses_a_bus_v2_manifest_by_name() {
+        let directory = tempfile::tempdir().unwrap();
+        let write = |name: &str, contract: &str, hash: String| {
+            let manifest = serde_json::json!({
+                "schema": "elastos.capsule/v1",
+                "name": name,
+                "version": "0.1.0",
+                "role": "app",
+                "type": "wasm",
+                "runtime_abi": "elastos.component/v1",
+                "execution": "component",
+                "entrypoint": "main.component.wasm",
+                "bus_contract": contract,
+                "wit_world_sha256": hash,
+            });
+            std::fs::write(directory.path().join("capsule.json"), manifest.to_string()).unwrap();
+        };
+        write(
+            "v2-app",
+            elastos_common::ELASTOS_BUS_V2_CONTRACT,
+            elastos_common::elastos_bus_v2_wit_sha256(),
+        );
+        let message = load_capsule_manifest(directory.path(), "v2-app")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            message.contains(elastos_common::ELASTOS_BUS_V2_CONTRACT),
+            "{message}"
+        );
+        assert!(message.contains("POST /api/capsules"), "{message}");
+        write(
+            "v1-app",
+            elastos_common::ELASTOS_BUS_V1_CONTRACT,
+            elastos_common::elastos_bus_v1_wit_sha256(),
+        );
+        assert_eq!(
+            load_capsule_manifest(directory.path(), "v1-app")
+                .unwrap()
+                .name,
+            "v1-app"
+        );
     }
 }

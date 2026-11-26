@@ -194,6 +194,7 @@ fn submit_with_bounds(
             model_token_ceiling: Some(16),
             model_budget: None,
             stop: None,
+            v2_guests: None,
             plan_book: None,
         };
         crate::runtime::Runtime::bind_detached_plan_for_test(
@@ -1952,6 +1953,7 @@ async fn plan_inflight_row(
         model_token_ceiling: Some(16),
         model_budget: None,
         stop: None,
+        v2_guests: None,
         plan_book: Some(runtime.plan_book()),
     };
     crate::resource_bridge::retain_agent_plan_dispatch_authority(
@@ -2291,6 +2293,7 @@ async fn plant_approved(
         model_token_ceiling: Some(16),
         model_budget: None,
         stop: None,
+        v2_guests: None,
         plan_book: Some(runtime.plan_book()),
     };
     crate::resource_bridge::retain_agent_plan_dispatch_authority(
@@ -2456,6 +2459,7 @@ async fn dispatch_without_an_open_instance(bound_then_gone: bool) {
         model_token_ceiling: None,
         model_budget: None,
         stop: None,
+        v2_guests: None,
         plan_book: None,
     };
     if bound_then_gone {
@@ -3124,6 +3128,7 @@ async fn a_hundred_timeouts_leave_no_flight_and_no_instance() {
             model_token_ceiling: Some(16),
             model_budget: None,
             stop: None,
+            v2_guests: None,
             plan_book: Some(plant.runtime.plan_book()),
         };
         crate::resource_bridge::retain_agent_plan_dispatch_authority(
@@ -3885,6 +3890,7 @@ async fn three_hundred_spent_grants_still_let_stop_settle() {
             model_token_ceiling: Some(16),
             model_budget: None,
             stop: None,
+            v2_guests: None,
             plan_book: Some(plant.runtime.plan_book()),
         };
         crate::resource_bridge::retain_agent_plan_dispatch_authority(
@@ -4566,6 +4572,39 @@ async fn a_dropped_dispatch_takes_the_parked_guard() {
         !crate::resource_bridge::parked_plan_guard_is_held(&plant.id),
         "the drop left the parked guard"
     );
+}
+
+/// The present check (`count_use: false`) and the counted present
+/// (`use_grant: true`) answer without a provider read. As a plan step, each
+/// ends its flight, and Stop then says stopped.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_present_read_step_leaves_no_flight() {
+    for (n, flag) in [(91, "count_use"), (92, "use_grant")] {
+        let plant = plant_approved(n, false, |_, target| {
+            let mut request = json!({ "path": target });
+            request[flag] = json!(flag == "use_grant");
+            json!({"steps": [{"scheme": "localhost", "operation": "read", "request": request}]})
+        })
+        .await;
+        dispatch_planted(&plant).await.unwrap();
+        let record = read_record(plant.dir.path(), &plant.id);
+        assert_eq!(record["status"], "completed", "{flag} {record}");
+        assert_eq!(std::fs::read(&plant.path).unwrap(), plant.before, "{flag}");
+        assert!(
+            !plant.runtime.plan_effect_inflight(&plant.session),
+            "{flag} left the flight holding the instance"
+        );
+        let (status, body) = stop_plan_agent(plant.runtime.clone(), &plant.agent).await;
+        assert_eq!(status, StatusCode::OK, "{flag} {body}");
+        assert_eq!(body["stopped"][0]["status"], "stopped", "{flag} {body}");
+        assert!(
+            body["stopping"]
+                .as_array()
+                .is_none_or(|rows| rows.is_empty()),
+            "{flag} {body}"
+        );
+    }
 }
 
 fn panic_text(payload: Box<dyn std::any::Any + Send>) -> String {

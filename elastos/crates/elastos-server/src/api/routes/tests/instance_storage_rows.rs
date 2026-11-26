@@ -261,6 +261,7 @@ async fn replay(
         model_token_ceiling: None,
         model_budget: None,
         stop: None,
+        v2_guests: None,
         plan_book: None,
     };
     crate::resource_bridge::handle_component_resource_request(&line, ctx)
@@ -749,6 +750,7 @@ async fn retained_plan_dispatch_after(end: InstanceEnd) {
         model_token_ceiling: None,
         model_budget: None,
         stop: None,
+        v2_guests: None,
         plan_book: None,
     };
     crate::resource_bridge::retain_agent_plan_dispatch_authority(

@@ -1195,6 +1195,7 @@ fn gateway_router_with_api_url(state: GatewayState, gateway_api_url: String) -> 
             post(home_appearance_preferences_update),
         )
         .route("/api/apps/home/summary", get(home_summary))
+        .route("/api/apps/home/frame", get(home_v2_frame))
         .route("/api/apps/home/events", get(home_events))
         .route("/api/apps/home/events/stream", get(home_events_stream))
         .route(

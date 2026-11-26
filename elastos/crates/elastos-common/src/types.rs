@@ -28,6 +28,8 @@ impl std::fmt::Display for CapsuleId {
 pub enum CapsuleStatus {
     Loading,
     Running,
+    /// A stop has been asked and the worker has not joined.
+    Stopping,
     Stopped,
     Failed,
 }
@@ -37,6 +39,7 @@ impl std::fmt::Display for CapsuleStatus {
         match self {
             CapsuleStatus::Loading => write!(f, "loading"),
             CapsuleStatus::Running => write!(f, "running"),
+            CapsuleStatus::Stopping => write!(f, "stopping"),
             CapsuleStatus::Stopped => write!(f, "stopped"),
             CapsuleStatus::Failed => write!(f, "failed"),
         }

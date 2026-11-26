@@ -14,7 +14,10 @@ use elastos_bundle_identity::{
     WalkReport,
 };
 use elastos_common::{AuthorityBound, CapsuleManifest, CapsuleType, ElastosError, Result};
-use elastos_compute::providers::{BridgeHostcall, ComponentProvider, STOPPED_BEFORE_RUN};
+use elastos_compute::providers::{
+    component_bridge_leg, BridgeHostcall, BridgeHostcallAsync, ComponentBridgeLeg,
+    ComponentProvider, STOPPED_BEFORE_RUN, STOPPED_DURING_START,
+};
 use elastos_compute::{CapsuleHandle, ComputeProvider};
 use elastos_storage::StorageProvider;
 
@@ -35,6 +38,8 @@ pub const CAPSULE_STOPPED: &str = "stopped";
 pub const CAPSULE_FAILED: &str = "failed";
 /// The cause of an activation whose guest's `run` returned success.
 pub const CAUSE_COMPLETED: &str = "completed";
+pub const BOUNDED_V2_REFUSAL: &str =
+    "elastos:bus@2.0.0 is a Home resident: start it with POST /api/capsules";
 
 /// How long an ended activation stays listed, so its session, status and cause
 /// can still be read after the response that started it has long gone. The end
@@ -1693,12 +1698,13 @@ impl ActivationContextHeld {
                 let _ = self.component.stop(&self.handle).await;
                 let settled = match &self.authority {
                     Some(authority) => {
-                        crate::api::handlers::settle::settle_and_revoke(
+                        crate::api::handlers::settle::settle_and_revoke_guests(
                             &authority.pending_store,
                             &authority.capability_manager,
                             &authority.data_dir,
                             &self.id.0,
                             cause,
+                            Some(self.component.as_ref()),
                         )
                         .await
                     }
@@ -1856,7 +1862,9 @@ fn stop_reason(status: &str, cause: &str) -> elastos_runtime::primitives::audit:
 fn start_ended_by_stop(err: &ElastosError) -> bool {
     match err {
         ElastosError::CapsuleNotFound(_) => true,
-        ElastosError::Compute(message) => message == STOPPED_BEFORE_RUN,
+        ElastosError::Compute(message) => {
+            message == STOPPED_BEFORE_RUN || message == STOPPED_DURING_START
+        }
         _ => false,
     }
 }
@@ -2003,7 +2011,31 @@ pub(crate) struct BridgeTables {
     pub stop: Option<Arc<crate::resource_bridge::ActivationStopFlag>>,
 }
 
+/// The tables both bridge hostcalls read. Built once where those closures
+/// are installed, and captured there. A call looks its own capsule id up
+/// and drops the locks before the bridge runs.
+struct ComponentBridgeTables {
+    registry: Arc<ProviderRegistry>,
+    capability_manager: Arc<elastos_runtime::capability::CapabilityManager>,
+    pending_store: Arc<elastos_runtime::capability::pending::PendingRequestStore>,
+    data_dir: PathBuf,
+    manifest_capabilities: Arc<StdRwLock<HashMap<String, Vec<AuthorityBound>>>>,
+    model_token_ceilings: Arc<StdRwLock<HashMap<String, AgentModelCeiling>>>,
+    model_budget: Arc<ModelBudget>,
+    model_offer_bounds: Arc<StdRwLock<HashMap<String, crate::resource_bridge::ModelOfferBound>>>,
+    activation_stops: Arc<StdRwLock<HashMap<String, Arc<ActivationStop>>>>,
+    launch_contents: Arc<StdRwLock<HashMap<String, Arc<LaunchContent>>>>,
+    v2_guests: Option<Arc<ComponentProvider>>,
+    plan_book: Arc<StdMutex<PlanBook>>,
+}
+
 impl Runtime {
+    /// The v2 guests this runtime hosts. The owner's revoke routes tell them,
+    /// and `elastos serve` hands the same view to the Supervisor.
+    pub fn component_guests(&self) -> Option<Arc<ComponentProvider>> {
+        self.component_provider.clone()
+    }
+
     /// Create a new runtime with a single compute provider (backward compatible)
     pub fn new(storage: Arc<dyn StorageProvider>, compute: Arc<dyn ComputeProvider>) -> Self {
         Self {
@@ -2067,6 +2099,20 @@ impl Runtime {
         }
     }
 
+    /// Runs one bridge future on `handle`, on this thread. A `spawn_blocking`
+    /// worker whose runtime handle is entered stays on that thread too.
+    pub(crate) fn block_on_component_bridge<T>(
+        handle: &tokio::runtime::Handle,
+        leg: ComponentBridgeLeg,
+        fut: impl std::future::Future<Output = T> + Send,
+    ) -> T
+    where
+        T: Send,
+    {
+        let ComponentBridgeLeg::Caller = leg;
+        handle.block_on(fut)
+    }
+
     /// The model account a capsule's bridge calls spend. The key is the agent
     /// admission stored for that capsule, so every session of the agent shares
     /// one ceiling. A missing entry is not an admitted agent.
@@ -2102,6 +2148,63 @@ impl Runtime {
         (ceiling, budget)
     }
 
+    /// The ceiling and the launch content for one bridge call, looked up by
+    /// that caller's own capsule id. Both hostcalls use this. The locks end
+    /// here, before the call.
+    fn component_bridge_context(
+        tables: &ComponentBridgeTables,
+        capsule_id: &str,
+        principal_id: Option<&str>,
+    ) -> crate::resource_bridge::BridgeContext {
+        let manifest_capabilities = tables
+            .manifest_capabilities
+            .read()
+            .ok()
+            .and_then(|guard| guard.get(capsule_id).cloned())
+            .unwrap_or_default();
+        // The content this caller was launched with, if it is the program of
+        // a content launch: looked up by its own id, as its ceiling is, and
+        // nobody else's. A poisoned lock still holds the table. The read
+        // guard ends with this statement: it is not held across the call.
+        let launch = tables
+            .launch_contents
+            .read()
+            .unwrap_or_else(|it| it.into_inner())
+            .get(capsule_id)
+            .cloned();
+        let (model_token_ceiling, model_budget) = Self::model_dispatch_budget(
+            capsule_id,
+            &tables.model_token_ceilings,
+            &tables.model_budget,
+            &tables.model_offer_bounds,
+        );
+        let stop = tables
+            .activation_stops
+            .read()
+            .unwrap_or_else(|it| it.into_inner())
+            .get(capsule_id)
+            .map(|stop| stop.flag.clone());
+        crate::resource_bridge::BridgeContext {
+            provider_registry: tables.registry.clone(),
+            capability_manager: tables.capability_manager.clone(),
+            pending_store: tables.pending_store.clone(),
+            capsule_id: capsule_id.to_string(),
+            // The provider minted this id for the one activation, so the
+            // Runtime session is the activation, taken from the hostcall
+            // and never from the Bus identity field the guest reads.
+            session_id: capsule_id.to_string(),
+            principal_id: principal_id.map(ToOwned::to_owned),
+            manifest_capabilities,
+            data_dir: Some(tables.data_dir.clone()),
+            launch,
+            model_token_ceiling,
+            model_budget,
+            stop,
+            v2_guests: tables.v2_guests.clone(),
+            plan_book: Some(Arc::clone(&tables.plan_book)),
+        }
+    }
+
     /// Set the provider registry and capability manager for provider dispatch
     /// and real token minting.
     ///
@@ -2129,74 +2232,50 @@ impl Runtime {
             data_dir: data_dir.clone(),
         });
         if let Some(ref component) = self.component_provider {
-            let host_reg = registry.clone();
-            let host_cap_mgr = capability_manager.clone();
-            let host_pending = pending_store.clone();
-            let host_data_dir = data_dir.clone();
-            let host_manifest_capabilities = self.bridge_manifest_capabilities.clone();
-            let host_model_token_ceilings = self.bridge_model_token_ceilings.clone();
-            let host_model_budget = self.model_budget.clone();
-            let host_model_offer_bounds = self.model_offer_bounds.clone();
-            let host_activation_stops = self.activation_stops.clone();
-            let host_launch_contents = self.launch_contents.clone();
-            let host_plan_book = Arc::clone(&self.plan_book);
+            let tables = ComponentBridgeTables {
+                registry: registry.clone(),
+                capability_manager: capability_manager.clone(),
+                pending_store: pending_store.clone(),
+                data_dir: data_dir.clone(),
+                manifest_capabilities: self.bridge_manifest_capabilities.clone(),
+                model_token_ceilings: self.bridge_model_token_ceilings.clone(),
+                model_budget: self.model_budget.clone(),
+                model_offer_bounds: self.model_offer_bounds.clone(),
+                activation_stops: self.activation_stops.clone(),
+                launch_contents: self.launch_contents.clone(),
+                v2_guests: Some(component.clone()),
+                plan_book: Arc::clone(&self.plan_book),
+            };
             let host_handle = tokio::runtime::Handle::current();
+            let bridge_call: BridgeHostcallAsync =
+                Arc::new(move |line, capsule_id, principal_id| {
+                    let ctx = Self::component_bridge_context(&tables, capsule_id, principal_id);
+                    let line = line.to_string();
+                    Box::pin(async move {
+                        let response =
+                            crate::resource_bridge::handle_component_resource_request(&line, ctx)
+                                .await
+                                .map_err(|err| err.to_string())?;
+                        serde_json::to_string(&response).map_err(|err| err.to_string())
+                    })
+                        as std::pin::Pin<
+                            Box<
+                                dyn std::future::Future<
+                                        Output = std::result::Result<String, String>,
+                                    > + Send,
+                            >,
+                        >
+                });
+            let bridge_for_v1 = bridge_call.clone();
+            component.set_bus_hostcall_async(bridge_call);
+            // v1 stays on the caller thread. The leg is Caller, so this does
+            // not start a thread. v2 awaits `bridge_call` and never comes here.
             component.set_bus_hostcall(Arc::new(move |line, capsule_id, principal_id| {
-                let manifest_capabilities = host_manifest_capabilities
-                    .read()
-                    .ok()
-                    .and_then(|guard| guard.get(capsule_id).cloned())
-                    .unwrap_or_default();
-                // The content this caller was launched with, if it is the
-                // program of a content launch: looked up by its own id, as
-                // its ceiling is, and nobody else's. A poisoned lock still
-                // holds the table, as for the guard. The read guard ends with
-                // this statement: it is not held across the call below, so an
-                // activation's end can take the content away while another
-                // guest is inside the bridge.
-                let launch = host_launch_contents
-                    .read()
-                    .unwrap_or_else(|it| it.into_inner())
-                    .get(capsule_id)
-                    .cloned();
-                let (model_token_ceiling, model_budget) = Self::model_dispatch_budget(
-                    capsule_id,
-                    &host_model_token_ceilings,
-                    &host_model_budget,
-                    &host_model_offer_bounds,
-                );
-                // The stop this activation was asked for, if any: the bridge's
-                // wait loop leaves a long capability wait through it.
-                let stop = host_activation_stops
-                    .read()
-                    .unwrap_or_else(|it| it.into_inner())
-                    .get(capsule_id)
-                    .map(|stop| stop.flag.clone());
-                let ctx = crate::resource_bridge::BridgeContext {
-                    provider_registry: host_reg.clone(),
-                    capability_manager: host_cap_mgr.clone(),
-                    pending_store: host_pending.clone(),
-                    capsule_id: capsule_id.to_string(),
-                    // The provider minted this id for the one activation, so
-                    // the Runtime session is the activation, taken here from
-                    // the Runtime's own hostcall and never from the Bus
-                    // identity field the guest reads.
-                    session_id: capsule_id.to_string(),
-                    principal_id: principal_id.map(ToOwned::to_owned),
-                    manifest_capabilities,
-                    data_dir: Some(host_data_dir.clone()),
-                    launch,
-                    model_token_ceiling,
-                    model_budget,
-                    stop,
-                    plan_book: Some(host_plan_book.clone()),
-                };
-                let response = host_handle
-                    .block_on(crate::resource_bridge::handle_component_resource_request(
-                        line, ctx,
-                    ))
-                    .map_err(|err| err.to_string())?;
-                serde_json::to_string(&response).map_err(|err| err.to_string())
+                Self::block_on_component_bridge(
+                    &host_handle,
+                    component_bridge_leg(),
+                    bridge_for_v1(line, capsule_id, principal_id),
+                )
             }));
             tracing::info!("Component resource bridge configured");
         }
@@ -3597,14 +3676,6 @@ impl Runtime {
             }
         }
 
-        // The server has no owner or stop route for a resident v2 activation.
-        // Refuse it before loading a component or running any guest code.
-        if manifest.bus_contract.as_deref() == Some(elastos_common::ELASTOS_BUS_V2_CONTRACT) {
-            return Err(ElastosError::InvalidManifest(
-                "Bus v2 contract not yet runnable".into(),
-            ));
-        }
-
         // Reject entrypoints that escape the capsule directory
         if manifest.entrypoint.contains("..")
             || std::path::Path::new(&manifest.entrypoint).is_absolute()
@@ -4413,14 +4484,19 @@ impl Runtime {
                 crate::agent_admission::NOT_A_COMPONENT.to_string(),
             ));
         }
-        let detached_component =
-            if mode == LaunchMode::Detached && handle.manifest.is_component_capsule() {
-                Some(self.component_provider.clone().ok_or_else(|| {
-                    ElastosError::Compute("No component compute provider is configured".to_string())
-                })?)
-            } else {
-                None
-            };
+        // A v2 component stays up. A folder start uses this detached path,
+        // with the same admission, grants, and limits as a v1 start.
+        let v2_resident = handle.manifest.bus_contract.as_deref()
+            == Some(elastos_common::ELASTOS_BUS_V2_CONTRACT);
+        let detached_component = if (mode == LaunchMode::Detached || v2_resident)
+            && handle.manifest.is_component_capsule()
+        {
+            Some(self.component_provider.clone().ok_or_else(|| {
+                ElastosError::Compute("No component compute provider is configured".to_string())
+            })?)
+        } else {
+            None
+        };
         let mut carried = if model_admission.is_some() {
             live_run.take()
         } else {
@@ -4948,6 +5024,9 @@ impl Runtime {
     /// List all registered capsules, sorted by id. An entry that ended more
     /// than [`ENDED_CAPSULE_RETENTION`] ago leaves the listing here.
     pub async fn list_capsules(&self) -> Vec<RunningCapsuleInfo> {
+        if let Some(component) = &self.component_provider {
+            component.reap_joined_residents().await;
+        }
         self.list_capsules_pruning_at(std::time::Instant::now())
             .await
     }
@@ -5223,12 +5302,47 @@ fn table_holds<T>(table: &StdRwLock<HashMap<String, T>>, id: &str) -> bool {
 }
 
 #[cfg(test)]
+fn live_thread_count() -> u32 {
+    #[cfg(target_os = "linux")]
+    {
+        std::fs::read_dir("/proc/self/task")
+            .map(|entries| entries.filter(|entry| entry.is_ok()).count() as u32)
+            .unwrap_or(0)
+    }
+    #[cfg(target_os = "macos")]
+    {
+        extern "C" {
+            fn mach_task_self() -> libc::mach_port_t;
+        }
+        // SAFETY: `mach_task_self` is this process. `task_threads` writes a
+        // kernel array that this function releases with `vm_deallocate`.
+        unsafe {
+            let mut list: libc::thread_act_array_t = std::ptr::null_mut();
+            let mut count: libc::mach_msg_type_number_t = 0;
+            let task = mach_task_self();
+            let kr = libc::task_threads(task, &mut list, &mut count);
+            if kr == 0 && !list.is_null() {
+                let bytes =
+                    (count as usize).saturating_mul(std::mem::size_of::<libc::thread_act_t>());
+                libc::vm_deallocate(task, list as libc::vm_address_t, bytes as libc::vm_size_t);
+            }
+            count
+        }
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        0
+    }
+}
+
+#[cfg(test)]
 pub(crate) mod tests {
     use super::*;
     use async_trait::async_trait;
     use elastos_common::{
-        elastos_bus_v1_wit_sha256, CapsuleId, CapsuleManifest, CapsuleRole, CapsuleStatus,
-        CapsuleType, Permissions, ResourceLimits, ELASTOS_BUS_V1_CONTRACT, SCHEMA_V1,
+        elastos_bus_v1_wit_sha256, elastos_bus_v2_wit_sha256, CapsuleId, CapsuleManifest,
+        CapsuleRole, CapsuleStatus, CapsuleType, Permissions, ResourceLimits,
+        ELASTOS_BUS_V1_CONTRACT, ELASTOS_BUS_V2_CONTRACT, SCHEMA_V1,
     };
     use elastos_compute::{CapsuleInfo, ComputeProvider};
     use elastos_runtime::capability::pending::GrantDuration;
@@ -5607,6 +5721,7 @@ pub(crate) mod tests {
                 model_token_ceiling,
                 model_budget,
                 stop: tables.stop,
+                v2_guests: None,
                 plan_book: Some(Arc::clone(&self.plan_book)),
             }
         }
@@ -8533,6 +8648,7 @@ pub(crate) mod tests {
             model_token_ceiling: None,
             model_budget: None,
             stop: None,
+            v2_guests: None,
             plan_book: None,
         };
         let line = serde_json::json!({
@@ -8926,6 +9042,262 @@ pub(crate) mod tests {
             own.to_string()
         )));
     }
+
+    fn v2_home_bytes(kind: &str) -> Vec<u8> {
+        let source = include_str!("../../../tests/fixtures/components/v2-resident.wat");
+        let source = match kind {
+            "trap" => source.replacen(
+                "call $new global.set $set\n      call $next)",
+                "call $new global.set $set\n      unreachable)",
+                1,
+            ),
+            "spin" => source.replacen(
+                "call $new global.set $set\n      call $next)",
+                "call $new global.set $set\n      (loop $spin br $spin) i32.const 0)",
+                1,
+            ),
+            _ => source.to_string(),
+        };
+        wat::parse_str(source).expect("v2 home guest")
+    }
+
+    /// Loads a v2 guest, registers it, and lets the watcher start it.
+    async fn start_v2_home(
+        bytes: Vec<u8>,
+        name: &str,
+        panic_start: bool,
+    ) -> (
+        Runtime,
+        Arc<ComponentProvider>,
+        CapsuleHandle,
+        tempfile::TempDir,
+    ) {
+        let temp = tempfile::tempdir().unwrap();
+        let storage = Arc::new(
+            LocalFSProvider::new(temp.path().to_path_buf())
+                .await
+                .unwrap(),
+        );
+        let component = Arc::new(ComponentProvider::new());
+        let runtime =
+            Runtime::with_providers_and_component(storage, Vec::new(), Some(component.clone()));
+        let mut manifest: CapsuleManifest =
+            serde_json::from_str(&component_manifest_json(name)).unwrap();
+        manifest.bus_contract = Some(ELASTOS_BUS_V2_CONTRACT.into());
+        manifest.wit_world_sha256 = Some(elastos_bus_v2_wit_sha256());
+        let handle = component.load_admitted(bytes, manifest).await.unwrap();
+        let id = handle.id.0.clone();
+        runtime
+            .hold_launch_context(&handle, Some("person:local:resident".into()), None)
+            .await;
+        runtime
+            .register_capsule(RunningCapsuleInfo {
+                id: id.clone(),
+                name: name.to_string(),
+                status: CAPSULE_STARTING.to_string(),
+                capsule_type: handle.manifest.capsule_type.clone(),
+                handle: Some(handle.clone()),
+                session_id: id.clone(),
+                principal: Some("person:local:resident".into()),
+                cause: None,
+                ended_at: None,
+            })
+            .await;
+        let held = ActivationContextHeld::new(&runtime, &handle, component.clone(), None);
+        if panic_start {
+            component.panic_next_v2.store(true, Ordering::Release);
+        }
+        runtime.watch_activation(handle.id.clone(), handle.clone(), component.clone(), held);
+        (runtime, component, handle, temp)
+    }
+
+    async fn wait_v2_status(runtime: &Runtime, id: &str, running: bool) -> RunningCapsuleInfo {
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if let Some(entry) = runtime.get_capsule(id).await {
+                    if running && entry.status == CAPSULE_RUNNING {
+                        return entry;
+                    }
+                    if entry.ended_at.is_some() {
+                        return entry;
+                    }
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("v2 resident did not reach its status: {id}"))
+    }
+
+    async fn assert_v2_home_cleared(
+        runtime: &Runtime,
+        component: &ComponentProvider,
+        handle: &CapsuleHandle,
+    ) {
+        assert!(
+            runtime
+                .context_left_for_test(handle.id.as_str())
+                .await
+                .is_empty(),
+            "tokens stay after the end"
+        );
+        assert!(!runtime.provider_entry_for_test(handle).await);
+        assert!(runtime.provider_principal_for_test(handle).await.is_none());
+        assert!(component
+            .read_v2_frame(Some("person:local:resident"), handle.id.as_str())
+            .await
+            .is_none());
+    }
+
+    /// A detached v2 guest stays up, answers stop, and the end clears its
+    /// tokens, frame, and events. The launch record names that stop.
+    #[tokio::test]
+    async fn a_v2_home_resident_stays_up_and_stops() {
+        let (runtime, component, handle, _temp) =
+            start_v2_home(v2_home_bytes("stay"), "stays", false).await;
+        let running = wait_v2_status(&runtime, handle.id.as_str(), true).await;
+        assert_eq!(running.status, CAPSULE_RUNNING);
+        assert_eq!(running.session_id, handle.id.0);
+        assert!(running.cause.is_none());
+        assert!(running.ended_at.is_none());
+        assert_eq!(
+            component.status(&handle).await.unwrap(),
+            CapsuleStatus::Running
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+        assert_eq!(
+            component.status(&handle).await.unwrap(),
+            CapsuleStatus::Running,
+            "the guest stays up"
+        );
+        let ended = runtime
+            .stop_capsule_by_id(handle.id.as_str())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(ended.status, CAPSULE_STOPPED);
+        assert_eq!(ended.cause.as_deref(), Some("stopped: user"));
+        assert!(ended.ended_at.is_some());
+        assert_eq!(ended.session_id, handle.id.0);
+        assert_v2_home_cleared(&runtime, &component, &handle).await;
+    }
+
+    /// A start task that panics, with no stop requested, is the guest's failure.
+    #[tokio::test]
+    async fn a_panic_in_the_v2_start_task_is_recorded_failed() {
+        let (runtime, _component, handle, _temp) =
+            start_v2_home(v2_home_bytes("stay"), "panics", true).await;
+        let ended = wait_v2_status(&runtime, handle.id.as_str(), false).await;
+        assert_eq!(ended.status, CAPSULE_FAILED, "{ended:?}");
+        let cause = ended.cause.unwrap_or_default();
+        assert!(cause.contains("ended without answering"), "{cause}");
+        assert!(!cause.contains(STOPPED_DURING_START), "{cause}");
+    }
+
+    /// A stop while start is still in the publish gap is recorded stopped.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_stop_in_the_v2_publish_gap_is_recorded_stopped() {
+        let temp = tempfile::tempdir().unwrap();
+        let storage = Arc::new(
+            LocalFSProvider::new(temp.path().to_path_buf())
+                .await
+                .unwrap(),
+        );
+        let component = Arc::new(ComponentProvider::new());
+        let runtime =
+            Runtime::with_providers_and_component(storage, Vec::new(), Some(component.clone()));
+        let mut manifest: CapsuleManifest =
+            serde_json::from_str(&component_manifest_json("gap")).unwrap();
+        manifest.bus_contract = Some(ELASTOS_BUS_V2_CONTRACT.into());
+        manifest.wit_world_sha256 = Some(elastos_bus_v2_wit_sha256());
+        let handle = component
+            .load_admitted(v2_home_bytes("stay"), manifest)
+            .await
+            .unwrap();
+        let hold = component.testing_hold_publish(&handle.id).await;
+        let id = handle.id.0.clone();
+        runtime
+            .hold_launch_context(&handle, Some("person:local:resident".into()), None)
+            .await;
+        runtime
+            .register_capsule(RunningCapsuleInfo {
+                id: id.clone(),
+                name: "gap".into(),
+                status: CAPSULE_STARTING.to_string(),
+                capsule_type: handle.manifest.capsule_type.clone(),
+                handle: Some(handle.clone()),
+                session_id: id.clone(),
+                principal: Some("person:local:resident".into()),
+                cause: None,
+                ended_at: None,
+            })
+            .await;
+        let held = ActivationContextHeld::new(&runtime, &handle, component.clone(), None);
+        runtime.watch_activation(handle.id.clone(), handle.clone(), component.clone(), held);
+        tokio::time::timeout(std::time::Duration::from_secs(2), hold.0.notified())
+            .await
+            .expect("start did not reach the publish gap");
+        let stopping = tokio::spawn(async move { runtime.stop_capsule_by_id(&id).await });
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                if component.status(&handle).await.is_err() {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the stop did not take the guest out of the publish gap");
+        hold.1.notify_one();
+        let ended = stopping
+            .await
+            .expect("stop task")
+            .expect("stop")
+            .expect("entry");
+        assert_eq!(ended.status, CAPSULE_STOPPED);
+        assert_eq!(ended.cause.as_deref(), Some("stopped: user"));
+    }
+
+    /// A trap finishes the resident and clears its tokens, frame, and provider entry.
+    #[tokio::test]
+    async fn a_v2_home_resident_trap_end_clears_it() {
+        let (runtime, component, handle, _temp) =
+            start_v2_home(v2_home_bytes("trap"), "traps", false).await;
+        let ended = wait_v2_status(&runtime, handle.id.as_str(), false).await;
+        assert_eq!(ended.status, CAPSULE_FAILED);
+        let cause = ended.cause.unwrap();
+        assert!(cause.contains("unreachable"), "{cause}");
+        assert_eq!(ended.session_id, handle.id.0);
+        assert_v2_home_cleared(&runtime, &component, &handle).await;
+    }
+
+    /// Dropping the runtime that watches the guest is a server shutdown. The
+    /// owed end still runs, and it clears the same state.
+    #[test]
+    fn a_v2_home_resident_shutdown_ends_and_clears() {
+        let local = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let (runtime, component, handle, _temp) = local.block_on(async {
+            let started = start_v2_home(v2_home_bytes("stay"), "shutdown", false).await;
+            let running = wait_v2_status(&started.0, started.2.id.as_str(), true).await;
+            assert_eq!(running.status, CAPSULE_RUNNING);
+            started
+        });
+        drop(local);
+        let poll = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        poll.block_on(async {
+            let ended = wait_v2_status(&runtime, handle.id.as_str(), false).await;
+            assert_eq!(ended.status, CAPSULE_FAILED);
+            assert_eq!(ended.cause.as_deref(), Some(CAUSE_TASK_LOST));
+            assert_v2_home_cleared(&runtime, &component, &handle).await;
+        });
+    }
+
     #[cfg(unix)]
     /// A3-R S3 fix 1. A guard dropped with its end owed hands the end to a
     /// task, and the runtime shuts down before it runs that task, as a
@@ -9084,6 +9456,40 @@ pub(crate) mod tests {
                 "{stops:?}"
             );
         });
+    }
+
+    /// A v1 bridge future runs on the `spawn_blocking` thread that called it.
+    /// That thread has a runtime handle entered, so a choice made by
+    /// `Handle::try_current` would add a thread for the call.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn v1_bridge_on_a_blocking_thread_adds_no_thread() {
+        let handle = tokio::runtime::Handle::current();
+        let joined = tokio::task::spawn_blocking(move || {
+            assert!(
+                tokio::runtime::Handle::try_current().is_ok(),
+                "a spawn_blocking worker has a runtime handle entered"
+            );
+            let caller = std::thread::current().id();
+            let before = super::live_thread_count();
+            let (ran_on, during) = Runtime::block_on_component_bridge(
+                &handle,
+                elastos_compute::providers::ComponentBridgeLeg::Caller,
+                async move {
+                    tokio::task::yield_now().await;
+                    (std::thread::current().id(), super::live_thread_count())
+                },
+            );
+            assert_eq!(
+                during, before,
+                "a v1 bridge on a blocking thread adds no thread"
+            );
+            assert_eq!(ran_on, caller, "a v1 bridge future stays on the caller");
+        })
+        .await;
+        assert!(
+            joined.is_ok(),
+            "the blocking bridge call panicked: {joined:?}"
+        );
     }
 
     #[cfg(unix)]

@@ -8,6 +8,7 @@ use axum::{
     response::IntoResponse,
     Extension, Json,
 };
+use base64::Engine as _;
 use elastos_runtime::primitives::audit::{AuditEvent, AuditLog, TrustLevel};
 use elastos_runtime::primitives::SecureTimestamp;
 use serde::{Deserialize, Serialize};
@@ -73,6 +74,105 @@ pub async fn list_capsules(
         .collect();
 
     Json(CapsuleListResponse { capsules })
+}
+
+#[derive(Deserialize)]
+pub(crate) struct ResidentFrameQuery {
+    app: String,
+    principal: String,
+}
+
+/// One stored frame. The shell token returns the frame for the principal
+/// stored when it was minted. The query principal is ignored.
+///
+/// The holder of the attach secret can POST any principal to
+/// `/api/auth/attach`. The gateway mint, `home_attach_frame_shell`, posts only
+/// the principal on the verified Home launch context. A presenter of the
+/// resulting shell token reads that stored principal's frame. Home launch
+/// records do not reach attach: AttachState has the session registry, the
+/// secret, and the shell notes, and the session is owned by the device DID.
+/// A second process that holds the secret can still name a principal those
+/// records do not. A guest session, a Home app session, and no session are
+/// refused by name.
+pub(crate) async fn resident_frame(
+    Extension(runtime): Extension<Arc<Runtime>>,
+    Extension(sessions): Extension<Arc<elastos_runtime::session::SessionRegistry>>,
+    Extension(shells): Extension<crate::api::handlers::attach::AttachShells>,
+    headers: HeaderMap,
+    axum::extract::Query(query): axum::extract::Query<ResidentFrameQuery>,
+) -> axum::response::Response {
+    if let Some(guests) = runtime.component_guests() {
+        guests.reap_joined_residents().await;
+    }
+    let Some(token) = frame_bearer(&headers) else {
+        return (StatusCode::UNAUTHORIZED, "no session").into_response();
+    };
+    if let Some(session) = sessions.validate_token(&token).await {
+        if session.is_shell() {
+            if let Some(principal) = shells.frame_principal(&token) {
+                let _query_names = query.principal.as_str();
+                return resident_frame_body(&runtime, &query.app, &principal).await;
+            }
+            // An ordinary shell stays forbidden. A frame shell that lost its
+            // slot is already gone from the registry, so that poll is 401.
+            return (StatusCode::FORBIDDEN, "shell has no frame principal").into_response();
+        }
+        return (StatusCode::FORBIDDEN, "guest session").into_response();
+    }
+    shells.forget(&token);
+    if home_app_session_token(&token) {
+        return (StatusCode::FORBIDDEN, "Home app session").into_response();
+    }
+    (StatusCode::UNAUTHORIZED, "no session").into_response()
+}
+
+fn frame_bearer(headers: &HeaderMap) -> Option<String> {
+    headers
+        .get(axum::http::header::AUTHORIZATION)?
+        .to_str()
+        .ok()?
+        .strip_prefix("Bearer ")
+        .filter(|token| !token.is_empty())
+        .map(str::to_string)
+}
+
+fn home_app_session_token(token: &str) -> bool {
+    let Ok(bytes) = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(token) else {
+        return false;
+    };
+    serde_json::from_slice::<serde_json::Value>(&bytes)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("payload")?
+                .get("schema")?
+                .as_str()
+                .map(str::to_owned)
+        })
+        .as_deref()
+        == Some("elastos.home.launch-token/v4")
+}
+
+async fn resident_frame_body(
+    runtime: &Runtime,
+    app: &str,
+    principal: &str,
+) -> axum::response::Response {
+    if app.is_empty() || app.len() > 128 || principal.is_empty() || principal.len() > 256 {
+        return Json(serde_json::json!({ "nodes": [] })).into_response();
+    }
+    let Some(provider) = runtime.component_guests() else {
+        return Json(serde_json::json!({ "nodes": [] })).into_response();
+    };
+    match crate::component::v2_frame_answer(provider.as_ref(), principal, app).await {
+        Ok(bytes) => (
+            StatusCode::OK,
+            [(axum::http::header::CONTENT_TYPE, "application/json")],
+            bytes,
+        )
+            .into_response(),
+        Err(reason) => (StatusCode::PAYLOAD_TOO_LARGE, reason).into_response(),
+    }
 }
 
 /// Unknown fields are refused: a launch request carries no principal kind. The
@@ -2055,6 +2155,7 @@ pub(crate) mod tests {
                     Box::new(ShellPassthroughVerifier),
                     self.audit_log.clone(),
                 )),
+                v2_guests: None,
             }
         }
 
@@ -5098,6 +5199,7 @@ pub(crate) mod tests {
             model_token_ceiling: tables.model_token_ceiling,
             model_budget: None,
             stop: tables.stop,
+            v2_guests: None,
             plan_book: None,
         };
         let answer = crate::resource_bridge::handle_component_resource_request(&line, ctx)
@@ -6254,6 +6356,7 @@ pub(crate) mod tests {
             model_token_ceiling: None,
             model_budget: None,
             stop: None,
+            v2_guests: None,
             plan_book: None,
         };
         let request = serde_json::json!({"path": foreign, "content": "x"});
@@ -9446,6 +9549,7 @@ pub(crate) mod tests {
             model_token_ceiling: tables.model_token_ceiling,
             model_budget: None,
             stop: tables.stop,
+            v2_guests: None,
             plan_book: None,
         };
         let answer = crate::resource_bridge::handle_component_resource_request(&line, ctx)

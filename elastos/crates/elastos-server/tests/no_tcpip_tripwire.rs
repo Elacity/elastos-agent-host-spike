@@ -343,11 +343,29 @@ fn forbidden_wit_name_part(part: &str) -> bool {
         .any(|prefix| lower == format!("{prefix}ip"))
 }
 
+/// The world declaration: a non-comment line whose first token is `world_name`.
+fn world_tail<'a>(code: &'a str, world_name: &str) -> Result<&'a str, String> {
+    let mut offset = 0;
+    for line in code.lines() {
+        let trimmed = line.trim_start();
+        if let Some(rest) = trimmed.strip_prefix(world_name) {
+            if rest.is_empty() || rest.starts_with([' ', '{', '\t']) {
+                let column = line.len() - trimmed.len();
+                return Ok(&code[offset + column + world_name.len()..]);
+            }
+        }
+        offset += line.len() + 1;
+    }
+    Err("world missing".to_string())
+}
+
 fn check_wit(text: &str, world_name: &str, expected: &[&str]) -> Result<usize, String> {
-    let world = text
-        .split_once(world_name)
-        .ok_or_else(|| "world missing".to_string())?
-        .1;
+    let code = text
+        .lines()
+        .filter(|line| !line.trim_start().starts_with("//"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let world = world_tail(&code, world_name)?;
     let body = world
         .split_once('{')
         .and_then(|(_, tail)| tail.split_once('}'))
@@ -359,11 +377,6 @@ fn check_wit(text: &str, world_name: &str, expected: &[&str]) -> Result<usize, S
         .map(str::trim)
         .collect();
     assert_eq!(imports, expected, "{world_name} imports changed");
-    let code = text
-        .lines()
-        .filter(|line| !line.trim_start().starts_with("//"))
-        .collect::<Vec<_>>()
-        .join("\n");
     for part in code.split(|c: char| !c.is_ascii_alphanumeric()) {
         if forbidden_wit_name_part(part) {
             return Err(format!("forbidden WIT name part: {part}"));

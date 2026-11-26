@@ -25,6 +25,11 @@ async fn load_microvm_capsule(
         .map_err(|e| anyhow::anyhow!("Failed to load capsule: {}", e))
 }
 
+#[rustfmt::skip]
+fn refuse_bounded_v2(manifest: &elastos_common::CapsuleManifest) -> anyhow::Result<()> {
+    if manifest.bus_contract.as_deref() == Some(elastos_common::ELASTOS_BUS_V2_CONTRACT) { anyhow::bail!(crate::runtime::BOUNDED_V2_REFUSAL); } Ok(())
+}
+
 pub async fn run_serve(
     addr: String,
     storage_path: PathBuf,
@@ -292,6 +297,7 @@ pub async fn run_serve(
             }
 
             if manifest.capsule_type == elastos_common::CapsuleType::Wasm {
+                refuse_bounded_v2(&manifest)?;
                 let infra = crate::setup_server_infrastructure().await?;
                 let mut collaboration_service = infra.collaboration_service;
                 let mut carrier_service = infra.carrier_service;
@@ -433,6 +439,7 @@ pub async fn run_serve(
             }
             s.set_capability_manager(infra.capability_manager.clone());
             s.set_pending_store(infra.pending_store.clone());
+            s.set_v2_guests(runtime.component_guests());
             Some(Arc::new(s))
         } else {
             None
@@ -755,5 +762,31 @@ mod tests {
             Some("http://127.0.0.1:1")
         );
         assert_eq!(shell_env(&command, "ELASTOS_TOKEN").as_deref(), Some("tok"));
+    }
+
+    #[test]
+    fn serve_refuses_a_v2_resident_before_run_local() {
+        let source =
+            std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/serve_cmd.rs"))
+                .unwrap();
+        let prod = source.split("\n#[cfg(test)]\nmod tests").next().unwrap();
+        let wasm = prod.split_once("CapsuleType::Wasm").unwrap().1;
+        let (before, after) = wasm.split_once("run_local").unwrap();
+        assert!(
+            before.contains("refuse_bounded_v2"),
+            "the wasm branch refuses a v2 resident before it runs the guest"
+        );
+        assert!(prod
+            .split_once("fn refuse_bounded_v2")
+            .unwrap()
+            .1
+            .contains("BOUNDED_V2_REFUSAL"));
+        assert!(after.contains("exited"));
+        let mut manifest: elastos_common::CapsuleManifest =
+            serde_json::from_str(include_str!("../../../capsules/shell/capsule.json")).unwrap();
+        assert!(refuse_bounded_v2(&manifest).is_ok());
+        manifest.bus_contract = Some(elastos_common::ELASTOS_BUS_V2_CONTRACT.into());
+        let err = refuse_bounded_v2(&manifest).unwrap_err().to_string();
+        assert!(err.contains("POST /api/capsules"), "{err}");
     }
 }
