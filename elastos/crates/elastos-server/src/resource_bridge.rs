@@ -336,6 +336,8 @@ pub struct BridgeContext {
     /// instead of waiting out the shell's polls; it records that it left for
     /// the stop, and the activation's own end then denies the request.
     pub stop: Option<Arc<ActivationStopFlag>>,
+    /// The runtime's v2 guests. Capacity retirement consults their GrantBooks.
+    pub v2_guests: Option<Arc<elastos_compute::providers::ComponentProvider>>,
 }
 
 /// The admitted context that submitted a plan stays available until its one
@@ -2300,6 +2302,7 @@ async fn handle_request(line: &str, ctx: &Option<BridgeContext>) -> Result<serde
                 let pending = crate::api::handlers::capability::create_request_retiring(
                     &ctx.pending_store,
                     &ctx.capability_manager,
+                    ctx.v2_guests.as_deref(),
                     elastos_runtime::session::SessionId(ctx.capsule_id.clone()),
                     resource_id.clone(),
                     action,
@@ -3251,6 +3254,7 @@ pub(crate) mod tests {
             model_token_ceiling: None,
             model_budget: None,
             stop: None,
+            v2_guests: None,
         }
     }
 

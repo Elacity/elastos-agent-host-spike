@@ -4499,6 +4499,7 @@ pub(crate) mod tests {
             model_token_ceiling: tables.model_token_ceiling,
             model_budget: None,
             stop: tables.stop,
+            v2_guests: None,
         };
         let answer = crate::resource_bridge::handle_component_resource_request(&line, ctx)
             .await
@@ -5654,6 +5655,7 @@ pub(crate) mod tests {
             model_token_ceiling: None,
             model_budget: None,
             stop: None,
+            v2_guests: None,
         };
         let request = serde_json::json!({"path": foreign, "content": "x"});
         let refused = crate::resource_bridge::protected_principal_root_resource_response_for_test(
@@ -8704,6 +8706,7 @@ pub(crate) mod tests {
             model_token_ceiling: tables.model_token_ceiling,
             model_budget: None,
             stop: tables.stop,
+            v2_guests: None,
         };
         let answer = crate::resource_bridge::handle_component_resource_request(&line, ctx)
             .await

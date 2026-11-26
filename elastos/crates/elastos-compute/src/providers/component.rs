@@ -464,6 +464,20 @@ impl ComponentProvider {
         }
     }
 
+    /// True when a live guest for `id` still holds `grant` unexpired in its
+    /// GrantBook. A spent once grant still counts while the book holds it.
+    pub async fn guest_holds_grant(&self, id: &CapsuleId, grant: &str) -> bool {
+        let book = {
+            let instances = self.instances.read().await;
+            instances.get(id).map(|instance| instance.grants.clone())
+        };
+        let Some(book) = book else {
+            return false;
+        };
+        let held = book.lock().expect("grant book").holds_unexpired(grant);
+        held
+    }
+
     /// Revokes every grant on every live v2 guest and drops that guest's frame.
     /// Lock order is the book, then the frames. A grant recorded before this
     /// sweep, including one recorded while the sweep waited, is included.

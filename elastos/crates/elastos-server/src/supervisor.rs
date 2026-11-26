@@ -1118,6 +1118,7 @@ impl Supervisor {
                     model_token_ceiling: None,
                     model_budget: None,
                     stop: None,
+                    v2_guests: None,
                 }),
                 _ => None,
             };

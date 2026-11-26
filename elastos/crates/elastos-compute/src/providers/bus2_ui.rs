@@ -479,17 +479,22 @@ impl GrantBook {
         self.closed || self.refusal(id).is_some()
     }
 
-    /// A presented image stays while this grant is still held and unexpired.
-    /// Spending its last use does not remove it. A missing grant (revoked or
-    /// evicted), an expiry, or a closed book does.
-    pub fn blocks_presented_image(&self, id: &str) -> bool {
+    /// A live guest still uses this grant: it is held and unexpired.
+    /// Spending its last use does not end that. Revoke, eviction, expiry, or a
+    /// closed book does. A presented image and an open WindowRead use this.
+    pub fn holds_unexpired(&self, id: &str) -> bool {
         if self.closed {
-            return true;
+            return false;
         }
         let Some(held) = self.grants.iter().find(|grant| grant.id == id) else {
-            return true;
+            return false;
         };
-        held.expires_at_ms.is_some_and(|exp| wall_ms() >= exp)
+        held.expires_at_ms.is_none_or(|exp| wall_ms() < exp)
+    }
+
+    /// A presented image stays while [`Self::holds_unexpired`] is true.
+    pub fn blocks_presented_image(&self, id: &str) -> bool {
+        !self.holds_unexpired(id)
     }
 
     pub fn is_empty(&self) -> bool {
@@ -738,6 +743,10 @@ mod tests {
         );
         book.spend("once");
         assert!(book.blocks_read("once"), "the last use is spent");
+        assert!(
+            book.holds_unexpired("once"),
+            "holds_unexpired is the one hold rule"
+        );
         assert!(
             !book.blocks_presented_image("once"),
             "spending the last use keeps the presented image"

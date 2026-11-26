@@ -1125,6 +1125,7 @@ struct ComponentBridgeTables {
     model_offer_bounds: Arc<StdRwLock<HashMap<String, crate::resource_bridge::ModelOfferBound>>>,
     activation_stops: Arc<StdRwLock<HashMap<String, Arc<ActivationStop>>>>,
     launch_contents: Arc<StdRwLock<HashMap<String, Arc<LaunchContent>>>>,
+    v2_guests: Option<Arc<ComponentProvider>>,
 }
 
 impl Runtime {
@@ -1282,6 +1283,7 @@ impl Runtime {
             model_token_ceiling,
             model_budget,
             stop,
+            v2_guests: tables.v2_guests.clone(),
         }
     }
 
@@ -1319,6 +1321,7 @@ impl Runtime {
                 model_offer_bounds: self.model_offer_bounds.clone(),
                 activation_stops: self.activation_stops.clone(),
                 launch_contents: self.launch_contents.clone(),
+                v2_guests: Some(component.clone()),
             };
             let host_handle = tokio::runtime::Handle::current();
             let bridge_call: BridgeHostcallAsync =
@@ -3793,6 +3796,7 @@ pub(crate) mod tests {
                 model_token_ceiling,
                 model_budget,
                 stop: tables.stop,
+                v2_guests: None,
             }
         }
     }
@@ -6717,6 +6721,7 @@ pub(crate) mod tests {
             model_token_ceiling: None,
             model_budget: None,
             stop: None,
+            v2_guests: None,
         };
         let line = serde_json::json!({
             "id": 99,

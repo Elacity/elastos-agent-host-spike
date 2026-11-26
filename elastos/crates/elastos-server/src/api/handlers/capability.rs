@@ -172,6 +172,7 @@ pub async fn request_capability(
     let request = create_request_retiring(
         &state.pending_store,
         &state.capability_manager,
+        state.v2_guests.as_deref(),
         session.id.clone(),
         resource,
         action,
@@ -509,18 +510,44 @@ fn capability_output(
     })
 }
 
+/// True when a live v2 guest for `session_id` still holds `token` in its
+/// GrantBook (spent uses included). Listing and retirement share this helper
+/// so a spent once grant that still backs an image or open stream stays live
+/// to the person until nothing a live guest holds still uses it.
+async fn guest_still_holds(
+    guests: Option<&elastos_compute::providers::ComponentProvider>,
+    session_id: &str,
+    token: &elastos_runtime::capability::CapabilityToken,
+) -> bool {
+    let Some(guests) = guests else {
+        return false;
+    };
+    let Ok(encoded) = token.to_base64() else {
+        return false;
+    };
+    guests
+        .guest_holds_grant(&elastos_common::CapsuleId::new(session_id), &encoded)
+        .await
+}
+
 /// A granted record whose token could still validate for this record's
 /// session, by the Runtime's read-only rule
-/// (`CapabilityManager::can_still_validate_for_caller`). The record's action
-/// and resource are not compared with the token's: a path may mint a token
-/// that names a narrower action or resource than its record, as the Browser
-/// operator does.
-async fn is_live(manager: &CapabilityManager, r: &PendingCapabilityRequest) -> bool {
+/// (`CapabilityManager::can_still_validate_for_caller`), or that a live guest
+/// still holds. The record's action and resource are not compared with the
+/// token's: a path may mint a token that names a narrower action or resource
+/// than its record, as the Browser operator does. A spent grant still grants
+/// nothing new.
+async fn is_live(
+    manager: &CapabilityManager,
+    guests: Option<&elastos_compute::providers::ComponentProvider>,
+    r: &PendingCapabilityRequest,
+) -> bool {
     match r.granted_token() {
         Some(token) => {
             manager
                 .can_still_validate_for_caller(token, r.session_id.as_str())
                 .await
+                || guest_still_holds(guests, r.session_id.as_str(), token).await
         }
         None => false,
     }
@@ -532,26 +559,30 @@ async fn is_live(manager: &CapabilityManager, r: &PendingCapabilityRequest) -> b
 pub async fn create_request_retiring(
     store: &PendingRequestStore,
     manager: &CapabilityManager,
+    guests: Option<&elastos_compute::providers::ComponentProvider>,
     session_id: SessionId,
     resource: ResourceId,
     action: Action,
     reason: String,
 ) -> PendingCapabilityRequest {
-    retire_dead_grants(store, manager).await;
+    retire_dead_grants(store, manager, guests).await;
     let request = store.create_request_with_reason(session_id, resource, action, reason);
     request.await
 }
 
 /// At capacity, settle each granted record whose token can no longer
-/// validate at all (`CapabilityManager::can_still_validate`) as denied by the
-/// Runtime, so the store's capacity cleanup can reclaim it. This is main's
-/// rule and does not depend on the record's caller, action or resource: a
-/// token that could still validate for anyone is left alone, whether or not
-/// it names the record's own action or resource. Below capacity nothing
-/// changes. That cleanup drops only records older than one second, so a
-/// grant spent in the same second as the next request is retired but still
-/// holds its slot until the second turns.
-async fn retire_dead_grants(store: &PendingRequestStore, manager: &CapabilityManager) {
+/// validate at all (`CapabilityManager::can_still_validate`) and that no live
+/// guest still holds, as denied by the Runtime, so the store's capacity
+/// cleanup can reclaim it. A spent once grant that still backs a presented
+/// image or open stream is left alone. Below capacity nothing changes. That
+/// cleanup drops only records older than one second, so a grant spent in the
+/// same second as the next request is retired but still holds its slot until
+/// the second turns.
+async fn retire_dead_grants(
+    store: &PendingRequestStore,
+    manager: &CapabilityManager,
+    guests: Option<&elastos_compute::providers::ComponentProvider>,
+) {
     let held = store.list_requests().await;
     if held.len() < MAX_PENDING_REQUESTS {
         return;
@@ -560,7 +591,9 @@ async fn retire_dead_grants(store: &PendingRequestStore, manager: &CapabilityMan
         let Some(token) = r.granted_token() else {
             continue;
         };
-        if !manager.can_still_validate(token).await {
+        if !manager.can_still_validate(token).await
+            && !guest_still_holds(guests, r.session_id.as_str(), token).await
+        {
             let reason = "grant can no longer validate";
             store
                 .revoke_request_by(r.id.as_str(), reason, Settler::Runtime)
@@ -572,8 +605,9 @@ async fn retire_dead_grants(store: &PendingRequestStore, manager: &CapabilityMan
 /// Every session's live grants, sorted by session then request id.
 async fn live_capabilities(state: &CapabilityState) -> ListCapabilitiesOutput {
     let mut live = Vec::new();
+    let guests = state.v2_guests.as_deref();
     for r in state.pending_store.list_requests().await {
-        if is_live(&state.capability_manager, &r).await {
+        if is_live(&state.capability_manager, guests, &r).await {
             live.push(r);
         }
     }
@@ -2391,6 +2425,209 @@ mod tests {
             crate::provider_resource::WALLET_STATUS_RESOURCE
         );
         assert_eq!(pending[0].action, Action::Read);
+    }
+
+    /// A v2 guest, its CapabilityState, and a spent once grant the guest holds.
+    async fn spent_once_held_by_guest() -> (
+        CapabilityState,
+        std::sync::Arc<elastos_compute::providers::ComponentProvider>,
+        elastos_compute::CapsuleHandle,
+        String,
+        String,
+        elastos_runtime::capability::CapabilityToken,
+    ) {
+        use elastos_compute::ComputeProvider;
+
+        let audit = std::sync::Arc::new(elastos_runtime::primitives::audit::AuditLog::new());
+        let store = std::sync::Arc::new(elastos_runtime::capability::CapabilityStore::new());
+        let metrics =
+            std::sync::Arc::new(elastos_runtime::primitives::metrics::MetricsManager::new());
+        let capability_manager = std::sync::Arc::new(CapabilityManager::new(
+            store.clone(),
+            audit.clone(),
+            metrics,
+        ));
+        let guests = std::sync::Arc::new(elastos_compute::providers::ComponentProvider::new());
+        let bytes = wat::parse_str(include_str!(
+            "../../../../../tests/fixtures/components/v2-resident.wat"
+        ))
+        .unwrap();
+        let manifest_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/fixtures/components/bus-v1/capsule.json");
+        let mut manifest: elastos_common::CapsuleManifest =
+            serde_json::from_slice(&std::fs::read(manifest_path).unwrap()).unwrap();
+        manifest.bus_contract = Some(elastos_common::ELASTOS_BUS_V2_CONTRACT.into());
+        manifest.wit_world_sha256 = Some(elastos_common::elastos_bus_v2_wit_sha256());
+        let handle = guests.load_admitted(bytes, manifest).await.unwrap();
+        ComputeProvider::start(guests.as_ref(), &handle)
+            .await
+            .unwrap();
+        let state = CapabilityState {
+            pending_store: std::sync::Arc::new(PendingRequestStore::new(audit.clone())),
+            capability_manager,
+            capability_store: store,
+            policy_evaluator: std::sync::Arc::new(PolicyEvaluator::new(
+                Box::new(elastos_runtime::capability::evaluator::ShellPassthroughVerifier),
+                audit,
+            )),
+            v2_guests: Some(guests.clone()),
+        };
+        let resource = ResourceId::new("localhost://Public/note.txt");
+        let request = state
+            .pending_store
+            .create_request(
+                elastos_runtime::session::SessionId::from_string(handle.id.as_str()),
+                resource.clone(),
+                Action::Read,
+            )
+            .await;
+        let id = request.id.to_string();
+        let token = state.capability_manager.grant(
+            handle.id.as_str(),
+            resource.clone(),
+            Action::Read,
+            TokenConstraints::new(0, false, None, Some(1)),
+            None,
+        );
+        state
+            .pending_store
+            .grant_request(&id, token.clone(), GrantDuration::Once)
+            .await
+            .unwrap();
+        let encoded = token.to_base64().unwrap();
+        guests
+            .testing_hold_grant(&handle.id, &encoded, "localhost://Public/note.txt", "read")
+            .await;
+        state
+            .capability_manager
+            .validate(&token, handle.id.as_str(), Action::Read, &resource, None)
+            .await
+            .expect("the once grant's one use");
+        assert!(
+            state
+                .capability_manager
+                .validate(&token, handle.id.as_str(), Action::Read, &resource, None)
+                .await
+                .is_err(),
+            "a spent grant grants nothing new"
+        );
+        (state, guests, handle, id, encoded, token)
+    }
+
+    /// Fills the pending store to capacity around `keep`, ages past retention,
+    /// and admits one new request so retirement runs.
+    async fn push_past_retirement(state: &CapabilityState, keep: &str) {
+        use elastos_runtime::capability::pending::{MAX_PENDING_PER_SESSION, MAX_PENDING_REQUESTS};
+        let store = state.pending_store.clone();
+        let resource = ResourceId::new("elastos://content/publish");
+        let held = store.list_requests().await.len();
+        for n in 0..MAX_PENDING_REQUESTS - held {
+            let session = format!("spent-{}", n / MAX_PENDING_PER_SESSION);
+            let (id, token) = grant_in(state, &session, Some(1), None).await;
+            let used =
+                state
+                    .capability_manager
+                    .validate(&token, &session, Action::Write, &resource, None);
+            used.await.expect("fill once grant is used");
+            assert_ne!(id, keep);
+        }
+        assert_eq!(store.list_requests().await.len(), MAX_PENDING_REQUESTS);
+        age_past_capacity_retention(&store).await;
+        let input = RequestCapabilityInput {
+            resource: "elastos://content/publish".to_string(),
+            action: "write".to_string(),
+            reason: String::new(),
+        };
+        let client = Extension(Session::new_capsule("vm-new".to_string()));
+        let reply = request_capability(State(state.clone()), client, Json(input)).await;
+        assert_eq!(reply.unwrap().0.status, "pending");
+    }
+
+    #[tokio::test]
+    async fn a_spent_once_grant_backing_an_image_stays_live_past_retirement() {
+        use elastos_compute::ComputeProvider;
+
+        let (state, guests, handle, id, encoded, _) = spent_once_held_by_guest().await;
+        guests.testing_store_v2_frame(
+            handle.id.as_str(),
+            None,
+            vec![elastos_compute::providers::bus2_ui::FrameNode::Image {
+                grant: encoded.clone(),
+                resource: "localhost://Public/note.txt".into(),
+            }],
+        );
+        assert!(
+            guests
+                .read_v2_frame(None, handle.id.as_str())
+                .await
+                .is_some_and(|frame| !frame.nodes.is_empty()),
+            "the image is presented"
+        );
+        let (_, ids) = live_view(&state).await;
+        assert!(ids.contains(&id), "all_sessions_live lists the spent grant");
+        push_past_retirement(&state, &id).await;
+        assert!(
+            state.pending_store.get_request(&id).await.is_some(),
+            "retirement leaves a grant a guest still holds"
+        );
+        let (_, ids) = live_view(&state).await;
+        assert!(
+            ids.contains(&id),
+            "the spent grant stays listed after retirement"
+        );
+        let _ = revoke_capability(
+            State(state),
+            Extension(Session::new_shell("shell".into())),
+            Path(id),
+        )
+        .await
+        .expect("DELETE revokes the spent grant");
+        assert!(
+            guests
+                .read_v2_frame(None, handle.id.as_str())
+                .await
+                .is_none_or(|frame| frame.nodes.is_empty()),
+            "DELETE ends the image"
+        );
+        ComputeProvider::stop(guests.as_ref(), &handle)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_spent_once_grant_backing_an_open_stream_stays_live_past_retirement() {
+        use elastos_compute::ComputeProvider;
+
+        let (state, guests, handle, id, encoded, _) = spent_once_held_by_guest().await;
+        let mut open = guests
+            .testing_open_read(&handle.id, &encoded, b"image-bytes")
+            .await
+            .expect("open read");
+        assert_eq!(open.pull(1).unwrap(), b"i");
+        let (_, ids) = live_view(&state).await;
+        assert!(ids.contains(&id), "all_sessions_live lists the spent grant");
+        push_past_retirement(&state, &id).await;
+        assert!(
+            state.pending_store.get_request(&id).await.is_some(),
+            "retirement leaves a grant a guest still holds"
+        );
+        assert_eq!(
+            open.pull(1).unwrap(),
+            b"m",
+            "the stream stays open past retirement"
+        );
+        let _ = revoke_capability(
+            State(state),
+            Extension(Session::new_shell("shell".into())),
+            Path(id),
+        )
+        .await
+        .expect("DELETE revokes the spent grant");
+        assert!(open.pull(1).is_none(), "DELETE ends the stream");
+        assert!(matches!(open.trailer(), Some(Err(_))));
+        ComputeProvider::stop(guests.as_ref(), &handle)
+            .await
+            .unwrap();
     }
 
     #[tokio::test]

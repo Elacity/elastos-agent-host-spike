@@ -191,6 +191,7 @@ fn submit_with_bounds(
             model_token_ceiling: Some(16),
             model_budget: None,
             stop: None,
+            v2_guests: None,
         };
         crate::resource_bridge::retain_agent_plan_dispatch_authority(
             record["request_id"].as_str().unwrap(),
