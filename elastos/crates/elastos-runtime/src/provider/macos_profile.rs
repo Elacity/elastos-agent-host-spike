@@ -6,7 +6,16 @@
 #[cfg(all(not(elastos_unsupported_os_check), any(target_os = "macos", test)))]
 use super::{rights::AdmittedRights, rights_table::RuntimeProviderId};
 
-#[cfg(not(elastos_unsupported_os_check))]
+#[cfg(all(
+    not(elastos_unsupported_os_check),
+    any(
+        target_os = "macos",
+        all(
+            target_os = "linux",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        )
+    )
+))]
 const HEAD: &[&str] = &["(version 1)", "(deny default)", "(deny network*)"];
 
 /// Runtime-owned model launch inputs. Each numbered socket is a bound literal;

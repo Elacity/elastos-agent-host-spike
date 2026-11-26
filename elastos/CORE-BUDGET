@@ -52,4 +52,7 @@
 # refusal that round 29 moves into auth_state_files. Round 29 maps musl libgcc like
 # glibc, returns (target, generation) under the restart lock, and gates the resolv
 # test hook. Measured 26 Nov 2026.
-15243
+# +18: round 30 gives landlock_plan, HEAD and AdmittedRights::admits the path_allow cfg,
+# so an unsupported Unix builds under -D warnings (+27), and the forked child closes
+# descriptors from a list sorted before fork (-11). Measured 26 Nov 2026.
+15261

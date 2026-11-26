@@ -236,6 +236,7 @@ fn model_engine_receipt_file_matches(
     Ok(entry["sha256"].as_str() == Some(expected.as_str()))
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn local_llama_ids(offers: &[serde_json::Value]) -> Result<Vec<&str>, BridgeError> {
     offers
         .iter()
@@ -1305,6 +1306,13 @@ fn remove_children(directory: &OwnedFd) {
 }
 
 /// The last component of the directory this descriptor holds.
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn held_directory_name(_directory: &OwnedFd) -> Option<std::ffi::CString> {
+    None
+}
+
+/// The last component of the directory this descriptor holds.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn held_directory_name(directory: &OwnedFd) -> Option<std::ffi::CString> {
     use std::os::unix::ffi::OsStrExt;
     #[cfg(target_os = "linux")]
@@ -1322,11 +1330,6 @@ fn held_directory_name(directory: &OwnedFd) -> Option<std::ffi::CString> {
         let text = unsafe { std::ffi::CStr::from_ptr(buf.as_ptr().cast()) };
         let path = Path::new(std::ffi::OsStr::from_bytes(text.to_bytes()));
         path.file_name()?.as_bytes().to_vec()
-    };
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-    let bytes = {
-        let _ = directory;
-        return None;
     };
     std::ffi::CString::new(bytes).ok()
 }

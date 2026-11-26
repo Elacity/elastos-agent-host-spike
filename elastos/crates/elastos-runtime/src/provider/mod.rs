@@ -20,7 +20,16 @@ mod checked_executable;
 #[path = "checked_executable_windows.rs"]
 mod checked_executable;
 pub mod dispatch;
-#[cfg(all(unix, not(elastos_unsupported_os_check)))]
+#[cfg(all(
+    not(elastos_unsupported_os_check),
+    any(
+        target_os = "macos",
+        all(
+            target_os = "linux",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        )
+    )
+))]
 mod landlock_plan;
 #[cfg(target_os = "linux")]
 mod linux_model_seccomp;
