@@ -2330,6 +2330,163 @@ async fn one_start_charges_every_listed_entry() {
     assert_eq!(alone.unwrap(), "second");
 }
 
+/// `max_depth` and `max_path_bytes` stay per path across a closure. Several
+/// pinned bundles may each sit at those limits and pass; the totals are not
+/// summed. One path one folder deeper, or one byte longer, in one member is
+/// refused while the members already walked still pass.
+#[tokio::test]
+async fn depth_and_path_bytes_stay_per_path_across_a_closure() {
+    let publisher = key(88);
+    let home = Home::trusting(&[&publisher]).await;
+    let quiet = quiet_component();
+    // Folder path of three parts is refused before it opens. Two parts pass.
+    const DEPTH: usize = 3;
+    // Long enough for `app.component.wasm`, short enough to craft by hand.
+    const PATH_BYTES: usize = 64;
+    // Under `n/n` ("n/n/" is four bytes) a leaf of length 60 sits at 64.
+    let at_path = "p".repeat(PATH_BYTES - 4);
+    let over_path = "p".repeat(PATH_BYTES - 3);
+
+    async fn stage_nested(
+        home: &Home,
+        publisher: &SigningKey,
+        quiet: &[u8],
+        name: &str,
+        manifest: &str,
+        folders: usize,
+        leaf: &str,
+    ) -> String {
+        let folder = home.bundle(name, manifest, quiet);
+        let mut at = folder.clone();
+        for _ in 0..folders {
+            at.push("n");
+        }
+        fs::create_dir_all(&at).unwrap();
+        fs::write(at.join(leaf), b"x").unwrap();
+        home.stage(&folder, publisher).await
+    }
+
+    let first = stage_nested(
+        &home,
+        &publisher,
+        &quiet,
+        "first",
+        &manifest("first"),
+        2,
+        &at_path,
+    )
+    .await;
+    let second = stage_nested(
+        &home,
+        &publisher,
+        &quiet,
+        "second",
+        &manifest("second"),
+        2,
+        &at_path,
+    )
+    .await;
+    let root = stage_nested(
+        &home,
+        &publisher,
+        &quiet,
+        "root",
+        &manifest_pinning("root", &[("first", &first), ("second", &second)]),
+        2,
+        &at_path,
+    )
+    .await;
+
+    let at_limit = Budget {
+        max_depth: DEPTH,
+        max_path_bytes: PATH_BYTES,
+        ..BUNDLE_WALK_BUDGET
+    };
+    let (ran, walked) = home.run_watched(&root, None, at_limit).await;
+    assert_eq!(ran.unwrap(), "root");
+    assert_eq!(
+        walked,
+        [root.as_str(), first.as_str(), second.as_str()],
+        "each member sat at the path limits and the limits were not summed"
+    );
+
+    let deep = stage_nested(
+        &home,
+        &publisher,
+        &quiet,
+        "deep",
+        &manifest("deep"),
+        3,
+        &at_path,
+    )
+    .await;
+    let root_deep = stage_nested(
+        &home,
+        &publisher,
+        &quiet,
+        "root-deep",
+        &manifest_pinning("root-deep", &[("first", &first), ("deep", &deep)]),
+        2,
+        &at_path,
+    )
+    .await;
+    let (result, walked) = home.run_watched(&root_deep, None, at_limit).await;
+    let refusal = result.unwrap_err();
+    assert_eq!(refusal.code(), "bundle_walk_over_budget", "{refusal}");
+    assert!(
+        matches!(&refusal, BundleRefusal::Requirement { name, .. } if name == "deep"),
+        "{refusal}"
+    );
+    assert!(
+        refusal.to_string().contains("the walk's limit on depth"),
+        "{refusal}"
+    );
+    assert_eq!(
+        walked,
+        [root_deep.as_str(), first.as_str()],
+        "the first pin passed; only the deep path refused"
+    );
+
+    let long = stage_nested(
+        &home,
+        &publisher,
+        &quiet,
+        "long",
+        &manifest("long"),
+        2,
+        &over_path,
+    )
+    .await;
+    let root_long = stage_nested(
+        &home,
+        &publisher,
+        &quiet,
+        "root-long",
+        &manifest_pinning("root-long", &[("first", &first), ("long", &long)]),
+        2,
+        &at_path,
+    )
+    .await;
+    let (result, walked) = home.run_watched(&root_long, None, at_limit).await;
+    let refusal = result.unwrap_err();
+    assert_eq!(refusal.code(), "bundle_walk_over_budget", "{refusal}");
+    assert!(
+        matches!(&refusal, BundleRefusal::Requirement { name, .. } if name == "long"),
+        "{refusal}"
+    );
+    assert!(
+        refusal
+            .to_string()
+            .contains("the walk's limit on path bytes"),
+        "{refusal}"
+    );
+    assert_eq!(
+        walked,
+        [root_long.as_str(), first.as_str()],
+        "the first pin passed; only the long path refused"
+    );
+}
+
 /// C-limits. A pin may sit at depth 4 and not at depth 5, the bundle asked
 /// for being depth 1; and one start takes in 16 bundles and not 17. The
 /// bundle past either limit is not read.
