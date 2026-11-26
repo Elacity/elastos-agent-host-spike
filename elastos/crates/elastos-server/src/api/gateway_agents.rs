@@ -300,11 +300,21 @@ struct AgentStoppedSession {
 }
 
 #[derive(Serialize)]
+struct AgentUnknownStep {
+    session_id: String,
+    request_id: String,
+    outcome: String,
+}
+
+#[derive(Serialize)]
 struct AgentStopResponse {
     agent_id: String,
     stopped: Vec<AgentStoppedSession>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     stopping: Vec<AgentStoppedSession>,
+    /// Steps the Runtime named as unknown. The owner sees the same names.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    unknown: Vec<AgentUnknownStep>,
 }
 
 pub(super) async fn agents_stop(
@@ -353,7 +363,7 @@ async fn stop_agent(
     let request: AgentStopRequest = agents_request(body)?;
     owner_may_stop(state, headers, Some(&request.agent_id))?;
     let outcome = stop_runtime_agent(&state.data_dir, &request.agent_id).await?;
-    if outcome.stopped.is_empty() && outcome.stopping.is_empty() {
+    if outcome.stopped.is_empty() && outcome.stopping.is_empty() && outcome.unknown.is_empty() {
         return Err(match outcome.already.as_deref() {
             Some("stopped") => CodedRefusal {
                 code: "agent_already_stopped",
@@ -375,5 +385,14 @@ async fn stop_agent(
         agent_id: request.agent_id,
         stopped: outcome.stopped.into_iter().map(&session).collect(),
         stopping: outcome.stopping.into_iter().map(&session).collect(),
+        unknown: outcome
+            .unknown
+            .into_iter()
+            .map(|step| AgentUnknownStep {
+                session_id: step.session_id,
+                request_id: step.request_id,
+                outcome: step.outcome,
+            })
+            .collect(),
     })
 }

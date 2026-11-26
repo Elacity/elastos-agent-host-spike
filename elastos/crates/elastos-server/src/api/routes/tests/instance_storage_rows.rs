@@ -1,8 +1,8 @@
 #![cfg(feature = "prototype-agents")]
 //! Each running instance gets fresh, limited access to its agent's storage,
-//! which ends when the instance stops. A plan step whose dispatch had already
-//! begun when the end was recorded may finish after it. A plan step still
-//! pending at the end is refused.
+//! which ends when the instance stops. A step whose dispatch hasn't reached
+//! its effect is refused; an effect already begun is tracked, and Stop says
+//! stopping until it ends. A plan step still pending at the end is refused.
 //!
 //! The rows below use the route-level probe (`ProbeLaunch`, the launch route,
 //! and the bridge). A journal write that succeeded is the storage grant. The
@@ -24,6 +24,9 @@
 //!
 //! This module compiles only with `prototype-agents`. A build without that
 //! feature does not contain these rows.
+//!
+//! Within one process, one Home has one plan book for dispatch and Stop.
+//! The installed two-process path runs no agent today and its proof comes with the package.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -258,6 +261,7 @@ async fn replay(
         model_token_ceiling: None,
         model_budget: None,
         stop: None,
+        plan_book: None,
     };
     crate::resource_bridge::handle_component_resource_request(&line, ctx)
         .await
@@ -683,8 +687,9 @@ fn owner_approves_pending_plan(dir: &std::path::Path, request_id: &str) {
 /// or by the guest completing, while that plan is still pending. Ending the
 /// instance drops the retained admission. The owner then approves. This row
 /// calls `dispatch_agent_plan_step`, which is refused `admission_missing`, and
-/// the step's file is unchanged. A plan step whose dispatch had already begun
-/// when the end was recorded may finish after it.
+/// the step's file is unchanged. An effect already begun is tracked, and Stop
+/// says stopping until it ends. This row ends before the dispatch, so the
+/// admission is already gone.
 ///
 /// The admission is dropped for a pending plan as well as any other. A change
 /// that keeps a pending plan's admission after the guest ends would let this
@@ -744,6 +749,7 @@ async fn retained_plan_dispatch_after(end: InstanceEnd) {
         model_token_ceiling: None,
         model_budget: None,
         stop: None,
+        plan_book: None,
     };
     crate::resource_bridge::retain_agent_plan_dispatch_authority(
         request_id,

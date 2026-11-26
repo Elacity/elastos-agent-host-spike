@@ -241,6 +241,25 @@ impl ComponentProvider {
         *self.bus_hostcall.write().unwrap() = Some(hostcall);
     }
 
+    /// The hostcall a dependent's tests call. This crate's tests compile it,
+    /// and so does `test-hooks`, which only a dev-dependency enables.
+    #[cfg(any(test, feature = "test-hooks"))]
+    #[doc(hidden)]
+    pub fn call_bus_hostcall_for_test(
+        &self,
+        line: &str,
+        capsule_id: &str,
+        principal_id: Option<&str>,
+    ) -> std::result::Result<String, String> {
+        let hostcall = self
+            .bus_hostcall
+            .read()
+            .unwrap_or_else(|err| err.into_inner())
+            .clone()
+            .ok_or_else(|| "component bridge is not configured".to_string())?;
+        hostcall(line, capsule_id, principal_id)
+    }
+
     pub async fn set_bridge_principal(&self, capsule_id: &CapsuleId, principal_id: Option<String>) {
         self.bridge_principals
             .write()
@@ -269,6 +288,23 @@ impl ComponentProvider {
     pub async fn forget_instance(&self, capsule_id: &CapsuleId) {
         self.instances.write().await.remove(capsule_id);
         self.clear_bridge_principal(capsule_id).await;
+    }
+
+    /// A long fuel budget, and when `v2` the stop path that removes a running
+    /// v2 entry. Server tests reach this through the `test-hooks` feature.
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub async fn prepare_stop_target_for_test(&self, id: &CapsuleId, v2: bool) -> bool {
+        let mut instances = self.instances.write().await;
+        let Some(entry) = instances.get_mut(id) else {
+            return false;
+        };
+        entry.fuel = u64::MAX;
+        entry.run_deadline = Duration::from_secs(30);
+        if v2 {
+            entry.status = CapsuleStatus::Running;
+            entry.manifest.bus_contract = Some(ELASTOS_BUS_V2_CONTRACT.into());
+        }
+        true
     }
 
     /// The one engine every v1 component in this process compiles and runs on.

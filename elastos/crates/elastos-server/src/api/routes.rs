@@ -48,6 +48,9 @@ pub struct CapsuleInfoResponse {
     session_id: String,
     /// Why the activation ended, once it has.
     cause: Option<String>,
+    /// Plan steps whose record is unknown. Empty unless this stop resolved one.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    unknown_steps: Vec<String>,
 }
 
 /// Every registered activation, sorted by id. A component launch answers
@@ -65,6 +68,7 @@ pub async fn list_capsules(
             status: info.status,
             session_id: info.session_id,
             cause: info.cause,
+            unknown_steps: Vec::new(),
         })
         .collect();
 
@@ -418,20 +422,42 @@ pub async fn stop_capsule(
         .unwrap_or_else(|| "user".to_string());
     match runtime.stop_capsule_with_reason(&id, &reason).await {
         Ok(Some(info)) => {
-            let status = match info.ended_at {
-                Some(_) => StatusCode::OK,
-                None => StatusCode::ACCEPTED,
-            };
-            let answer = CapsuleInfoResponse {
-                id: info.id,
-                name: info.name,
-                status: info.status,
-                session_id: info.session_id,
-                cause: info.cause,
-            };
-            (status, Json(answer)).into_response()
+            // One hold of the plan lock. A live row, or an effect that can
+            // still land, is stopping: the names are copied and stay in the
+            // book. Stopped is said only once the row has ended and nothing
+            // is in flight, and that answer is the one that removes the names.
+            capsule_stop_response(
+                info.id,
+                info.name,
+                info.status,
+                info.session_id,
+                info.cause,
+                runtime.plan_stop_decision(&id, info.ended_at.is_some()),
+            )
         }
-        Ok(None) => (StatusCode::NOT_FOUND, format!("Capsule {} not found", id)).into_response(),
+        Ok(None) => {
+            // The registry row can be gone after its retention while an
+            // effect is still landing, or while a step resolved as unknown
+            // after that row left. That Stop still names the outcome. A row
+            // that left with nothing in the plan book is not found.
+            let decision = runtime.plan_stop_decision(&id, true);
+            if !decision.stopping && decision.unknown_steps.is_empty() {
+                (StatusCode::NOT_FOUND, format!("Capsule {} not found", id)).into_response()
+            } else {
+                capsule_stop_response(
+                    id.clone(),
+                    id.clone(),
+                    if decision.stopping {
+                        "stopping".to_string()
+                    } else {
+                        "stopped".to_string()
+                    },
+                    id,
+                    None,
+                    decision,
+                )
+            }
+        }
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("Failed to stop capsule: {}", e),
@@ -456,14 +482,94 @@ struct StoppedAgentBody {
 }
 
 #[derive(Serialize)]
+struct UnknownPlanStepBody {
+    session_id: String,
+    request_id: String,
+    /// Always `unknown`. The record uses the same word. This is not done
+    /// and it is not refused.
+    outcome: String,
+}
+
+#[derive(Serialize)]
 struct StopAgentResponse {
     stopped: Vec<StoppedAgentBody>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     stopping: Vec<StoppedAgentBody>,
+    /// Steps whose record is unknown. Stop names them and does not call them
+    /// done or refused.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    unknown: Vec<UnknownPlanStepBody>,
     /// `stopped` when this call found the sessions already ended and did not
     /// stop a further row.
     #[serde(skip_serializing_if = "Option::is_none")]
     already: Option<String>,
+}
+
+fn capsule_stop_response(
+    body_id: String,
+    name: String,
+    status_text: String,
+    session_id: String,
+    cause: Option<String>,
+    decision: crate::runtime::PlanStopDecision,
+) -> axum::response::Response {
+    let status = if decision.stopping {
+        StatusCode::ACCEPTED
+    } else {
+        StatusCode::OK
+    };
+    let answer = CapsuleInfoResponse {
+        id: body_id,
+        name,
+        status: if decision.stopping {
+            "stopping".to_string()
+        } else if status_text != "failed" && !decision.unknown_steps.is_empty() {
+            "stopped".to_string()
+        } else {
+            status_text
+        },
+        session_id,
+        cause,
+        unknown_steps: decision.unknown_steps,
+    };
+    (status, Json(answer)).into_response()
+}
+
+fn unknown_step_bodies(runtime: &Runtime, agent_id: &str) -> Vec<UnknownPlanStepBody> {
+    runtime
+        .take_unknown_plan_steps(agent_id)
+        .into_iter()
+        .map(|step| UnknownPlanStepBody {
+            session_id: step.session_id,
+            request_id: step.request_id,
+            outcome: "unknown".to_string(),
+        })
+        .collect()
+}
+
+fn copy_unknown_step_bodies(runtime: &Runtime, agent_id: &str) -> Vec<UnknownPlanStepBody> {
+    runtime
+        .copy_unknown_plan_steps(agent_id)
+        .into_iter()
+        .map(|step| UnknownPlanStepBody {
+            session_id: step.session_id,
+            request_id: step.request_id,
+            outcome: "unknown".to_string(),
+        })
+        .collect()
+}
+
+fn stopped_rows_for_unknown(unknown: &[UnknownPlanStepBody]) -> Vec<StoppedAgentBody> {
+    let mut sessions: Vec<String> = unknown.iter().map(|step| step.session_id.clone()).collect();
+    sessions.sort();
+    sessions.dedup();
+    sessions
+        .into_iter()
+        .map(|session_id| StoppedAgentBody {
+            session_id,
+            status: "stopped".to_string(),
+        })
+        .collect()
 }
 
 /// Stops every live row whose principal is this agent. The start record is
@@ -505,10 +611,61 @@ pub async fn stop_agent_session(
     stop_collected_agent_rows(&runtime, &agent_id).await
 }
 
+/// `stopping` (202) while a plan effect of this agent can still land.
+/// `stopped` is not said for that session.
+fn plan_write_still_open(runtime: &Runtime, agent_id: &str) -> Option<axum::response::Response> {
+    let sessions = runtime.inflight_plan_sessions(agent_id);
+    // A landing effect keeps the names in the book. Only a stopped answer
+    // removes them.
+    let unknown = if sessions.is_empty() {
+        unknown_step_bodies(runtime, agent_id)
+    } else {
+        copy_unknown_step_bodies(runtime, agent_id)
+    };
+    if sessions.is_empty() && unknown.is_empty() {
+        return None;
+    }
+    if sessions.is_empty() {
+        return Some(
+            (
+                StatusCode::OK,
+                Json(StopAgentResponse {
+                    stopped: stopped_rows_for_unknown(&unknown),
+                    stopping: Vec::new(),
+                    unknown,
+                    already: None,
+                }),
+            )
+                .into_response(),
+        );
+    }
+    Some(
+        (
+            StatusCode::ACCEPTED,
+            Json(StopAgentResponse {
+                stopped: Vec::new(),
+                stopping: sessions
+                    .into_iter()
+                    .map(|session_id| StoppedAgentBody {
+                        session_id,
+                        status: "stopping".to_string(),
+                    })
+                    .collect(),
+                unknown,
+                already: None,
+            }),
+        )
+            .into_response(),
+    )
+}
+
 /// Reads and stops rows after the per-agent stopping flag is set.
 async fn stop_collected_agent_rows(runtime: &Runtime, agent_id: &str) -> axum::response::Response {
     let ids = runtime.live_sessions_for_agent(agent_id).await;
     if ids.is_empty() {
+        if let Some(response) = plan_write_still_open(runtime, agent_id) {
+            return response;
+        }
         return (
             StatusCode::NOT_FOUND,
             format!("agent {agent_id} has no running session"),
@@ -535,20 +692,25 @@ async fn stop_collected_agent_rows(runtime: &Runtime, agent_id: &str) -> axum::r
         }
     }
     if ready.is_empty() {
+        // A 409 is this call's answer. An earlier unknown step does not
+        // replace it, and this call does not take those names.
         if let Some(reason) = refusal {
             return (StatusCode::CONFLICT, reason.to_string()).into_response();
+        }
+        if let Some(response) = plan_write_still_open(runtime, agent_id) {
+            return response;
         }
         return (
             StatusCode::OK,
             Json(StopAgentResponse {
                 stopped: Vec::new(),
                 stopping: Vec::new(),
+                unknown: Vec::new(),
                 already: Some("stopped".to_string()),
             }),
         )
             .into_response();
     }
-    runtime.note_agent_stop_requested(agent_id).await;
     let mut stopped = Vec::with_capacity(ready.len());
     let mut stopping = Vec::new();
     for id in ready {
@@ -566,7 +728,10 @@ async fn stop_collected_agent_rows(runtime: &Runtime, agent_id: &str) -> axum::r
             continue;
         }
         let info = match runtime.stop_capsule_with_reason(&id, "owner").await {
-            Ok(Some(info)) => info,
+            Ok(Some(info)) => {
+                runtime.note_agent_stop_requested(agent_id);
+                info
+            }
             Ok(None) => continue,
             Err(error) => {
                 return (
@@ -576,7 +741,7 @@ async fn stop_collected_agent_rows(runtime: &Runtime, agent_id: &str) -> axum::r
                     .into_response();
             }
         };
-        if info.ended_at.is_none() {
+        if info.ended_at.is_none() || runtime.plan_effect_inflight(&id) {
             stopping.push(StoppedAgentBody {
                 session_id: info.session_id,
                 status: "stopping".to_string(),
@@ -588,7 +753,39 @@ async fn stop_collected_agent_rows(runtime: &Runtime, agent_id: &str) -> axum::r
             });
         }
     }
-    let already = (stopped.is_empty() && stopping.is_empty()).then(|| "stopped".to_string());
+    // A session whose row already ended is absent from the live list, and its
+    // effect can still be landing. Name that session here. The answer is 202
+    // while any such effect remains.
+    for session_id in runtime.inflight_plan_sessions(agent_id) {
+        if stopping.iter().any(|row| row.session_id == session_id) {
+            continue;
+        }
+        if let Some(pos) = stopped.iter().position(|row| row.session_id == session_id) {
+            stopped.remove(pos);
+        }
+        stopping.push(StoppedAgentBody {
+            session_id,
+            status: "stopping".to_string(),
+        });
+    }
+    // A session named in stopping is not also named in stopped.
+    stopped.retain(|row| {
+        !stopping
+            .iter()
+            .any(|stopping_row| stopping_row.session_id == row.session_id)
+    });
+    // While anything is still stopping, the names stay in the book for the
+    // Stop that later says stopped.
+    let unknown = if stopping.is_empty() {
+        unknown_step_bodies(runtime, agent_id)
+    } else {
+        copy_unknown_step_bodies(runtime, agent_id)
+    };
+    if stopped.is_empty() && stopping.is_empty() {
+        stopped = stopped_rows_for_unknown(&unknown);
+    }
+    let already = (stopped.is_empty() && stopping.is_empty() && unknown.is_empty())
+        .then(|| "stopped".to_string());
     let status = if stopping.is_empty() {
         StatusCode::OK
     } else {
@@ -599,6 +796,7 @@ async fn stop_collected_agent_rows(runtime: &Runtime, agent_id: &str) -> axum::r
         Json(StopAgentResponse {
             stopped,
             stopping,
+            unknown,
             already,
         }),
     )
@@ -3767,6 +3965,508 @@ pub(crate) mod tests {
         )
     }
 
+    /// Launch, dispatch, and Stop go through the product path. This row does
+    /// not bind an instance or mark one ending. The plan book is the one the
+    /// hostcall closure receives. The guest stays inside its bridge call, so
+    /// the run does not end on its own fuel. The second step is submitted
+    /// while that call is still up. Its refusal is read after `end_instance`
+    /// marks the instance and before `release` drops the admission: a dispatch
+    /// after that drop is `admission_missing` and cannot see the mark.
+    /// Deleting the hostcall's plan book, the bind in `start_loaded` (before
+    /// `watch_activation`), or `mark_stopping` in `end_instance` fails this row.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_launched_run_stops_through_the_product_route() {
+        if crate::agents::require_build().is_err() {
+            return;
+        }
+        let home = std::sync::Arc::new(ProbeLaunch::new(&["route"]).await);
+        let agent = home.agents[0].clone();
+        let launched = home.launch(&agent).await.expect("launch").0;
+        assert_eq!(launched.status, crate::runtime::CAPSULE_STARTING);
+        assert_eq!(launched.session_id, launched.id);
+        let session = launched.id.clone();
+        home.wait_pending(&session).await;
+
+        let root = home.root(&agent);
+        let target = format!("{root}/Documents/plan.md");
+        let path =
+            elastos_common::localhost::rooted_localhost_fs_path(&home.data_dir, &target).unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        crate::auth::write_principal_root_object(
+            &home.data_dir,
+            &agent,
+            &root,
+            &target,
+            &path,
+            b"before",
+        )
+        .unwrap();
+        let before = std::fs::read(&path).unwrap();
+        let book = home.runtime.plan_book();
+
+        assert!(
+            crate::runtime::Runtime::plan_instance_is_open(&book, &session, &agent),
+            "the launch did not bind {session} for {agent}"
+        );
+        let first = submit_launched_plan(&home, &session, &agent, &target, vec![1]).await;
+        assert_eq!(
+            crate::resource_bridge::retained_plan_instance_is_open(&first, &session, &agent, &book),
+            "open",
+            "the hostcall context does not see the launched instance"
+        );
+        let second = submit_launched_plan(&home, &session, &agent, &target, vec![2]).await;
+        approve_launched_plan(&home.data_dir, &first);
+        let pause = crate::resource_bridge::arm_plan_dispatch_hold(
+            &first,
+            crate::resource_bridge::PlanDispatchPoint::InEffect,
+        );
+        let state = launched_plan_state(&home);
+        let owner = home.owner.clone();
+        let request = first.clone();
+        let task = tokio::spawn(async move {
+            gateway::dispatch_approved_agent_plan(
+                &state,
+                &gateway::HomeLaunchTokenContext::for_test(
+                    owner,
+                    "session:owner",
+                    None,
+                    "grant:owner",
+                    crate::auth::PrincipalKind::Human,
+                ),
+                &request,
+            )
+            .await
+        });
+        let reached =
+            tokio::time::timeout(std::time::Duration::from_secs(20), pause.entered.notified())
+                .await;
+        if reached.is_err() {
+            let outcome = tokio::time::timeout(std::time::Duration::from_secs(2), task).await;
+            let stored = std::fs::read(
+                home.data_dir
+                    .join("inspect-actions")
+                    .join(format!("{first}.json")),
+            )
+            .ok()
+            .and_then(|bytes| String::from_utf8(bytes).ok())
+            .unwrap_or_default();
+            panic!("the launched dispatch did not reach its effect: {outcome:?}\n{stored}");
+        }
+
+        let end_pause = crate::runtime::arm_after_plan_end_mark(&session);
+        let _release_end = NotifyOnDrop(std::sync::Arc::clone(&end_pause.release));
+        let stop_home = std::sync::Arc::clone(&home);
+        let stop_agent = agent.clone();
+        let stop_task =
+            tokio::spawn(async move { stop_launched_agent(&stop_home, &stop_agent).await });
+        let marked = tokio::time::timeout(
+            std::time::Duration::from_secs(20),
+            end_pause.entered.notified(),
+        )
+        .await;
+        if marked.is_err() {
+            let outcome = tokio::time::timeout(std::time::Duration::from_secs(2), stop_task).await;
+            panic!("the stop did not mark the end: {outcome:?}");
+        }
+
+        approve_launched_plan(&home.data_dir, &second);
+        let refused = gateway::dispatch_approved_agent_plan(
+            &launched_plan_state(&home),
+            &gateway::HomeLaunchTokenContext::for_test(
+                home.owner.clone(),
+                "session:owner",
+                None,
+                "grant:owner",
+                crate::auth::PrincipalKind::Human,
+            ),
+            &second,
+        )
+        .await
+        .expect("a refused step still settles");
+        assert!(refused.contains("refused"), "{refused}");
+        let record = std::fs::read(
+            home.data_dir
+                .join("inspect-actions")
+                .join(format!("{second}.json")),
+        )
+        .unwrap();
+        let record: serde_json::Value = serde_json::from_slice(&record).unwrap();
+        assert_eq!(record["status"], "refused", "{record}");
+        assert_eq!(record["result"]["code"], "instance ended", "{record}");
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+
+        end_pause.release.notify_one();
+        let (status, body) = tokio::time::timeout(std::time::Duration::from_secs(20), stop_task)
+            .await
+            .expect("the stop did not answer")
+            .expect("stop task");
+        assert_eq!(status, StatusCode::ACCEPTED, "{body}");
+        let stopping = body["stopping"].as_array().expect("stopping");
+        assert!(
+            stopping
+                .iter()
+                .any(|row| row["session_id"] == session && row["status"] == "stopping"),
+            "{body}"
+        );
+
+        pause.release.notify_one();
+        let finished = tokio::time::timeout(std::time::Duration::from_secs(20), task)
+            .await
+            .expect("the launched effect did not settle");
+        finished.expect("dispatch task").expect("dispatch");
+    }
+
+    /// An effect in flight keeps the live-run token after the end is decided.
+    /// Start is refused until that effect is settled, and the same grant is
+    /// then allowed. An unknown record releases the token on the same path.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_start_waits_until_an_inflight_effect_is_settled() {
+        if crate::agents::require_build().is_err() {
+            return;
+        }
+        let home = std::sync::Arc::new(ProbeLaunch::new(&["token"]).await);
+        let agent = home.agents[0].clone();
+        let launched = home.launch(&agent).await.expect("launch").0;
+        assert_eq!(launched.session_id, launched.id);
+        let session = launched.id.clone();
+        home.wait_pending(&session).await;
+
+        let root = home.root(&agent);
+        let target = format!("{root}/Documents/plan.md");
+        let path =
+            elastos_common::localhost::rooted_localhost_fs_path(&home.data_dir, &target).unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        crate::auth::write_principal_root_object(
+            &home.data_dir,
+            &agent,
+            &root,
+            &target,
+            &path,
+            b"before",
+        )
+        .unwrap();
+
+        let first = submit_launched_plan(&home, &session, &agent, &target, vec![1]).await;
+        approve_launched_plan(&home.data_dir, &first);
+        let pause = crate::resource_bridge::arm_plan_dispatch_hold(
+            &first,
+            crate::resource_bridge::PlanDispatchPoint::InEffect,
+        );
+        let state = launched_plan_state(&home);
+        let owner = home.owner.clone();
+        let request = first.clone();
+        let task = tokio::spawn(async move {
+            gateway::dispatch_approved_agent_plan(
+                &state,
+                &gateway::HomeLaunchTokenContext::for_test(
+                    owner,
+                    "session:owner",
+                    None,
+                    "grant:owner",
+                    crate::auth::PrincipalKind::Human,
+                ),
+                &request,
+            )
+            .await
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(20), pause.entered.notified())
+            .await
+            .expect("the effect did not start");
+
+        let (status, body) = stop_launched_agent(&home, &agent).await;
+        assert_eq!(status, StatusCode::ACCEPTED, "{body}");
+        assert!(
+            home.runtime.agent_live_run_held(&agent),
+            "the end released the token while an effect was in flight"
+        );
+        let grant = gateway::issue_home_agent_launch_token_with_context(
+            &home.data_dir,
+            &agent,
+            PROBE_HOST,
+            &home.context,
+        )
+        .unwrap();
+        assert_stopping(launch_grant(&home, &home.capsule_dir, &agent, &grant).await);
+        assert!(
+            home.runtime.stop_requested_for_test(&agent),
+            "Start cleared the stop mark while an effect was in flight"
+        );
+
+        pause.release.notify_one();
+        tokio::time::timeout(std::time::Duration::from_secs(20), task)
+            .await
+            .expect("the effect did not settle")
+            .expect("dispatch task")
+            .expect("dispatch");
+        assert!(
+            !home.runtime.agent_live_run_held(&agent),
+            "a settled effect left the live run held"
+        );
+        let again = launch_grant(&home, &home.capsule_dir, &agent, &grant)
+            .await
+            .expect("the settled effect allows Start");
+        let _ = stop_launched_agent(&home, &agent).await;
+        assert_ne!(again.0.id, session);
+    }
+
+    /// A timeout resolves the flight. Start is refused while it is landing
+    /// and allowed once the record is unknown.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_start_is_allowed_after_the_effect_is_unknown() {
+        if crate::agents::require_build().is_err() {
+            return;
+        }
+        let home = std::sync::Arc::new(ProbeLaunch::new(&["unknown-start"]).await);
+        let agent = home.agents[0].clone();
+        let launched = home.launch(&agent).await.expect("launch").0;
+        let session = launched.id.clone();
+        home.wait_pending(&session).await;
+        let root = home.root(&agent);
+        let target = format!("{root}/Documents/plan.md");
+        let path =
+            elastos_common::localhost::rooted_localhost_fs_path(&home.data_dir, &target).unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        crate::auth::write_principal_root_object(
+            &home.data_dir,
+            &agent,
+            &root,
+            &target,
+            &path,
+            b"before",
+        )
+        .unwrap();
+        let first = submit_launched_plan(&home, &session, &agent, &target, vec![1]).await;
+        approve_launched_plan(&home.data_dir, &first);
+        gateway::set_plan_dispatch_wait_for_test(&first, std::time::Duration::from_secs(2));
+        let pause = crate::resource_bridge::arm_plan_dispatch_hold(
+            &first,
+            crate::resource_bridge::PlanDispatchPoint::InEffect,
+        );
+        let state = launched_plan_state(&home);
+        let owner = home.owner.clone();
+        let request = first.clone();
+        let task = tokio::spawn(async move {
+            gateway::dispatch_approved_agent_plan(
+                &state,
+                &gateway::HomeLaunchTokenContext::for_test(
+                    owner,
+                    "session:owner",
+                    None,
+                    "grant:owner",
+                    crate::auth::PrincipalKind::Human,
+                ),
+                &request,
+            )
+            .await
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(20), pause.entered.notified())
+            .await
+            .expect("the effect did not start");
+        let (status, body) = stop_launched_agent(&home, &agent).await;
+        assert_eq!(status, StatusCode::ACCEPTED, "{body}");
+        let grant = gateway::issue_home_agent_launch_token_with_context(
+            &home.data_dir,
+            &agent,
+            PROBE_HOST,
+            &home.context,
+        )
+        .unwrap();
+        assert_stopping(launch_grant(&home, &home.capsule_dir, &agent, &grant).await);
+        tokio::time::timeout(std::time::Duration::from_secs(20), task)
+            .await
+            .expect("the timeout did not settle")
+            .expect("dispatch task")
+            .expect("dispatch");
+        gateway::clear_plan_dispatch_wait_for_test(&first);
+        let stored = std::fs::read(
+            home.data_dir
+                .join("inspect-actions")
+                .join(format!("{first}.json")),
+        )
+        .unwrap();
+        let record: serde_json::Value = serde_json::from_slice(&stored).unwrap();
+        assert_eq!(record["status"], "unknown", "{record}");
+        let again = launch_grant(&home, &home.capsule_dir, &agent, &grant)
+            .await
+            .expect("an unknown record left Start refused");
+        assert_ne!(again.0.id, session);
+    }
+
+    /// The plan instance is bound before the guest's first line.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_guest_that_dispatches_at_once_sees_the_instance() {
+        if crate::agents::require_build().is_err() {
+            return;
+        }
+        let home = std::sync::Arc::new(ProbeLaunch::new(&["dispatch-at-once"]).await);
+        let agent = home.agents[0].clone();
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        crate::runtime::arm_guest_opening(&agent, crate::runtime::GuestOpening::Dispatch(sender));
+        let launched = home.launch(&agent).await.expect("launch").0;
+        let open = tokio::time::timeout(std::time::Duration::from_secs(10), receiver)
+            .await
+            .expect("the guest did not start")
+            .expect("the guest dropped the answer");
+        assert!(
+            open,
+            "the instance was not bound before the guest ran: {}",
+            crate::runtime::Runtime::plan_book_view(&home.runtime.plan_book(), &launched.id)
+        );
+        let _ = stop_launched_agent(&home, &agent).await;
+    }
+
+    /// A guest that ends at once does not leave a plan instance behind.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_guest_that_exits_at_once_does_not_leave_an_instance() {
+        if crate::agents::require_build().is_err() {
+            return;
+        }
+        let home = std::sync::Arc::new(ProbeLaunch::new(&["exit-at-once"]).await);
+        let agent = home.agents[0].clone();
+        crate::runtime::arm_guest_opening(&agent, crate::runtime::GuestOpening::Exit);
+        let launched = home.launch(&agent).await.expect("launch").0;
+        let session = launched.id.clone();
+        let ended = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                match home.runtime.get_capsule(&session).await {
+                    Some(info) if info.ended_at.is_some() => break,
+                    None => break,
+                    Some(_) => tokio::task::yield_now().await,
+                }
+            }
+        })
+        .await;
+        assert!(ended.is_ok(), "the guest did not end");
+        assert!(
+            !crate::runtime::Runtime::plan_instance_is_open(
+                &home.runtime.plan_book(),
+                &session,
+                &agent
+            ),
+            "an instance remained: {}",
+            crate::runtime::Runtime::plan_book_view(&home.runtime.plan_book(), &session)
+        );
+    }
+
+    /// Releases a plan-end pause if the row fails before it does.
+    #[cfg(unix)]
+    struct NotifyOnDrop(std::sync::Arc<tokio::sync::Notify>);
+
+    #[cfg(unix)]
+    impl Drop for NotifyOnDrop {
+        fn drop(&mut self) {
+            self.0.notify_one();
+        }
+    }
+
+    #[cfg(unix)]
+    async fn submit_launched_plan(
+        home: &ProbeLaunch,
+        session: &str,
+        agent: &str,
+        target: &str,
+        content: Vec<u8>,
+    ) -> String {
+        use elastos_runtime::capability::{Action, ResourceId, TokenConstraints};
+        let token = home.capability_manager.grant(
+            session,
+            ResourceId::new("elastos://inspect/submit_agent_plan"),
+            Action::Write,
+            TokenConstraints::default(),
+            None,
+        );
+        let token = token.to_base64().expect("token encodes");
+        let plan = serde_json::json!({
+            "steps": [{
+                "scheme": "localhost",
+                "operation": "write",
+                "request": {"path": target, "content": content}
+            }]
+        });
+        let line = serde_json::json!({
+            "id": 1,
+            "request": {
+                "type": "resource_invoke",
+                "uri": "elastos://inspect/submit_agent_plan",
+                "operation": "submit_agent_plan",
+                "body": plan,
+                "token": token,
+            }
+        })
+        .to_string();
+        let runtime = home.runtime.clone();
+        let session = session.to_string();
+        let agent = agent.to_string();
+        let raw = tokio::task::spawn_blocking(move || {
+            runtime.call_component_hostcall_for_test(&line, &session, Some(&agent))
+        })
+        .await
+        .expect("hostcall task")
+        .expect("hostcall");
+        let answer: serde_json::Value = serde_json::from_str(&raw).expect(&raw);
+        answer["response"]["result"]["data"]["request_id"]
+            .as_str()
+            .unwrap_or_else(|| panic!("submit did not return a request: {answer}"))
+            .to_string()
+    }
+
+    #[cfg(unix)]
+    fn approve_launched_plan(data_dir: &std::path::Path, request_id: &str) {
+        let path = data_dir
+            .join("inspect-actions")
+            .join(format!("{request_id}.json"));
+        let mut record: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        record["status"] = serde_json::json!("approved");
+        std::fs::write(&path, serde_json::to_vec_pretty(&record).unwrap()).unwrap();
+    }
+
+    #[cfg(unix)]
+    fn launched_plan_state(home: &ProbeLaunch) -> gateway::GatewayState {
+        gateway::GatewayState {
+            provider_registry: Some(home.registry.clone()),
+            collaboration_chat_product_port: None,
+            collaboration_presence_product_port: None,
+            carrier_endpoint: None,
+            collaboration_discovery_service: None,
+            browser_internet: Default::default(),
+            identity_manager: std::sync::Arc::new(std::sync::OnceLock::new()),
+            cache_dir: home.data_dir.clone(),
+            data_dir: home.data_dir.clone(),
+        }
+    }
+
+    #[cfg(unix)]
+    async fn stop_launched_agent(
+        home: &ProbeLaunch,
+        agent: &str,
+    ) -> (StatusCode, serde_json::Value) {
+        let response = stop_agent_session(
+            axum::Extension(home.runtime.clone()),
+            axum::Extension(home.audit_log.clone()),
+            axum::body::Bytes::from(
+                serde_json::to_vec(&serde_json::json!({"agent_id": agent})).unwrap(),
+            ),
+        )
+        .await;
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        (
+            status,
+            serde_json::from_slice(&bytes)
+                .unwrap_or(serde_json::json!(
+                    String::from_utf8_lossy(&bytes).to_string()
+                )),
+        )
+    }
+
     /// A10-R's mid-compute proof (S4). A spinning guest is resident beside a
     /// second agent. `DELETE` with a reason ends the spinning guest well
     /// before its own 10 s deadline: the entry is `stopped` with
@@ -4398,6 +5098,7 @@ pub(crate) mod tests {
             model_token_ceiling: tables.model_token_ceiling,
             model_budget: None,
             stop: tables.stop,
+            plan_book: None,
         };
         let answer = crate::resource_bridge::handle_component_resource_request(&line, ctx)
             .await
@@ -5553,6 +6254,7 @@ pub(crate) mod tests {
             model_token_ceiling: None,
             model_budget: None,
             stop: None,
+            plan_book: None,
         };
         let request = serde_json::json!({"path": foreign, "content": "x"});
         let refused = crate::resource_bridge::protected_principal_root_resource_response_for_test(
@@ -8538,6 +9240,147 @@ pub(crate) mod tests {
         );
     }
 
+    /// What `start_agent_once` answers. The launch route returns this sentence
+    /// once admission has passed, and System paints Running or Stopping from it.
+    #[cfg(unix)]
+    async fn start_sentence(runtime: &Arc<Runtime>, agent: &str, launch_id: &str) -> String {
+        let expires = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs()
+            + 3600;
+        let err = runtime
+            .start_agent_once(
+                std::path::Path::new("unused"),
+                crate::agent_admission::AdmissionContext::for_test(agent),
+                crate::runtime::AgentStartFacts {
+                    agent_id: agent,
+                    owner: "person:owner",
+                    host_cid: "cid",
+                    launch_id,
+                    expires_at: expires,
+                },
+            )
+            .await
+            .expect_err("Start was accepted");
+        match err {
+            elastos_common::ElastosError::InvalidManifest(message) => message,
+            other => panic!("Start returned {other}"),
+        }
+    }
+
+    /// The launch route System Start calls, before a grant is presented.
+    /// Stopping is decided here. Already running is decided in `start_agent_once`
+    /// after the grant, which this call does not reach.
+    #[cfg(unix)]
+    async fn launch_route_body(runtime: &Arc<Runtime>, agent: &str) -> (StatusCode, String) {
+        match launch_capsule(
+            Extension(runtime.clone()),
+            Extension(Arc::new(AuditLog::new())),
+            Extension(Some(std::path::PathBuf::from("unused-home"))),
+            Json(LaunchRequest {
+                path: "unused".to_string(),
+                principal_id: None,
+                launch_grant: None,
+                agent_id: Some(agent.to_string()),
+            }),
+        )
+        .await
+        {
+            Ok(answer) => (StatusCode::OK, answer.0.id),
+            Err((status, body)) => (status, body),
+        }
+    }
+
+    /// The agent's own live run has a plan step in flight. Start says already
+    /// running. The launch route does not say stopping.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_live_run_with_a_held_step_says_already_running() {
+        let (runtime, _dir) = crate::runtime::tests::test_runtime().await;
+        let runtime = Arc::new(runtime);
+        let agent = "agent:r10-live";
+        let session = "session-r10-live";
+        runtime.plant_open_agent_stop_for_test(agent, session).await;
+        let guard =
+            Runtime::try_enter_plan_effect(&runtime.plan_book(), session, agent, "step-r10-live")
+                .expect("the live step enters");
+        assert!(
+            !runtime.agent_is_stopping(agent).await,
+            "a live step made the agent stopping"
+        );
+        assert_eq!(
+            start_sentence(&runtime, agent, "launch:r10-live").await,
+            Runtime::AGENT_ALREADY_RUNNING
+        );
+        let (status, body) = launch_route_body(&runtime, agent).await;
+        assert!(
+            status != StatusCode::CONFLICT || body != Runtime::AGENT_STOPPING,
+            "the launch route said stopping for a live step: {status} {body}"
+        );
+        drop(guard);
+    }
+
+    /// The run has ended and a plan step is still landing. Start says stopping,
+    /// and the launch route says the same sentence.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_stopped_run_with_a_landing_step_says_stopping() {
+        let (runtime, _dir) = crate::runtime::tests::test_runtime().await;
+        let runtime = Arc::new(runtime);
+        let agent = "agent:r10-land";
+        let session = "session-r10-land";
+        runtime.plant_open_agent_stop_for_test(agent, session).await;
+        let guard =
+            Runtime::try_enter_plan_effect(&runtime.plan_book(), session, agent, "step-r10-land")
+                .expect("the landing step enters");
+        runtime.note_plan_instance_ended(session);
+        assert!(runtime.agent_is_stopping(agent).await);
+        assert_eq!(
+            start_sentence(&runtime, agent, "launch:r10-land").await,
+            Runtime::AGENT_STOPPING
+        );
+        let (status, body) = launch_route_body(&runtime, agent).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        assert_eq!(body, Runtime::AGENT_STOPPING);
+        drop(guard);
+    }
+
+    /// System Start goes through the launch route. A live step is already
+    /// running. A step that is still landing after the run ended is stopping.
+    /// The page paints Running and Stopping from those two sentences.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_system_list_labels_a_live_step_running_and_a_landing_step_stopping() {
+        if crate::agents::require_build().is_err() {
+            return;
+        }
+        let home = ProbeLaunch::new(&[]).await;
+        let (dir, cid) = home.spin_host();
+        let agent = home.create_agent_for_host("r10-label", &cid);
+        let first = home
+            .launch_from(&dir, &agent)
+            .await
+            .expect("the run starts")
+            .0;
+        home.wait_running(&first.id).await;
+        let guard = Runtime::try_enter_plan_effect(
+            &home.runtime.plan_book(),
+            &first.id,
+            &agent,
+            "step-r10-label",
+        )
+        .expect("the live step enters");
+        assert!(!home.runtime.agent_is_stopping(&agent).await);
+        assert_already_running(home.launch_from(&dir, &agent).await);
+        home.runtime.note_plan_instance_ended(&first.id);
+        assert!(home.runtime.agent_is_stopping(&agent).await);
+        assert_stopping(home.launch_from(&dir, &agent).await);
+        guard.release();
+        let (status, body) = stop_route(&home, &first.id, Some("owner")).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+    }
+
     #[cfg(unix)]
     fn panic_message(payload: Box<dyn std::any::Any + Send>) -> String {
         if let Some(message) = payload.downcast_ref::<String>() {
@@ -8603,6 +9446,7 @@ pub(crate) mod tests {
             model_token_ceiling: tables.model_token_ceiling,
             model_budget: None,
             stop: tables.stop,
+            plan_book: None,
         };
         let answer = crate::resource_bridge::handle_component_resource_request(&line, ctx)
             .await
@@ -8644,6 +9488,20 @@ pub(crate) mod tests {
             .into_iter()
             .filter(|info| info.ended_at.is_none() && info.principal.as_deref() == Some(agent))
             .count()
+    }
+
+    #[cfg(unix)]
+    fn assert_stopping(result: Result<Json<LaunchResponse>, (StatusCode, String)>) {
+        match result {
+            Err((status, body)) => {
+                assert_eq!(status, StatusCode::CONFLICT);
+                assert_eq!(body, crate::runtime::Runtime::AGENT_STOPPING);
+            }
+            Ok(answer) => panic!(
+                "a start during a landing effect was accepted: {}",
+                answer.0.id
+            ),
+        }
     }
 
     #[cfg(unix)]
@@ -9516,6 +10374,60 @@ pub(crate) mod tests {
             !start_refused_because_stopping(&runtime, agent).await,
             "a panic in Stop left Start refused"
         );
+    }
+
+    /// Stop names an unknown step and keeps a failed capsule failed.
+    #[tokio::test]
+    async fn a_failed_stop_keeps_failed_when_it_names_an_unknown_step() {
+        use axum::body::to_bytes;
+
+        let response = capsule_stop_response(
+            "cap".to_string(),
+            "guest".to_string(),
+            "failed".to_string(),
+            "session".to_string(),
+            Some("failed: boom".to_string()),
+            crate::runtime::PlanStopDecision {
+                stopping: false,
+                unknown_steps: vec!["step-9".to_string()],
+            },
+        );
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let answer: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(answer["status"], "failed");
+        assert_eq!(answer["unknown_steps"][0], "step-9");
+
+        let running = capsule_stop_response(
+            "cap".to_string(),
+            "guest".to_string(),
+            "running".to_string(),
+            "session".to_string(),
+            None,
+            crate::runtime::PlanStopDecision {
+                stopping: false,
+                unknown_steps: vec!["step-9".to_string()],
+            },
+        );
+        let running_bytes = to_bytes(running.into_body(), usize::MAX).await.unwrap();
+        let running_answer: serde_json::Value = serde_json::from_slice(&running_bytes).unwrap();
+        assert_eq!(running_answer["status"], "stopped");
+
+        let landing = capsule_stop_response(
+            "cap".to_string(),
+            "guest".to_string(),
+            "failed".to_string(),
+            "session".to_string(),
+            Some("failed: boom".to_string()),
+            crate::runtime::PlanStopDecision {
+                stopping: true,
+                unknown_steps: vec!["step-9".to_string()],
+            },
+        );
+        assert_eq!(landing.status(), StatusCode::ACCEPTED);
+        let landing_bytes = to_bytes(landing.into_body(), usize::MAX).await.unwrap();
+        let landing_answer: serde_json::Value = serde_json::from_slice(&landing_bytes).unwrap();
+        assert_eq!(landing_answer["status"], "stopping");
     }
 }
 

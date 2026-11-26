@@ -130,6 +130,8 @@ wasm-encoder = "=0.254.2"
 wat = "=1.254.2"
 elastos-auth = { path = "../elastos-auth" }
 elastos-common = { path = "../elastos-common", features = ["test-fixtures"] }
+elastos-compute = { path = "../elastos-compute", features = ["test-hooks"] }
+elastos-runtime = { path = "../elastos-runtime", features = ["test-hooks"] }
 elastos-protected-content-custody = { path = "../elastos-protected-content-custody" }
 x-wing = { version = "=0.1.0", features = ["hazmat", "zeroize"] }
 # The rand generation iroh-gossip's membership state machine takes; the

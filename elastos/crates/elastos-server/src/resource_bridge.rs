@@ -289,9 +289,8 @@ impl BridgePrincipal {
 }
 
 /// One activation's stop request, shared by its end and the bridge's wait
-/// loop (M1-R A10-R). `requested` is set by the stop route before it waits;
-/// `cancelled` is set by the wait loop when it leaves the guest's call
-/// because of it, so the end can tell this stop's ending from a trap's.
+/// loop (M1-R A10-R). `requested` is set after that caller's provider stop
+/// succeeds. `cancelled` is set when the wait leaves because of that flag.
 #[derive(Debug, Default)]
 pub struct ActivationStopFlag {
     pub requested: std::sync::atomic::AtomicBool,
@@ -329,6 +328,9 @@ pub struct BridgeContext {
     /// instead of waiting out the shell's polls; it records that it left for
     /// the stop, and the activation's own end then denies the request.
     pub stop: Option<Arc<ActivationStopFlag>>,
+    /// The Runtime book this activation's plan steps decide against. `None`
+    /// is an unbound dispatch, and an unbound dispatch is refused.
+    pub(crate) plan_book: Option<Arc<std::sync::Mutex<crate::runtime::PlanBook>>>,
 }
 
 /// The admitted context that submitted a plan stays available until its one
@@ -373,6 +375,53 @@ pub(crate) async fn own_root_token_replay_refused_for_test(request_id: &str) -> 
             .is_err()
 }
 
+/// The one-use grant was not counted. A later revoke of a refused effect
+/// still leaves no successful use of that token.
+#[cfg(unix)]
+#[cfg(test)]
+pub(crate) async fn own_root_token_is_unused_for_test(request_id: &str) -> bool {
+    let held = AGENT_PLAN_ONE_USE_TOKENS
+        .get()
+        .and_then(|tokens| tokens.lock().unwrap().get(request_id).cloned());
+    let Some((manager, token)) = held else {
+        return false;
+    };
+    let token_id = token.id().to_string();
+    !manager.audit_log().recent_events(400).iter().any(|event| {
+        matches!(
+            event,
+            elastos_runtime::primitives::audit::AuditEvent::CapabilityUse {
+                token_id: id,
+                success: true,
+                ..
+            } if id == &token_id
+        )
+    })
+}
+
+#[cfg(unix)]
+#[cfg(test)]
+pub(crate) async fn own_root_token_revoked_for_test(request_id: &str) -> bool {
+    let held = AGENT_PLAN_ONE_USE_TOKENS
+        .get()
+        .and_then(|tokens| tokens.lock().unwrap().get(request_id).cloned());
+    let Some((manager, token)) = held else {
+        return false;
+    };
+    matches!(
+        manager
+            .validate(
+                &token,
+                token.capsule(),
+                token.action(),
+                token.resource(),
+                None,
+            )
+            .await,
+        Err(elastos_runtime::capability::manager::ValidationError::TokenRevoked)
+    )
+}
+
 fn plan_authorities() -> &'static Mutex<HashMap<String, AgentPlanDispatchAuthority>> {
     AGENT_PLAN_DISPATCH_AUTHORITIES.get_or_init(|| Mutex::new(HashMap::new()))
 }
@@ -398,6 +447,43 @@ pub(crate) fn retain_agent_plan_dispatch_authority(
         },
     );
     Ok(())
+}
+
+/// What the retained hostcall context can see for this step. A row uses it
+/// to tell a missing book from a closed instance. Anything other than `open`
+/// names the two books.
+#[cfg(all(test, unix))]
+pub(crate) fn retained_plan_instance_is_open(
+    request_id: &str,
+    session_id: &str,
+    agent_id: &str,
+    runtime_book: &Arc<std::sync::Mutex<crate::runtime::PlanBook>>,
+) -> String {
+    let Ok(authorities) = plan_authorities().lock() else {
+        return "poison".to_string();
+    };
+    let Some(held) = authorities.get(request_id) else {
+        return "no authority".to_string();
+    };
+    let principal = held.context.principal_id.as_deref().unwrap_or("");
+    let Some(book) = held.context.plan_book.as_ref() else {
+        return format!(
+            "no book capsule={} session={} principal={principal}",
+            held.context.capsule_id, held.context.session_id
+        );
+    };
+    if crate::runtime::Runtime::plan_instance_is_open(book, session_id, agent_id) {
+        return "open".to_string();
+    }
+    format!(
+        "closed same_arc={} runtime_open={} runtime_book={} retained_book={} capsule={} ctx_session={} principal={principal}",
+        Arc::ptr_eq(book, runtime_book),
+        crate::runtime::Runtime::plan_instance_is_open(runtime_book, session_id, agent_id),
+        crate::runtime::Runtime::plan_book_view(runtime_book, session_id),
+        crate::runtime::Runtime::plan_book_view(book, session_id),
+        held.context.capsule_id,
+        held.context.session_id
+    )
 }
 
 pub(crate) fn forget_agent_plan_dispatch_authority(capsule_id: &str) {
@@ -472,6 +558,679 @@ pub(crate) fn narrow_agent_plan_manifest_for_test(request_id: &str) {
     }];
 }
 
+/// The owner's record shows this code when a plan step is refused because
+/// its instance has ended or is stopping.
+const PLAN_INSTANCE_ENDED: &str = "instance ended";
+
+#[derive(Clone)]
+struct PlanStep {
+    request_id: String,
+    owner_id: String,
+    requester_id: String,
+    capsule_id: String,
+    data_dir: PathBuf,
+    book: Option<Arc<std::sync::Mutex<crate::runtime::PlanBook>>>,
+}
+
+tokio::task_local! {
+    static PLAN_STEP: PlanStep;
+}
+
+fn current_plan_step() -> Option<PlanStep> {
+    PLAN_STEP.try_with(Clone::clone).ok()
+}
+
+#[cfg(all(test, unix))]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum PlanDispatchPoint {
+    BeforeCheck,
+    AfterToken,
+    InEffect,
+    /// The effect has returned and the record is still `dispatching`.
+    /// The flight is still held: settlement has not released it.
+    BeforeSettle,
+    /// The effect has returned and the one-use grant is still in its guard.
+    /// The revoke of that grant has not run.
+    Revoke,
+}
+
+#[cfg(all(test, unix))]
+struct PlanHold {
+    request_id: String,
+    point: PlanDispatchPoint,
+    entered: Arc<tokio::sync::Notify>,
+    release: Arc<tokio::sync::Notify>,
+}
+
+#[cfg(all(test, unix))]
+static PLAN_HOLDS: Mutex<Vec<PlanHold>> = Mutex::new(Vec::new());
+
+#[cfg(all(test, unix))]
+pub(crate) struct PlanDispatchPause {
+    pub entered: Arc<tokio::sync::Notify>,
+    pub release: Arc<tokio::sync::Notify>,
+}
+
+/// Hold the dispatch at `point` until the test releases it. The mutex is
+/// dropped before the wait.
+#[cfg(all(test, unix))]
+pub(crate) fn arm_plan_dispatch_hold(
+    request_id: &str,
+    point: PlanDispatchPoint,
+) -> PlanDispatchPause {
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    PLAN_HOLDS
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+        .push(PlanHold {
+            request_id: request_id.to_string(),
+            point,
+            entered: Arc::clone(&entered),
+            release: Arc::clone(&release),
+        });
+    PlanDispatchPause { entered, release }
+}
+
+#[cfg(all(test, unix))]
+async fn pause_plan_dispatch(request_id: &str, point: PlanDispatchPoint) {
+    let hold = {
+        let mut holds = PLAN_HOLDS.lock().unwrap_or_else(|err| err.into_inner());
+        let pos = holds
+            .iter()
+            .rposition(|hold| hold.request_id == request_id && hold.point == point);
+        pos.map(|pos| holds.swap_remove(pos))
+    };
+    if let Some(hold) = hold {
+        hold.entered.notify_one();
+        hold.release.notified().await;
+    }
+}
+
+/// The dispatch task waits here, after the effect and before the record is settled.
+#[cfg(all(test, unix))]
+pub(crate) async fn pause_plan_dispatch_for_test(request_id: &str, point: PlanDispatchPoint) {
+    pause_plan_dispatch(request_id, point).await;
+}
+
+/// The flight of a plan step that has returned and has not been settled.
+/// Settlement takes it and releases it only after the record is written.
+fn parked_plan_guards() -> &'static Mutex<HashMap<String, crate::runtime::PlanEffectGuard>> {
+    static PARKED: OnceLock<Mutex<HashMap<String, crate::runtime::PlanEffectGuard>>> =
+        OnceLock::new();
+    PARKED.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn park_plan_guard(request_id: &str, guard: crate::runtime::PlanEffectGuard) {
+    if request_id.is_empty() {
+        guard.release();
+        return;
+    }
+    parked_plan_guards()
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+        .insert(request_id.to_string(), guard);
+}
+
+/// Takes the flight parked for `request_id`. The caller releases it after the
+/// record is written. Dropping it without [`PlanEffectGuard::release`] keeps
+/// the flight, which is what a failed settle and an unknown outcome do.
+pub(crate) fn take_parked_plan_guard(request_id: &str) -> Option<crate::runtime::PlanEffectGuard> {
+    parked_plan_guards()
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+        .remove(request_id)
+}
+
+#[cfg(all(test, unix))]
+pub(crate) fn park_plan_guard_for_test(request_id: &str, guard: crate::runtime::PlanEffectGuard) {
+    park_plan_guard(request_id, guard);
+}
+
+#[cfg(all(test, unix))]
+pub(crate) fn parked_plan_guard_is_held(request_id: &str) -> bool {
+    parked_plan_guards()
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+        .contains_key(request_id)
+}
+
+fn instance_ended_response() -> serde_json::Value {
+    resource_error_response(PLAN_INSTANCE_ENDED, PLAN_INSTANCE_ENDED)
+}
+
+fn plan_step_refusal(
+    data_dir: &Path,
+    owner_id: &str,
+    requester_id: &str,
+    capsule_id: &str,
+    book: Option<&Arc<std::sync::Mutex<crate::runtime::PlanBook>>>,
+) -> Option<serde_json::Value> {
+    let open = book.is_some_and(|book| {
+        crate::runtime::Runtime::plan_instance_is_open(book, capsule_id, requester_id)
+    });
+    if !open {
+        return Some(instance_ended_response());
+    }
+    match acting_agent_owner(data_dir, requester_id) {
+        Ok(owner) if owner == owner_id => None,
+        _ => Some(resource_error_response(
+            "agent_inactive",
+            "agent can no longer dispatch",
+        )),
+    }
+}
+
+/// Proof that the effect branches ran after the one check-and-mark. Only
+/// [`AdmittedEffect::admit`] builds one, and only [`admit_plan_effect`] calls it.
+struct AdmittedEffect {
+    _private: (),
+}
+
+impl AdmittedEffect {
+    fn admit() -> Self {
+        AdmittedEffect { _private: () }
+    }
+}
+
+async fn register_one_use_grant(
+    ctx: &BridgeContext,
+    token: &CapabilityToken,
+    resource: &str,
+    action: Action,
+    request_id: &str,
+) -> Result<String, ()> {
+    let pending = ctx
+        .pending_store
+        .create_request(
+            elastos_runtime::session::SessionId(ctx.capsule_id.clone()),
+            ResourceId::new(resource),
+            action,
+        )
+        .await;
+    let id = pending.id.as_str().to_string();
+    #[cfg(all(test, unix))]
+    wait_one_use_grant_race(request_id, &id).await;
+    #[cfg(not(all(test, unix)))]
+    let _ = request_id;
+    if ctx
+        .pending_store
+        .grant_request(
+            &id,
+            token.clone(),
+            elastos_runtime::capability::pending::GrantDuration::Session,
+        )
+        .await
+        .is_err()
+    {
+        let _ = ctx
+            .pending_store
+            .deny_request_by(
+                &id,
+                "grant not registered",
+                elastos_runtime::capability::pending::Settler::Runtime,
+            )
+            .await;
+        ctx.pending_store
+            .revoke_request_by(
+                &id,
+                "grant not registered",
+                elastos_runtime::capability::pending::Settler::Runtime,
+            )
+            .await;
+        return Err(());
+    }
+    Ok(id)
+}
+
+#[cfg(all(test, unix))]
+struct OneUseGrantRace {
+    request_id: String,
+    entered: Arc<tokio::sync::Notify>,
+    release: Arc<tokio::sync::Notify>,
+    pending_id: Arc<Mutex<Option<String>>>,
+}
+
+/// One race per request. A second plant's arm does not replace the first.
+#[cfg(all(test, unix))]
+static ONE_USE_GRANT_RACE: Mutex<Vec<OneUseGrantRace>> = Mutex::new(Vec::new());
+
+/// Lets a test grant the pending record before this registration does.
+#[cfg(all(test, unix))]
+pub(crate) struct OneUseGrantPause {
+    pub(crate) entered: Arc<tokio::sync::Notify>,
+    pub(crate) release: Arc<tokio::sync::Notify>,
+    pending_id: Arc<Mutex<Option<String>>>,
+}
+
+#[cfg(all(test, unix))]
+impl OneUseGrantPause {
+    pub(crate) fn pending_id(&self) -> Option<String> {
+        self.pending_id
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .clone()
+    }
+}
+
+#[cfg(all(test, unix))]
+impl Drop for OneUseGrantPause {
+    fn drop(&mut self) {
+        self.release.notify_one();
+        let mut races = ONE_USE_GRANT_RACE
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        if let Some(pos) = races
+            .iter()
+            .rposition(|race| Arc::ptr_eq(&race.pending_id, &self.pending_id))
+        {
+            races.swap_remove(pos);
+        }
+    }
+}
+
+#[cfg(all(test, unix))]
+pub(crate) fn arm_one_use_grant_race(request_id: &str) -> OneUseGrantPause {
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let pending_id = Arc::new(Mutex::new(None));
+    ONE_USE_GRANT_RACE
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+        .push(OneUseGrantRace {
+            request_id: request_id.to_string(),
+            entered: Arc::clone(&entered),
+            release: Arc::clone(&release),
+            pending_id: Arc::clone(&pending_id),
+        });
+    OneUseGrantPause {
+        entered,
+        release,
+        pending_id,
+    }
+}
+
+#[cfg(all(test, unix))]
+async fn wait_one_use_grant_race(request_id: &str, pending_id: &str) {
+    let race = {
+        let mut races = ONE_USE_GRANT_RACE
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        let Some(pos) = races.iter().rposition(|race| race.request_id == request_id) else {
+            return;
+        };
+        races.swap_remove(pos)
+    };
+    *race
+        .pending_id
+        .lock()
+        .unwrap_or_else(|err| err.into_inner()) = Some(pending_id.to_string());
+    race.entered.notify_one();
+    race.release.notified().await;
+}
+
+struct AbandonedPlanGrant {
+    manager: Arc<CapabilityManager>,
+    store: Arc<elastos_runtime::capability::pending::PendingRequestStore>,
+    token: CapabilityToken,
+    pending_id: String,
+    /// Set when the dispatch is dropped. The spend path refuses this token
+    /// until the revoke below removes the entry.
+    refused: bool,
+    revoking: bool,
+    ready: Arc<tokio::sync::watch::Sender<u8>>,
+}
+
+/// The one-use grant for a dispatch that has not finished. Dropping the
+/// dispatch, including a panic or the 120 s timeout, leaves it here. The
+/// caller revokes it before it records the outcome. A finished dispatch
+/// calls [`HeldPlanGrant::keep`] and leaves nothing.
+struct HeldPlanGrant {
+    request_id: String,
+    grant: Option<AbandonedPlanGrant>,
+}
+
+impl HeldPlanGrant {
+    fn keep(mut self) {
+        self.grant.take();
+    }
+}
+
+impl Drop for HeldPlanGrant {
+    fn drop(&mut self) {
+        let Some(mut grant) = self.grant.take() else {
+            return;
+        };
+        grant.refused = true;
+        abandoned_plan_grants()
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .insert(self.request_id.clone(), grant);
+    }
+}
+
+fn abandoned_plan_grants() -> &'static Mutex<HashMap<String, AbandonedPlanGrant>> {
+    static GRANTS: OnceLock<Mutex<HashMap<String, AbandonedPlanGrant>>> = OnceLock::new();
+    GRANTS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn abandoned_grants() -> std::sync::MutexGuard<'static, HashMap<String, AbandonedPlanGrant>> {
+    abandoned_plan_grants()
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+}
+
+async fn revoke_plan_grant(
+    manager: &CapabilityManager,
+    store: &elastos_runtime::capability::pending::PendingRequestStore,
+    token: &CapabilityToken,
+    pending_id: &str,
+    reason: &str,
+) {
+    let _ = manager.revoke(*token.id(), reason).await;
+    store
+        .revoke_request_by(
+            pending_id,
+            reason,
+            elastos_runtime::capability::pending::Settler::Runtime,
+        )
+        .await;
+}
+
+/// Revoke the grant a dropped or panicked dispatch left behind. A dispatch
+/// that finished revokes its own, or keeps it, and this finds nothing.
+#[cfg(all(test, unix))]
+pub(crate) fn park_abandoned_grant_for_test(
+    request_id: &str,
+    manager: Arc<CapabilityManager>,
+    store: Arc<elastos_runtime::capability::pending::PendingRequestStore>,
+    token: CapabilityToken,
+    pending_id: String,
+) {
+    abandoned_plan_grants()
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+        .insert(
+            request_id.to_string(),
+            AbandonedPlanGrant {
+                manager,
+                store,
+                token,
+                pending_id,
+                refused: false,
+                revoking: false,
+                ready: Arc::new(tokio::sync::watch::channel(0).0),
+            },
+        );
+}
+
+/// The dispatch is gone. A spend of this grant is refused before the revoke runs.
+pub(crate) fn refuse_abandoned_plan_grant(request_id: &str) {
+    if let Some(grant) = abandoned_plan_grants()
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+        .get_mut(request_id)
+    {
+        grant.refused = true;
+    }
+}
+
+fn plan_grant_spend_is_refused(token_id: &elastos_runtime::capability::token::TokenId) -> bool {
+    abandoned_plan_grants()
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+        .values()
+        .any(|grant| grant.refused && grant.token.id() == token_id)
+}
+
+#[cfg(all(test, unix))]
+struct AbandonedRevokeGate {
+    entered: Arc<std::sync::atomic::AtomicUsize>,
+    waiting: Arc<std::sync::atomic::AtomicUsize>,
+    progress: Arc<tokio::sync::Notify>,
+    release: Arc<tokio::sync::Notify>,
+}
+
+#[cfg(all(test, unix))]
+static ABANDONED_REVOKE_GATE: Mutex<Vec<(String, AbandonedRevokeGate)>> = Mutex::new(Vec::new());
+
+/// Holds the first revoke open so a second caller is measured against it.
+#[cfg(all(test, unix))]
+pub(crate) struct AbandonedRevokePause {
+    pub(crate) entered: Arc<std::sync::atomic::AtomicUsize>,
+    pub(crate) waiting: Arc<std::sync::atomic::AtomicUsize>,
+    pub(crate) progress: Arc<tokio::sync::Notify>,
+    release: Arc<tokio::sync::Notify>,
+}
+
+#[cfg(all(test, unix))]
+impl AbandonedRevokePause {
+    pub(crate) fn release_for_test(&self) {
+        self.release.notify_waiters();
+    }
+}
+
+#[cfg(all(test, unix))]
+pub(crate) fn arm_abandoned_revoke_overlap(request_id: &str) -> AbandonedRevokePause {
+    let entered = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let waiting = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let progress = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    ABANDONED_REVOKE_GATE
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+        .push((
+            request_id.to_string(),
+            AbandonedRevokeGate {
+                entered: Arc::clone(&entered),
+                waiting: Arc::clone(&waiting),
+                progress: Arc::clone(&progress),
+                release: Arc::clone(&release),
+            },
+        ));
+    AbandonedRevokePause {
+        entered,
+        waiting,
+        progress,
+        release,
+    }
+}
+
+#[cfg(all(test, unix))]
+impl Drop for AbandonedRevokePause {
+    fn drop(&mut self) {
+        self.release.notify_waiters();
+    }
+}
+
+#[cfg(all(test, unix))]
+fn note_abandoned_revoke_waiting(request_id: &str) {
+    let gates = ABANDONED_REVOKE_GATE
+        .lock()
+        .unwrap_or_else(|err| err.into_inner());
+    if let Some((_, gate)) = gates.iter().find(|(id, _)| id == request_id) {
+        gate.waiting
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        gate.progress.notify_waiters();
+    }
+}
+
+#[cfg(all(test, unix))]
+async fn pause_abandoned_revoke(request_id: &str) {
+    let (entered, progress, release) = {
+        let gates = ABANDONED_REVOKE_GATE
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        let Some((_, gate)) = gates.iter().find(|(id, _)| id == request_id) else {
+            return;
+        };
+        (
+            Arc::clone(&gate.entered),
+            Arc::clone(&gate.progress),
+            Arc::clone(&gate.release),
+        )
+    };
+    let waiting = release.notified();
+    entered.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    progress.notify_waiters();
+    waiting.await;
+}
+
+struct ClearRevoking(String, Arc<tokio::sync::watch::Sender<u8>>);
+
+impl Drop for ClearRevoking {
+    fn drop(&mut self) {
+        if let Some(grant) = abandoned_grants().get_mut(&self.0) {
+            grant.revoking = false;
+        }
+        let next = self.1.borrow().wrapping_add(1);
+        let _ = self.1.send(next);
+    }
+}
+
+pub(crate) async fn revoke_abandoned_plan_grant(request_id: &str) {
+    let (held, ready) = loop {
+        let (mut watch, seen) = {
+            let mut grants = abandoned_grants();
+            let Some(grant) = grants.get_mut(request_id) else {
+                return;
+            };
+            if !grant.revoking {
+                grant.revoking = true;
+                grant.refused = true;
+                let held = (
+                    Arc::clone(&grant.manager),
+                    Arc::clone(&grant.store),
+                    grant.token.clone(),
+                    grant.pending_id.clone(),
+                );
+                let ready = Arc::clone(&grant.ready);
+                break (held, ready);
+            }
+            let watch = grant.ready.subscribe();
+            let seen = *watch.borrow();
+            (watch, seen)
+        };
+        #[cfg(all(test, unix))]
+        note_abandoned_revoke_waiting(request_id);
+        let _ = watch.wait_for(|value| *value != seen).await;
+    };
+    let _mark = ClearRevoking(request_id.to_string(), ready);
+    #[cfg(all(test, unix))]
+    pause_abandoned_revoke(request_id).await;
+    revoke_plan_grant(
+        &held.0,
+        &held.1,
+        &held.2,
+        &held.3,
+        "plan dispatch abandoned",
+    )
+    .await;
+    abandoned_grants().remove(request_id);
+}
+
+/// The product spend of a bridge token. A dropped dispatch's grant is refused
+/// here before `validate` counts a use.
+async fn spend_invoked_capability(
+    manager: &CapabilityManager,
+    token: &CapabilityToken,
+    caller: &str,
+    action: Action,
+    resource: &ResourceId,
+) -> Result<(), elastos_runtime::capability::manager::ValidationError> {
+    if plan_grant_spend_is_refused(token.id()) {
+        return Err(elastos_runtime::capability::manager::ValidationError::TokenRevoked);
+    }
+    manager
+        .validate(token, caller, action, resource, None)
+        .await
+}
+
+#[cfg(all(test, unix))]
+pub(crate) async fn spend_plan_grant_for_test(
+    manager: &CapabilityManager,
+    token: &CapabilityToken,
+) -> Result<(), elastos_runtime::capability::manager::ValidationError> {
+    spend_invoked_capability(
+        manager,
+        token,
+        token.capsule(),
+        token.action(),
+        token.resource(),
+    )
+    .await
+}
+
+fn plan_effect_succeeded(response: &serde_json::Value) -> bool {
+    response.get("type").and_then(|value| value.as_str()) == Some("resource_result")
+        && response
+            .pointer("/result/status")
+            .and_then(|value| value.as_str())
+            .is_none_or(|status| status == "ok")
+}
+
+/// One check-and-mark for every effect of an approved step. A step that is
+/// not a plan takes an idle guard. The mark stays until [`PlanEffectGuard::release`]
+/// or, when the future is dropped first, until settlement records unknown.
+async fn admit_plan_effect(
+) -> Result<(crate::runtime::PlanEffectGuard, AdmittedEffect), serde_json::Value> {
+    let Some(step) = current_plan_step() else {
+        return Ok((
+            crate::runtime::PlanEffectGuard::idle(),
+            AdmittedEffect::admit(),
+        ));
+    };
+    match acting_agent_owner(&step.data_dir, &step.requester_id) {
+        Ok(owner) if owner == step.owner_id => {}
+        _ => {
+            return Err(resource_error_response(
+                "agent_inactive",
+                "agent can no longer dispatch",
+            ));
+        }
+    }
+    let Some(book) = step.book.clone() else {
+        return Err(instance_ended_response());
+    };
+    let guard = match crate::runtime::Runtime::try_enter_plan_effect(
+        &book,
+        &step.capsule_id,
+        &step.requester_id,
+        &step.request_id,
+    ) {
+        Ok(guard) => guard,
+        Err(()) => return Err(instance_ended_response()),
+    };
+    #[cfg(test)]
+    if take_plan_panic(&step.request_id) {
+        panic!("plan dispatch panic seam");
+    }
+    #[cfg(all(test, unix))]
+    pause_plan_dispatch(&step.request_id, PlanDispatchPoint::InEffect).await;
+    Ok((guard, AdmittedEffect::admit()))
+}
+
+#[cfg(test)]
+static PLAN_PANIC: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+#[cfg(all(test, unix))]
+pub(crate) fn arm_plan_dispatch_panic(request_id: &str) {
+    PLAN_PANIC
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+        .push(request_id.to_string());
+}
+
+#[cfg(test)]
+fn take_plan_panic(request_id: &str) -> bool {
+    let mut armed = PLAN_PANIC.lock().unwrap_or_else(|err| err.into_inner());
+    let Some(pos) = armed.iter().rposition(|id| id == request_id) else {
+        return false;
+    };
+    armed.swap_remove(pos);
+    true
+}
+
 /// Submit an approved stored step through the same normalization, authority
 /// checks and dispatch as an agent's ordinary resource invoke.
 pub(crate) async fn dispatch_agent_plan_step(
@@ -491,6 +1250,9 @@ pub(crate) async fn dispatch_agent_plan_step(
         return resource_error_response("admission_missing", "agent plan admission is unavailable");
     };
     let ctx = held.context;
+    if let Some(book) = ctx.plan_book.as_ref() {
+        crate::runtime::wire_home_runtime(data_dir, book);
+    }
     if held.owner_id != owner_id
         || ctx.principal_id.as_deref() != Some(requester_id)
         || ctx.capsule_id != capsule_id
@@ -508,9 +1270,19 @@ pub(crate) async fn dispatch_agent_plan_step(
     {
         return resource_error_response("admission_mismatch", "agent plan step changed");
     }
-    match acting_agent_owner(data_dir, requester_id) {
-        Ok(current_owner) if current_owner == owner_id => {}
-        _ => return resource_error_response("agent_inactive", "agent can no longer dispatch"),
+    // The admission is already removed. Refuse unless this instance is still
+    // running and not stopping. The same check runs again immediately before
+    // the write.
+    #[cfg(all(test, unix))]
+    pause_plan_dispatch(request_id, PlanDispatchPoint::BeforeCheck).await;
+    if let Some(refusal) = plan_step_refusal(
+        data_dir,
+        owner_id,
+        requester_id,
+        capsule_id,
+        ctx.plan_book.as_ref(),
+    ) {
+        return refusal;
     }
     let uri = match build_capability_resource(scheme, operation, body) {
         Ok(uri) => uri,
@@ -585,13 +1357,103 @@ pub(crate) async fn dispatch_agent_plan_step(
         };
         token
     };
+    let registered = if own_root {
+        match register_one_use_grant(
+            &ctx,
+            &token,
+            &dispatch.resource,
+            dispatch.required_action,
+            request_id,
+        )
+        .await
+        {
+            Ok(pending_id) => Some((token.clone(), pending_id)),
+            Err(()) => {
+                let _ = ctx
+                    .capability_manager
+                    .revoke(*token.id(), "grant not registered")
+                    .await;
+                return resource_error_response(
+                    "capability_denied",
+                    "agent plan grant was not registered",
+                );
+            }
+        }
+    } else {
+        None
+    };
+    // Held across the dispatch. A return revokes it when the effect did not
+    // succeed. A drop, from the timeout or a panic, leaves it to be revoked
+    // when that outcome is recorded.
+    let held = registered.map(|(token, pending_id)| HeldPlanGrant {
+        request_id: request_id.to_string(),
+        grant: Some(AbandonedPlanGrant {
+            manager: Arc::clone(&ctx.capability_manager),
+            store: Arc::clone(&ctx.pending_store),
+            token,
+            pending_id,
+            refused: false,
+            revoking: false,
+            ready: Arc::new(tokio::sync::watch::channel(0).0),
+        }),
+    });
+    #[cfg(all(test, unix))]
+    pause_plan_dispatch(request_id, PlanDispatchPoint::AfterToken).await;
     let request = serde_json::json!({
         "uri": uri,
         "operation": operation,
         "body": body,
         "token": encode_bridge_capability_token(&token),
     });
-    authorize_and_dispatch_resource_invoke(&request, &ctx).await
+    let step = PlanStep {
+        request_id: request_id.to_string(),
+        owner_id: owner_id.to_string(),
+        requester_id: requester_id.to_string(),
+        capsule_id: capsule_id.to_string(),
+        data_dir: data_dir.to_path_buf(),
+        book: ctx.plan_book.clone(),
+    };
+    let response = PLAN_STEP
+        .scope(step, authorize_and_dispatch_resource_invoke(&request, &ctx))
+        .await;
+    if let Some(held) = held {
+        // The grant stays in the guard across this await. A timeout or abort
+        // while it is running still drops the guard, so the grant is abandoned
+        // and revoked once.
+        if let Some(grant) = held.grant.as_ref() {
+            #[cfg(all(test, unix))]
+            pause_plan_dispatch(request_id, PlanDispatchPoint::Revoke).await;
+            if plan_effect_succeeded(&response) {
+                // The token was counted by validate. The pending record must
+                // leave Granted: Stop's settle writes every still-granted
+                // token into a list of 256, and a longer run fills it.
+                grant
+                    .store
+                    .revoke_request_by(
+                        &grant.pending_id,
+                        "one-use plan grant spent",
+                        elastos_runtime::capability::pending::Settler::Runtime,
+                    )
+                    .await;
+            } else {
+                let reason = response
+                    .get("code")
+                    .and_then(|value| value.as_str())
+                    .filter(|code| !code.is_empty())
+                    .unwrap_or("plan effect did not succeed");
+                revoke_plan_grant(
+                    &grant.manager,
+                    &grant.store,
+                    &grant.token,
+                    &grant.pending_id,
+                    reason,
+                )
+                .await;
+            }
+        }
+        held.keep();
+    }
+    response
 }
 
 #[derive(Clone)]
@@ -1008,19 +1870,28 @@ fn finish_component_invoke(
     response
 }
 
-async fn authorize_and_dispatch_resource_invoke(
+struct CheckedInvoke {
+    dispatch: ResourceInvokeDispatch,
+    audit_id: String,
+    token: CapabilityToken,
+}
+
+/// The checks before the plan admit. An effect does not run here, and the
+/// one-use grant is not counted here. A new effect belongs in
+/// [`dispatch_admitted_effect`], after [`admit_plan_effect`].
+async fn checks_before_plan_admit(
     request: &serde_json::Value,
     bridge_ctx: &BridgeContext,
-) -> serde_json::Value {
+) -> Result<CheckedInvoke, serde_json::Value> {
     let token_b64 = request["token"].as_str().unwrap_or("");
-    let mut dispatch = match resource_invoke_dispatch(
+    let dispatch = match resource_invoke_dispatch(
         request,
         bridge_ctx.principal_id.as_deref(),
         bridge_ctx.data_dir.as_deref(),
     ) {
         Ok(dispatch) => dispatch,
         Err(err) => {
-            return resource_error_response(err.code, &err.message);
+            return Err(resource_error_response(err.code, &err.message));
         }
     };
     let audit_id = format!(
@@ -1036,7 +1907,7 @@ async fn authorize_and_dispatch_resource_invoke(
         bridge_ctx.principal_id.as_deref(),
         bridge_ctx.data_dir.as_deref(),
     ) {
-        return finish_component_invoke(
+        return Err(finish_component_invoke(
             bridge_ctx,
             &audit_id,
             &dispatch,
@@ -1046,23 +1917,23 @@ async fn authorize_and_dispatch_resource_invoke(
                 &dispatch.resource,
                 &dispatch.required_action.to_string(),
             ),
-        );
+        ));
     }
 
     if let Err(message) = reject_localhost_user_area_root(&dispatch.resource)
         .and_then(|_| reject_localhost_parent_segments(&dispatch.resource))
     {
-        return finish_component_invoke(
+        return Err(finish_component_invoke(
             bridge_ctx,
             &audit_id,
             &dispatch,
             "denied",
             resource_error_response("invalid_resource_invoke", &message),
-        );
+        ));
     }
 
     if token_b64.is_empty() {
-        return finish_component_invoke(
+        return Err(finish_component_invoke(
             bridge_ctx,
             &audit_id,
             &dispatch,
@@ -1071,34 +1942,65 @@ async fn authorize_and_dispatch_resource_invoke(
                 "missing_token",
                 "resource_invoke requires a capability token",
             ),
-        );
+        ));
     }
 
     let token = match CapabilityToken::from_base64(token_b64) {
         Ok(token) => token,
         Err(_) => {
-            return finish_component_invoke(
+            return Err(finish_component_invoke(
                 bridge_ctx,
                 &audit_id,
                 &dispatch,
                 "denied",
                 resource_error_response("invalid_token", "Invalid capability token"),
-            )
+            ))
+        }
+    };
+    // The token is parsed here and not used. `validate` consumes a one-use
+    // grant, so it runs after the plan admit: a refusal there leaves the
+    // grant unused.
+    Ok(CheckedInvoke {
+        dispatch,
+        audit_id,
+        token,
+    })
+}
+
+async fn authorize_and_dispatch_resource_invoke(
+    request: &serde_json::Value,
+    bridge_ctx: &BridgeContext,
+) -> serde_json::Value {
+    let CheckedInvoke {
+        dispatch,
+        audit_id,
+        token,
+    } = match checks_before_plan_admit(request, bridge_ctx).await {
+        Ok(checked) => checked,
+        Err(response) => return response,
+    };
+
+    // Every effect of an approved step passes this one check-and-mark: a
+    // protected-root write, a provider call, inspect and submit, a launch
+    // read, and a model call. A new branch belongs in `dispatch_admitted_effect`.
+    let (guard, effect) = match admit_plan_effect().await {
+        Ok(admitted) => admitted,
+        Err(refusal) => {
+            return finish_component_invoke(bridge_ctx, &audit_id, &dispatch, "denied", refusal);
         }
     };
     let resource_id = ResourceId::new(&dispatch.resource);
-    if bridge_ctx
-        .capability_manager
-        .validate(
-            &token,
-            &bridge_ctx.capsule_id,
-            dispatch.required_action,
-            &resource_id,
-            None,
-        )
-        .await
-        .is_err()
+    if spend_invoked_capability(
+        &bridge_ctx.capability_manager,
+        &token,
+        &bridge_ctx.capsule_id,
+        dispatch.required_action,
+        &resource_id,
+    )
+    .await
+    .is_err()
     {
+        guard.release();
         return finish_component_invoke(
             bridge_ctx,
             &audit_id,
@@ -1107,16 +2009,37 @@ async fn authorize_and_dispatch_resource_invoke(
             resource_error_response("capability_denied", "Capability validation failed"),
         );
     }
-
     if let Some(refusal) = agents_area_dispatch_refusal(&dispatch) {
+        guard.release();
         return finish_component_invoke(bridge_ctx, &audit_id, &dispatch, "denied", refusal);
     }
+    let response =
+        dispatch_admitted_effect(&effect, request, bridge_ctx, dispatch, &audit_id, &token).await;
+    if let Some(step) = current_plan_step() {
+        // Settlement holds this flight until the record is written, then
+        // releases it. A timeout drops the future before this park, and the
+        // guard's drop keeps the flight until that record says unknown.
+        park_plan_guard(&step.request_id, guard);
+    } else {
+        guard.release();
+    }
+    response
+}
 
+/// The effect itself. `effect` exists only because [`admit_plan_effect`] ran.
+async fn dispatch_admitted_effect(
+    _effect: &AdmittedEffect,
+    request: &serde_json::Value,
+    bridge_ctx: &BridgeContext,
+    mut dispatch: ResourceInvokeDispatch,
+    audit_id: &str,
+    token: &CapabilityToken,
+) -> serde_json::Value {
     // An agent whose launch released its account is refused by name before the
     // hosted-run gate and before any send. A person with neither still runs.
     if dispatch.scheme == "model" {
         if let Some(refusal) = agent_run_without_account(bridge_ctx, &dispatch.operation) {
-            return finish_component_invoke(bridge_ctx, &audit_id, &dispatch, "denied", refusal);
+            return finish_component_invoke(bridge_ctx, audit_id, &dispatch, "denied", refusal);
         }
     }
 
@@ -1134,9 +2057,7 @@ async fn authorize_and_dispatch_resource_invoke(
             Ok(stamped) => dispatch.request = stamped,
             Err((code, message)) => {
                 let refusal = resource_error_response(code, &message);
-                return finish_component_invoke(
-                    bridge_ctx, &audit_id, &dispatch, "denied", refusal,
-                );
+                return finish_component_invoke(bridge_ctx, audit_id, &dispatch, "denied", refusal);
             }
         }
     }
@@ -1150,7 +2071,7 @@ async fn authorize_and_dispatch_resource_invoke(
             Some("resource_result") => invoke_outcome(&response["result"]),
             _ => "denied",
         };
-        return finish_component_invoke(bridge_ctx, &audit_id, &dispatch, outcome, response);
+        return finish_component_invoke(bridge_ctx, audit_id, &dispatch, outcome, response);
     }
 
     // A launch name is answered here, from the caller's own launch, and
@@ -1162,7 +2083,7 @@ async fn authorize_and_dispatch_resource_invoke(
             Some("resource_result") => invoke_outcome(&response["result"]),
             _ => "denied",
         };
-        return finish_component_invoke(bridge_ctx, &audit_id, &dispatch, outcome, response);
+        return finish_component_invoke(bridge_ctx, audit_id, &dispatch, outcome, response);
     }
 
     if let Some(response) = protected_principal_root_resource_response(
@@ -1174,29 +2095,29 @@ async fn authorize_and_dispatch_resource_invoke(
             Some("resource_result") => invoke_outcome(&response["result"]),
             _ => "error",
         };
-        return finish_component_invoke(bridge_ctx, &audit_id, &dispatch, outcome, response);
+        return finish_component_invoke(bridge_ctx, audit_id, &dispatch, outcome, response);
     }
 
     if dispatch.scheme == "model" {
         if let Some(refusal) = model_budget_refusal(bridge_ctx) {
-            return finish_component_invoke(bridge_ctx, &audit_id, &dispatch, "denied", refusal);
+            return finish_component_invoke(bridge_ctx, audit_id, &dispatch, "denied", refusal);
         }
         if dispatch.operation == "runs_create" {
             if bridge_ctx.model_token_ceiling.is_some() && bridge_ctx.model_budget.is_none() {
                 return finish_component_invoke(
                     bridge_ctx,
-                    &audit_id,
+                    audit_id,
                     &dispatch,
                     "denied",
                     resource_error_response("denied", AGENT_ACCOUNT_UNAVAILABLE),
                 );
             }
             if let Some(ref budget) = bridge_ctx.model_budget {
-                match reserve_model_create(budget, bridge_ctx, &dispatch.request, &token) {
+                match reserve_model_create(budget, bridge_ctx, &dispatch.request, token) {
                     Ok(request) => dispatch.request = request,
                     Err(refusal) => {
                         return finish_component_invoke(
-                            bridge_ctx, &audit_id, &dispatch, "denied", refusal,
+                            bridge_ctx, audit_id, &dispatch, "denied", refusal,
                         );
                     }
                 }
@@ -1217,7 +2138,7 @@ async fn authorize_and_dispatch_resource_invoke(
             }
             finish_component_invoke(
                 bridge_ctx,
-                &audit_id,
+                audit_id,
                 &dispatch,
                 invoke_outcome(&result),
                 serde_json::json!({"type": "resource_result", "result": result}),
@@ -1232,7 +2153,7 @@ async fn authorize_and_dispatch_resource_invoke(
             );
             finish_component_invoke(
                 bridge_ctx,
-                &audit_id,
+                audit_id,
                 &dispatch,
                 "error",
                 resource_error_response("provider_error", "Provider operation failed"),
@@ -3040,6 +3961,7 @@ pub(crate) mod tests {
             model_token_ceiling: None,
             model_budget: None,
             stop: None,
+            plan_book: None,
         }
     }
 
@@ -8436,6 +9358,10 @@ pub(crate) mod tests {
         ctx.session_id = ctx.capsule_id.clone();
         ctx.data_dir = Some(data_dir.to_path_buf());
         ctx.manifest_capabilities = submit_plan_host_manifest().resource_authority_bounds();
+        // This bridge has no running Runtime row. Bind one so the later
+        // dispatch is an open instance, the same helper other plan tests use.
+        let capsule = ctx.capsule_id.clone();
+        crate::runtime::Runtime::bind_detached_plan_for_test(&mut ctx, &capsule, principal);
         let provider = Arc::new(CapturingProvider::default());
         ctx.provider_registry.register(provider.clone()).await;
         (ctx, provider)
@@ -9658,5 +10584,109 @@ fn after() {
         // admission decision; the total also pins those nested mappings.
         assert_eq!(outer_arms, 5, "gateway outer admission match arms");
         assert_eq!(total_arms, 8, "gateway total admission match arms");
+    }
+
+    /// Every effect of an approved step is behind the one check-and-mark.
+    /// A new branch in the authorizer cannot build the witness or call an
+    /// effect; both live in the function that takes the witness.
+    #[test]
+    fn an_effect_branch_cannot_skip_the_plan_admit() {
+        let source = production_text(include_str!("resource_bridge.rs"));
+        assert_eq!(
+            source.matches("AdmittedEffect { _private: () }").count(),
+            1,
+            "the admit witness is built in one place"
+        );
+        let authorize = function_body(&source, "authorize_and_dispatch_resource_invoke");
+        let checks = function_body(&source, "checks_before_plan_admit");
+        let effect = function_body(&source, "dispatch_admitted_effect");
+        assert_eq!(authorize.matches("checks_before_plan_admit(").count(), 1);
+        assert_eq!(authorize.matches("admit_plan_effect(").count(), 1);
+        assert_eq!(authorize.matches("dispatch_admitted_effect(").count(), 1);
+        assert_eq!(
+            checks.matches(".await").count(),
+            0,
+            "the checks before the plan admit do not count the one-use grant"
+        );
+        assert!(
+            !checks.contains(".validate("),
+            "validate consumes a one-use grant and stays after admit"
+        );
+        assert_eq!(authorize.matches("spend_invoked_capability(").count(), 1);
+        let admit_at = authorize.find("admit_plan_effect(").expect("admit");
+        let spend_at = authorize.find("spend_invoked_capability(").expect("spend");
+        assert!(
+            admit_at < spend_at,
+            "admit runs before the one-use grant is counted"
+        );
+        let spend = function_body(&source, "spend_invoked_capability");
+        let refusal_at = spend.find("plan_grant_spend_is_refused(").expect("refusal");
+        let validate_at = spend.find(".validate(").expect("validate");
+        assert!(
+            refusal_at < validate_at,
+            "the refusal check runs before validate counts a use"
+        );
+        assert!(!checks.contains("admit_plan_effect("));
+        assert!(!checks.contains("dispatch_admitted_effect("));
+        assert!(effect.contains("_effect: &AdmittedEffect"));
+        for name in [
+            "submit_agent_plan_response",
+            "protected_principal_root_resource_response",
+            "launch_response",
+            "send_raw",
+            "reserve_model_create",
+            "bus_model_provider_request",
+        ] {
+            assert!(effect.contains(name), "{name} left the admitted effect");
+            assert!(!checks.contains(name), "{name} runs before the plan admit");
+        }
+        // A capability ask is not an approved-step effect. It stays in the
+        // bridge's own request handler, and neither effect function calls it.
+        for name in ["create_request_retiring", "request_capability"] {
+            assert!(!authorize.contains(name), "{name}");
+            assert!(!effect.contains(name), "{name}");
+        }
+    }
+
+    /// A one-use grant that cannot be registered is not the instance ending.
+    #[test]
+    fn a_grant_that_cannot_be_registered_is_not_called_instance_ended() {
+        let body = function_body(include_str!("resource_bridge.rs"), "register_one_use_grant");
+        assert!(
+            body.contains("\"grant not registered\""),
+            "a failed registration needs a neutral reason"
+        );
+        assert!(
+            !body.contains("instance ended"),
+            "a failed registration is not the instance ending"
+        );
+    }
+
+    fn function_body(source: &str, name: &str) -> String {
+        let marker = format!("fn {name}(");
+        let start = source
+            .find(&marker)
+            .unwrap_or_else(|| panic!("missing {name}"));
+        let bytes = source.as_bytes();
+        let mut index = start;
+        let mut depth = 0i32;
+        let mut seen_brace = false;
+        while index < bytes.len() {
+            match bytes[index] {
+                b'{' => {
+                    depth += 1;
+                    seen_brace = true;
+                }
+                b'}' => {
+                    depth -= 1;
+                    if seen_brace && depth == 0 {
+                        return source[start..=index].to_string();
+                    }
+                }
+                _ => {}
+            }
+            index += 1;
+        }
+        panic!("unclosed {name}");
     }
 }
