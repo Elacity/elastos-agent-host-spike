@@ -411,7 +411,15 @@ impl LocalProvider {
                 return Ok(buffer);
             }
 
-            let plaintext = read_sealed_localhost_file(key, &full_path, path).or_else(|err| if err.to_string().contains("process can read") && localhost_provider::is_plain_localhost_file(&full_path)? { localhost_provider::read_plain_localhost_range(&full_path, path, offset.unwrap_or(0), length) } else { Err(err) })?;
+            let read_span = || localhost_provider::read_plain_localhost_range(&full_path, path, offset.unwrap_or(0), length);
+            if (offset.is_some() || length.is_some()) && localhost_provider::is_plain_localhost_file(&full_path)? {
+                return read_span();
+            }
+            let plaintext = match read_sealed_localhost_file(key, &full_path, path) {
+                Ok(bytes) => bytes,
+                Err(err) if err.to_string().contains("process can read") => if localhost_provider::is_plain_localhost_file(&full_path)? { return read_span(); } else { return Err(err); },
+                Err(err) => return Err(err),
+            };
 
             let off = offset.unwrap_or(0) as usize;
             if off >= plaintext.len() {
@@ -1491,6 +1499,7 @@ mod tests {
         assert_eq!(digest, 750, "the stream did not see ftyp and MARK");
         assert!(widest <= 64 * 1024, "a stream chunk held {widest} bytes");
 
+        let _ = localhost_provider::take_sealed_read_bytes();
         let slice = provider.handle_request(ProviderRequest::Read {
             path: "Users/video.bin".into(),
             token: Some("token".into()),
@@ -1507,6 +1516,9 @@ mod tests {
             serde_json::json!([b'M', b'A', b'R', b'K'])
         );
         assert_eq!(slice["size"], 4);
+        let ranged = localhost_provider::take_sealed_read_bytes();
+        assert_eq!(ranged, 4 + 64, "a range read loaded the file: {ranged}");
+        println!("SL_R18_UNDER_GIB={ranged}");
 
         let whole = provider
             .read_file("Users/video.bin", "token", None, None)
@@ -1529,11 +1541,18 @@ mod tests {
             .unwrap()
             .set_len(SIZE)
             .unwrap();
+        let _ = localhost_provider::take_sealed_read_bytes();
         let json_slice = provider
             .read_file("Users/note.json", "token", Some(0), Some(7))
             .unwrap();
         assert_eq!(json_slice, br#"{"note""#);
         assert!(json_slice.capacity() <= 16);
+        let json_ranged = localhost_provider::take_sealed_read_bytes();
+        assert_eq!(
+            json_ranged,
+            7 + 64,
+            "a json range read loaded the file: {json_ranged}"
+        );
         let json_whole = provider
             .read_file("Users/note.json", "token", None, None)
             .unwrap();
@@ -1828,19 +1847,48 @@ mod tests {
         fs::create_dir(dir.path().join("Users")).unwrap();
         let provider = make_encrypted_provider(&dir);
         let path = dir.path().join("Users/huge-plain.bin");
-        fs::write(&path, b"{over").unwrap();
-        fs::OpenOptions::new()
-            .write(true)
-            .open(&path)
-            .unwrap()
-            .set_len(localhost_provider::SEALED_READ_HARD_LIMIT + 1)
-            .unwrap();
-        assert_eq!(
-            provider
-                .read_file("Users/huge-plain.bin", "token", Some(0), Some(5))
-                .unwrap(),
-            b"{over"
-        );
+        let mut file = fs::File::create(&path).unwrap();
+        use std::io::{Seek, Write};
+        file.write_all(b"{over").unwrap();
+        file.seek(std::io::SeekFrom::Start(100)).unwrap();
+        file.write_all(b"AT100").unwrap();
+        file.seek(std::io::SeekFrom::Start(4096)).unwrap();
+        file.write_all(b"PAGE").unwrap();
+        let huge = localhost_provider::SEALED_READ_HARD_LIMIT + 1;
+        file.set_len(huge).unwrap();
+        drop(file);
+        let name = "Users/huge-plain.bin";
+        let sentence =
+            format!("{name} is larger than this process can read. Move it out of the folder.");
+        let read = |offset, length| {
+            let _ = localhost_provider::take_sealed_read_bytes();
+            let out = provider.read_file(name, "token", offset, length);
+            (out, localhost_provider::take_sealed_read_bytes())
+        };
+        for (offset, length, expect) in [
+            (Some(0), Some(5), &b"{over"[..]),
+            (Some(100), Some(5), &b"AT100"[..]),
+            (Some(4096), Some(4), &b"PAGE"[..]),
+        ] {
+            let (out, n) = read(offset, length);
+            assert_eq!(out.unwrap(), expect, "{offset:?} {length:?}");
+            assert_eq!(n, 64 + length.unwrap(), "held more than the range: {n}");
+            println!("SL_R18_OFF={offset:?} LEN={length:?} READ={n}");
+        }
+        for offset in [None, Some(0), Some(100), Some(4096)] {
+            let (out, n) = read(offset, None);
+            assert_eq!(out.unwrap_err().to_string(), sentence, "{offset:?}");
+            assert!(n <= 128, "a no-length read held the file: {n}");
+            println!("SL_R18_NOLEN={offset:?} READ={n}");
+        }
+        for offset in [Some(huge), Some(huge + 100)] {
+            let (out, n) = read(offset, Some(8));
+            assert_eq!(out.unwrap(), b"", "{offset:?}");
+            assert!(n <= 64, "past the end held the file: {n}");
+        }
+        let (out, n) = read(Some(huge), None);
+        assert_eq!(out.unwrap(), b"");
+        assert!(n <= 64, "past the end with no length held the file: {n}");
     }
 
     fn reorder_envelope(sealed: &[u8]) -> Vec<u8> {

@@ -36,10 +36,10 @@
 //! turns local apps off there too, and they register the refusing provider so
 //! System can show the sentence. They do not spawn the localhost helper.
 //! Update and the provider host take the same lock and do not run this walk.
-//! `elastos run`
-//! of a data capsule calls `serve_web_capsule` (`main.rs`), which walks and
-//! does not take the host lock. `elastos capsule` attaches to a running
-//! runtime and does not walk. `elastos run` and a host can therefore overlap.
+//! `elastos run` of a data capsule and `elastos open` call `serve_web_capsule`
+//! (`main.rs`), which walks and does not take the host lock. `elastos capsule`
+//! attaches to a running runtime and does not walk. `elastos run`, `elastos open`,
+//! and a host can therefore overlap.
 //! They cannot mix keys: on Unix the file key is HKDF-SHA256 of the device key
 //! (info `elastos-localhost-file-v1`), and the migration lock lets one walk
 //! write at a time. On Windows the helper still receives the device key, and

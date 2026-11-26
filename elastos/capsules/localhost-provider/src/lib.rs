@@ -214,7 +214,13 @@ pub fn read_plain_localhost_range(
         return Ok(Vec::new());
     }
     let available = len - offset;
-    let want = usize::try_from(length.unwrap_or(available).min(available)).unwrap_or(usize::MAX);
+    let asked = length.unwrap_or(available).min(available);
+    // No length on a file past the hard limit is the whole tail. Refuse it
+    // even when the tail from this offset would fit: the file is past the limit.
+    if asked > SEALED_READ_HARD_LIMIT || (length.is_none() && len > SEALED_READ_HARD_LIMIT) {
+        return Err(hard_limit_refusal(name));
+    }
+    let want = usize::try_from(asked).unwrap_or(usize::MAX);
     file.seek(SeekFrom::Start(offset))?;
     let mut buffer = Vec::new();
     if buffer.try_reserve_exact(want).is_err() {
