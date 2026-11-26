@@ -14,7 +14,8 @@ app a separate, revocable capability. The WASM Component authoring path runs in
 Wasmtime with memory and fuel limits and Runtime Bus hostcalls.
 
 Providers run as native operating-system processes with the Runtime user's
-rights. Only the model provider is partly confined. The trusted shell helper
+rights. The did, wallet and model providers are confined as SECURITY.md states.
+The others are not. The trusted shell helper
 also runs as a native host process. The web Terminal is disabled by default;
 host developer mode and closed guest registration are required to enable it.
 An enabled Terminal runs commands with the host user's rights.

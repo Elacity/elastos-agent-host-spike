@@ -547,7 +547,7 @@ impl AttachableRuntimeKind {
 /// group and returns success, so a coordinates file that names pid 0 would
 /// stay forever. A value that does not fit in a positive pid does not name
 /// one process either. Both are dead, and the file is removed.
-fn pid_is_alive(pid: u32) -> bool {
+pub(crate) fn pid_is_alive(pid: u32) -> bool {
     if pid == 0 {
         return false;
     }
@@ -812,7 +812,7 @@ fn write_private_runtime_coords_atomically(
 }
 
 #[cfg(unix)]
-fn read_private_runtime_coord_bytes(path: &Path) -> Option<Vec<u8>> {
+pub(crate) fn read_private_runtime_coord_bytes(path: &Path) -> Option<Vec<u8>> {
     use std::io::Read as _;
 
     let metadata = std::fs::symlink_metadata(path).ok()?;
@@ -858,7 +858,7 @@ fn read_private_runtime_coord_bytes(path: &Path) -> Option<Vec<u8>> {
 }
 
 #[cfg(windows)]
-fn read_private_runtime_coord_bytes(_path: &Path) -> Option<Vec<u8>> {
+pub(crate) fn read_private_runtime_coord_bytes(_path: &Path) -> Option<Vec<u8>> {
     // Unknown file custody cannot establish a Runtime attach authority.
     None
 }

@@ -189,6 +189,9 @@ pub(crate) fn build_router(config: ServerConfig) -> anyhow::Result<Router> {
         attach_secret,
         host_helpers: _,
     } = config;
+    if let Some(home) = data_dir.as_deref() {
+        crate::runtime::wire_home_runtime(home, &runtime.plan_book);
+    }
     // Runtime keeps this control API on its own configured origin.
     // Browser capsules use the gateway launch boundary.
     // A route here may admit the running runtime. On macOS the process holds
@@ -248,6 +251,7 @@ pub(crate) fn build_router(config: ServerConfig) -> anyhow::Result<Router> {
         capability_manager: capability_manager.clone(),
         capability_store,
         policy_evaluator,
+        v2_guests: runtime.component_guests(),
     };
     let capsule_audit_log = audit_log
         .clone()
@@ -271,10 +275,12 @@ pub(crate) fn build_router(config: ServerConfig) -> anyhow::Result<Router> {
     let public_routes = Router::new().route("/api/health", get(routes::health));
 
     // Attach endpoint — exchanges local secret for a session token.
+    let attach_shells = handlers::attach::AttachShells::default();
     let attach_routes = if let Some(secret) = attach_secret {
         let attach_state = handlers::attach::AttachState {
             session_registry: session_registry.clone(),
             secret,
+            shells: attach_shells.clone(),
         };
         Router::new()
             .route("/api/auth/attach", post(handlers::attach::attach))
@@ -512,12 +518,20 @@ pub(crate) fn build_router(config: ServerConfig) -> anyhow::Result<Router> {
         ))
         .layer(Extension(data_dir.clone()))
         .layer(Extension(capsule_audit_log))
-        .layer(Extension(runtime));
+        .layer(Extension(runtime.clone()));
+
+    // One read of a resident's stored frame. The shell is the attach shell.
+    let frame_routes = Router::new()
+        .route("/api/residents/frame", get(routes::resident_frame))
+        .layer(Extension(runtime))
+        .layer(Extension(session_registry.clone()))
+        .layer(Extension(attach_shells));
 
     // Combine all routes
     let mut app = Router::new()
         .merge(public_routes)
         .merge(attach_routes)
+        .merge(frame_routes)
         .merge(auth_routes)
         .merge(shell_routes)
         .merge(orchestrator_routes)
@@ -718,6 +732,24 @@ pub(crate) mod tests {
         let mut wrong = Vec::new();
         for (method, uri, who, want) in [
             ("GET", "/api/health", "nobody", StatusCode::OK),
+            (
+                "GET",
+                "/api/residents/frame?app=a&principal=p",
+                "nobody",
+                StatusCode::UNAUTHORIZED,
+            ),
+            (
+                "GET",
+                "/api/residents/frame?app=a&principal=p",
+                "client",
+                StatusCode::FORBIDDEN,
+            ),
+            (
+                "GET",
+                "/api/residents/frame?app=a&principal=p",
+                "shell",
+                StatusCode::FORBIDDEN,
+            ),
             ("GET", pending_route, "nobody", StatusCode::UNAUTHORIZED),
             ("GET", pending_route, "client", StatusCode::FORBIDDEN),
             ("GET", pending_route, "shell", StatusCode::OK),

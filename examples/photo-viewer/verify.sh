@@ -81,7 +81,7 @@ cargo fmt --manifest-path "${VIEWER_DIR}/host-test/Cargo.toml" -- --check
 cargo clippy --locked --manifest-path "${VIEWER_DIR}/host-test/Cargo.toml" --all-targets -- -D warnings
 cargo test --locked --manifest-path "${VIEWER_DIR}/host-test/Cargo.toml" -- --nocapture
 
-# This test code stands in for the Runtime's launch by CID, which does not exist yet.
+# This stand-in is not the Runtime start by CID (Runtime::start_by_bundle in elastos/crates/elastos-server/src/runtime.rs; POST /api/launch/open in elastos/crates/elastos-server/src/api/routes.rs).
 python3 -I "${VIEWER_DIR}/falsify-ph6-stand-in.py"
 
 # Surface: the render-only page against a fake fetch, each of its rules broken

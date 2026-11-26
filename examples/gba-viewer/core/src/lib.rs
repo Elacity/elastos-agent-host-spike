@@ -287,12 +287,15 @@ fn rom_of(listing: &[u8]) -> Result<Rom, CoreError> {
     }
 }
 
-/// A path under the launch's content: relative, with no empty, `.` or `..`
-/// component. The Runtime names the files; this core still refuses a name it
-/// would not fetch.
+/// A path under the launch's content: one or more plain parts joined by `/`.
+/// Not empty, no empty, `.` or `..` part, no leading `/`, no `\`, no control
+/// character. The Runtime's content path uses the same rule; this core still
+/// refuses a name it would not fetch.
 fn plain_relative_path(path: &str) -> bool {
     !path.is_empty()
         && !path.starts_with('/')
+        && !path.contains('\\')
+        && !path.chars().any(char::is_control)
         && path.split('/').all(|part| !matches!(part, "" | "." | ".."))
 }
 

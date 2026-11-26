@@ -187,7 +187,7 @@ A hand-started subordinate host on the Home's own root keeps running. Its live-r
 
 A second Start while that run is live is refused, and the refusal says "this agent is already running", including when that Start presents the same grant. A Start while a Stop still holds its token is refused, and the refusal says "this agent is stopping". A Stop that has not finished answers "stopping" (`routes.rs:580`) and leaves the run live.
 
-The run ends when that Stop finishes, when the guest fails, when the guest crashes, when that run is cancelled, or when the Home process starts again, and a later Start can then begin. When an end cannot run (`OwedEnd::Lost`, `runtime.rs:969`), the live-run token is released while the registry row may still show the run as live.
+The run ends when that Stop finishes, when the guest fails, when the guest crashes, when that run is cancelled, or when the Home process starts again, and a later Start can then begin. An effect already in flight keeps the live-run token after that end is decided. A later Start stays refused until that effect is settled or its record is unknown, and is then allowed. When an end cannot run (`OwedEnd::Lost`, `runtime.rs:969`), the live-run token is released while the registry row may still show the run as live.
 
 Retire refuses a later Start because the agent is retired. The launch answers "the caller owns no agent with that id" (`a_retired_or_unknown_agent_refuses_its_launch`).
 
@@ -370,6 +370,8 @@ the same Home, with the same owner key, reopens every agent of that owner.
 Another person's agents stay closed to the recovered owner, and those agents
 still open for their own owner.
 
+Key rotation replaces the owner's passkey and brings the owner's root key back through recovery; an agent has a fixed data key made at creation and no key that rotates, and a future one keeps the agent id and root.
+
 These limits are part of the property:
 
 - A new Home has no agents.
@@ -402,9 +404,16 @@ on `the_wrap_key_binds_each_input` names the same tests.
 ### Instance access to agent storage
 
 Each running instance gets fresh, limited access to its agent's storage, and
-that access ends when the instance stops. A plan step whose dispatch had
-already begun when the end was recorded may finish after it. A plan step
-still pending at the end is refused.
+that access ends when the instance stops. A step whose dispatch hasn't reached
+its effect is refused; an effect already begun is tracked, and Stop says
+stopping until it ends. When settlement records that effect as unknown, the
+effect is resolved for Stop: the instance is reaped, Stop answers stopped and
+names the step, and the record stays unknown. A late landing can still store
+the bytes that effect had already begun. That store is the same effect, not a
+new action, and the record is not changed to done or refused. A journal write
+still has to pass its revision check.
+
+Stop says stopped only when that session has ended and nothing of it is still landing. A refusal (409) stays a refusal when an earlier step is unknown, and a session that is stopping is not also listed as stopped. A Start during a landing effect answers "this agent is stopping", and that mark stays until the effect is settled or its record is unknown. The plan instance is bound before the guest runs. Unknown steps are capped at 32 per agent. A name has no purge time while its session is live or any flight of that session is still in progress, so a row sweep does not start the limit. Its one capsule retention starts when that session's last flight is gone, and then the name is dropped. A provider stop that fails leaves the run able to act. Unknown steps are carried through the Runtime hop to the owner. A one-use grant is counted only after the plan admit. A one-use grant the effect spent is settled in the pending store, so a later Stop can still save that session's revocations. A settlement record write is retried a bounded number of times; if it still fails, the flight resolves as unknown and the stored record is not updated to a stronger status. Within one process, one Home has one plan book for dispatch and Stop. The installed two-process path runs no agent today and its proof comes with the package.
 
 This document does not freeze the exact path layout below `Users/...` or
 `UsersAI/...`. Those paths require their own versioned object contract before
@@ -429,6 +438,8 @@ The repository already establishes several parts of this model:
   workspace operations. It is not the future general autonomous Agent Host.
 - The architecture already separates mutable capsule state from immutable
   capsule artifacts.
+
+The agent record keeps the tokens already charged as `model_tokens_spent` in the Home's agent file. A charge appends its signed spend event and then writes that file. The signed history keeps its last 512 events. A floor is kept by the file once any heal or charge has written it. If a write of the file was lost and no heal succeeded and 512 other events came after, the floor is the file's. When that write cannot be done, the spend heal does not block the start, and the gateway's own audit check still needs a readable sign-in file. The log names the cause once: a full disk, a read-only folder, a sign-in file Home cannot read, an agent lock that cannot be opened or is still held after a short wait, or a raised copy that fails. A charge is refused by that cause until a heal has succeeded. A sign-in file failure keeps the sign-in file's own name. A build of this fork from before that field refuses a file which carries it, by the name it uses for a field it does not write, and the Home still loads. Agents stay unavailable until a build that knows the field returns. A file that omits the field means zero spent, and both that older build and the current parser accept it.
 
 No product-readiness claim should be inferred from this architecture document.
 A conforming implementation must prove the exact installed Runtime, capsule,

@@ -218,6 +218,9 @@ pub(super) fn collect_entries(
         observe(Moment::AfterCheck, &path);
         if kind == EntryKind::Directory {
             let listing = list_folder(&handle, &path, tally)?;
+            if listing.as_slice().is_empty() {
+                tally.note_empty(&path);
+            }
             folders.push(Folder { handle, listing });
         } else {
             let content = read_file(handle, &path, tally)?;

@@ -91,9 +91,9 @@
       i32.const 0)
     (func $after-invoke (result i32)
       (local $code i32)
-      ;; result<tuple<...>,bus-error>: Err(Unavailable(...)).
+      ;; result<tuple<...>,bus-error>: Err(Invalid(...)). Empty read params.
       i32.const 256 i32.load i32.const 1 i32.ne if unreachable end
-      i32.const 260 i32.load i32.const 3 i32.ne if unreachable end
+      i32.const 260 i32.load i32.const 2 i32.ne if unreachable end
       global.get $writer i32.const 512 i32.const 1 call $write
       local.tee $code i32.const -1 i32.eq
       if

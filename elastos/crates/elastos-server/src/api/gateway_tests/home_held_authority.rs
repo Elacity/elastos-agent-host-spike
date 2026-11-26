@@ -908,11 +908,18 @@ fn rows() -> Vec<HeldRow> {
         mark("home-own", "egress credential", "model provider", "Home reads the hosted credential for egress"),
     ),
     row(
-        "elastos-server/src/api/model_provider_egress.rs",
-        "saved_connection_state",
+        "elastos-server/src/api/model_provider_egress_decision.rs",
+        "broker_text_connection",
         "read_hosted_secret",
         1,
-        mark("home-own", "egress credential", "model provider", "Home reads the hosted credential for a saved connection"),
+        mark("home-own", "egress credential", "model provider", "Home reads the hosted key into the connection revision the charge matches"),
+    ),
+    row(
+        "elastos-server/src/api/model_provider_egress_decision.rs",
+        "current_run_configurations",
+        "read_hosted_secret",
+        1,
+        mark("home-own", "egress credential", "model provider", "Home reads the hosted key into the configuration id the charge matches"),
     ),
     row(
         "elastos-server/src/api/routes.rs",

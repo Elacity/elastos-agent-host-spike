@@ -13,7 +13,9 @@ use std::fs;
 use std::io::{self, BufRead, Read, Write};
 use std::path::{Path, PathBuf};
 
-use elastos_common::localhost::{is_plaintext_root, parse_localhost_path, parse_localhost_uri};
+use elastos_common::localhost::{
+    is_plaintext_root, parse_localhost_path, parse_localhost_uri, v2_read_offers,
+};
 
 /// Per-person (`Users`) and per-agent (`UsersAI`) areas. A request that reaches
 /// one of these roots must name it; a symlink from another root must not widen
@@ -41,6 +43,9 @@ pub enum ProviderRequest {
         encoding: Option<String>,
         offset: Option<u64>,
         length: Option<u64>,
+        /// Set by a v2 read. Absent on a v1 read, which keeps its old answer.
+        #[serde(default)]
+        check_revision: bool,
     },
 
     /// Write file contents
@@ -724,19 +729,37 @@ impl LocalProvider {
                 encoding,
                 offset,
                 length,
-            } => match self.read_file(&path, token.as_deref().unwrap_or(""), offset, length) {
-                Ok(data) => match read_response_data(data, encoding.as_deref()) {
-                    Ok(data) => ProviderResponse::Ok { data: Some(data) },
+                check_revision,
+            } => {
+                if check_revision {
+                    return match read_v2_window(
+                        self,
+                        &path,
+                        token.as_deref().unwrap_or(""),
+                        offset,
+                        length,
+                    ) {
+                        Ok(data) => ProviderResponse::Ok { data: Some(data) },
+                        Err(e) => ProviderResponse::Error {
+                            code: v2_read_code(&e),
+                            message: e.to_string(),
+                        },
+                    };
+                }
+                match self.read_file(&path, token.as_deref().unwrap_or(""), offset, length) {
+                    Ok(data) => match read_response_data(data, encoding.as_deref()) {
+                        Ok(data) => ProviderResponse::Ok { data: Some(data) },
+                        Err(e) => ProviderResponse::Error {
+                            code: "read_failed".to_string(),
+                            message: e.to_string(),
+                        },
+                    },
                     Err(e) => ProviderResponse::Error {
                         code: "read_failed".to_string(),
                         message: e.to_string(),
                     },
-                },
-                Err(e) => ProviderResponse::Error {
-                    code: "read_failed".to_string(),
-                    message: e.to_string(),
-                },
-            },
+                }
+            }
 
             ProviderRequest::Write {
                 path,
@@ -820,6 +843,198 @@ impl LocalProvider {
             },
         }
     }
+}
+
+#[derive(Debug)]
+struct V2ReadFail {
+    code: &'static str,
+    message: String,
+}
+
+impl std::fmt::Display for V2ReadFail {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for V2ReadFail {}
+
+fn v2_fail(code: &'static str, message: impl Into<String>) -> io::Error {
+    io::Error::other(V2ReadFail {
+        code,
+        message: message.into(),
+    })
+}
+
+fn v2_read_code(err: &io::Error) -> String {
+    err.get_ref()
+        .and_then(|inner| inner.downcast_ref::<V2ReadFail>())
+        .map(|fail| fail.code.to_string())
+        .unwrap_or_else(|| "read_failed".to_string())
+}
+
+/// Local, Public, and Users. Any other root is returned by name.
+fn offered_v2_root(path: &str) -> Result<(), String> {
+    let trimmed = path
+        .trim()
+        .trim_start_matches("localhost://")
+        .trim_start_matches('/');
+    match parse_localhost_path(trimmed).map(|(root, _)| root) {
+        Some(name) if v2_read_offers(name) => Ok(()),
+        Some(name) => Err(name.to_string()),
+        None => Err(trimmed.split('/').next().unwrap_or(trimmed).to_string()),
+    }
+}
+
+#[cfg(test)]
+static REVISION_GAP: std::sync::Mutex<Option<Box<dyn FnMut() + Send>>> =
+    std::sync::Mutex::new(None);
+
+fn between_revision_reads() {
+    #[cfg(test)]
+    if let Some(hook) = REVISION_GAP.lock().expect("revision gap").as_mut() {
+        hook();
+    }
+}
+
+/// Smallest plaintext a hex-JSON envelope of `file_len` bytes can hold.
+/// The wrapper and the 16-byte tag are taken at their largest, so a file
+/// this bound calls too big is too big. A smaller file is judged after decrypt.
+fn encrypted_plaintext_lower_bound(file_len: u64) -> u64 {
+    const MAX_WRAPPER: u64 = 96;
+    const TAG: u64 = 16;
+    (file_len.saturating_sub(MAX_WRAPPER) / 2).saturating_sub(TAG)
+}
+
+/// A Public or MyWebSite path, written as a short path or a localhost address.
+fn plain_root_path(path: &str) -> bool {
+    let trimmed = path.trim_start_matches('/');
+    parse_localhost_uri(path)
+        .or_else(|| parse_localhost_path(trimmed))
+        .is_some_and(|(root, _)| is_plaintext_root(root))
+}
+
+fn window_of(bytes: &[u8], start: u64, window: u64) -> Vec<u8> {
+    let start = usize::try_from(start)
+        .unwrap_or(usize::MAX)
+        .min(bytes.len());
+    let room = usize::try_from(window).unwrap_or(usize::MAX);
+    let end = start.saturating_add(room).min(bytes.len());
+    bytes[start..end].to_vec()
+}
+
+/// A v2 read. A plain file whose length exceeds the window is refused before
+/// its body is read. A plain root is refused then only when that length and
+/// the lower bound both do. An encrypted file is judged by the lower bound
+/// first: that bound can pass a plaintext up to 16 bytes over the window, and
+/// the decrypted body is then refused. A plain root follows `decrypt_bytes`:
+/// that rule opens an envelope, and a file it rejects stays plain. The body
+/// is read once. A change of length or mtime during that read is
+/// `revision_conflict`.
+fn read_v2_window(
+    provider: &LocalProvider,
+    path: &str,
+    token: &str,
+    offset: Option<u64>,
+    length: Option<u64>,
+) -> io::Result<serde_json::Value> {
+    if let Err(root) = offered_v2_root(path) {
+        return Err(v2_fail(
+            "root_not_offered",
+            format!("{root} is not offered"),
+        ));
+    }
+    let full_path = provider.resolve_path(path)?;
+    let metadata = fs::metadata(&full_path)?;
+    if metadata.is_dir() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Cannot read directory as file",
+        ));
+    }
+    let start = offset.unwrap_or(0);
+    let window = length.unwrap_or(u64::MAX);
+    let by_bytes = provider.encryption_key.is_some() && plain_root_path(path);
+    let encrypted =
+        provider.encryption_key.is_some() && !by_bytes && !LocalProvider::is_plaintext_path(path);
+    let raw_over = metadata.len().saturating_sub(start) > window;
+    let bound_over = encrypted_plaintext_lower_bound(metadata.len()).saturating_sub(start) > window;
+    if (!by_bytes || bound_over) && (raw_over || encrypted) && (bound_over || !encrypted) {
+        return Err(v2_fail("invalid", "object is over the read cap"));
+    }
+    let read_once = |provider: &LocalProvider| -> io::Result<Vec<u8>> {
+        if by_bytes {
+            let raw = fs::read(&full_path)?;
+            let key = provider.encryption_key.as_ref().expect("plain root key");
+            let body = decrypt_bytes(key, &raw).unwrap_or(raw);
+            if (body.len() as u64).saturating_sub(start) > window {
+                return Err(v2_fail("invalid", "object is over the read cap"));
+            }
+            return Ok(window_of(&body, start, window));
+        }
+        if !encrypted {
+            return provider.read_file(path, token, offset, length);
+        }
+        let plain = provider.read_file(path, token, None, None)?;
+        if (plain.len() as u64).saturating_sub(start) > window {
+            return Err(v2_fail("invalid", "object is over the read cap"));
+        }
+        Ok(window_of(&plain, start, window))
+    };
+    let before_len = metadata.len();
+    let before_modified = metadata.modified().ok();
+    let bytes = read_once(provider)?;
+    between_revision_reads();
+    let after = fs::metadata(&full_path)?;
+    if after.len() != before_len || after.modified().ok() != before_modified {
+        return Err(v2_fail("revision_conflict", "revision_conflict"));
+    }
+    Ok(serde_json::json!({
+        "content": { "b64": encode_b64(&bytes) },
+        "size": bytes.len(),
+        "revision": fnv_hex(&bytes),
+    }))
+}
+
+fn encode_b64(bytes: &[u8]) -> String {
+    const ALPHA: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::new();
+    let mut index = 0;
+    while index + 3 <= bytes.len() {
+        let packed = (u32::from(bytes[index]) << 16)
+            | (u32::from(bytes[index + 1]) << 8)
+            | u32::from(bytes[index + 2]);
+        for shift in [18u32, 12, 6, 0] {
+            out.push(ALPHA[((packed >> shift) & 63) as usize] as char);
+        }
+        index += 3;
+    }
+    let rest = bytes.len() - index;
+    if rest > 0 {
+        let mut packed = u32::from(bytes[index]) << 16;
+        if rest == 2 {
+            packed |= u32::from(bytes[index + 1]) << 8;
+        }
+        out.push(ALPHA[((packed >> 18) & 63) as usize] as char);
+        out.push(ALPHA[((packed >> 12) & 63) as usize] as char);
+        if rest == 2 {
+            out.push(ALPHA[((packed >> 6) & 63) as usize] as char);
+            out.push('=');
+        } else {
+            out.push('=');
+            out.push('=');
+        }
+    }
+    out
+}
+
+fn fnv_hex(bytes: &[u8]) -> String {
+    let mut hash = 0xcbf29ce484222325u64;
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    format!("{hash:016x}")
 }
 
 fn read_response_data(data: Vec<u8>, encoding: Option<&str>) -> io::Result<serde_json::Value> {
@@ -1539,5 +1754,627 @@ mod tests {
             .read_file("Public/elastos/index.html", "token", None, None)
             .unwrap();
         assert_eq!(content, b"<h1>Hello</h1>");
+    }
+
+    fn plain_provider(dir: &tempfile::TempDir) -> LocalProvider {
+        LocalProvider::new(ProviderConfig {
+            base_path: dir.path().to_string_lossy().to_string(),
+            allowed_paths: vec!["*".to_string()],
+            read_only: false,
+            encryption_key: String::new(),
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn v2_windowed_read_on_local_public_and_users() {
+        let dir = setup_test_dir();
+        for root in ["Local", "Public", "Users"] {
+            fs::create_dir_all(dir.path().join(root)).unwrap();
+        }
+        let mut provider = plain_provider(&dir);
+        for (root, bytes) in [
+            ("Local", &b"local-bytes"[..]),
+            ("Public", &b"public-bytes"[..]),
+            ("Users", &b"users-bytes"[..]),
+        ] {
+            let path = format!("{root}/note.txt");
+            provider.write_file(&path, "token", bytes, false).unwrap();
+            let request: ProviderRequest = serde_json::from_value(serde_json::json!({
+                "op": "read",
+                "path": path,
+                "offset": 0,
+                "length": 64,
+                "check_revision": true
+            }))
+            .unwrap();
+            let ProviderResponse::Ok { data: Some(data) } = provider.handle_request(request) else {
+                panic!("{root} windowed read failed");
+            };
+            assert_eq!(data["content"]["b64"], encode_b64(bytes), "{root}");
+            assert_eq!(data["size"], bytes.len());
+            assert!(data["revision"].is_string());
+            let v1: ProviderRequest = serde_json::from_value(serde_json::json!({
+                "op": "read", "path": path, "offset": 0, "length": 64
+            }))
+            .unwrap();
+            let ProviderResponse::Ok { data: Some(old) } = provider.handle_request(v1) else {
+                panic!("v1 read failed");
+            };
+            assert!(
+                old["content"].as_array().is_some(),
+                "a v1 read stays a byte array"
+            );
+        }
+        provider
+            .write_file("Local/big.txt", "token", b"0123456789abcdef", false)
+            .unwrap();
+        let over: ProviderRequest = serde_json::from_value(serde_json::json!({
+            "op": "read",
+            "path": "Local/big.txt",
+            "offset": 0,
+            "length": 4,
+            "check_revision": true
+        }))
+        .unwrap();
+        match provider.handle_request(over) {
+            ProviderResponse::Error { code, message } => {
+                assert_eq!(code, "invalid");
+                assert!(message.contains("over the read cap"), "{message}");
+            }
+            other => panic!("oversized object was read: {other:?}"),
+        }
+        *REVISION_GAP.lock().expect("gap") = Some(Box::new({
+            let path = dir.path().join("Local/note.txt");
+            move || {
+                fs::write(&path, b"changed").unwrap();
+            }
+        }));
+        let gap: ProviderRequest = serde_json::from_value(serde_json::json!({
+            "op": "read",
+            "path": "Local/note.txt",
+            "offset": 0,
+            "length": 64,
+            "check_revision": true
+        }))
+        .unwrap();
+        match provider.handle_request(gap) {
+            ProviderResponse::Error { code, message } => {
+                assert_eq!(code, "revision_conflict");
+                assert!(message.contains("revision_conflict"), "{message}");
+            }
+            other => panic!("a changed file was accepted: {other:?}"),
+        }
+        *REVISION_GAP.lock().expect("gap") = None;
+        for root in [
+            "ElastOS",
+            "AppCapsules",
+            "MyWebSite",
+            "UsersAI",
+            "WebSpaces",
+        ] {
+            let request: ProviderRequest = serde_json::from_value(serde_json::json!({
+                "op": "read",
+                "path": format!("{root}/note.txt"),
+                "offset": 0,
+                "length": 8,
+                "check_revision": true
+            }))
+            .unwrap();
+            match provider.handle_request(request) {
+                ProviderResponse::Error { code, message } => {
+                    assert_eq!(code, "root_not_offered", "{root} {message}");
+                    assert!(
+                        message.contains(root) && message.contains("is not offered"),
+                        "{message}"
+                    );
+                }
+                other => panic!("{root} fell through: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn v2_windowed_read_bounds_an_encrypted_users_file() {
+        let dir = setup_test_dir();
+        fs::create_dir_all(dir.path().join("Users")).unwrap();
+        fs::create_dir_all(dir.path().join("Local")).unwrap();
+        let mut provider = make_encrypted_provider(&dir);
+        provider
+            .write_file("Users/small.txt", "token", b"secret", false)
+            .unwrap();
+        provider
+            .write_file("Local/note.txt", "token", b"journal v1", false)
+            .unwrap();
+        let ok: ProviderRequest = serde_json::from_value(serde_json::json!({
+            "op": "read",
+            "path": "Users/small.txt",
+            "offset": 0,
+            "length": 64,
+            "check_revision": true
+        }))
+        .unwrap();
+        let ProviderResponse::Ok { data: Some(data) } = provider.handle_request(ok) else {
+            panic!("a small encrypted file must be readable");
+        };
+        assert_eq!(data["content"]["b64"], encode_b64(b"secret"));
+        let local: ProviderRequest = serde_json::from_value(serde_json::json!({
+            "op": "read",
+            "path": "Local/note.txt",
+            "offset": 0,
+            "length": 64,
+            "check_revision": true
+        }))
+        .unwrap();
+        let ProviderResponse::Ok { data: Some(data) } = provider.handle_request(local) else {
+            panic!("a 10-byte encrypted Local file must fit a 64-byte window");
+        };
+        assert_eq!(data["content"]["b64"], encode_b64(b"journal v1"));
+        provider
+            .write_file("Users/big.txt", "token", &[7u8; 32], false)
+            .unwrap();
+        let over: ProviderRequest = serde_json::from_value(serde_json::json!({
+            "op": "read",
+            "path": "Users/big.txt",
+            "offset": 0,
+            "length": 8,
+            "check_revision": true
+        }))
+        .unwrap();
+        match provider.handle_request(over) {
+            ProviderResponse::Error { message, .. } => {
+                assert!(message.contains("over the read cap"), "{message}");
+            }
+            other => panic!("the encrypted body was read: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_encrypted_local_file_over_half_the_window_is_the_plaintext() {
+        let dir = setup_test_dir();
+        fs::create_dir_all(dir.path().join("Local")).unwrap();
+        let mut provider = make_encrypted_provider(&dir);
+        let plain = vec![b'a'; 40_000];
+        provider
+            .write_file("Local/report.txt", "token", &plain, false)
+            .unwrap();
+        let window = 65_536u64;
+        assert!(plain.len() as u64 > window / 2);
+        let request: ProviderRequest = serde_json::from_value(serde_json::json!({
+            "op": "read",
+            "path": "Local/report.txt",
+            "offset": 0,
+            "length": window,
+            "check_revision": true
+        }))
+        .unwrap();
+        let ProviderResponse::Ok { data: Some(data) } = provider.handle_request(request) else {
+            panic!("plaintext over half the window must be returned");
+        };
+        assert_eq!(data["content"]["b64"], encode_b64(&plain));
+    }
+
+    #[test]
+    fn a_16mib_encrypted_local_read_stays_inside_two_seconds() {
+        let dir = setup_test_dir();
+        fs::create_dir_all(dir.path().join("Local")).unwrap();
+        let mut provider = make_encrypted_provider(&dir);
+        let cap = 16 * 1024 * 1024;
+        let plain = vec![b'b'; cap];
+        provider
+            .write_file("Local/report.bin", "token", &plain, false)
+            .unwrap();
+        let rss = || -> u64 {
+            let output = std::process::Command::new("ps")
+                .args(["-o", "rss=", "-p", &std::process::id().to_string()])
+                .output()
+                .expect("ps");
+            String::from_utf8_lossy(&output.stdout)
+                .split_whitespace()
+                .next()
+                .unwrap_or("0")
+                .parse()
+                .unwrap_or(0)
+        };
+        let before = rss();
+        let started = std::time::Instant::now();
+        let request: ProviderRequest = serde_json::from_value(serde_json::json!({
+            "op": "read",
+            "path": "Local/report.bin",
+            "offset": 0,
+            "length": cap,
+            "check_revision": true
+        }))
+        .unwrap();
+        let response = provider.handle_request(request);
+        let elapsed = started.elapsed();
+        let after = rss();
+        let ProviderResponse::Ok { data: Some(data) } = response else {
+            panic!("a 16 MiB plaintext must fit the cap");
+        };
+        assert_eq!(data["size"], cap);
+        println!(
+            "16mib elapsed_ms={} rss_kib_before={before} rss_kib_after={after}",
+            elapsed.as_millis()
+        );
+        assert!(
+            cfg!(debug_assertions) || elapsed < std::time::Duration::from_secs(2),
+            "the read took {elapsed:?}"
+        );
+        let growth = after.saturating_sub(before);
+        assert!(growth < 256 * 1024, "rss grew by {growth} KiB");
+    }
+
+    #[test]
+    fn v2_uri_read_uses_the_file_key_and_a_uri_write_stays_encrypted() {
+        let dir = setup_test_dir();
+        for root in ["Local", "Public", "Users"] {
+            fs::create_dir_all(dir.path().join(root)).unwrap();
+        }
+        let provider = make_encrypted_provider(&dir);
+        for (root, bytes) in [
+            ("Public", &b"plain-public"[..]),
+            ("Local", &b"secret-local"[..]),
+            ("Users", &b"secret-users"[..]),
+        ] {
+            let path = format!("{root}/note.txt");
+            provider.write_file(&path, "token", bytes, false).unwrap();
+            let stored = fs::read(provider.resolve_path(&path).unwrap()).unwrap();
+            if root == "Public" {
+                assert_eq!(stored, bytes, "a Public path write stays plain");
+            } else {
+                assert_ne!(stored, bytes, "{root} stays encrypted");
+                assert!(std::str::from_utf8(&stored).unwrap().contains("ciphertext"));
+            }
+            let data = read_v2_window(
+                &provider,
+                &format!("localhost://{path}"),
+                "token",
+                None,
+                None,
+            )
+            .unwrap_or_else(|err| panic!("{root} uri read: {err}"));
+            assert_eq!(data["content"]["b64"], encode_b64(bytes), "{root}");
+        }
+        provider
+            .write_file("localhost://Public/uri.txt", "token", b"not-plain", false)
+            .unwrap();
+        let stored =
+            fs::read(provider.resolve_path("localhost://Public/uri.txt").unwrap()).unwrap();
+        assert_ne!(stored, b"not-plain");
+        assert!(
+            std::str::from_utf8(&stored).unwrap().contains("ciphertext"),
+            "a localhost URI write stays encrypted"
+        );
+    }
+
+    // RA2-R16-V1-ROWS
+    fn row(name: &str) {
+        eprintln!("row {name}");
+    }
+
+    fn stored_bytes(provider: &LocalProvider, path: &str) -> Vec<u8> {
+        fs::read(provider.resolve_path(path).unwrap()).unwrap()
+    }
+
+    fn v1_plain_root(provider: &LocalProvider, root: &str) {
+        let bytes = b"address-bytes";
+        let more = b"-more";
+        let joined: Vec<u8> = [bytes.as_slice(), more].concat();
+        let address = format!("localhost://{root}/by-address.txt");
+        provider
+            .write_file(&address, "token", bytes, false)
+            .unwrap();
+        let stored = stored_bytes(provider, &address);
+        assert_ne!(stored, bytes, "{root} address write");
+        assert!(std::str::from_utf8(&stored).unwrap().contains("ciphertext"));
+        assert_eq!(
+            provider.read_file(&address, "token", None, None).unwrap(),
+            bytes
+        );
+        row(&format!("{root} address write then address read"));
+        provider.write_file(&address, "token", more, true).unwrap();
+        assert_eq!(
+            provider.read_file(&address, "token", None, None).unwrap(),
+            joined
+        );
+        row(&format!("{root} address append then address read"));
+
+        let short = format!("{root}/by-short.txt");
+        let address_of_short = format!("localhost://{root}/by-short.txt");
+        provider.write_file(&short, "token", bytes, false).unwrap();
+        assert_eq!(stored_bytes(provider, &short), bytes);
+        assert_eq!(
+            provider.read_file(&short, "token", None, None).unwrap(),
+            bytes
+        );
+        row(&format!("{root} short write then short read"));
+        provider.write_file(&short, "token", more, true).unwrap();
+        assert_eq!(
+            provider.read_file(&short, "token", None, None).unwrap(),
+            joined
+        );
+        row(&format!("{root} short append then short read"));
+        let err = provider
+            .read_file(&address_of_short, "token", None, None)
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("not an encrypted envelope"),
+            "{root} address read of a short file: {err}"
+        );
+        row(&format!("{root} address read of a short file"));
+
+        let envelope = format!("localhost://{root}/envelope.txt");
+        let short_envelope = format!("{root}/envelope.txt");
+        provider
+            .write_file(&envelope, "token", bytes, false)
+            .unwrap();
+        let stored = stored_bytes(provider, &envelope);
+        assert_eq!(
+            provider
+                .read_file(&short_envelope, "token", None, None)
+                .unwrap(),
+            stored
+        );
+        row(&format!("{root} short read of an address file"));
+
+        let plain = format!("{root}/plain-append.txt");
+        let plain_address = format!("localhost://{root}/plain-append.txt");
+        provider.write_file(&plain, "token", bytes, false).unwrap();
+        let before = stored_bytes(provider, &plain);
+        let err = provider
+            .write_file(&plain_address, "token", more, true)
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("not an encrypted envelope"),
+            "{root} address append onto a short file: {err}"
+        );
+        assert_eq!(stored_bytes(provider, &plain), before);
+        row(&format!("{root} address append onto a short file"));
+
+        let envelope_append = format!("localhost://{root}/envelope-append.txt");
+        let short_append = format!("{root}/envelope-append.txt");
+        provider
+            .write_file(&envelope_append, "token", bytes, false)
+            .unwrap();
+        let before = stored_bytes(provider, &envelope_append);
+        provider
+            .write_file(&short_append, "token", more, true)
+            .unwrap();
+        let after = stored_bytes(provider, &envelope_append);
+        assert!(after.starts_with(&before) && after.ends_with(more));
+        assert_eq!(
+            provider
+                .read_file(&short_append, "token", None, None)
+                .unwrap(),
+            after
+        );
+        row(&format!("{root} short append onto an address file"));
+    }
+
+    fn v1_sealed_root(provider: &LocalProvider, root: &str) {
+        let bytes = b"secret";
+        let more = b"-more";
+        let joined = b"secret-more";
+        let address = format!("localhost://{root}/note.txt");
+        let short = format!("{root}/note.txt");
+        provider
+            .write_file(&address, "token", bytes, false)
+            .unwrap();
+        let stored = stored_bytes(provider, &address);
+        assert_ne!(stored, bytes);
+        assert!(std::str::from_utf8(&stored).unwrap().contains("ciphertext"));
+        assert_eq!(
+            provider.read_file(&address, "token", None, None).unwrap(),
+            bytes
+        );
+        assert_eq!(
+            provider.read_file(&short, "token", None, None).unwrap(),
+            bytes
+        );
+        row(&format!("{root} address write then address and short read"));
+        provider.write_file(&short, "token", more, true).unwrap();
+        assert_eq!(
+            provider.read_file(&address, "token", None, None).unwrap(),
+            joined
+        );
+        assert_eq!(
+            provider.read_file(&short, "token", None, None).unwrap(),
+            joined
+        );
+        row(&format!("{root} short append then address and short read"));
+
+        let other = format!("{root}/other.txt");
+        let other_address = format!("localhost://{root}/other.txt");
+        provider.write_file(&other, "token", bytes, false).unwrap();
+        let stored = stored_bytes(provider, &other);
+        assert_ne!(stored, bytes);
+        assert_eq!(
+            provider.read_file(&other, "token", None, None).unwrap(),
+            bytes
+        );
+        assert_eq!(
+            provider
+                .read_file(&other_address, "token", None, None)
+                .unwrap(),
+            bytes
+        );
+        row(&format!("{root} short write then short and address read"));
+        provider
+            .write_file(&other_address, "token", more, true)
+            .unwrap();
+        assert_eq!(
+            provider.read_file(&other, "token", None, None).unwrap(),
+            joined
+        );
+        assert_eq!(
+            provider
+                .read_file(&other_address, "token", None, None)
+                .unwrap(),
+            joined
+        );
+        row(&format!(
+            "{root} address append then short and address read"
+        ));
+    }
+
+    fn v1_lookalike(provider: &LocalProvider) {
+        let lookalike = br#"{"version":1,"nonce":"00112233445566778899aabb","ciphertext":"abcd"}"#;
+        let path = "Public/lookalike.txt";
+        let address = "localhost://Public/lookalike.txt";
+        provider
+            .write_file(path, "token", lookalike, false)
+            .unwrap();
+        assert_eq!(stored_bytes(provider, path), lookalike);
+        assert_eq!(
+            provider.read_file(path, "token", None, None).unwrap(),
+            lookalike
+        );
+        let err = provider
+            .read_file(address, "token", None, None)
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("decryption"),
+            "address read of a lookalike: {err}"
+        );
+        row("Public short write of a lookalike then short read");
+        row("Public address read of a lookalike");
+    }
+
+    #[test]
+    fn v1_address_write_read_and_append_match_main() {
+        let dir = setup_test_dir();
+        let provider = make_encrypted_provider(&dir);
+        for root in ["Public", "MyWebSite"] {
+            v1_plain_root(&provider, root);
+        }
+        for root in ["Local", "Users"] {
+            v1_sealed_root(&provider, root);
+        }
+        v1_lookalike(&provider);
+    }
+    // RA2-R16-V1-ROWS-END
+
+    fn v2_b64(provider: &LocalProvider, path: &str) -> String {
+        let data = read_v2_window(provider, path, "token", None, None)
+            .unwrap_or_else(|err| panic!("{path}: {err}"));
+        data["content"]["b64"].as_str().unwrap().to_string()
+    }
+
+    #[test]
+    fn v2_plain_roots_follow_the_envelope_and_a_lookalike_stays_plain() {
+        let dir = setup_test_dir();
+        let provider = make_encrypted_provider(&dir);
+        {
+            let root = "Public";
+            let plain = b"via-address";
+            let address = format!("localhost://{root}/address.txt");
+            let short = format!("{root}/address.txt");
+            provider
+                .write_file(&address, "token", plain, false)
+                .unwrap();
+            let stored = stored_bytes(&provider, &address);
+            let want = encode_b64(plain);
+            assert_eq!(
+                provider.read_file(&address, "token", None, None).unwrap(),
+                plain,
+                "{root} v1 address"
+            );
+            assert_eq!(v2_b64(&provider, &address), want, "{root} v2 address");
+            assert_eq!(
+                v2_b64(&provider, &short),
+                want,
+                "{root} v2 short of address"
+            );
+            assert_ne!(v2_b64(&provider, &short), encode_b64(&stored));
+            assert_eq!(
+                provider.read_file(&short, "token", None, None).unwrap(),
+                stored,
+                "{root} v1 short of address stays the envelope"
+            );
+            provider
+                .write_file(&address, "token", b"-more", true)
+                .unwrap();
+            let joined = encode_b64(b"via-address-more");
+            assert_eq!(v2_b64(&provider, &address), joined);
+            assert_eq!(v2_b64(&provider, &short), joined);
+
+            let text = b"via-short";
+            let short_file = format!("{root}/short.txt");
+            let short_address = format!("localhost://{root}/short.txt");
+            provider
+                .write_file(&short_file, "token", text, false)
+                .unwrap();
+            let want = encode_b64(text);
+            assert_eq!(
+                provider
+                    .read_file(&short_file, "token", None, None)
+                    .unwrap(),
+                text
+            );
+            let err = provider
+                .read_file(&short_address, "token", None, None)
+                .unwrap_err();
+            assert!(err.to_string().contains("not an encrypted envelope"));
+            assert_eq!(v2_b64(&provider, &short_file), want, "{root} v2 short");
+            assert_eq!(
+                v2_b64(&provider, &short_address),
+                want,
+                "{root} v2 address of short"
+            );
+        }
+        for root in ["Local", "Users"] {
+            for (label, path, other) in [
+                (
+                    "address",
+                    format!("localhost://{root}/note.txt"),
+                    format!("{root}/note.txt"),
+                ),
+                (
+                    "short",
+                    format!("{root}/other.txt"),
+                    format!("localhost://{root}/other.txt"),
+                ),
+            ] {
+                provider
+                    .write_file(&path, "token", b"secret", false)
+                    .unwrap();
+                let stored = stored_bytes(&provider, &path);
+                assert_ne!(stored, b"secret", "{root} {label}");
+                let want = encode_b64(b"secret");
+                assert_eq!(
+                    provider.read_file(&path, "token", None, None).unwrap(),
+                    b"secret"
+                );
+                assert_eq!(
+                    provider.read_file(&other, "token", None, None).unwrap(),
+                    b"secret"
+                );
+                assert_eq!(v2_b64(&provider, &path), want, "{root} v2 {label}");
+                assert_eq!(v2_b64(&provider, &other), want, "{root} v2 other {label}");
+            }
+        }
+        let lookalike = br#"{"version":1,"nonce":"00112233445566778899aabb","ciphertext":"abcd"}"#;
+        assert!(std::str::from_utf8(lookalike)
+            .unwrap()
+            .contains("ciphertext"));
+        let path = "Public/lookalike.txt";
+        let address = "localhost://Public/lookalike.txt";
+        provider
+            .write_file(path, "token", lookalike, false)
+            .unwrap();
+        assert_eq!(stored_bytes(&provider, path), lookalike);
+        assert_eq!(
+            provider.read_file(path, "token", None, None).unwrap(),
+            lookalike
+        );
+        let err = provider
+            .read_file(address, "token", None, None)
+            .unwrap_err();
+        assert!(err.to_string().contains("decryption"), "{err}");
+        let want = encode_b64(lookalike);
+        assert_eq!(v2_b64(&provider, path), want);
+        assert_eq!(v2_b64(&provider, address), want);
+        row("Public lookalike stays plain for v2");
     }
 }

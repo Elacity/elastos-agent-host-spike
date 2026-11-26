@@ -14,7 +14,9 @@ use url::Url;
 #[cfg(any(test, target_os = "macos"))]
 use super::model_provider_config::archive_hosted_egress_decision;
 use super::model_provider_config::{
-    read_hosted_egress_decisions, recent_hosted_egress_history, write_hosted_egress_decisions,
+    load_hosted_validate_fixtures, load_model_provider_operator_offers,
+    read_hosted_egress_decisions, read_hosted_secret, recent_hosted_egress_history,
+    write_hosted_egress_decisions, HostedValidateFixtures,
 };
 
 pub(super) const APPROVE_PREFIX: &str = "model-egress-approve:";
@@ -805,4 +807,398 @@ pub(super) fn offer_state(data_dir: &Path, offer_id: &str) -> anyhow::Result<&'s
         }
     }
     Ok(if pending { "pending" } else { "none" })
+}
+
+/// The effects a run can send, and the adapter kind each one runs on.
+pub(crate) fn offer_run_matches(effect: &str, kind: &str) -> bool {
+    matches!(
+        (effect, kind),
+        ("text", "open_ai_compatible_text")
+            | ("responses", "open_ai_responses_text")
+            | ("decisions", "open_router_decisions")
+            | (
+                "job_create" | "job_status" | "job_cancel",
+                "http_job_artifact"
+            )
+    )
+}
+
+pub(super) fn configuration_id_with_fixture_ca(base: String, ca_pem: Option<&str>) -> String {
+    match ca_pem {
+        Some(pem) => hex::encode(Sha256::digest(
+            serde_json::to_vec(&(base, hex::encode(Sha256::digest(pem.as_bytes()))))
+                .expect("configuration identity is serializable"),
+        )),
+        None => base,
+    }
+}
+
+pub(super) fn configuration_identity(
+    adapter: &serde_json::Value,
+    credential: Option<&str>,
+    url: &Url,
+    fixture_ca_pem: Option<&str>,
+) -> anyhow::Result<String> {
+    let base = hex::encode(Sha256::digest(serde_json::to_vec(&(adapter, credential))?));
+    let ca = (url.scheme() == "https" && url.host_str() == Some("127.0.0.1"))
+        .then_some(fixture_ca_pem)
+        .flatten();
+    Ok(configuration_id_with_fixture_ca(base, ca))
+}
+
+pub(super) fn chat_url_for_offer(
+    adapter: &serde_json::Value,
+    fixtures: Option<&HostedValidateFixtures>,
+) -> anyhow::Result<String> {
+    let mut url = adapter["api_url"]
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("hosted URL unavailable"))?
+        .to_string();
+    if let Some(fixtures) = fixtures {
+        url = match adapter["hosted"]["backend_provider_label"].as_str() {
+            Some("OpenRouter") => fixtures
+                .openrouter_chat_url
+                .as_ref()
+                .map(|value| value.as_str().to_string())
+                .unwrap_or(url),
+            Some("Venice") => fixtures
+                .venice_chat_url
+                .as_ref()
+                .map(|value| value.as_str().to_string())
+                .unwrap_or(url),
+            _ => url,
+        };
+    }
+    Ok(url)
+}
+
+/// The offer's adapter kind, and the configuration id the broker would send
+/// for each effect that kind can run. Absent when the offer cannot be read.
+pub(crate) fn current_run_configurations(
+    data_dir: &Path,
+    offer_id: &str,
+) -> Option<(String, Vec<(String, String)>)> {
+    let offers = load_model_provider_operator_offers(data_dir).ok()?;
+    let offer = offers
+        .iter()
+        .find(|offer| offer["id"] == offer_id && offer["enabled"] != false)?;
+    let adapter = &offer["adapter"];
+    let kind = adapter["kind"].as_str()?.to_string();
+    let fixtures = load_hosted_validate_fixtures(data_dir).ok()?;
+    let mut runs = Vec::new();
+    for effect in [
+        "text",
+        "responses",
+        "decisions",
+        "job_create",
+        "job_status",
+        "job_cancel",
+    ] {
+        if !offer_run_matches(effect, &kind) {
+            continue;
+        }
+        let (raw_url, credential) = if matches!(effect, "text" | "responses" | "decisions") {
+            let url = chat_url_for_offer(adapter, fixtures.as_ref()).ok()?;
+            let credential = read_hosted_secret(data_dir, offer_id).ok()?;
+            (url, credential)
+        } else {
+            let field = match effect {
+                "job_create" => "create_url",
+                "job_status" => "status_url",
+                _ => "cancel_url",
+            };
+            let url = adapter[field].as_str()?.to_string();
+            let credential = adapter["bearer_token"].as_str().map(str::to_string);
+            (url, credential)
+        };
+        let url = Url::parse(&raw_url).ok()?;
+        let ca = fixtures
+            .as_ref()
+            .and_then(|value| value.loopback_ca_pem.as_deref());
+        let configuration =
+            configuration_identity(adapter, credential.as_deref(), &url, ca).ok()?;
+        runs.push((effect.to_string(), configuration));
+    }
+    if runs.is_empty() {
+        return None;
+    }
+    Some((kind, runs))
+}
+
+/// The policy string the broker hashes into a connection revision.
+pub(super) const HOSTED_CONNECTION_POLICY: &str =
+    "hosted-connection-policy-v1:validate_models,validate_access,text,responses,decisions";
+
+pub(super) fn connection_revision(
+    provider: &str,
+    origin: &str,
+    credential: &str,
+    ca_pem: Option<&str>,
+) -> anyhow::Result<String> {
+    Ok(hex::encode(Sha256::digest(serde_json::to_vec(&(
+        HOSTED_CONNECTION_POLICY,
+        provider,
+        origin,
+        credential,
+        ca_pem,
+    ))?)))
+}
+
+/// The connection the broker sends for this offer's chat route, and a scope
+/// that names that same offer, provider and origin. The revision matches
+/// `connection_scope` on the text, responses, or decisions send.
+pub(super) fn broker_text_connection(
+    data_dir: &Path,
+    offer_id: &str,
+) -> Option<(EgressScope, ConnectionScope)> {
+    let offers = load_model_provider_operator_offers(data_dir).ok()?;
+    let offer = offers
+        .iter()
+        .find(|offer| offer["id"] == offer_id && offer["enabled"] != false)?;
+    let adapter = &offer["adapter"];
+    let kind = adapter["kind"].as_str().unwrap_or_default();
+    let effect = ["text", "responses", "decisions"]
+        .into_iter()
+        .find(|effect| offer_run_matches(effect, kind))?;
+    let fixtures = load_hosted_validate_fixtures(data_dir).ok()?;
+    let raw = chat_url_for_offer(adapter, fixtures.as_ref()).ok()?;
+    let url = Url::parse(&raw).ok()?;
+    if !url.username().is_empty() || url.password().is_some() || url.fragment().is_some() {
+        return None;
+    }
+    let credential = read_hosted_secret(data_dir, offer_id).ok()??;
+    let provider = adapter["hosted"]["backend_provider_label"]
+        .as_str()
+        .filter(|label| !label.is_empty())
+        .unwrap_or("Hosted model")
+        .to_string();
+    let fixture_ca_pem = if url.scheme() == "https" && url.host_str() == Some("127.0.0.1") {
+        fixtures
+            .as_ref()
+            .and_then(|fixture| fixture.loopback_ca_pem.clone())
+    } else {
+        None
+    };
+    let origin = url.origin().ascii_serialization();
+    let revision = connection_revision(
+        provider.as_str(),
+        origin.as_str(),
+        credential.as_str(),
+        fixture_ca_pem.as_deref(),
+    )
+    .ok()?;
+    let configuration_id = configuration_identity(
+        adapter,
+        Some(credential.as_str()),
+        &url,
+        fixture_ca_pem.as_deref(),
+    )
+    .ok()?;
+    let recipient = url.host_str()?.to_string();
+    let purpose = if effect == "decisions" {
+        "Ask Jev for advice"
+    } else {
+        "Send an Assistant prompt"
+    };
+    let connection = ConnectionScope {
+        version: 1,
+        offer_id: offer_id.to_string(),
+        provider: provider.clone(),
+        origin: origin.clone(),
+        revision,
+    };
+    let scope = EgressScope {
+        offer_id: offer_id.to_string(),
+        effect: effect.into(),
+        method: "POST".into(),
+        url: raw,
+        origin,
+        recipient,
+        payer: "this Home".into(),
+        provider,
+        purpose: purpose.into(),
+        configuration_id,
+    };
+    Some((scope, connection))
+}
+
+/// The offer has an approval for this owner's proof that has not ended.
+/// A hosted connection-v1 offer matches the connection the broker sends.
+/// Any other offer matches a run effect with no connection, and that
+/// effect's current configuration. The requester is this owner or unnamed.
+/// Both reads finish before the decision lock.
+pub(crate) fn approved_for_owner(data_dir: &Path, offer_id: &str, owner_proof: &str) -> bool {
+    let uses_connection = offer_id.starts_with("model:hosted-")
+        && super::model_provider_config::offer_uses_connection_authority(data_dir, offer_id)
+            .unwrap_or(false);
+    let connection = uses_connection
+        .then(|| broker_text_connection(data_dir, offer_id))
+        .flatten();
+    if uses_connection && connection.is_none() {
+        return false;
+    }
+    let runs = if uses_connection {
+        None
+    } else {
+        current_run_configurations(data_dir, offer_id)
+    };
+    if !uses_connection && runs.is_none() {
+        return false;
+    }
+    let _guard = lock().lock().unwrap_or_else(|error| error.into_inner());
+    let (Ok(now), Ok(file)) = (now_ms(), read(data_dir)) else {
+        return false;
+    };
+    file.decisions.iter().any(|decision| {
+        let requester = decision
+            .requested_by_proof
+            .as_deref()
+            .is_none_or(|requested| requested == owner_proof);
+        decision.scope.offer_id == offer_id
+            && decision.status == DecisionStatus::Approved
+            && decision.expires_at_ms > now
+            && decision.owner_proof_binding_id.as_deref() == Some(owner_proof)
+            && requester
+            && if let Some((_, connection)) = connection.as_ref() {
+                decision.connection.as_ref() == Some(connection)
+            } else {
+                let Some((kind, runs)) = runs.as_ref() else {
+                    return false;
+                };
+                decision.connection.is_none()
+                    && offer_run_matches(&decision.scope.effect, kind)
+                    && runs.iter().any(|(effect, configuration)| {
+                        decision.scope.effect == *effect
+                            && decision.scope.configuration_id == *configuration
+                    })
+            }
+    })
+}
+
+/// Stages the pending connection the broker would send for this saved offer.
+#[cfg(test)]
+pub(crate) fn stage_broker_connection_request(
+    data_dir: &Path,
+    offer_id: &str,
+) -> anyhow::Result<String> {
+    let (scope, connection) = broker_text_connection(data_dir, offer_id)
+        .ok_or_else(|| anyhow::anyhow!("hosted connection unavailable"))?;
+    request_connection(data_dir, &scope, &connection, None)
+}
+
+/// Writes one approved text decision for `offer_id` under `owner_proof`.
+#[cfg(all(test, unix))]
+pub(crate) fn plant_offer_approval(
+    data_dir: &Path,
+    offer_id: &str,
+    owner_proof: &str,
+    expires_at_ms: u64,
+) {
+    plant_offer_decision(data_dir, offer_id, owner_proof, expires_at_ms, "text");
+}
+
+/// Writes one approved decision whose effect is `effect`. The stored
+/// configuration is the planted text offer's current one.
+#[cfg(all(test, unix))]
+pub(crate) fn plant_offer_decision(
+    data_dir: &Path,
+    offer_id: &str,
+    owner_proof: &str,
+    expires_at_ms: u64,
+    effect: &str,
+) {
+    seed_text_offer(data_dir, offer_id, "fixture/model");
+    let configuration = text_configuration(data_dir, offer_id);
+    write_planted_decision(
+        data_dir,
+        offer_id,
+        owner_proof,
+        expires_at_ms,
+        effect,
+        &configuration,
+    );
+}
+
+/// Replaces the planted offer's model and leaves the stored decision as it is.
+#[cfg(all(test, unix))]
+pub(crate) fn reseed_text_offer_model(data_dir: &Path, offer_id: &str, model: &str) {
+    seed_text_offer(data_dir, offer_id, model);
+}
+
+#[cfg(all(test, unix))]
+fn seed_text_offer(data_dir: &Path, offer_id: &str, model: &str) {
+    crate::api::model_provider_config::seed_model_provider_operator_offers_for_test(
+        data_dir,
+        vec![serde_json::json!({
+            "id": offer_id,
+            "title": "Fixture",
+            "operation": "text.generate",
+            "input_modalities": ["text/plain"],
+            "output_modalities": ["text/plain"],
+            "enabled": true,
+            "adapter": {
+                "kind": "open_ai_compatible_text",
+                "api_url": "https://openrouter.ai/api/v1/chat/completions",
+                "api_key": "sk-plant",
+                "model": model,
+                "hosted": {
+                    "backend_provider_label": "OpenRouter",
+                    "selection_mode": "pinned",
+                    "privacy_policy_ref": "fixture:privacy:v1",
+                    "terms_ref": "fixture:terms:v1",
+                    "upstream_routing_fallback_assertion": "operator_asserted_disabled"
+                }
+            }
+        })],
+    )
+    .unwrap();
+}
+
+#[cfg(all(test, unix))]
+fn text_configuration(data_dir: &Path, offer_id: &str) -> String {
+    current_run_configurations(data_dir, offer_id)
+        .and_then(|(_kind, runs)| {
+            runs.into_iter()
+                .find(|(effect, _)| effect == "text")
+                .map(|(_, configuration)| configuration)
+        })
+        .expect("planted text offer has a configuration")
+}
+
+#[cfg(all(test, unix))]
+fn write_planted_decision(
+    data_dir: &Path,
+    offer_id: &str,
+    owner_proof: &str,
+    expires_at_ms: u64,
+    effect: &str,
+    configuration: &str,
+) {
+    let file = DecisionFile {
+        schema: SCHEMA.into(),
+        decisions: vec![EgressDecision {
+            id: "model-egress-plant".into(),
+            scope: EgressScope {
+                offer_id: offer_id.into(),
+                effect: effect.into(),
+                method: "POST".into(),
+                url: "https://openrouter.ai/api/v1/chat/completions".into(),
+                origin: "https://openrouter.ai".into(),
+                recipient: "openrouter.ai".into(),
+                payer: "this Home".into(),
+                provider: "OpenRouter".into(),
+                purpose: effect.into(),
+                configuration_id: configuration.into(),
+            },
+            connection: None,
+            requested_by_proof: None,
+            owner_proof_binding_id: Some(owner_proof.into()),
+            requested_at_ms: 1,
+            decided_at_ms: Some(1),
+            ended_at_ms: None,
+            expires_at_ms,
+            status: DecisionStatus::Approved,
+        }],
+    };
+    write(data_dir, &file).unwrap();
 }

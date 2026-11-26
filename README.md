@@ -19,7 +19,20 @@ app a separate, revocable capability. The WASM Component authoring path runs in
 Wasmtime with memory and fuel limits and Runtime Bus hostcalls.
 
 Providers run as native operating-system processes with the Runtime user's
-rights. Only the model provider is partly confined. The trusted shell helper
+rights. The did provider and the wallet provider start through
+`ProviderBridge::spawn_confined` in
+`elastos/crates/elastos-server/src/server_infra.rs`, and that call enters
+`os_entry::start_provider`. macOS starts them with `sandbox-exec` under a
+Seatbelt profile whose first lines are `(deny default)` and `(deny network*)`,
+using a verified copy of the binary. On Linux x86_64 and aarch64 the
+child installs the admitted rights rows between fork and exec. Every other
+operating system refuses that start. The model provider uses its own
+launcher and starts on macOS and Linux. macOS runs it with `sandbox-exec` under
+a Seatbelt profile that begins with `(allow default)`, then denies outbound
+network and file read and write except the paths that profile names. Linux
+x86_64 and aarch64 attach a seccomp filter to the model command: the filter
+allows Unix sockets for the private local engine path and refuses Internet
+sockets. Another Linux architecture refuses that start. The trusted shell helper
 also runs as a native host process. The web Terminal is disabled by default;
 host developer mode and closed guest registration are required to enable it.
 An enabled Terminal runs commands with the host user's rights.

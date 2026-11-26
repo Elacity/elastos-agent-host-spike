@@ -11,7 +11,9 @@ use std::fs;
 use std::io::Write;
 use std::path::Path;
 
-use elastos_bundle_identity::{checked_bundle_within, CheckedBundle, LabCid};
+use elastos_bundle_identity::{
+    checked_bundle_within, checked_bundle_within_reported, CheckedBundle, LabCid, WalkReport,
+};
 
 use crate::bundle_admission::{
     bundle_signature_path, bundle_slot, walk_refusal, AcceptedSignature, BundleRefusal,
@@ -29,6 +31,8 @@ pub struct Staged {
     pub signer_did: String,
     /// False when the slot already held this bundle and was left alone.
     pub files_written: bool,
+    /// Empty folders the walk listed and did not store, sorted by path.
+    pub empty_folders: Vec<String>,
 }
 
 /// The name a publisher signs: the CID of the bundle in `folder`, from the
@@ -74,8 +78,10 @@ async fn stage_bundle_observed(
     after_walk: impl FnOnce(),
 ) -> Result<Staged, BundleRefusal> {
     // The one walk of the source. Everything written below comes from this
-    // value; the folder is not read again.
-    let bundle = checked_bundle_within(folder, BUNDLE_WALK_BUDGET).map_err(walk_refusal)?;
+    // value; the folder is not read again. Empty folders are named, not stored.
+    let mut report = WalkReport::default();
+    let bundle = checked_bundle_within_reported(folder, BUNDLE_WALK_BUDGET, &mut report)
+        .map_err(walk_refusal)?;
     after_walk();
     let cid = bundle.cid();
 
@@ -116,6 +122,7 @@ async fn stage_bundle_observed(
         cid: cid.to_string(),
         signer_did: accepted.signer_did,
         files_written,
+        empty_folders: report.empty_folders,
     })
 }
 
@@ -283,6 +290,7 @@ mod tests {
                 cid: CID_A.into(),
                 signer_did: did(&publisher.verifying_key()),
                 files_written: true,
+                empty_folders: Vec::new(),
             }
         );
         // The slot is under the recorded CID and holds the fixture's bytes,
@@ -630,6 +638,43 @@ mod tests {
         assert!(home.store_names().is_empty());
     }
 
+    #[tokio::test]
+    async fn an_empty_folder_is_named_and_is_not_stored_or_renamed() {
+        let publisher = key(1);
+        let home = Home::trusting(&[&publisher], false).await;
+        let source = home.dir.path().join("source");
+        copy_of(&fixture("web-app"), &source);
+        fs::create_dir(source.join("spare")).unwrap();
+        fs::create_dir_all(source.join("nest/inner")).unwrap();
+        // The CID rule is unchanged: the two empty folders are not in the name.
+        assert_eq!(bundle_cid(&source).unwrap(), CID_A);
+        let signature = home.write("offered.sig.json", &signed(CID_A, &publisher));
+        let staged = home.stage(&source, &signature).await.expect("staged");
+        assert_eq!(
+            staged.empty_folders,
+            vec!["nest/inner".to_string(), "spare".to_string()]
+        );
+        let slot = home.store().join(CID_A);
+        assert!(
+            !slot.join("spare").exists(),
+            "the slot stored an empty folder"
+        );
+        assert!(!slot.join("nest").exists(), "the slot stored a folder");
+        assert_eq!(files_of(&slot), files_of(&fixture("web-app")));
+        // A directory put into the slot after staging does not change the name
+        // the start recomputes. The start reads that name and not the report.
+        fs::create_dir(slot.join("later")).unwrap();
+        assert_eq!(bundle_cid(&slot).unwrap(), CID_A);
+        let guide = fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../docs/CAPSULE_AUTHORING.md"),
+        )
+        .unwrap();
+        assert!(guide.contains("Empty folders are not part of a bundle's name or its stored bytes"));
+        let cli = include_str!("main.rs");
+        assert!(cli.contains("\"empty_folders\": staged.empty_folders"));
+        assert!(cli.contains("Empty folders are not part of a bundle's name or its stored bytes"));
+    }
+
     #[test]
     fn the_server_walks_a_bundle_only_under_its_budget() {
         // The crate's other ways to name a folder take no budget. No file of
@@ -648,6 +693,7 @@ mod tests {
             ["encode_listed_files", "("].concat(),
         ];
         let bounded = ["checked_bundle", "_within("].concat();
+        let reported = ["checked_bundle", "_within_reported("].concat();
         fn rust_files(dir: &Path, found: &mut Vec<PathBuf>) {
             for item in fs::read_dir(dir).unwrap() {
                 let path = item.unwrap().path();
@@ -674,14 +720,22 @@ mod tests {
                     file.display()
                 );
             }
-            for line in text.lines().filter(|line| line.contains(bounded.as_str())) {
+            for line in text
+                .lines()
+                .filter(|line| line.contains(reported.as_str()) || line.contains(bounded.as_str()))
+            {
                 // The start by CID walks each bundle of a closure under what
                 // is left of one budget. That this budget is the server's,
                 // and that it only shrinks, is held by the start's own pin
                 // (`the_start_by_cid_reads_each_slot_once_and_fetches_nothing`).
-                let what_is_left = file.ends_with("runtime.rs") && line.contains("(&slot, *left)");
+                let what_is_left = file.ends_with("runtime.rs")
+                    && (line.contains("(&slot, *left)") || line.contains("(&slot, *left,"));
+                // The reported walk takes the report after the budget, so the
+                // budget is followed by a comma there and by `)` on the others.
+                let server_budget =
+                    line.contains("BUNDLE_WALK_BUDGET)") || line.contains("BUNDLE_WALK_BUDGET,");
                 assert!(
-                    line.contains("BUNDLE_WALK_BUDGET)") || what_is_left,
+                    server_budget || what_is_left,
                     "{}: a walk without the server's budget: {}",
                     file.display(),
                     line.trim()

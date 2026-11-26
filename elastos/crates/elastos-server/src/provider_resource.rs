@@ -264,7 +264,7 @@ const fn localhost_op(
 const LOCALHOST_OPERATIONS: &[LocalhostOperation] = &[
     localhost_op(
         "read",
-        &["path", "encoding", "offset", "length"],
+        &["path", "encoding", "offset", "length", "check_revision"],
         &["status", "data"],
         Action::Read,
         LocalhostConsequence::Observe,

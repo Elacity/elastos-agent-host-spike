@@ -2,7 +2,7 @@
   "schema": "elastos.capsule/v1",
   "name": "archive-viewer",
   "version": "0.1.0",
-  "description": "List one ZIP archive and show its small text entries by grant, within fixed read, inflate and output caps. Read-only: it extracts nothing and has no display of its own.",
+  "description": "List one ZIP or ustar tar archive and show its small text entries by grant, within fixed read, inflate and output caps. The parsers are src/zip.rs and src/tar.rs. Read-only: it extracts nothing and has no display of its own.",
   "author": "local-development",
   "role": "app",
   "type": "wasm",

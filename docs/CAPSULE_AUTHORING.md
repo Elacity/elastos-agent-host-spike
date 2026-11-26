@@ -306,6 +306,8 @@ The signature file has `schema` set to
 `signature` fields. The signature is the hex Ed25519 signature of
 SHA-256(domain bytes, one zero byte, CID text bytes). If the slot is missing,
 `run` gives the staging command. The staged slot supplies the bytes that run.
+Empty folders are not part of a bundle's name or its stored bytes. The stage
+receipt names each empty folder the walk dropped.
 Data capsules use an in-process preview; microVM `run` still uses the operator
 runtime. See the [Command runtime matrix](COMMAND_MATRIX.md).
 

@@ -34,6 +34,8 @@
 # authority, noted in #1802's description. Measured on main after the merge.
 # +5 for #1804 (P2-8 slice 4a: a capsule start requires the component closure; the gate in
 # capsule/manager.rs component_closure_required). Measured 23 Nov 2026 after merging main.
+# +10 for the request-map write hold used by the plan-grant drop row. The counter
+# does not treat cfg(any(test, feature = "test-hooks")) as test-only. Measured 25 Nov 2026.
 # +775 for the P2-4 path-allow fences after an honest trim of repeated checks, one shared
 # plan for both start paths, and one signed-authority admission for localhost, object, and
 # chain. This raise is larger than any earlier raise. Owner: Claude, CTO.
@@ -62,4 +64,4 @@
 # -39: round 34 removes the object helper's live restart and its one-lock swap (-37);
 # the object fence already covers Users and UsersAI, where every capsule storage root
 # lives. last_errno reads errno through std (-2). Measured 26 Nov 2026.
-15259
+15269
