@@ -23,7 +23,7 @@ pub(crate) fn repair_recorded_audit(
     }
     let digest = hex::encode(Sha256::digest(file_bytes));
     let prefix = format!("audit:agent-records:{}:", pending.sequence);
-    let seq = format!("seq={}", pending.sequence);
+    let seq = format!("seq={} ", pending.sequence);
     let state = crate::auth::load_auth_state(data_dir)?;
     let present = state.audit.iter().any(|event| {
         event.event_id.starts_with(&prefix)

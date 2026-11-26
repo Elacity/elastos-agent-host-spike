@@ -443,6 +443,45 @@ fn settle_records_in_place(
     for (path, mut record) in records {
         let lost = matches!(record.status.as_str(), "approved" | "dispatching");
         let owed = record.status == "unresolved" && !record.audit_recorded;
+        let down = record.status == "pending"
+            && !crate::api::agent_plane::instance_is_running(data_dir, &record.id);
+        let owed_end = record.status == "instance ended" && !record.audit_recorded;
+        if record.kind == AGENT_PLAN_KIND && (down || owed_end) {
+            if down {
+                record.status = "instance ended".into();
+                record.error = Some("instance ended".into());
+                record.updated_at = updated_at;
+                record.audit_recorded = false;
+                if let Err(error) = write_inspect_action_at_path(&path, &record) {
+                    eprintln!(
+                        "[gateway] skipped inspect action record {}: {error}",
+                        path.display()
+                    );
+                    continue;
+                }
+            }
+            if instance_end_audit_landed(data_dir, &record.request_id) {
+                record.audit_recorded = true;
+                let _ = write_inspect_action_at_path(&path, &record);
+                continue;
+            }
+            if let Err(error) = super::append_agent_plan_decision_audit(
+                data_dir,
+                &record,
+                "agent.plan.closed",
+                "instance ended",
+            ) {
+                eprintln!(
+                    "[gateway] instance ended plan {} has no signed row: {error}",
+                    record.request_id
+                );
+                continue;
+            }
+            record.audit_recorded = true;
+            let _ = write_inspect_action_at_path(&path, &record);
+            crate::resource_bridge::notify_plan_waiters();
+            continue;
+        }
         if record.kind != AGENT_PLAN_KIND || (!lost && !owed) {
             continue;
         }
@@ -480,6 +519,18 @@ fn settle_records_in_place(
         record.audit_recorded = true;
         let _ = write_inspect_action_at_path(&path, &record);
     }
+}
+
+fn instance_end_audit_landed(data_dir: &Path, request_id: &str) -> bool {
+    crate::auth::load_auth_state(data_dir)
+        .map(|state| {
+            state.audit.iter().any(|event| {
+                event.event_type == "agent.plan.closed"
+                    && event.result == "instance ended"
+                    && event.challenge_id.as_deref() == Some(request_id)
+            })
+        })
+        .unwrap_or(false)
 }
 
 fn unresolved_audit_landed(data_dir: &Path, request_id: &str) -> bool {

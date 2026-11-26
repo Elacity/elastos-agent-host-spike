@@ -522,7 +522,8 @@ pub(crate) fn build_router(config: ServerConfig) -> anyhow::Result<Router> {
         ))
         .layer(Extension(data_dir.clone()))
         .layer(Extension(capsule_audit_log))
-        .layer(Extension(runtime));
+        .layer(Extension(runtime))
+        .layer(Extension(routes::AgentsOnly(false)));
 
     // Combine all routes
     let mut app = Router::new()

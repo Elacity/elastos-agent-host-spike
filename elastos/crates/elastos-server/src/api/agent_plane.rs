@@ -3,10 +3,11 @@
 //! The local gateway starts it on the Home data folder. It binds loopback,
 //! keeps its own coordinates, and serves a stored-agent launch and stop.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-#[cfg(test)]
-use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(all(test, unix))]
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
@@ -112,15 +113,25 @@ const RESERVED: &[&str] = &[
     "home-runtime-coords.json",
 ];
 
-static DIRS: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
+static DIRS: OnceLock<Mutex<HashMap<PathBuf, u64>>> = OnceLock::new();
 
-fn dirs() -> &'static Mutex<HashSet<PathBuf>> {
-    DIRS.get_or_init(|| Mutex::new(HashSet::new()))
+fn dirs() -> &'static Mutex<HashMap<PathBuf, u64>> {
+    DIRS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn next_instance() -> u64 {
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    NEXT.fetch_add(1, Ordering::Relaxed)
 }
 
 /// Whether `data_dir` is the folder of the agent Runtime started in this process.
 pub(crate) fn serves(data_dir: Option<&Path>) -> bool {
-    data_dir.is_some_and(|dir| dirs().lock().map(|set| set.contains(dir)).unwrap_or(false))
+    data_dir.is_some_and(|dir| {
+        dirs()
+            .lock()
+            .map(|set| set.contains_key(dir))
+            .unwrap_or(false)
+    })
 }
 
 pub(crate) fn coords_path(data_dir: &Path) -> PathBuf {
@@ -128,6 +139,8 @@ pub(crate) fn coords_path(data_dir: &Path) -> PathBuf {
 }
 
 pub(crate) struct AgentPlane {
+    instance: u64,
+    api_url: String,
     server: tokio::task::AbortHandle,
     watcher: tokio::task::JoinHandle<()>,
     coords_path: PathBuf,
@@ -204,13 +217,23 @@ impl Drop for AgentPlane {
     fn drop(&mut self) {
         self.server.abort();
         self.watcher.abort();
+        // This url died with this plane. A newer plane has a different url.
+        crate::api::gateway::forget_plane_shell(&self.api_url);
+        let mut set = dirs().lock().unwrap_or_else(|err| err.into_inner());
+        let owns = if set.get(&self.data_dir).copied() == Some(self.instance) {
+            set.remove(&self.data_dir);
+            true
+        } else {
+            false
+        };
+        drop(set);
+        if !owns {
+            return;
+        }
         let _ = std::fs::remove_file(&self.coords_path);
         clear_fault(&self.data_dir);
         #[cfg(all(test, unix))]
         clear_registry(&self.data_dir);
-        if let Ok(mut set) = dirs().lock() {
-            set.remove(&self.data_dir);
-        }
     }
 }
 
@@ -226,29 +249,56 @@ pub(crate) async fn live_coords(data_dir: &Path) -> Option<crate::runtime_contro
     }
 }
 
+#[derive(Default)]
+struct HomeSlot {
+    live: Option<AgentPlane>,
+    retiring: Option<Arc<crate::runtime::Runtime>>,
+}
+
+static HOMES: OnceLock<Mutex<HashMap<PathBuf, HomeSlot>>> = OnceLock::new();
+
+fn homes() -> &'static Mutex<HashMap<PathBuf, HomeSlot>> {
+    HOMES.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn homes_lock() -> std::sync::MutexGuard<'static, HashMap<PathBuf, HomeSlot>> {
+    homes().lock().unwrap_or_else(|err| err.into_inner())
+}
+
+static GATES: OnceLock<Mutex<HashMap<PathBuf, Arc<tokio::sync::Mutex<()>>>>> = OnceLock::new();
+
+fn home_gate(data_dir: &Path) -> Arc<tokio::sync::Mutex<()>> {
+    let mut gates = GATES
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap_or_else(|err| err.into_inner());
+    gates
+        .entry(data_dir.to_path_buf())
+        .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+        .clone()
+}
+
 /// Start the agent Runtime when this process already owns `data_dir`.
+/// Tests use this handle. The Home path keeps the plane in the map itself.
+#[cfg(test)]
 pub(crate) async fn start(
     data_dir: &Path,
     providers: Option<std::sync::Arc<elastos_runtime::provider::ProviderRegistry>>,
 ) -> anyhow::Result<AgentPlane> {
+    let gate = home_gate(data_dir);
+    let _hold = gate.lock().await;
     if !crate::agents::build_allows() {
         anyhow::bail!(crate::agents::FEATURE_OFF);
     }
     #[cfg(unix)]
     {
-        start_owned(data_dir.to_path_buf(), providers).await
+        start_owned(data_dir.to_path_buf(), providers, false).await
     }
     #[cfg(not(unix))]
     {
         let _ = (data_dir, providers);
         anyhow::bail!("agent runtime coordinates are owner-only");
     }
-}
-
-static PLANES: OnceLock<Mutex<HashMap<PathBuf, AgentPlane>>> = OnceLock::new();
-
-fn planes() -> &'static Mutex<HashMap<PathBuf, AgentPlane>> {
-    PLANES.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 /// Start the agent Runtime when the build and the owner both allow it, without
@@ -258,10 +308,37 @@ pub(crate) async fn ensure_running(
     data_dir: &Path,
     providers: Option<Arc<elastos_runtime::provider::ProviderRegistry>>,
 ) -> anyhow::Result<()> {
-    if !crate::agents::build_allows()
-        || !crate::agents::home_enabled(data_dir)
-        || serves(Some(data_dir))
-    {
+    let gate = home_gate(data_dir);
+    let _hold = gate.lock().await;
+    keep_plane(data_dir, providers, false).await
+}
+
+/// Start this Home's plane before the enabled flag is written. A retiring
+/// plane is refused first, and a failed start leaves that flag untouched.
+pub(crate) async fn bring_up_for_enable(
+    data_dir: &Path,
+    providers: Option<Arc<elastos_runtime::provider::ProviderRegistry>>,
+) -> anyhow::Result<()> {
+    let gate = home_gate(data_dir);
+    let _hold = gate.lock().await;
+    keep_plane(data_dir, providers, true).await
+}
+
+async fn keep_plane(
+    data_dir: &Path,
+    providers: Option<Arc<elastos_runtime::provider::ProviderRegistry>>,
+    allow_off: bool,
+) -> anyhow::Result<()> {
+    if !crate::agents::build_allows() {
+        return match allow_off {
+            true => Err(crate::agents::Refused(crate::agents::FEATURE_OFF.into()).into()),
+            false => Ok(()),
+        };
+    }
+    if !allow_off && !crate::agents::home_enabled(data_dir) {
+        return Ok(());
+    }
+    if serves(Some(data_dir)) {
         return Ok(());
     }
     let owner = crate::host_lock::active_host_process(data_dir)?;
@@ -271,18 +348,28 @@ pub(crate) async fn ensure_running(
     // A retiring plane is this Home's previous runtime. Release it when it
     // is idle. A start while it is still busy is refused by name.
     release_or_refuse(data_dir).await?;
-    let plane = start(data_dir, providers).await?;
-    if let Ok(mut held) = planes().lock() {
-        held.insert(data_dir.to_path_buf(), plane);
+    #[cfg(unix)]
+    {
+        let plane = start_owned(data_dir.to_path_buf(), providers, allow_off).await?;
+        homes_lock().entry(data_dir.to_path_buf()).or_default().live = Some(plane);
+        Ok(())
     }
-    Ok(())
+    #[cfg(not(unix))]
+    {
+        let _ = (providers, allow_off);
+        if allow_off {
+            anyhow::bail!("agent runtime coordinates are owner-only");
+        }
+        Ok(())
+    }
 }
 
 /// End one agent's grants on this Home's agent Runtime and leave the guest
 /// running. A Home whose plane is not in this process has nothing to revoke.
 pub(crate) async fn revoke_agent_grants(data_dir: &Path, agent_id: &str) {
-    let runtime = planes().lock().ok().and_then(|held| {
-        held.get(data_dir)
+    let runtime = homes_lock().get(data_dir).and_then(|slot| {
+        slot.live
+            .as_ref()
             .map(|plane| std::sync::Arc::clone(&plane.runtime))
     });
     if let Some(runtime) = runtime {
@@ -292,17 +379,10 @@ pub(crate) async fn revoke_agent_grants(data_dir: &Path, agent_id: &str) {
     }
 }
 
-static RETIRING: OnceLock<Mutex<HashMap<PathBuf, Arc<crate::runtime::Runtime>>>> = OnceLock::new();
-
-fn retiring() -> &'static Mutex<HashMap<PathBuf, Arc<crate::runtime::Runtime>>> {
-    RETIRING.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
 fn retiring_runtime(data_dir: &Path) -> Option<Arc<crate::runtime::Runtime>> {
-    retiring()
-        .lock()
-        .ok()
-        .and_then(|held| held.get(data_dir).map(Arc::clone))
+    homes_lock()
+        .get(data_dir)
+        .and_then(|slot| slot.retiring.clone())
 }
 
 async fn runtime_busy(runtime: &crate::runtime::Runtime) -> bool {
@@ -323,33 +403,44 @@ pub(crate) async fn release_idle_retiring(data_dir: &Path) {
     if runtime_busy(&runtime).await {
         return;
     }
-    if let Ok(mut held) = retiring().lock() {
-        held.remove(data_dir);
+    let mut homes = homes_lock();
+    if let Some(slot) = homes.get_mut(data_dir) {
+        if slot
+            .retiring
+            .as_ref()
+            .is_some_and(|held| Arc::ptr_eq(held, &runtime))
+        {
+            slot.retiring = None;
+        }
     }
+    homes.retain(|_, slot| slot.live.is_some() || slot.retiring.is_some());
 }
 
 /// The agent Runtime this process is running for `data_dir`, when it has one.
 pub(crate) fn plane_runtime(data_dir: &Path) -> Option<Arc<crate::runtime::Runtime>> {
-    planes()
-        .lock()
-        .ok()
-        .and_then(|held| held.get(data_dir).map(|plane| Arc::clone(&plane.runtime)))
-        .or_else(|| retiring_runtime(data_dir))
+    let homes = homes_lock();
+    let slot = homes.get(data_dir)?;
+    slot.live
+        .as_ref()
+        .map(|plane| Arc::clone(&plane.runtime))
+        .or_else(|| slot.retiring.clone())
 }
 
 /// The live plane and the retiring plane for this Home. Another Home's planes
-/// are not in the list: the maps are keyed by the data folder.
+/// are not in the list: the map is keyed by the data folder. Moving a plane
+/// from live to retiring happens under this one lock, so a reader never sees
+/// neither.
 pub(crate) fn watched_runtimes(data_dir: &Path) -> Vec<Arc<crate::runtime::Runtime>> {
+    let homes = homes_lock();
+    let Some(slot) = homes.get(data_dir) else {
+        return Vec::new();
+    };
     let mut found = Vec::new();
-    if let Some(live) = planes()
-        .lock()
-        .ok()
-        .and_then(|held| held.get(data_dir).map(|plane| Arc::clone(&plane.runtime)))
-    {
-        found.push(live);
+    if let Some(live) = &slot.live {
+        found.push(Arc::clone(&live.runtime));
     }
-    if let Some(old) = retiring_runtime(data_dir) {
-        found.push(old);
+    if let Some(old) = &slot.retiring {
+        found.push(Arc::clone(old));
     }
     found
 }
@@ -385,41 +476,71 @@ pub(crate) async fn stopping_session_has_ended(data_dir: &Path, session_id: &str
     true
 }
 
-#[cfg(test)]
-#[allow(
-    dead_code,
-    reason = "called by the agent plane rows, which are compiled with the agents feature"
-)]
+#[cfg(all(test, unix))]
 pub(crate) fn plant_retiring_runtime(data_dir: &Path, runtime: Arc<crate::runtime::Runtime>) {
-    if let Ok(mut held) = retiring().lock() {
-        held.insert(data_dir.to_path_buf(), runtime);
+    homes_lock()
+        .entry(data_dir.to_path_buf())
+        .or_default()
+        .retiring = Some(runtime);
+}
+
+#[cfg(all(test, unix))]
+static STOP_GAP: AtomicBool = AtomicBool::new(false);
+
+#[cfg(all(test, unix))]
+pub(crate) fn arm_stop_gap() {
+    STOP_GAP.store(true, Ordering::Release);
+}
+
+#[cfg(all(test, unix))]
+pub(crate) fn release_dir_for_test(data_dir: &Path) {
+    if let Ok(mut set) = dirs().lock() {
+        set.remove(data_dir);
     }
+}
+
+/// Whether this Home's plane still has `capsule_id` running.
+pub(crate) fn instance_is_running(data_dir: &Path, capsule_id: &str) -> bool {
+    watched_runtimes(data_dir)
+        .iter()
+        .any(|runtime| runtime.capsule_is_running(capsule_id))
 }
 
 /// Stop the agent Runtime for this Home. Live guests end first, inside
 /// [`AgentPlane::shutdown`], so their grants and pending plans end with them.
+/// The live runtime is recorded as retiring before it leaves the map, under
+/// the same lock, so a reader never sees neither.
 pub(crate) async fn stop_running(data_dir: &Path) -> Vec<EndedGuest> {
-    let plane = planes()
-        .lock()
-        .ok()
-        .and_then(|mut held| held.remove(data_dir));
-    if let Some(plane) = plane {
-        let runtime = Arc::clone(&plane.runtime);
-        if let Ok(mut held) = retiring().lock() {
-            held.insert(data_dir.to_path_buf(), Arc::clone(&runtime));
-        }
-        let dir = plane.data_dir.clone();
-        let ended = plane.shutdown().await;
-        if !runtime_busy(&runtime).await {
-            if let Ok(mut held) = retiring().lock() {
-                held.remove(data_dir);
-            }
-        }
-        let _ = crate::api::gateway::close_home_plans(&dir, "agents off");
-        crate::resource_bridge::notify_plan_waiters();
-        return ended;
+    let gate = home_gate(data_dir);
+    let _hold = gate.lock().await;
+    let Some(plane) = take_live_for_stop(data_dir) else {
+        return Vec::new();
+    };
+    #[cfg(all(test, unix))]
+    if STOP_GAP.swap(false, Ordering::AcqRel) {
+        tokio::time::sleep(Duration::from_millis(200)).await;
     }
-    Vec::new()
+    let runtime = Arc::clone(&plane.runtime);
+    let dir = plane.data_dir.clone();
+    let ended = plane.shutdown().await;
+    if !runtime_busy(&runtime).await {
+        let mut homes = homes_lock();
+        if let Some(slot) = homes.get_mut(data_dir) {
+            slot.retiring = None;
+        }
+        homes.retain(|_, slot| slot.live.is_some() || slot.retiring.is_some());
+    }
+    let _ = crate::api::gateway::close_home_plans(&dir, "agents off");
+    crate::resource_bridge::notify_plan_waiters();
+    ended
+}
+
+fn take_live_for_stop(data_dir: &Path) -> Option<AgentPlane> {
+    let mut homes = homes_lock();
+    let slot = homes.get_mut(data_dir)?;
+    let runtime = slot.live.as_ref().map(|plane| Arc::clone(&plane.runtime))?;
+    slot.retiring = Some(runtime);
+    slot.live.take()
 }
 
 /// A grant whose asker has no live capsule is refused. The shell session is
@@ -499,7 +620,8 @@ pub(crate) fn router(config: ServerConfig) -> anyhow::Result<Router> {
         .layer(Extension(data_dir.clone()))
         .layer(Extension(audit))
         .layer(Extension(pending))
-        .layer(Extension(runtime.clone()));
+        .layer(Extension(runtime.clone()))
+        .layer(Extension(crate::api::routes::AgentsOnly(true)));
     let asks = Router::new()
         .route("/api/capability/pending", get(list_owner_pending))
         .route("/api/capability/grant", post(grant_if_asker_is_live))
@@ -658,6 +780,7 @@ fn sweep_coord_temps(data_dir: &Path) {
 async fn start_owned(
     data_dir: PathBuf,
     providers: Option<std::sync::Arc<elastos_runtime::provider::ProviderRegistry>>,
+    allow_off: bool,
 ) -> anyhow::Result<AgentPlane> {
     let owner = crate::host_lock::active_host_process(&data_dir)?;
     if owner.as_ref().map(|info| info.pid) != Some(std::process::id()) {
@@ -678,17 +801,20 @@ async fn start_owned(
     if RESERVED.contains(&COORDS_FILE) {
         anyhow::bail!("agent coordinates use their own file");
     }
-    if !crate::agents::home_enabled(&data_dir) {
+    if !allow_off && !crate::agents::home_enabled(&data_dir) {
         anyhow::bail!(crate::agents::NOT_ENABLED);
     }
+    let instance = next_instance();
     dirs()
         .lock()
         .expect("agent plane set")
-        .insert(data_dir.clone());
-    let started = listen(data_dir.clone(), providers).await;
+        .insert(data_dir.clone(), instance);
+    let started = listen(data_dir.clone(), providers, instance).await;
     if started.is_err() {
         if let Ok(mut set) = dirs().lock() {
-            set.remove(&data_dir);
+            if set.get(&data_dir).copied() == Some(instance) {
+                set.remove(&data_dir);
+            }
         }
     }
     started
@@ -698,6 +824,7 @@ async fn start_owned(
 async fn listen(
     data_dir: PathBuf,
     providers: Option<std::sync::Arc<elastos_runtime::provider::ProviderRegistry>>,
+    instance: u64,
 ) -> anyhow::Result<AgentPlane> {
     let (loaded, _) = elastos_runtime::bootstrap::RuntimeConfig::load(&data_dir);
     let storage = std::sync::Arc::new(
@@ -789,6 +916,8 @@ async fn listen(
             note_registry(&data_dir, installed.clone());
             let _ = crate::api::gateway::reconcile_lost_plan_receipts(&data_dir);
             return Ok(AgentPlane {
+                instance,
+                api_url: api_url.clone(),
                 server: running.server,
                 watcher: running.watcher,
                 coords_path: coords_path(&data_dir),
@@ -1013,6 +1142,23 @@ mod tests {
             assert!(super::installed_provider_registry(dir.path()).is_none());
         }
         assert!(!super::PLANT_TASK_PANIC.load(std::sync::atomic::Ordering::Acquire));
+        #[cfg(unix)]
+        {
+            // Named so a build without the agents feature still compiles them.
+            // Calling the gap here would delay another test's stop.
+            fn name_plane_plants(
+                plant: fn(&std::path::Path, std::sync::Arc<crate::runtime::Runtime>),
+                arm: fn(),
+                release: fn(&std::path::Path),
+            ) {
+                let _ = (plant, arm, release);
+            }
+            name_plane_plants(
+                super::plant_retiring_runtime,
+                super::arm_stop_gap,
+                super::release_dir_for_test,
+            );
+        }
         // The planter stays uncalled. Calling it here would arm a listener
         // that shares this process. A default test build still names it.
         fn not_the_planter() {}

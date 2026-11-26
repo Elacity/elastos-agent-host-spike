@@ -95,6 +95,10 @@ mod gateway_inbox;
 #[cfg(unix)]
 #[cfg(test)]
 pub(crate) use gateway_inbox::inbox_request_entries_for_test;
+
+pub(crate) fn forget_plane_shell(api_url: &str) {
+    gateway_inbox::forget_shell_url(api_url);
+}
 #[path = "gateway_inspect_actions.rs"]
 mod gateway_inspect_actions;
 #[cfg(test)]
@@ -1611,6 +1615,7 @@ fn inbox_error_response(err: anyhow::Error) -> Response {
     } else if profile_required.is_some()
         || text == crate::collaboration_release_network::COMMUNITY_LEFT_DETAIL
         || text.contains("the asking session has ended")
+        || text.contains("the grant was already given")
     {
         StatusCode::CONFLICT
     } else if text.contains("service access request delivery failed") {

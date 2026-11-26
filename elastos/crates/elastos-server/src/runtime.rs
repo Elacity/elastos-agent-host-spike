@@ -1746,6 +1746,17 @@ impl Runtime {
         }
     }
 
+    /// The model answer from the registry this Runtime stored. `None` when
+    /// this Runtime has no registry.
+    #[cfg(all(test, unix))]
+    pub(crate) async fn served_model_answer(
+        &self,
+        body: &serde_json::Value,
+    ) -> Option<serde_json::Value> {
+        let registry = self.provider_registry.read().await.clone()?;
+        registry.send_raw("model", body).await.ok()
+    }
+
     pub async fn set_provider_registry(
         &self,
         registry: Arc<ProviderRegistry>,
@@ -4504,6 +4515,15 @@ impl Runtime {
         listed
     }
 
+    /// Whether `id` is still running. A lock that is busy counts as running,
+    /// so a startup pass does not close that instance's plan.
+    pub(crate) fn capsule_is_running(&self, id: &str) -> bool {
+        match self.running_capsules.try_read() {
+            Ok(capsules) => capsules.get(id).is_some_and(|info| info.ended_at.is_none()),
+            Err(_) => true,
+        }
+    }
+
     /// Get a specific capsule by ID
     pub async fn get_capsule(&self, id: &str) -> Option<RunningCapsuleInfo> {
         let (info, removed) = {
@@ -4749,6 +4769,11 @@ pub(crate) mod tests {
     #[test]
     fn the_host_panic_plant_starts_clear() {
         assert!(!PLANT_HOST_PANIC.load(Ordering::Acquire));
+        #[cfg(unix)]
+        {
+            let _served = Runtime::served_model_answer;
+            let _ = _served;
+        }
         assert!(!HOST_PANIC_HOLD.load(Ordering::Acquire));
         assert!(!HOST_PANIC_RELEASE.load(Ordering::Acquire));
         // The planters stay distinct and uncalled. Calling one here would arm

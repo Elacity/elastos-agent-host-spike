@@ -287,17 +287,26 @@ pub(super) async fn agents_enable(
     State(state): State<GatewayState>,
     headers: HeaderMap,
 ) -> Response {
-    let enabled = agents_set_enabled(&state, &headers, true);
-    if enabled.is_ok() {
-        if let Err(error) = crate::api::agent_plane::ensure_running(
-            &state.data_dir,
-            state.provider_registry.clone(),
-        )
-        .await
-        {
+    let owner = match agents_owner(&state, &headers) {
+        Ok(owner) => owner,
+        Err(error) => {
             return agents_response(Err(error) as anyhow::Result<serde_json::Value>);
         }
+    };
+    // The retiring plane is checked, and the plane is running, before the
+    // enabled flag or its ok row is written. A refused start leaves both.
+    if let Err(error) = crate::api::agent_plane::bring_up_for_enable(
+        &state.data_dir,
+        state.provider_registry.clone(),
+    )
+    .await
+    {
+        return agents_response(Err(error) as anyhow::Result<serde_json::Value>);
     }
+    let enabled = (|| -> anyhow::Result<serde_json::Value> {
+        let enabled = crate::agents::set_enabled(&state.data_dir, &owner.caller(), true, now_ts())?;
+        Ok(serde_json::json!({ "enabled": enabled }))
+    })();
     agents_response(enabled)
 }
 

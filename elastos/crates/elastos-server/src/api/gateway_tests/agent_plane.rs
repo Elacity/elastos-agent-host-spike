@@ -503,13 +503,11 @@ async fn the_agent_runtime_calls_the_shared_model_provider() {
     let plane = crate::api::agent_plane::start(&home.data, Some(registry.clone()))
         .await
         .unwrap();
-    let installed = crate::api::agent_plane::installed_provider_registry(&home.data)
-        .expect("the plane kept the registry");
-    assert!(Arc::ptr_eq(&registry, &installed));
-    let response = installed
-        .send_raw("model", &json!({ "op": "ping" }))
+    let response = plane
+        .runtime
+        .served_model_answer(&json!({ "op": "ping" }))
         .await
-        .unwrap();
+        .expect("the runtime serves the model through its stored registry");
     assert_eq!(response["seen"], "ping");
     assert!(entered.load(std::sync::atomic::Ordering::SeqCst));
     plane.shutdown().await;
@@ -1820,9 +1818,14 @@ async fn two_inbox_approvals_mint_one_grant() {
         statuses.contains(&200),
         "neither approval minted: {left:?} {right:?}"
     );
+    let loser = if left.0 == 200 { &right } else { &left };
+    assert_eq!(
+        loser.0, 409,
+        "the second approval is a conflict: {left:?} {right:?}"
+    );
     assert!(
-        statuses.iter().any(|status| *status != 200),
-        "both approvals minted: {left:?} {right:?}"
+        loser.1.contains("not_granted"),
+        "the loser names not_granted: {loser:?}"
     );
     let rows = grant_audit(&home.data, &request_id);
     assert_eq!(
@@ -1965,6 +1968,35 @@ async fn an_effect_held_across_turn_off_is_not_signed_ok() {
         .unwrap();
     assert_eq!(oks(&home.data), 1);
     assert!(crate::api::agent_plane::plane_runtime(&home.data).is_none());
+}
+
+fn enable_ok_count(data: &Path) -> usize {
+    crate::auth::load_auth_state(data)
+        .unwrap()
+        .audit
+        .into_iter()
+        .filter(|event| event.event_type == "agent.records.enable" && event.result == "ok")
+        .count()
+}
+
+async fn plain_launch_refused(data: &Path) {
+    crate::api::agent_plane::release_dir_for_test(data);
+    let coords = wait_coords(data).await;
+    let token = shell_token(&coords.api_url, &coords.attach_secret).await;
+    let response = reqwest::Client::new()
+        .post(format!("{}/api/capsules", coords.api_url))
+        .header("authorization", format!("Bearer {token}"))
+        .json(&json!({ "path": "/tmp/not-an-agent" }))
+        .send()
+        .await
+        .unwrap();
+    let status = response.status();
+    let text = response.text().await.unwrap();
+    assert_eq!(status.as_u16(), 400, "{text}");
+    assert!(
+        text.contains("this runtime launches a stored agent"),
+        "{text}"
+    );
 }
 
 fn stopped_ok_count(data: &Path, session: &str) -> usize {
@@ -2256,6 +2288,9 @@ async fn off_then_on_waits_until_the_old_plane_is_idle() {
     )
     .await;
     assert_eq!(off, 200, "{off_body}");
+    let before_enable = std::fs::read(crate::agents::agent_file_path(&home.data).unwrap()).unwrap();
+    let enable_ok_before = enable_ok_count(&home.data);
+    assert!(!crate::agents::home_enabled(&home.data));
     let (on, on_body) = home_http(
         &gateway.addr,
         &token,
@@ -2268,6 +2303,13 @@ async fn off_then_on_waits_until_the_old_plane_is_idle() {
         on_body.contains("the previous agent runtime is still stopping"),
         "{on_body}"
     );
+    let after_refuse = std::fs::read(crate::agents::agent_file_path(&home.data).unwrap()).unwrap();
+    assert_eq!(
+        after_refuse, before_enable,
+        "a refused start does not write the file"
+    );
+    assert!(!crate::agents::home_enabled(&home.data));
+    assert_eq!(enable_ok_count(&home.data), enable_ok_before);
     let started = crate::api::agent_plane::start(&home.data, None).await;
     let error = started.expect_err("start while the old plane is busy");
     assert!(
@@ -2304,6 +2346,8 @@ async fn off_then_on_waits_until_the_old_plane_is_idle() {
     )
     .await;
     assert_eq!(again, 200, "{again_body}");
+    assert!(crate::agents::home_enabled(&home.data));
+    assert_eq!(enable_ok_count(&home.data), enable_ok_before + 1);
     let _ = home_http(
         &gateway.addr,
         &token,
@@ -2391,4 +2435,193 @@ async fn a_live_plane_does_not_hide_a_retiring_effect_or_stop() {
         .iter()
         .all(|runtime| !Arc::ptr_eq(runtime, &retiring)));
     plane.shutdown().await;
+}
+
+#[tokio::test]
+async fn two_enables_at_once_share_one_plane() {
+    let home = Home::open();
+    let gateway = Gateway::start(&home.data).await;
+    let token = system_token(&home);
+    let (off, off_body) = home_http(
+        &gateway.addr,
+        &token,
+        reqwest::Method::POST,
+        "/api/apps/system/agents/disable",
+    )
+    .await;
+    assert_eq!(off, 200, "{off_body}");
+    let first = home_http(
+        &gateway.addr,
+        &token,
+        reqwest::Method::POST,
+        "/api/apps/system/agents/enable",
+    );
+    let second = home_http(
+        &gateway.addr,
+        &token,
+        reqwest::Method::POST,
+        "/api/apps/system/agents/enable",
+    );
+    let (left, right) = tokio::join!(first, second);
+    assert_eq!(left.0, 200, "{left:?}");
+    assert_eq!(right.0, 200, "{right:?}");
+    assert!(
+        left.1.contains("true") && right.1.contains("true"),
+        "{left:?} {right:?}"
+    );
+    assert!(crate::agents::home_enabled(&home.data));
+    assert_eq!(
+        crate::api::agent_plane::watched_runtimes(&home.data).len(),
+        1
+    );
+    let coords = wait_coords(&home.data).await;
+    plain_launch_refused(&home.data).await;
+    let still = crate::api::agent_plane::live_coords(&home.data)
+        .await
+        .expect("the one plane kept its coordinates");
+    assert_eq!(still.api_url, coords.api_url);
+    gateway.shutdown().await;
+}
+
+#[tokio::test]
+async fn enable_racing_startup_shares_one_plane() {
+    let home = Home::open();
+    let gateway = Gateway::start(&home.data).await;
+    crate::api::agent_plane::stop_running(&home.data).await;
+    assert!(crate::agents::home_enabled(&home.data));
+    assert!(crate::api::agent_plane::plane_runtime(&home.data).is_none());
+    let token = system_token(&home);
+    let enable = home_http(
+        &gateway.addr,
+        &token,
+        reqwest::Method::POST,
+        "/api/apps/system/agents/enable",
+    );
+    let startup = crate::api::agent_plane::ensure_running(&home.data, None);
+    let (http, started) = tokio::join!(enable, startup);
+    assert_eq!(http.0, 200, "{http:?}");
+    assert!(http.1.contains("true"), "{http:?}");
+    started.expect("startup shares the enable");
+    assert_eq!(
+        crate::api::agent_plane::watched_runtimes(&home.data).len(),
+        1
+    );
+    plain_launch_refused(&home.data).await;
+    gateway.shutdown().await;
+}
+
+#[tokio::test]
+async fn disable_racing_list_keeps_the_stopping_plane() {
+    let home = Home::open();
+    let dir = home._temp.path().join("probe");
+    let cid = sign_probe(&dir);
+    let agent = home.create_agent("Live", &cid);
+    let gateway = Gateway::start(&home.data).await;
+    let session = home.launch(&agent, &dir).await;
+    let runtime = crate::api::agent_plane::plane_runtime(&home.data).unwrap();
+    runtime.bind_plan_instance(&session, &agent);
+    let guard = crate::runtime::Runtime::try_enter_plan_effect(
+        &runtime.plan_book(),
+        &session,
+        &agent,
+        "step-held",
+    )
+    .expect("effect hold");
+    plain_launch_refused(&home.data).await;
+    crate::api::agent_plane::arm_stop_gap();
+    let token = system_token(&home);
+    let disable = home_http(
+        &gateway.addr,
+        &token,
+        reqwest::Method::POST,
+        "/api/apps/system/agents/disable",
+    );
+    let listing = async {
+        let mut saw_plane = false;
+        for _ in 0..40 {
+            let _ = home_http(
+                &gateway.addr,
+                &token,
+                reqwest::Method::GET,
+                "/api/apps/system/agents",
+            )
+            .await;
+            if !crate::api::agent_plane::watched_runtimes(&home.data).is_empty() {
+                saw_plane = true;
+            }
+            assert_eq!(stopped_ok_count(&home.data, &session), 0);
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        saw_plane
+    };
+    let ((off, off_body), saw_plane) = tokio::join!(disable, listing);
+    assert_eq!(off, 200, "{off_body}");
+    assert!(saw_plane, "the list ran while neither plane was registered");
+    assert_eq!(stopped_ok_count(&home.data, &session), 0);
+    guard.release();
+    let _ = home_http(
+        &gateway.addr,
+        &token,
+        reqwest::Method::GET,
+        "/api/apps/system/agents",
+    )
+    .await;
+    assert_eq!(stopped_ok_count(&home.data, &session), 1);
+    gateway.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_pending_plan_stays_when_its_capsule_is_still_running() {
+    let home = Home::open();
+    let storage = home.data.join("still-running");
+    std::fs::create_dir_all(&storage).unwrap();
+    let runtime = Arc::new(crate::runtime::Runtime::new(
+        Arc::new(
+            elastos_storage::providers::LocalFSProvider::new(storage)
+                .await
+                .unwrap(),
+        ),
+        Arc::new(IdleCompute),
+    ));
+    let capsule = "capsule:still-running";
+    runtime
+        .register_capsule(crate::runtime::RunningCapsuleInfo {
+            id: capsule.to_string(),
+            name: "still".to_string(),
+            status: crate::runtime::CAPSULE_RUNNING.to_string(),
+            capsule_type: elastos_common::CapsuleType::Wasm,
+            handle: None,
+            session_id: "session:still".to_string(),
+            principal: Some(home.owner.clone()),
+            cause: None,
+            ended_at: None,
+        })
+        .await;
+    crate::api::agent_plane::plant_retiring_runtime(&home.data, Arc::clone(&runtime));
+    let plan = serde_json::json!({
+        "steps": [{ "scheme": "availability", "operation": "status", "request": {} }]
+    });
+    let created = super::super::gateway_inspect_actions::submit_pending_agent_plan(
+        &home.data,
+        &home.owner,
+        "agent:v2:0123456789abcdef0123456789abcdef",
+        capsule,
+        "session:still",
+        &plan,
+        1,
+    )
+    .unwrap();
+    let request_id = created["request_id"].as_str().unwrap().to_string();
+    super::super::gateway_inspect_actions::settle_agent_plans_lost_before_start(&home.data)
+        .unwrap();
+    let stored = std::fs::read_dir(home.data.join("inspect-actions"))
+        .unwrap()
+        .filter_map(|entry| entry.ok())
+        .find_map(|entry| {
+            let body = std::fs::read(entry.path()).ok()?;
+            let value: serde_json::Value = serde_json::from_slice(&body).ok()?;
+            (value["request_id"].as_str() == Some(request_id.as_str())).then_some(value)
+        })
+        .expect("the pending plan");
+    assert_eq!(stored["status"], "pending");
 }

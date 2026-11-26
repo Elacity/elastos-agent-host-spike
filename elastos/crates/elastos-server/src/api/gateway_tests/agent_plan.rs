@@ -1839,6 +1839,10 @@ async fn a_lost_receipt_is_unresolved_and_a_named_step_is_reconciled() {
     write_record(dir.path(), &request_id, &record);
     crate::api::gateway::reconcile_lost_plan_receipts(dir.path()).unwrap();
     assert_eq!(plan_status(dir.path(), &request_id), "unresolved");
+    assert_eq!(
+        read_record(dir.path(), &request_id)["audit_recorded"],
+        json!(true)
+    );
     assert!(chain_has(
         dir.path(),
         "agent_plan.dispatch.unresolved",
@@ -1859,6 +1863,38 @@ async fn a_lost_receipt_is_unresolved_and_a_named_step_is_reconciled() {
         "agent_plan.dispatch.completed",
         "completed"
     ));
+    assert_eq!(
+        read_record(dir.path(), &request_id)["audit_recorded"],
+        json!(true)
+    );
+}
+
+#[tokio::test]
+async fn a_pending_plan_whose_instance_is_not_running_ends_at_start() {
+    let (dir, _owner, request_id) = planted_plan(18);
+    assert_eq!(plan_status(dir.path(), &request_id), "pending");
+    let _settle = super::super::gateway_inspect_actions::settle_plan_through_dispatch_for_test;
+    let closed = |path: &Path| {
+        crate::auth::load_auth_state(path)
+            .unwrap()
+            .audit
+            .into_iter()
+            .filter(|event| {
+                event.event_type == "agent.plan.closed" && event.result == "instance ended"
+            })
+            .count()
+    };
+    super::super::gateway_inspect_actions::settle_agent_plans_lost_before_start(dir.path())
+        .unwrap();
+    assert_eq!(plan_status(dir.path(), &request_id), "instance ended");
+    assert_eq!(closed(dir.path()), 1);
+    assert_eq!(
+        read_record(dir.path(), &request_id)["audit_recorded"],
+        json!(true)
+    );
+    super::super::gateway_inspect_actions::settle_agent_plans_lost_before_start(dir.path())
+        .unwrap();
+    assert_eq!(closed(dir.path()), 1, "the closed row is written once");
 }
 
 /// Where an approved step is held, and how the instance ends while it is held.

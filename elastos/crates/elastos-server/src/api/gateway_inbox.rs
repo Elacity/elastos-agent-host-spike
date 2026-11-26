@@ -279,6 +279,12 @@ fn rows_from(
     }
 }
 
+pub(super) fn forget_shell_url(api_url: &str) {
+    if let Ok(mut map) = shell_cache().lock() {
+        map.remove(api_url);
+    }
+}
+
 fn shell_cache() -> &'static std::sync::Mutex<std::collections::HashMap<String, String>> {
     static CACHE: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, String>>> =
         std::sync::OnceLock::new();
@@ -1132,7 +1138,7 @@ async fn answer_agent_ask(
     }
     let again = read_pending(&coords).await?;
     let Some(row) = again.iter().find(|item| item.request_id == request_id) else {
-        anyhow::bail!("that request is no longer pending");
+        anyhow::bail!("not_granted: the grant was already given");
     };
     // The signed approval exists before the mint. A crash before the send
     // leaves that row and no grant. `sent` is the marker that the request
@@ -1472,6 +1478,26 @@ mod tests {
             "a cached shell is not another attach"
         );
         shell_cache().lock().unwrap().remove(url);
+    }
+
+    #[test]
+    fn forgetting_a_plane_url_drops_only_that_shell() {
+        let kept = "http://127.0.0.1:9/kept-shell";
+        let gone = "http://127.0.0.1:9/gone-shell";
+        shell_cache()
+            .lock()
+            .unwrap()
+            .insert(kept.to_string(), "keep".to_string());
+        shell_cache()
+            .lock()
+            .unwrap()
+            .insert(gone.to_string(), "drop".to_string());
+        forget_shell_url(gone);
+        let map = shell_cache().lock().unwrap();
+        assert_eq!(map.get(kept).map(String::as_str), Some("keep"));
+        assert!(map.get(gone).is_none());
+        drop(map);
+        shell_cache().lock().unwrap().remove(kept);
     }
 
     #[test]

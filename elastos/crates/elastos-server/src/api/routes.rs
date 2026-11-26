@@ -102,10 +102,16 @@ pub struct LaunchResponse {
     session_id: String,
 }
 
+/// Set by the router that serves [`launch_capsule`]. The agent plane's
+/// router sets it. A Home router leaves it clear.
+#[derive(Clone, Copy)]
+pub struct AgentsOnly(pub bool);
+
 pub async fn launch_capsule(
     Extension(runtime): Extension<Arc<Runtime>>,
     Extension(audit_log): Extension<Arc<AuditLog>>,
     Extension(data_dir): Extension<Option<std::path::PathBuf>>,
+    agents_only: Option<Extension<AgentsOnly>>,
     Json(req): Json<LaunchRequest>,
 ) -> Result<Json<LaunchResponse>, (StatusCode, String)> {
     if let Some(agent_id) = req.agent_id.as_deref() {
@@ -118,9 +124,10 @@ pub async fn launch_capsule(
     }
     let path = std::path::Path::new(&req.path);
     reject_raw_launch_principal_id(req.principal_id.as_deref())?;
+    let agents_only = agents_only.is_some_and(|Extension(AgentsOnly(enabled))| enabled);
     let (launcher, admission, grant_name, agent_audit) = match req.agent_id.as_deref() {
         None => {
-            if crate::api::agent_plane::serves(data_dir.as_deref()) {
+            if agents_only {
                 return Err((
                     StatusCode::BAD_REQUEST,
                     "this runtime launches a stored agent".to_string(),
@@ -1033,6 +1040,7 @@ pub(crate) mod tests {
             Extension(std::sync::Arc::new(runtime)),
             Extension(audit_log.clone()),
             Extension(None::<std::path::PathBuf>),
+            None,
             Json(LaunchRequest {
                 path: capsule_dir.to_string_lossy().into_owned(),
                 principal_id: None,
@@ -1089,6 +1097,7 @@ pub(crate) mod tests {
             Extension(runtime),
             Extension(audit_log.clone()),
             Extension(None::<std::path::PathBuf>),
+            None,
             Json(LaunchRequest {
                 path: capsule_dir.to_string_lossy().into_owned(),
                 principal_id: None,
@@ -2210,6 +2219,7 @@ pub(crate) mod tests {
                     Extension(runtime),
                     Extension(audit_log),
                     Extension(data_dir),
+                    None,
                     Json(LaunchRequest {
                         path,
                         principal_id: None,
@@ -3020,6 +3030,7 @@ pub(crate) mod tests {
             Extension(home.runtime.clone()),
             Extension(home.audit_log.clone()),
             Extension(Some(home.data_dir.clone())),
+            None,
             Json(LaunchRequest {
                 path: dir.to_string_lossy().into_owned(),
                 principal_id: None,
@@ -7025,6 +7036,7 @@ pub(crate) mod tests {
             Extension(runtime),
             Extension(audit_log.clone()),
             Extension(Some(data_dir.clone())),
+            None,
             Json(LaunchRequest {
                 path: forged_dir.to_string_lossy().into_owned(),
                 principal_id: None,
@@ -7078,6 +7090,7 @@ pub(crate) mod tests {
             Extension(home.runtime.clone()),
             Extension(home.audit_log.clone()),
             Extension(Some(home.data_dir.clone())),
+            None,
             Json(LaunchRequest {
                 path: home.capsule_dir.to_string_lossy().into_owned(),
                 principal_id: None,
@@ -7233,6 +7246,7 @@ pub(crate) mod tests {
                 Extension(runtime.clone()),
                 Extension(audit_log.clone()),
                 Extension(Some(data_dir.clone())),
+                None,
                 Json(LaunchRequest {
                     path: folder.to_string_lossy().into_owned(),
                     principal_id: None,
@@ -7480,6 +7494,7 @@ pub(crate) mod tests {
                 Extension(home.runtime.clone()),
                 Extension(home.audit_log.clone()),
                 Extension(Some(home.data_dir.clone())),
+                None,
                 Json(LaunchRequest {
                     path: home.capsule_dir.to_string_lossy().into_owned(),
                     principal_id: None,
@@ -9232,6 +9247,7 @@ pub(crate) mod tests {
             Extension(runtime.clone()),
             Extension(Arc::new(AuditLog::new())),
             Extension(Some(std::path::PathBuf::from("unused-home"))),
+            None,
             Json(LaunchRequest {
                 path: "unused".to_string(),
                 principal_id: None,
@@ -9475,6 +9491,7 @@ pub(crate) mod tests {
             Extension(home.runtime.clone()),
             Extension(home.audit_log.clone()),
             Extension(Some(home.data_dir.clone())),
+            None,
             Json(LaunchRequest {
                 path: dir.to_string_lossy().into_owned(),
                 principal_id: None,

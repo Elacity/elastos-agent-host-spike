@@ -23,6 +23,7 @@ import {
   gatewayHealthOk,
   grantWaitSatisfied,
   rootsStayWithTheirAgent,
+  planeSameProcess,
   journalFileInRoot,
   ownerDocumentUnchanged,
   ownerNoteRelative,
@@ -197,16 +198,27 @@ test("grant wait ignores the route row's marker files", () => {
   ]), true);
 });
 
+test("a plane is the gateway process and its coordinates stay owner-only", () => {
+  assert.equal(planeSameProcess(4, 4, true, true, 0o600), true);
+  assert.equal(planeSameProcess(4, 5, true, true, 0o600), false);
+  assert.equal(planeSameProcess(4, 4, true, false, 0o600), false);
+  assert.equal(planeSameProcess(4, 4, true, true, 0o644), false);
+});
+
 test("each root stays in its own grant, including the planted cross-read", () => {
   const grants = [
     { status: 200, resource: `${rootA}/journal` },
     { status: 200, resource: `${rootB}/journal` },
   ];
   const plants = {
-    own: { resource: `${rootA}/Documents/own-marker.txt`, status: 403 },
-    other: { resource: `${rootB}/Documents/cross-read.txt`, status: 403 },
+    own: { resource: `${rootA}/Documents/own-marker.txt`, status: 403, body: "refused" },
+    other: { resource: `${rootB}/Documents/cross-read.txt`, status: 403, body: "refused" },
   };
   assert.equal(rootsStayWithTheirAgent(rootA, rootB, grants, plants), true);
+  assert.equal(rootsStayWithTheirAgent(rootA, rootB, grants, {
+    own: plants.own,
+    other: { resource: `${rootB}/Documents/cross-read.txt`, status: 404, body: "missing" },
+  }), false);
   assert.equal(rootsStayWithTheirAgent(rootA, rootB, [
     { status: 200, resource: `${rootA}/${rootB}` },
   ], plants), false);
@@ -303,7 +315,7 @@ test("a shell failure does not pass a row the node did not check", () => {
     "u3_agents_enabled", "u3_owner_field_refused", "u3_agent_created",
     "u3_unknown_id_refused", "u3_guest_refused", "u3_agent_activated",
     "u3_agent_started", "u4_second_agent_created", "u4_both_running",
-    "u4_distinct_roots", "u4_route_refuses_user_area", "journal_in_agent_root",
+    "u4_distinct_roots", "u4_cross_root_bus_read_gap", "journal_in_agent_root",
     "plan_card_captured", "one_pending_record", "approve_without_step_up_refused",
     "step_up_approve", "one_authorised_write", "owner_document_unchanged",
     "one_result_and_receipt", "signed_start_audit", "signed_completion_audit",

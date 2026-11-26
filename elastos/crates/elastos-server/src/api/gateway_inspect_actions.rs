@@ -586,10 +586,12 @@ pub(crate) fn reconcile_lost_plan_receipts(data_dir: &FsPath) -> anyhow::Result<
         }
         let outcome = test_provider_step_outcome(&record.request_id)
             .unwrap_or_else(|| "unresolved".to_string());
-        let updated =
+        let mut updated =
             store::set_agent_plan_status(data_dir, &record.request_id, &outcome, now_ts())?;
         crate::resource_bridge::forget_one_agent_plan_authority(&record.request_id);
         append_agent_plan_dispatch_audit(data_dir, &updated, &outcome)?;
+        updated.audit_recorded = true;
+        store::write_inspect_action_record(data_dir, &updated)?;
         crate::resource_bridge::notify_plan_waiters();
         settled += 1;
     }
@@ -989,8 +991,20 @@ fn settle_agent_plan_dispatch(
     Ok(format!("Agent plan dispatch {status}."))
 }
 
+/// Settle one plan through the dispatch writer, which notifies the park.
+#[cfg(all(test, unix))]
+pub(crate) fn settle_plan_through_dispatch_for_test(
+    data_dir: &FsPath,
+    request_id: &str,
+    status: &str,
+    result: serde_json::Value,
+) -> anyhow::Result<String> {
+    let record = read_inspect_action_record(data_dir, request_id)?;
+    settle_agent_plan_dispatch(data_dir, record, status, result)
+}
+
 /// A second settlement after unknown. The stored record stays unknown.
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub(crate) fn resettle_plan_for_test(
     data_dir: &FsPath,
     request_id: &str,

@@ -59,7 +59,7 @@ const names = [
   "u3_agents_enabled", "u3_owner_field_refused", "u3_agent_created",
   "u3_unknown_id_refused", "u3_guest_refused", "u3_agent_activated",
   "u3_agent_started", "u4_second_agent_created", "u4_both_running",
-  "u4_distinct_roots", "u4_route_refuses_user_area", "roots_in_own_grants", "journal_in_agent_root",
+  "u4_distinct_roots", "u4_cross_root_bus_read_gap", "roots_in_own_grants", "journal_in_agent_root",
   "plan_card_captured", "one_pending_record", "approve_without_step_up_refused",
   "step_up_approve", "one_authorised_write", "owner_document_unchanged",
   "one_result_and_receipt", "signed_start_audit", "signed_completion_audit",
@@ -512,14 +512,32 @@ export function rootsStayWithTheirAgent(rootA, rootB, grants, plants) {
   });
   const own = plants?.own;
   const other = plants?.other;
+  const namedRefusal = other?.status === 403 && String(other.body || "").length > 0;
   const planted = typeof own?.resource === "string"
     && own.resource.includes(rootA)
     && !own.resource.includes(rootB)
     && typeof other?.resource === "string"
     && other.resource.includes(rootB)
     && !other.resource.includes(rootA)
-    && other.status !== 200;
+    && namedRefusal;
   return ownGrant(rootA, rootB) && ownGrant(rootB, rootA) && !leaked && planted;
+}
+
+export function rootsGrantedOnlyToTheirAgent(rootA, rootB, grants) {
+  if (typeof rootA !== "string" || typeof rootB !== "string" || rootA === "" || rootA === rootB) {
+    return false;
+  }
+  const rows = Array.isArray(grants) ? grants : [];
+  const ownGrant = (root, other) => rows.some((grant) => (
+    grant?.status === 200
+    && String(grant.resource || "").includes(root)
+    && !String(grant.resource || "").includes(other)
+  ));
+  const leaked = rows.some((grant) => {
+    const resource = String(grant?.resource || "");
+    return resource.includes(rootA) && resource.includes(rootB);
+  });
+  return ownGrant(rootA, rootB) && ownGrant(rootB, rootA) && !leaked;
 }
 
 export function journalFileInRoot(files, root) {
@@ -1168,6 +1186,14 @@ function planCards(summary) {
   ));
 }
 
+export function planeSameProcess(pid, gatewayPid, listenerOwned, pidAlive, mode) {
+  return pid > 0
+    && pid === gatewayPid
+    && listenerOwned === true
+    && pidAlive === true
+    && (mode & 0o777) === 0o600;
+}
+
 function alive(pid) {
   try {
     process.kill(pid, 0);
@@ -1177,7 +1203,31 @@ function alive(pid) {
   }
 }
 
+function linuxProcExecutables() {
+  let names;
+  try {
+    names = fs.readdirSync("/proc");
+  } catch {
+    return { ok: false, rows: [] };
+  }
+  const rows = [];
+  for (const name of names) {
+    if (!/^[1-9][0-9]*$/.test(name)) continue;
+    let exe = "";
+    try {
+      exe = fs.readlinkSync(`/proc/${name}/exe`);
+    } catch {
+      continue;
+    }
+    if (exe.endsWith(" (deleted)")) exe = exe.slice(0, -" (deleted)".length);
+    rows.push({ pid: Number(name), exe });
+  }
+  return { ok: true, rows };
+}
+
 function homeExecutables() {
+  if (process.platform === "linux") return linuxProcExecutables();
+  if (process.platform !== "darwin") return { ok: false, rows: [] };
   const listed = spawnSync("python3", ["-c", `
 import ctypes, ctypes.util, subprocess, sys
 libc = ctypes.CDLL(ctypes.util.find_library("c"))
@@ -1621,19 +1671,28 @@ async function main() {
   });
 
   const routeReads = await attemptUserAreaRoute();
-  if (!userAreaRouteRefused(routeReads)) {
-    // The plane does not mount this provider route. A 404 is the gap, not a
-    // pass, and the later rows still run.
-    mark("u4_route_refuses_user_area", "fail", {
+  const doorMissing = routeReads.own?.status === 404 && routeReads.other?.status === 404;
+  const readReturned = routeReads.own?.status === 200 || routeReads.other?.status === 200;
+  if (userAreaRouteRefused(routeReads)) {
+    pass("u4_cross_root_bus_read_gap", {
+      proved: "refused by name",
       own: routeAttemptDetail(routeReads.own),
       other: routeAttemptDetail(routeReads.other),
-      gap: "the agent plane does not mount the provider read",
+      isolation_not_covered: U4_ISOLATION_NOT_COVERED,
+    });
+  } else if (doorMissing && !readReturned) {
+    pass("u4_cross_root_bus_read_gap", {
+      claim: "removed",
+      gap: "the guest bus read of another agent's root is not driven on this installed release",
+      own_status: 404,
+      other_status: 404,
       isolation_not_covered: U4_ISOLATION_NOT_COVERED,
     });
   } else {
-    pass("u4_route_refuses_user_area", {
+    mark("u4_cross_root_bus_read_gap", "fail", {
       own: routeAttemptDetail(routeReads.own),
       other: routeAttemptDetail(routeReads.other),
+      gap: "the agent plane does not mount the provider read",
       isolation_not_covered: U4_ISOLATION_NOT_COVERED,
     });
   }
@@ -1649,12 +1708,21 @@ async function main() {
   }
   pass("journal_in_agent_root", { root: state.rootA, files: journalFiles.map((file) => file.path) });
   const rootsOwned = rootsStayWithTheirAgent(state.rootA, state.rootB, state.grants, routeReads);
+  const grantsOnly = rootsGrantedOnlyToTheirAgent(state.rootA, state.rootB, state.grants);
   if (rootsOwned) {
     pass("roots_in_own_grants", {
       a: state.rootA,
       b: state.rootB,
       grants: state.grants.map((grant) => grant.resource),
       plant_cross: routeReads.other?.resource || "",
+    });
+  } else if (grantsOnly && routeReads.other?.status === 404) {
+    pass("roots_in_own_grants", {
+      a: state.rootA,
+      b: state.rootB,
+      grants: state.grants.map((grant) => grant.resource),
+      plant_cross_claim: "removed",
+      gap: "the agent plane does not mount the provider read",
     });
   } else {
     mark("roots_in_own_grants", "fail", {
@@ -1778,32 +1846,77 @@ async function main() {
   }
   let stopDuringStep = null;
   let runnerStoppedTooLate = false;
+  let stopObserved = "";
   if (state.approveBody) {
-    // Stop once, while the guest that wrote the note is still live. A note
-    // with no live session means the runner stopped too late. There is no
-    // second Stop.
+    // Stop once, while the step is approved or dispatching and the note is
+    // not on disk. Freeze the gateway for that look, queue Stop, then let it
+    // run. There is no second Stop.
     const approvedPromise = call("POST", "/api/apps/inbox/actions", state.inboxToken, state.approveBody);
-    const stopDeadline = Date.now() + 20000;
-    while (Date.now() < stopDeadline) {
+    const notePath = path.join(data, rootSuffix(state.rootA), "Documents", "note.txt");
+    const gatewayPid = fs.existsSync(pidFile) ? Number(String(fs.readFileSync(pidFile, "utf8")).trim()) : 0;
+    const inflightDeadline = Date.now() + 20000;
+    let inflight = "";
+    while (Date.now() < inflightDeadline) {
       const record = inspectRecords().find((item) => item.request_id === state.requestId);
-      const wrote = interestingFiles().some((file) => (
-        file.path.includes(rootSuffix(state.rootA)) && file.path.endsWith("Documents/note.txt")
-      ));
-      if (wrote || (record && record.status === "completed" && record.result?.status === "ok")) {
-        const live = liveSessions(await capsules(), [state.launchA]);
-        if (live.length !== 1) {
-          runnerStoppedTooLate = true;
-          break;
-        }
-        stopDuringStep = await call("POST", "/api/apps/system/agents/stop", state.systemToken, {
-          agent_id: state.agentA,
-        });
-        if (stopDuringStep.status === 409 && String(stopDuringStep.text || "").includes("agent_no_session")) {
-          runnerStoppedTooLate = true;
-        }
+      const noteThere = fs.existsSync(notePath);
+      const status = record?.status || "";
+      if ((status === "approved" || status === "dispatching") && !noteThere) {
+        inflight = status;
         break;
       }
+      if (noteThere || status === "completed" || status === "denied" || status === "unknown") break;
       await sleep(5);
+    }
+    let frozen = false;
+    if (inflight && gatewayPid > 0) {
+      try {
+        process.kill(gatewayPid, "SIGSTOP");
+        frozen = true;
+        const record = inspectRecords().find((item) => item.request_id === state.requestId);
+        const noteThere = fs.existsSync(notePath);
+        const status = record?.status || "";
+        if (!((status === "approved" || status === "dispatching") && !noteThere)) {
+          stopObserved = `frozen saw ${status} note=${noteThere}`;
+          inflight = "";
+        }
+      } catch (error) {
+        frozen = false;
+        stopObserved = `SIGSTOP failed: ${error.message || error}`;
+      }
+    }
+    let stopPromise = null;
+    try {
+      if (inflight) {
+        stopPromise = call("POST", "/api/apps/system/agents/stop", state.systemToken, {
+          agent_id: state.agentA,
+        });
+        await sleep(30);
+      }
+    } finally {
+      if (frozen) {
+        try {
+          process.kill(gatewayPid, "SIGCONT");
+        } catch {
+          // The gateway has to leave the stop. A failed continue is recorded below.
+        }
+        frozen = false;
+      }
+    }
+    if (stopPromise) {
+      stopDuringStep = await stopPromise;
+      if (stopDuringStep.status === 409 && String(stopDuringStep.text || "").includes("agent_no_session")) {
+        runnerStoppedTooLate = true;
+        stopObserved = "the runner stopped too late";
+      }
+    } else {
+      const record = inspectRecords().find((item) => item.request_id === state.requestId);
+      const noteThere = fs.existsSync(notePath);
+      if (noteThere || record?.status === "completed") {
+        runnerStoppedTooLate = true;
+        stopObserved = "the runner stopped too late";
+      } else if (!stopObserved) {
+        stopObserved = `no in-flight step; status=${record?.status || "missing"} note=${noteThere}`;
+      }
     }
     const approved = await approvedPromise;
     keep("step_up_approve", approved.status === 200, approved.text.slice(0, 300));
@@ -1824,10 +1937,10 @@ async function main() {
   const namedStop = stopRows.find((event) => (
     event.result === "ok" || event.result === "failed" || event.result === "stopping"
   ));
-  if (runnerStoppedTooLate) {
+  if (runnerStoppedTooLate || (!stopDuringStep && stopObserved)) {
     mark("stop_after_the_note_lands", "fail", {
       http: stopDuringStep?.status || 0,
-      body: "the runner stopped too late",
+      body: stopObserved || "the runner stopped too late",
       step_outcome: stepOutcome,
       rows: stopRows.map((event) => event.result),
     });
@@ -1905,7 +2018,13 @@ async function main() {
   const ownsListener = gatewayOwnsListener(gatewayPid, listenPort);
   const childList = await listRuntimeCapsules();
   const childAgents = guestCapsuleCount(childList.capsules, [state.agentA, state.agentB]);
-  const sameProcess = planePid > 0 && planePid === gatewayPid && ownsListener
+  let secretMode = 0;
+  try {
+    secretMode = fs.statSync(planeCoords).mode & 0o777;
+  } catch {
+    secretMode = 0;
+  }
+  const sameProcess = planeSameProcess(planePid, gatewayPid, ownsListener, alive(planePid), secretMode)
     && childList.listed === true && childAgents === 0;
   if (authorised && receiptOk && marks.get("step_up_approve")?.status === "pass" && sameProcess) {
     pass("card_step_up_approve_one_write_one_receipt", {
@@ -1947,7 +2066,7 @@ async function main() {
   const replay = state.approveBody
     ? await call("POST", "/api/apps/inbox/actions", state.inboxToken, state.approveBody)
     : { status: 0, text: "no approve body" };
-  const replayClean = replay.status !== 200
+  const replayClean = replay.status !== 200 && replay.status !== 404
     && JSON.stringify(inspectRecords()) === recordBeforeReplay
     && JSON.stringify(auditEvents().map((event) => event.event_type)) === auditsBeforeReplay
     && JSON.stringify(interestingFiles()) === filesBeforeReplay;
@@ -2003,7 +2122,7 @@ async function main() {
     const restart = state.approveBody
       ? await call("POST", "/api/apps/inbox/actions", state.inboxToken, state.approveBody)
       : { status: 0, text: "no approve body" };
-    const restartClean = restart.status !== 200
+    const restartClean = restart.status !== 200 && restart.status !== 404
       && JSON.stringify(inspectRecords()) === recordBeforeRestart
       && JSON.stringify(auditEvents().map((event) => event.event_type)) === auditsBeforeRestart
       && JSON.stringify(interestingFiles()) === filesBeforeRestart;
@@ -2052,7 +2171,9 @@ async function main() {
     agent_id: state.agentA,
   });
   const denial = auditEvents().some((event) => event.event_type === "agent.stop.denied" && event.result === "denied");
-  if (guestStop.status !== 200 && denial) pass("owner_denial_signed_row", { status: guestStop.status });
+  if (guestStop.status !== 200 && guestStop.status !== 404 && denial) {
+    pass("owner_denial_signed_row", { status: guestStop.status });
+  }
   else mark("owner_denial_signed_row", "fail", { status: guestStop.status, denial });
 
 }

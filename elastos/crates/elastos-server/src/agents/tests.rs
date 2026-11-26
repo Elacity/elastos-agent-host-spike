@@ -589,6 +589,54 @@ fn the_sequence_rises_by_exactly_one() {
 }
 
 #[test]
+fn seq_ten_does_not_confirm_sequence_one() {
+    let home = Home::new();
+    crate::auth::append_audit_event(
+        home.dir.path(),
+        elastos_runtime::auth::RuntimeAuditEventV1 {
+            schema: elastos_runtime::auth::RuntimeAuditEventV1::SCHEMA.to_string(),
+            event_id: "audit:agent-records:10:aaaaaaaaaaaaaaaa".to_string(),
+            event_type: "agent.records.enable".to_string(),
+            principal_id: Some(OWNER_ID.to_string()),
+            proof_binding_id: None,
+            session_id: None,
+            challenge_id: None,
+            capsule_id: None,
+            result: "ok".to_string(),
+            reason: "seq=10 sha256=abcd".to_string(),
+            occurred_at: 1,
+            signer_did: None,
+            signature: None,
+        },
+    )
+    .unwrap();
+    let pending = LastAudit {
+        sequence: 1,
+        operation: "agent.records.enable".to_string(),
+        subject: OWNER_ID.to_string(),
+        proof_binding_id: "proof".to_string(),
+        session_id: "session".to_string(),
+        at: 2,
+        confirmed: false,
+    };
+    let rows = || {
+        crate::auth::load_auth_state(home.dir.path())
+            .unwrap()
+            .audit
+            .len()
+    };
+    let before = rows();
+    crate::agent_record_audit::repair_recorded_audit(home.dir.path(), &pending, b"file").unwrap();
+    assert_eq!(rows(), before + 1, "seq=10 does not stand in for seq=1");
+    crate::agent_record_audit::repair_recorded_audit(home.dir.path(), &pending, b"file").unwrap();
+    assert_eq!(
+        rows(),
+        before + 1,
+        "the repaired seq=1 row is not written twice"
+    );
+}
+
+#[test]
 fn only_the_listed_operations_change_the_file() {
     let before = enabled_file(vec![
         stored_agent(OWNER_ID, AGENT_A),

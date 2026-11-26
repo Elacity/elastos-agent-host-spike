@@ -186,14 +186,17 @@ async fn plan_file(data_dir: &Path) -> PathBuf {
     panic!("the guest did not store a plan");
 }
 
-fn settle(path: &Path, status: &str) {
-    let mut record: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+fn settle(data_dir: &Path, path: &Path, status: &str) {
+    let record: serde_json::Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
     assert_eq!(record["status"], "pending", "{record}");
-    record["status"] = serde_json::json!(status);
-    record["result"] = serde_json::json!({"status": "ok", "data": {"done": true}});
-    std::fs::write(path, serde_json::to_vec(&record).unwrap()).unwrap();
-    crate::resource_bridge::notify_plan_waiters();
+    let request_id = record["request_id"].as_str().expect("request id");
+    super::super::gateway_inspect_actions::settle_plan_through_dispatch_for_test(
+        data_dir,
+        request_id,
+        status,
+        serde_json::json!({"status": "ok", "data": {"done": true}}),
+    )
+    .expect("the approval route settles the plan");
 }
 
 async fn finish(
@@ -207,14 +210,16 @@ async fn finish(
 
 /// Approval at 31s and at 100s, denial at 45s, and the named limit.
 /// Short clocks: 1ms is 1s of the 300s the owner has.
+/// The park itself stays long, so only the product notify ends it.
 #[tokio::test]
+#[ignore = "loads examples/agent-host/agent-host.component.wasm; run examples/agent-host/run-e2e.sh"]
 async fn the_real_guest_waits_out_the_owner_approval_time() {
     for (owner_ms, status) in [(31, "completed"), (100, "completed"), (45, "denied")] {
         let host = host().await;
         let _clock = ClockGuard {
             home: host.data_dir.clone(),
         };
-        crate::api::gateway::seams::set_plan_park_ms(&host.data_dir, 30);
+        crate::api::gateway::seams::set_plan_park_ms(&host.data_dir, 120_000);
         let mut task = launch(&host);
         grant_opening_asks(&host, &mut task).await;
         let path = plan_file(&host.data_dir).await;
@@ -223,7 +228,7 @@ async fn the_real_guest_waits_out_the_owner_approval_time() {
             !task.is_finished(),
             "the guest ended before the {owner_ms}s decision"
         );
-        settle(&path, status);
+        settle(&host.data_dir, &path, status);
         finish(task)
             .await
             .unwrap_or_else(|error| panic!("{owner_ms}s {status} did not land: {error:#}"));

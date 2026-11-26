@@ -20,3 +20,8 @@ cargo test --locked -p elastos-server --lib --features prototype-agents \
   api::gateway::gateway_tests::agent_plan::a15r_real_journey_one_step_one_result \
   -- --exact | tee "$proof_dir/joined.log"
 grep -Eq 'test result: ok\. 1 passed; 0 failed;' "$proof_dir/joined.log"
+
+cargo test --locked -p elastos-server --lib --features prototype-agents \
+  api::gateway::gateway_tests::agent_host_wait::the_real_guest_waits_out_the_owner_approval_time \
+  -- --ignored --exact | tee "$proof_dir/wait.log"
+grep -Eq 'test result: ok\. 1 passed; 0 failed;' "$proof_dir/wait.log"
