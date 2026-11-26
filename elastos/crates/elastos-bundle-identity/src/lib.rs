@@ -4,6 +4,7 @@
 //! can call the one implementation. It names a bundle or refuses; it admits and launches nothing.
 #![forbid(unsafe_code)]
 
+use std::cell::RefCell;
 #[cfg(unix)]
 use std::ffi::CString;
 use std::ffi::OsStr;
@@ -491,6 +492,7 @@ struct Tally {
     budget: Budget,
     entries: usize,
     bytes: u64,
+    empty_folders: Vec<String>,
 }
 
 impl Tally {
@@ -499,6 +501,7 @@ impl Tally {
             budget,
             entries: 0,
             bytes: 0,
+            empty_folders: Vec::new(),
         }
     }
 
@@ -537,6 +540,11 @@ impl Tally {
             return Err(over("total bytes", path));
         }
         Ok(())
+    }
+
+    /// An empty folder. It was listed, so it is already charged. It is not a file.
+    fn note_empty(&mut self, path: &str) {
+        self.empty_folders.push(path.to_owned());
     }
 }
 
@@ -600,10 +608,54 @@ pub fn checked_bundle_observed(
     checked_bundle_within_observed(bundle, Budget::UNLIMITED, observe)
 }
 
+/// What one walk listed. The bundle's name is its files. An empty folder is
+/// named here and is not stored and is not part of that name.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct WalkReport {
+    /// Files and folders listed under the root.
+    pub entries: usize,
+    /// Bytes of the regular files the walk kept.
+    pub bytes: u64,
+    /// Empty folders, sorted by path. The walk's own limits bound the list:
+    /// at most `max_entries` paths, each at most `max_path_bytes` long.
+    pub empty_folders: Vec<String>,
+}
+
+thread_local! {
+    static WALK_REPORT: RefCell<Option<WalkReport>> = const { RefCell::new(None) };
+}
+
+fn clear_walk_report() {
+    WALK_REPORT.with(|slot| *slot.borrow_mut() = None);
+}
+
+fn stash_walk_report(report: WalkReport) {
+    WALK_REPORT.with(|slot| *slot.borrow_mut() = Some(report));
+}
+
+fn take_walk_report() -> WalkReport {
+    WALK_REPORT.with(|slot| slot.borrow_mut().take().unwrap_or_default())
+}
+
 /// [`checked_bundle`] under a [`Budget`]: the same walk and the same manifest
 /// check, refused as [`Refusal::OverBudget`] as soon as a limit is passed.
+/// The walk's report is dropped. [`checked_bundle_within_reported`] keeps it.
 pub fn checked_bundle_within(bundle: &Path, budget: Budget) -> Result<CheckedBundle, Refusal> {
-    checked_bundle_within_observed(bundle, budget, |_, _| {})
+    let mut discarded = WalkReport::default();
+    checked_bundle_within_reported(bundle, budget, &mut discarded)
+}
+
+/// [`checked_bundle_within`] that also fills `report`. One walk. The report
+/// replaces whatever `report` held. The seam below builds the [`CheckedBundle`];
+/// its shape is fixed, so this function reads the report that walk leaves.
+pub fn checked_bundle_within_reported(
+    bundle: &Path,
+    budget: Budget,
+    report: &mut WalkReport,
+) -> Result<CheckedBundle, Refusal> {
+    let checked = checked_bundle_within_observed(bundle, budget, |_, _| {})?;
+    *report = take_walk_report();
+    Ok(checked)
 }
 
 /// [`checked_bundle_observed`] under a [`Budget`]. This is the one walk; the
@@ -613,13 +665,19 @@ pub fn checked_bundle_within_observed(
     budget: Budget,
     mut observe: impl FnMut(Moment, &str),
 ) -> Result<CheckedBundle, Refusal> {
-    let entries = collect_entries(bundle, &mut observe, &mut Tally::new(budget))?;
+    clear_walk_report();
+    let mut tally = Tally::new(budget);
+    let entries = collect_entries(bundle, &mut observe, &mut tally)?;
     let manifest = entries
         .iter()
         .find(|entry| entry.path == MANIFEST_FILE)
         .ok_or(Refusal::NoManifest)?;
     let (wasm, name, role) = check_manifest(&manifest.content)?;
-    encode_entries(&entries)
+    let bytes: u64 = entries.iter().map(|entry| entry.content.len() as u64).sum();
+    let mut empty_folders = std::mem::take(&mut tally.empty_folders);
+    empty_folders.sort();
+    let listed = tally.entries;
+    let built = encode_entries(&entries)
         // The value keeps the very entries its lab CID names: no second read.
         .map(|cid| CheckedBundle {
             cid,
@@ -627,7 +685,13 @@ pub fn checked_bundle_within_observed(
             wasm,
             name,
             role,
-        })
+        })?;
+    stash_walk_report(WalkReport {
+        entries: listed,
+        bytes,
+        empty_folders,
+    });
+    Ok(built)
 }
 
 /// Check the name `claimed` against the bundle at `bundle`.
@@ -1190,6 +1254,9 @@ fn collect_entries(
         observe(Moment::AfterCheck, &path);
         if kind == EntryKind::Directory {
             let listing = list_folder(handle.as_fd(), &path, tally)?;
+            if listing.as_slice().is_empty() {
+                tally.note_empty(&path);
+            }
             folders.push(Folder { handle, listing });
         } else {
             let content = read_file(handle, &path, tally)?;
