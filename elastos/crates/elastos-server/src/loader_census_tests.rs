@@ -1233,3 +1233,232 @@ fn native_provider_spawn_routes_keep_the_checked_executable() {
         );
     }
 }
+
+fn decl_prefix(prefix: &str) -> bool {
+    prefix.split_whitespace().all(|word| {
+        word.starts_with("pub")
+            || matches!(word, "async" | "unsafe" | "const" | "extern" | "default")
+    })
+}
+
+fn brace_body(code: &str, from: usize) -> Option<String> {
+    let bytes = code.as_bytes();
+    let open = bytes[from..].iter().position(|byte| *byte == b'{')? + from;
+    let mut depth = 0usize;
+    for (at, byte) in bytes[open..].iter().enumerate() {
+        match byte {
+            b'{' => depth += 1,
+            b'}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(code[open..=open + at].to_string());
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Production functions, by name. A name that two files define stays a list,
+/// and a caller follows it only when one definition is the one in reach.
+fn function_index(sources: &BTreeMap<String, String>) -> BTreeMap<String, Vec<(String, String)>> {
+    let mut index: BTreeMap<String, Vec<(String, String)>> = BTreeMap::new();
+    for (file, text) in sources {
+        let code = source::code_only(text);
+        let bytes = code.as_bytes();
+        let mut at = 0;
+        while let Some(rel) = code[at..].find("fn ") {
+            let fn_at = at + rel;
+            let ident_before = fn_at > 0 && {
+                let prev = bytes[fn_at - 1];
+                prev.is_ascii_alphanumeric() || prev == b'_'
+            };
+            let line_start = code[..fn_at]
+                .rfind('\n')
+                .map(|index| index + 1)
+                .unwrap_or(0);
+            if !ident_before && decl_prefix(code[line_start..fn_at].trim()) {
+                let name_at = fn_at + 3;
+                let name_len = code[name_at..]
+                    .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+                    .unwrap_or(code.len() - name_at);
+                if name_len > 0 {
+                    if let Some(body) = brace_body(&code, name_at + name_len) {
+                        index
+                            .entry(code[name_at..name_at + name_len].to_string())
+                            .or_default()
+                            .push((file.clone(), body));
+                    }
+                }
+            }
+            at = fn_at + 3;
+        }
+    }
+    index
+}
+
+fn calls(body: &str) -> Vec<String> {
+    let bytes = body.as_bytes();
+    let mut found = Vec::new();
+    for (paren, _) in body.match_indices('(') {
+        let mut end = paren;
+        while end > 0 && bytes[end - 1].is_ascii_whitespace() {
+            end -= 1;
+        }
+        let mut start = end;
+        while start > 0 && {
+            let prev = bytes[start - 1];
+            prev.is_ascii_alphanumeric() || prev == b'_'
+        } {
+            start -= 1;
+        }
+        if start < end {
+            found.push(body[start..end].to_string());
+        }
+    }
+    found
+}
+
+fn choose<'a>(
+    index: &'a BTreeMap<String, Vec<(String, String)>>,
+    name: &str,
+    file: &str,
+) -> Option<&'a str> {
+    let defs = index.get(name)?;
+    let same: Vec<_> = defs
+        .iter()
+        .filter(|(def_file, _)| def_file == file)
+        .collect();
+    if same.len() == 1 {
+        Some(same[0].1.as_str())
+    } else if defs.len() == 1 {
+        Some(defs[0].1.as_str())
+    } else {
+        None
+    }
+}
+
+fn reachable(
+    index: &BTreeMap<String, Vec<(String, String)>>,
+    file: &str,
+    function: &str,
+) -> String {
+    let mut seen = BTreeSet::new();
+    let mut queue = vec![(file.to_string(), function.to_string())];
+    let mut text = String::new();
+    while let Some((file, name)) = queue.pop() {
+        if !seen.insert((file.clone(), name.clone())) {
+            continue;
+        }
+        let Some(body) = choose(index, &name, &file) else {
+            continue;
+        };
+        text.push_str(body);
+        text.push('\n');
+        let here = index.get(&name).and_then(|defs| {
+            let same = defs
+                .iter()
+                .filter(|(def_file, _)| def_file == &file)
+                .count();
+            if same == 1 {
+                Some(file.clone())
+            } else if defs.len() == 1 {
+                Some(defs[0].0.clone())
+            } else {
+                None
+            }
+        });
+        let Some(def_file) = here else {
+            continue;
+        };
+        for called in calls(body) {
+            if choose(index, &called, &def_file).is_some() {
+                queue.push((def_file.clone(), called));
+            }
+        }
+    }
+    text
+}
+
+/// The closure rows reach the one pinned walk, and the stage row reaches the
+/// report. `run_signer` refuses a loose requirement and walks the folder; it
+/// does not admit a pinned member.
+#[test]
+fn closure_and_stage_rows_bind_to_their_checks() {
+    let sources = source::production_sources();
+    let index = function_index(&sources);
+    let pinned = ".admit_closure_member(data_dir, &pinned";
+    let closure: Vec<_> = rows()
+        .into_iter()
+        .filter(|row| row.checks == "CID+DID+closure" && row.function != "run_signer")
+        .collect();
+    assert_eq!(closure.len(), 7, "a closure row was added or dropped");
+    for row in &closure {
+        let reached = reachable(&index, row.file, row.function);
+        assert!(
+            reached.contains(pinned),
+            "{}::{} does not reach the pinned member walk",
+            row.file,
+            row.function
+        );
+    }
+    assert_eq!(
+        rows()
+            .iter()
+            .filter(|row| row.function == "run_signer" && row.checks == "CID+DID+closure")
+            .count(),
+        1
+    );
+    let signer = reachable(&index, "elastos-server/src/runtime.rs", "run_signer");
+    assert!(
+        signer.contains("walk_folder_start("),
+        "run_signer does not walk the folder"
+    );
+    // The refusal text is a string, so the code-only walk blanks it. The
+    // enclosing function is read from the source the census keeps.
+    let runtime = &sources["elastos-server/src/runtime.rs"];
+    let runtime_code = source::code_only(runtime);
+    assert!(
+        runtime
+            .match_indices("bundle_requirement_unpinned")
+            .any(|(at, _)| source::enclosing_fn(&runtime_code, at) == "run_signer"),
+        "run_signer does not refuse a loose requirement"
+    );
+    let signer_body =
+        choose(&index, "run_signer", "elastos-server/src/runtime.rs").expect("run_signer");
+    assert!(
+        !signer_body.contains("admit_closure_member("),
+        "run_signer now admits a pinned member; bind the row to that call"
+    );
+    let folder_walk = reachable(&index, "elastos-server/src/runtime.rs", "walk_folder_start");
+    assert!(
+        folder_walk.contains("checked_bundle_within("),
+        "the folder walk dropped its budgeted walk"
+    );
+    assert_eq!(
+        rows()
+            .iter()
+            .filter(|row| row.function == "stage_bundle" && row.checks == "CID+DID")
+            .count(),
+        1
+    );
+    let stage = reachable(&index, "elastos-server/src/stage_cmd.rs", "stage_bundle");
+    assert!(
+        stage.contains("checked_bundle_within_reported("),
+        "stage_bundle does not walk with a report"
+    );
+    assert!(
+        stage.contains("empty_folders"),
+        "stage_bundle does not name an empty folder"
+    );
+    let windows = fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../elastos-bundle-identity/src/windows_walk.rs"),
+    )
+    .unwrap();
+    assert!(
+        windows.contains("tally.note_empty("),
+        "Windows walk gap: an empty folder is dropped and not named"
+    );
+}
