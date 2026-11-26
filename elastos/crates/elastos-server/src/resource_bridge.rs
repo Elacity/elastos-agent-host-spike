@@ -878,6 +878,7 @@ struct AbandonedPlanGrant {
     /// until the revoke below removes the entry.
     refused: bool,
     revoking: bool,
+    ready: Arc<tokio::sync::watch::Sender<u8>>,
 }
 
 /// The one-use grant for a dispatch that has not finished. Dropping the
@@ -911,6 +912,12 @@ impl Drop for HeldPlanGrant {
 fn abandoned_plan_grants() -> &'static Mutex<HashMap<String, AbandonedPlanGrant>> {
     static GRANTS: OnceLock<Mutex<HashMap<String, AbandonedPlanGrant>>> = OnceLock::new();
     GRANTS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn abandoned_grants() -> std::sync::MutexGuard<'static, HashMap<String, AbandonedPlanGrant>> {
+    abandoned_plan_grants()
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
 }
 
 async fn revoke_plan_grant(
@@ -952,6 +959,7 @@ pub(crate) fn park_abandoned_grant_for_test(
                 pending_id,
                 refused: false,
                 revoking: false,
+                ready: Arc::new(tokio::sync::watch::channel(0).0),
             },
         );
 }
@@ -978,7 +986,7 @@ fn plan_grant_spend_is_refused(token_id: &elastos_runtime::capability::token::To
 #[cfg(all(test, unix))]
 struct AbandonedRevokeGate {
     entered: Arc<std::sync::atomic::AtomicUsize>,
-    skipped: Arc<std::sync::atomic::AtomicUsize>,
+    waiting: Arc<std::sync::atomic::AtomicUsize>,
     progress: Arc<tokio::sync::Notify>,
     release: Arc<tokio::sync::Notify>,
 }
@@ -990,7 +998,7 @@ static ABANDONED_REVOKE_GATE: Mutex<Vec<(String, AbandonedRevokeGate)>> = Mutex:
 #[cfg(all(test, unix))]
 pub(crate) struct AbandonedRevokePause {
     pub(crate) entered: Arc<std::sync::atomic::AtomicUsize>,
-    pub(crate) skipped: Arc<std::sync::atomic::AtomicUsize>,
+    pub(crate) waiting: Arc<std::sync::atomic::AtomicUsize>,
     pub(crate) progress: Arc<tokio::sync::Notify>,
     release: Arc<tokio::sync::Notify>,
 }
@@ -1005,7 +1013,7 @@ impl AbandonedRevokePause {
 #[cfg(all(test, unix))]
 pub(crate) fn arm_abandoned_revoke_overlap(request_id: &str) -> AbandonedRevokePause {
     let entered = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let skipped = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let waiting = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let progress = Arc::new(tokio::sync::Notify::new());
     let release = Arc::new(tokio::sync::Notify::new());
     ABANDONED_REVOKE_GATE
@@ -1015,14 +1023,14 @@ pub(crate) fn arm_abandoned_revoke_overlap(request_id: &str) -> AbandonedRevokeP
             request_id.to_string(),
             AbandonedRevokeGate {
                 entered: Arc::clone(&entered),
-                skipped: Arc::clone(&skipped),
+                waiting: Arc::clone(&waiting),
                 progress: Arc::clone(&progress),
                 release: Arc::clone(&release),
             },
         ));
     AbandonedRevokePause {
         entered,
-        skipped,
+        waiting,
         progress,
         release,
     }
@@ -1036,12 +1044,12 @@ impl Drop for AbandonedRevokePause {
 }
 
 #[cfg(all(test, unix))]
-fn note_abandoned_revoke_skipped(request_id: &str) {
+fn note_abandoned_revoke_waiting(request_id: &str) {
     let gates = ABANDONED_REVOKE_GATE
         .lock()
         .unwrap_or_else(|err| err.into_inner());
     if let Some((_, gate)) = gates.iter().find(|(id, _)| id == request_id) {
-        gate.skipped
+        gate.waiting
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         gate.progress.notify_waiters();
     }
@@ -1068,28 +1076,46 @@ async fn pause_abandoned_revoke(request_id: &str) {
     waiting.await;
 }
 
-pub(crate) async fn revoke_abandoned_plan_grant(request_id: &str) {
-    let held = {
-        let mut grants = abandoned_plan_grants()
-            .lock()
-            .unwrap_or_else(|err| err.into_inner());
-        let Some(grant) = grants.get_mut(request_id) else {
-            return;
-        };
-        if grant.revoking {
-            #[cfg(all(test, unix))]
-            note_abandoned_revoke_skipped(request_id);
-            return;
+struct ClearRevoking(String, Arc<tokio::sync::watch::Sender<u8>>);
+
+impl Drop for ClearRevoking {
+    fn drop(&mut self) {
+        if let Some(grant) = abandoned_grants().get_mut(&self.0) {
+            grant.revoking = false;
         }
-        grant.revoking = true;
-        grant.refused = true;
-        (
-            Arc::clone(&grant.manager),
-            Arc::clone(&grant.store),
-            grant.token.clone(),
-            grant.pending_id.clone(),
-        )
+        let next = self.1.borrow().wrapping_add(1);
+        let _ = self.1.send(next);
+    }
+}
+
+pub(crate) async fn revoke_abandoned_plan_grant(request_id: &str) {
+    let (held, ready) = loop {
+        let (mut watch, seen) = {
+            let mut grants = abandoned_grants();
+            let Some(grant) = grants.get_mut(request_id) else {
+                return;
+            };
+            if !grant.revoking {
+                grant.revoking = true;
+                grant.refused = true;
+                let held = (
+                    Arc::clone(&grant.manager),
+                    Arc::clone(&grant.store),
+                    grant.token.clone(),
+                    grant.pending_id.clone(),
+                );
+                let ready = Arc::clone(&grant.ready);
+                break (held, ready);
+            }
+            let watch = grant.ready.subscribe();
+            let seen = *watch.borrow();
+            (watch, seen)
+        };
+        #[cfg(all(test, unix))]
+        note_abandoned_revoke_waiting(request_id);
+        let _ = watch.wait_for(|value| *value != seen).await;
     };
+    let _mark = ClearRevoking(request_id.to_string(), ready);
     #[cfg(all(test, unix))]
     pause_abandoned_revoke(request_id).await;
     revoke_plan_grant(
@@ -1100,10 +1126,7 @@ pub(crate) async fn revoke_abandoned_plan_grant(request_id: &str) {
         "plan dispatch abandoned",
     )
     .await;
-    abandoned_plan_grants()
-        .lock()
-        .unwrap_or_else(|err| err.into_inner())
-        .remove(request_id);
+    abandoned_grants().remove(request_id);
 }
 
 /// The product spend of a bridge token. A dropped dispatch's grant is refused
@@ -1369,6 +1392,7 @@ pub(crate) async fn dispatch_agent_plan_step(
             pending_id,
             refused: false,
             revoking: false,
+            ready: Arc::new(tokio::sync::watch::channel(0).0),
         }),
     });
     #[cfg(all(test, unix))]

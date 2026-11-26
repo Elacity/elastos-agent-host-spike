@@ -2765,13 +2765,13 @@ async fn two_callers_revoke_an_abandoned_grant_once() {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
     loop {
         let seen = overlap.entered.load(std::sync::atomic::Ordering::SeqCst)
-            + overlap.skipped.load(std::sync::atomic::Ordering::SeqCst);
+            + overlap.waiting.load(std::sync::atomic::Ordering::SeqCst);
         if seen >= 2 || std::time::Instant::now() >= deadline {
             break;
         }
         let wait = overlap.progress.notified();
         let seen = overlap.entered.load(std::sync::atomic::Ordering::SeqCst)
-            + overlap.skipped.load(std::sync::atomic::Ordering::SeqCst);
+            + overlap.waiting.load(std::sync::atomic::Ordering::SeqCst);
         if seen >= 2 {
             break;
         }
@@ -2785,6 +2785,17 @@ async fn two_callers_revoke_an_abandoned_grant_once() {
         overlap.entered.load(std::sync::atomic::Ordering::SeqCst),
         1,
         "both callers revoked"
+    );
+    assert!(
+        overlap.waiting.load(std::sync::atomic::Ordering::SeqCst) >= 1,
+        "the second caller returned before the first revoke finished"
+    );
+    for _ in 0..8 {
+        tokio::task::yield_now().await;
+    }
+    assert!(
+        !right.is_finished(),
+        "the second revoke returned while the first was still open"
     );
     overlap.release_for_test();
     left.await.unwrap();
@@ -2802,6 +2813,121 @@ async fn two_callers_revoke_an_abandoned_grant_once() {
         })
         .count();
     assert_eq!(revokes, 1, "two callers each audited the revoke");
+}
+
+/// The first revoke is cancelled while it is still open. Its mark clears, and
+/// the next revoke runs.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_cancelled_revoke_lets_the_next_one_run() {
+    let audit = Arc::new(elastos_runtime::primitives::audit::AuditLog::new());
+    let manager = Arc::new(elastos_runtime::capability::CapabilityManager::new(
+        Arc::new(elastos_runtime::capability::CapabilityStore::new()),
+        audit,
+        Arc::new(elastos_runtime::primitives::metrics::MetricsManager::new()),
+    ));
+    let store = Arc::new(
+        elastos_runtime::capability::pending::PendingRequestStore::new(manager.audit_log().clone()),
+    );
+    let resource = elastos_runtime::capability::ResourceId::new("elastos://availability/status");
+    let token = manager.grant(
+        "capsule:revoke-cancel",
+        resource.clone(),
+        elastos_runtime::capability::Action::Read,
+        elastos_runtime::capability::TokenConstraints::default(),
+        None,
+    );
+    let pending = store
+        .create_request(
+            elastos_runtime::session::SessionId::from_string("capsule:revoke-cancel"),
+            resource,
+            elastos_runtime::capability::Action::Read,
+        )
+        .await;
+    let pending_id = pending.id.as_str().to_string();
+    store
+        .grant_request(
+            &pending_id,
+            token.clone(),
+            elastos_runtime::capability::pending::GrantDuration::Session,
+        )
+        .await
+        .unwrap();
+    crate::resource_bridge::park_abandoned_grant_for_test(
+        "revoke-cancel",
+        Arc::clone(&manager),
+        store,
+        token,
+        pending_id,
+    );
+    let overlap = crate::resource_bridge::arm_abandoned_revoke_overlap("revoke-cancel");
+    let first = tokio::spawn(crate::resource_bridge::revoke_abandoned_plan_grant(
+        "revoke-cancel",
+    ));
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    loop {
+        if overlap.entered.load(std::sync::atomic::Ordering::SeqCst) >= 1
+            || std::time::Instant::now() >= deadline
+        {
+            break;
+        }
+        let wait = overlap.progress.notified();
+        if overlap.entered.load(std::sync::atomic::Ordering::SeqCst) >= 1 {
+            break;
+        }
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        if left.is_zero() {
+            break;
+        }
+        let _ = tokio::time::timeout(left, wait).await;
+    }
+    assert_eq!(
+        overlap.entered.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "the first revoke did not open"
+    );
+    first.abort();
+    let _ = first.await;
+    let second = tokio::spawn(crate::resource_bridge::revoke_abandoned_plan_grant(
+        "revoke-cancel",
+    ));
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    loop {
+        if overlap.entered.load(std::sync::atomic::Ordering::SeqCst) >= 2
+            || std::time::Instant::now() >= deadline
+        {
+            break;
+        }
+        let wait = overlap.progress.notified();
+        if overlap.entered.load(std::sync::atomic::Ordering::SeqCst) >= 2 {
+            break;
+        }
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        if left.is_zero() {
+            break;
+        }
+        let _ = tokio::time::timeout(left, wait).await;
+    }
+    assert_eq!(
+        overlap.entered.load(std::sync::atomic::Ordering::SeqCst),
+        2,
+        "the cancelled revoke left its mark set"
+    );
+    overlap.release_for_test();
+    second.await.unwrap();
+    let revokes = manager
+        .audit_log()
+        .recent_events(40)
+        .into_iter()
+        .filter(|event| {
+            matches!(
+                event,
+                elastos_runtime::primitives::audit::AuditEvent::CapabilityRevoke { reason, .. }
+                    if reason == "plan dispatch abandoned"
+            )
+        })
+        .count();
+    assert_eq!(revokes, 1, "the next revoke did not run once");
 }
 
 /// A late store after unknown is the same effect. The record stays unknown,
