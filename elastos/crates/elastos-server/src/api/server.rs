@@ -190,7 +190,7 @@ pub(crate) fn build_router(config: ServerConfig) -> anyhow::Result<Router> {
         host_helpers: _,
     } = config;
     if let Some(home) = data_dir.as_deref() {
-        crate::runtime::wire_home_runtime(home, Some(&runtime.plan_book));
+        crate::runtime::wire_home_runtime(home, &runtime.plan_book);
     }
     // Runtime keeps this control API on its own configured origin.
     // Browser capsules use the gateway launch boundary.

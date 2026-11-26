@@ -523,7 +523,7 @@ fn capsule_stop_response(
         name,
         status: if decision.stopping {
             "stopping".to_string()
-        } else if !decision.unknown_steps.is_empty() {
+        } else if status_text != "failed" && !decision.unknown_steps.is_empty() {
             "stopped".to_string()
         } else {
             status_text
@@ -10374,6 +10374,60 @@ pub(crate) mod tests {
             !start_refused_because_stopping(&runtime, agent).await,
             "a panic in Stop left Start refused"
         );
+    }
+
+    /// Stop names an unknown step and keeps a failed capsule failed.
+    #[tokio::test]
+    async fn a_failed_stop_keeps_failed_when_it_names_an_unknown_step() {
+        use axum::body::to_bytes;
+
+        let response = capsule_stop_response(
+            "cap".to_string(),
+            "guest".to_string(),
+            "failed".to_string(),
+            "session".to_string(),
+            Some("failed: boom".to_string()),
+            crate::runtime::PlanStopDecision {
+                stopping: false,
+                unknown_steps: vec!["step-9".to_string()],
+            },
+        );
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let answer: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(answer["status"], "failed");
+        assert_eq!(answer["unknown_steps"][0], "step-9");
+
+        let running = capsule_stop_response(
+            "cap".to_string(),
+            "guest".to_string(),
+            "running".to_string(),
+            "session".to_string(),
+            None,
+            crate::runtime::PlanStopDecision {
+                stopping: false,
+                unknown_steps: vec!["step-9".to_string()],
+            },
+        );
+        let running_bytes = to_bytes(running.into_body(), usize::MAX).await.unwrap();
+        let running_answer: serde_json::Value = serde_json::from_slice(&running_bytes).unwrap();
+        assert_eq!(running_answer["status"], "stopped");
+
+        let landing = capsule_stop_response(
+            "cap".to_string(),
+            "guest".to_string(),
+            "failed".to_string(),
+            "session".to_string(),
+            Some("failed: boom".to_string()),
+            crate::runtime::PlanStopDecision {
+                stopping: true,
+                unknown_steps: vec!["step-9".to_string()],
+            },
+        );
+        assert_eq!(landing.status(), StatusCode::ACCEPTED);
+        let landing_bytes = to_bytes(landing.into_body(), usize::MAX).await.unwrap();
+        let landing_answer: serde_json::Value = serde_json::from_slice(&landing_bytes).unwrap();
+        assert_eq!(landing_answer["status"], "stopping");
     }
 }
 

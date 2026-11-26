@@ -565,6 +565,31 @@ test("a stop keeps the unknown names when the reload fails or comes back empty",
   assert.equal(empty.state(AGENT_ID), "Unknown step: step-9 unknown");
 });
 
+test("a stop that is still stopping keeps that mark when the reload throws", async () => {
+  let gets = 0;
+  const ui = mount((path, init = {}) => {
+    if ((init.method || "GET") === "GET") {
+      gets += 1;
+      if (gets > 1) return Promise.reject(new Error("request failed: 500 the list failed"));
+      return Promise.resolve({
+        agents: [{ agent_id: AGENT_ID, display_name: "Helper", active: true }],
+      });
+    }
+    return Promise.resolve({
+      agent_id: AGENT_ID,
+      stopped: [],
+      stopping: [{ session_id: "session-1", status: "stopping" }],
+      unknown: [{ session_id: "session-1", request_id: "step-9", outcome: "unknown" }],
+    });
+  });
+  await ui.load();
+  ui.button("Stop").click();
+  await flush();
+  await flush();
+  assert.equal(ui.state(AGENT_ID), "Stopping. Unknown step: step-9 unknown");
+  assert.equal(ui.button("Start").disabled, true);
+});
+
 test("a stop that is still stopping names the unknown step as well", async () => {
   const ui = mount((path, init = {}) => {
     if ((init.method || "GET") === "GET") {

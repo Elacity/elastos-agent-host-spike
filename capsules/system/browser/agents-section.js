@@ -239,7 +239,7 @@ export function bindAgents(doc, request, confirmStepUp) {
         throw pageRefusal("The Home did not confirm that change.");
       }
       const note = unknown.map((step) => `${text(step.request_id)} ${text(step.outcome)}`.trim()).filter(Boolean).join(", ");
-      try { await load(); } catch (error) { if (note) unknownNotes.set(id, note); throw error; }
+      try { await load(); } catch (error) { if (note) unknownNotes.set(id, note); if (still.length) stopping.add(id); else stopping.delete(id); throw error; }
       if (note) unknownNotes.set(id, note);
       if (still.length) stopping.add(id);
       else stopping.delete(id);

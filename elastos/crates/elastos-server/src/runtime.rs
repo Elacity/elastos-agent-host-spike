@@ -451,8 +451,10 @@ fn new_plan_book() -> Arc<StdMutex<PlanBook>> {
     }))
 }
 
-/// One plan book for one Home. None is the gateway's claim. A second live book fails.
-pub(crate) fn wire_home_runtime(home: &Path, book: Option<&Arc<StdMutex<PlanBook>>>) {
+/// Within one process, one Home has one plan book for dispatch and Stop.
+/// A second live book fails.
+/// The installed two-process path runs no agent today and its proof comes with the package.
+pub(crate) fn wire_home_runtime(home: &Path, book: &Arc<StdMutex<PlanBook>>) {
     type Slot = std::sync::Weak<StdMutex<PlanBook>>;
     static HOMES: std::sync::OnceLock<StdMutex<HashMap<PathBuf, Slot>>> =
         std::sync::OnceLock::new();
@@ -463,12 +465,21 @@ pub(crate) fn wire_home_runtime(home: &Path, book: Option<&Arc<StdMutex<PlanBook
         .unwrap_or_else(|err| err.into_inner());
     let live = homes.get(&key).and_then(Slot::upgrade);
     if let Some(found) = live.as_ref() {
-        if book.is_some_and(|next| !Arc::ptr_eq(found, next)) {
-            panic!("one Home runs plan dispatch and Stop on two Runtimes");
+        if !Arc::ptr_eq(found, book) {
+            panic!("one Home runs plan dispatch and Stop on two Runtimes within one process");
         }
         return;
     }
-    homes.insert(key, book.map(Arc::downgrade).unwrap_or_default());
+    homes.insert(key, Arc::downgrade(book));
+}
+
+/// The next id at or after `start` that `occupied` does not already hold.
+fn fresh_id(start: u64, occupied: impl Fn(u64) -> bool) -> u64 {
+    let mut id = start;
+    while occupied(id) {
+        id = id.wrapping_add(1);
+    }
+    id
 }
 
 /// Request id to the book that holds its flight. Settlement of `unknown`
@@ -857,8 +868,8 @@ impl ActivationStop {
 
     fn open_id(&self) -> u64 {
         let mut calls = self.calls.lock().unwrap_or_else(|err| err.into_inner());
-        let id = calls.next;
-        calls.next = calls.next.wrapping_add(1);
+        let id = fresh_id(calls.next, |id| calls.open.contains(&id));
+        calls.next = id.wrapping_add(1);
         calls.open.insert(id);
         id
     }
@@ -1401,8 +1412,12 @@ impl AgentLiveRuns {
     }
 
     fn admit(&mut self, agent_id: &str) -> u64 {
-        let token = self.next;
-        self.next = self.next.wrapping_add(1);
+        let token = fresh_id(self.next, |id| {
+            self.tokens
+                .get(agent_id)
+                .is_some_and(|set| set.contains(&id))
+        });
+        self.next = token.wrapping_add(1);
         self.tokens
             .entry(agent_id.to_string())
             .or_default()
@@ -2096,7 +2111,7 @@ impl Runtime {
         pending_store: Arc<elastos_runtime::capability::pending::PendingRequestStore>,
         data_dir: std::path::PathBuf,
     ) {
-        wire_home_runtime(&data_dir, Some(&self.plan_book));
+        wire_home_runtime(&data_dir, &self.plan_book);
         #[cfg(test)]
         self.set_plant_dir_for_test(&data_dir);
         self.model_budget.bind_home(data_dir.clone());
@@ -2631,8 +2646,8 @@ impl Runtime {
         if !instance_open(&locked, session_id, agent_id) {
             return Err(());
         }
-        let id = locked.next;
-        locked.next = locked.next.wrapping_add(1);
+        let id = fresh_id(locked.next, |id| locked.inflight.contains_key(&id));
+        locked.next = id.wrapping_add(1);
         locked.inflight.insert(
             id,
             PlanFlight {
@@ -2862,8 +2877,13 @@ impl Runtime {
                 .stop_marks
                 .lock()
                 .unwrap_or_else(|err| err.into_inner());
-            let token = marks.next;
-            marks.next = marks.next.wrapping_add(1);
+            let token = fresh_id(marks.next, |id| {
+                marks
+                    .tokens
+                    .get(agent_id)
+                    .is_some_and(|set| set.contains(&id))
+            });
+            marks.next = token.wrapping_add(1);
             let _ = marks
                 .tokens
                 .entry(agent_id.to_string())
@@ -5327,25 +5347,33 @@ pub(crate) mod tests {
         assert_eq!(runtime.model_budget.bound_home_for_test(), Some(data_dir));
     }
 
-    /// Dispatch and Stop share one Runtime for one Home. A second book fails
-    /// closed. The gateway claims the Home, and the agent package fills it.
+    /// Within one process, one Home has one plan book for dispatch and Stop.
+    /// A second live book fails. The installed two-process path runs no agent
+    /// today and its proof comes with the package.
     #[tokio::test]
     async fn one_home_refuses_a_second_runtime_for_plan_dispatch_and_stop() {
         let bridge = include_str!("resource_bridge.rs");
         assert!(
-            bridge.contains("wire_home_runtime(data_dir, ctx.plan_book.as_ref())"),
-            "plan dispatch does not use the Home runtime"
+            bridge.contains("wire_home_runtime(data_dir, book)"),
+            "plan dispatch does not use this process's plan book"
         );
         let server = include_str!("api/server.rs");
         assert!(
-            server.contains("wire_home_runtime(home, Some(&runtime.plan_book))"),
-            "Stop's router does not use the Home runtime"
+            server.contains("wire_home_runtime(home, &runtime.plan_book)"),
+            "Stop's router does not use this process's plan book"
         );
         let gateway = include_str!("api/gateway_server.rs");
         assert!(
-            gateway.contains("wire_home_runtime(&data_dir, None)"),
-            "the gateway does not claim one Runtime for this Home"
+            !gateway.contains("wire_home_runtime"),
+            "the gateway process wires a Home runtime"
         );
+        let limit = "The installed two-process path runs no agent today and its proof comes with the package.";
+        let doc = include_str!("../../../../docs/AGENT_ARCHITECTURE.md");
+        let notes = include_str!("api/routes/tests/instance_storage_rows.rs");
+        assert!(doc.contains(limit) && doc.contains("Within one process"));
+        assert!(notes.contains(limit) && notes.contains("Within one process"));
+        assert!(!doc.contains("gateway's one Runtime"));
+        assert!(!notes.contains("gateway's one Runtime"));
         let temp = tempfile::tempdir().unwrap();
         let data_dir = temp.path().join("home");
         std::fs::create_dir_all(&data_dir).unwrap();
@@ -5373,16 +5401,124 @@ pub(crate) mod tests {
                 data_dir.clone(),
             )
             .await;
-        wire_home_runtime(&data_dir, Some(&first.plan_book));
+        wire_home_runtime(&data_dir, &first.plan_book);
         let split = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            wire_home_runtime(&data_dir, Some(&second.plan_book));
+            wire_home_runtime(&data_dir, &second.plan_book);
         }));
         let err = split.expect_err("a second Runtime was accepted for one Home");
         let message = err.downcast_ref::<&str>().copied().unwrap_or("");
-        assert!(
-            message.contains("one Home runs plan dispatch and Stop on two Runtimes"),
-            "{message}"
-        );
+        assert!(message.contains("within one process"), "{message}");
+    }
+
+    /// A counter that wraps does not reuse an id a hung call still holds.
+    #[tokio::test]
+    async fn wrapping_ids_skip_occupied_slots() {
+        let stop = ActivationStop::new();
+        {
+            let mut calls = stop.calls.lock().unwrap_or_else(|err| err.into_inner());
+            calls.next = 0;
+            calls.open.insert(0);
+            calls.open.insert(1);
+        }
+        let ticket = stop.open_id();
+        assert_eq!(ticket, 2);
+        stop.withdraw(ticket);
+        {
+            let calls = stop.calls.lock().unwrap_or_else(|err| err.into_inner());
+            assert!(calls.open.contains(&0) && calls.open.contains(&1));
+            assert!(!calls.open.contains(&ticket));
+        }
+
+        let mut runs = AgentLiveRuns {
+            next: 0,
+            ..Default::default()
+        };
+        {
+            let held = runs.tokens.entry("agent".to_string()).or_default();
+            held.insert(0);
+            held.insert(1);
+        }
+        let token = runs.admit("agent");
+        assert_eq!(token, 2);
+        runs.clear("agent", token);
+        let set = runs
+            .tokens
+            .get("agent")
+            .expect("the hung live-run tokens stay");
+        assert!(set.contains(&0) && set.contains(&1));
+        assert!(!set.contains(&token));
+
+        let book = new_plan_book();
+        {
+            let mut locked = plan_book(&book);
+            locked.next = 0;
+            locked.instances.insert(
+                "session".to_string(),
+                PlanInstance {
+                    agent_id: "agent".to_string(),
+                    stopping: false,
+                },
+            );
+            for id in [0_u64, 1] {
+                locked.inflight.insert(
+                    id,
+                    PlanFlight {
+                        session_id: "session".to_string(),
+                        agent_id: "agent".to_string(),
+                        request_id: format!("hung-{id}"),
+                    },
+                );
+            }
+        }
+        let guard = Runtime::try_enter_plan_effect(&book, "session", "agent", "fresh-wrap-r12")
+            .expect("the session is open");
+        let fresh = guard.id;
+        assert_eq!(fresh, 2);
+        guard.release();
+        {
+            let locked = plan_book(&book);
+            assert_eq!(
+                locked
+                    .inflight
+                    .get(&0)
+                    .map(|flight| flight.request_id.as_str()),
+                Some("hung-0")
+            );
+            assert_eq!(
+                locked
+                    .inflight
+                    .get(&1)
+                    .map(|flight| flight.request_id.as_str()),
+                Some("hung-1")
+            );
+            assert!(!locked.inflight.contains_key(&fresh));
+        }
+
+        let (runtime, _dir) = test_runtime().await;
+        let runtime = Arc::new(runtime);
+        {
+            let mut marks = runtime
+                .stop_marks
+                .lock()
+                .unwrap_or_else(|err| err.into_inner());
+            marks.next = 0;
+            let set = marks.tokens.entry("agent".to_string()).or_default();
+            set.insert(0);
+            set.insert(1);
+        }
+        let guard = runtime.begin_agent_stop("agent").await;
+        assert_eq!(guard.token, 2);
+        drop(guard);
+        let marks = runtime
+            .stop_marks
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        let set = marks
+            .tokens
+            .get("agent")
+            .expect("the hung stop tokens stay");
+        assert!(set.contains(&0) && set.contains(&1));
+        assert!(!set.contains(&2));
     }
 
     impl Runtime {
