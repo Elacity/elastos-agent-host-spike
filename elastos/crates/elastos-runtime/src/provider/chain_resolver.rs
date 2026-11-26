@@ -268,6 +268,7 @@ impl ChainResolver {
 
     pub(super) async fn shutdown_replacement(&self) {
         let _lock = self.restart.lock().await;
+        self.off.store(true, Ordering::Release);
         let live = self
             .replacement
             .lock()
@@ -509,6 +510,20 @@ mod tests {
             assert_eq!(after["status"], "ok", "{after}");
             assert_eq!(bridge.chain_resolver_restarts(), 1);
             bridge.shutdown().await.unwrap();
+        }
+
+        /// After shutdown a resolver change does not start chain again.
+        #[tokio::test]
+        async fn a_resolv_change_after_shutdown_leaves_chain_off() {
+            let _lock = tests_lock().lock().await;
+            let started = start(Some(b"nameserver 127.0.0.1\n")).await;
+            let warm = networks(&started.bridge).await.unwrap();
+            assert_eq!(warm["status"], "ok", "{warm}");
+            started.bridge.shutdown().await.unwrap();
+            replace_by_rename(&started.resolv, b"nameserver 127.0.0.2\n");
+            let after = networks(&started.bridge).await.unwrap_err();
+            assert_eq!(after.to_string(), CHAIN_IS_OFF);
+            assert_eq!(started.bridge.chain_resolver_restarts(), 0);
         }
 
         /// A start that fails after the identity changed does not try again.
