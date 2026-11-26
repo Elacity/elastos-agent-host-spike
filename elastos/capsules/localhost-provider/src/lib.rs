@@ -85,7 +85,7 @@ pub fn header_is_device_key_envelope(header: &[u8]) -> bool {
         && matches!(header[digit_at], b'0'..=b'9' | b'a'..=b'f')
 }
 
-/// Cut-off old header when `header` is all bytes the file has (`len`), or bad hex shows.
+/// Cut-off or damaged old header. `{`, `{"`, and a non-hex nonce stay plain.
 #[rustfmt::skip]
 pub fn header_looks_like_device_key_envelope(header: &[u8]) -> bool {
     header_looks_like_device_key_envelope_at(header, header.len() as u64)
@@ -93,12 +93,15 @@ pub fn header_looks_like_device_key_envelope(header: &[u8]) -> bool {
 
 #[rustfmt::skip]
 pub fn header_looks_like_device_key_envelope_at(header: &[u8], len: u64) -> bool {
-    const HEAD: &[u8] = br#"{"version":1,"nonce":""#;
-    if header.len() > 1 && HEAD.starts_with(header) { return true; }
-    if !header.starts_with(HEAD) || header_is_device_key_envelope(header) { return false; }
-    let mid_at = HEAD.len() + 24;
-    let bad = header.len() >= mid_at && header[HEAD.len()..mid_at].iter().any(|b| !matches!(b, b'0'..=b'9' | b'a'..=b'f'));
-    bad || header.len() as u64 >= len
+    const H: &[u8] = br#"{"version":1,"nonce":""#; const M: &[u8] = br#"","ciphertext":""#;
+    let (mid, digit) = (H.len() + 24, H.len() + 24 + M.len());
+    if header.len() <= 2 || header_is_device_key_envelope(header) { return false; }
+    let whole = header.len() as u64 >= len;
+    if !header.starts_with(H) { return whole && H.starts_with(header); }
+    let end = header.len().min(mid);
+    if header[H.len()..end].iter().any(|b| !matches!(b, b'0'..=b'9' | b'a'..=b'f')) { return false; }
+    if header.len() <= digit { return whole && (header.len() <= mid || M.starts_with(&header[mid..])); }
+    len > 64 || whole
 }
 
 #[rustfmt::skip]
@@ -596,6 +599,7 @@ mod tests {
         assert_eq!(full.len(), 62);
         for (bytes, cut) in [
             (&full[..1], false), // "{"
+            (&full[..2], false), // "{"
             (&full[..21], true),
             (&full[..28], true),
             (&full[..62], true),
@@ -620,9 +624,60 @@ mod tests {
             ENVELOPE_BYTE_LIMIT + 1
         ));
         assert!(!header_looks_like_device_key_envelope(b"{"));
+        assert!(!header_looks_like_device_key_envelope(br#"{"#));
         let (plain, _) =
             reads_as_plain_bytes(b"{", ENVELOPE_BYTE_LIMIT + 1, &mut &b""[..]).unwrap();
         assert!(plain);
+        let (plain, _) =
+            reads_as_plain_bytes(br#"{"#, ENVELOPE_BYTE_LIMIT + 1, &mut &b""[..]).unwrap();
+        assert!(plain, "a 2-byte brace was refused");
+    }
+
+    #[test]
+    fn every_prefix_of_a_real_old_header_and_damage_in_bytes_46_to_62() {
+        let sealed = encrypt_bytes(&[9; 32], b"old-header").unwrap();
+        assert!(sealed.len() > 64, "{}", sealed.len());
+        for len in 0..=sealed.len() {
+            let prefix = &sealed[..len];
+            let looks = header_looks_like_device_key_envelope_at(prefix, len as u64);
+            let old = header_is_device_key_envelope(prefix);
+            assert_eq!(looks, (3..=62).contains(&len), "prefix {len}");
+            assert_eq!(old, len > 62, "prefix {len}");
+            if len < 64 {
+                assert!(
+                    !header_looks_like_device_key_envelope_at(prefix, sealed.len() as u64),
+                    "prefix {len} of a longer file"
+                );
+            }
+        }
+        for at in 46..=62 {
+            let mut bad = sealed.clone();
+            bad[at] = b'Z';
+            assert!(
+                !header_is_device_key_envelope(&bad[..64]),
+                "byte {at} still looked whole"
+            );
+            assert!(
+                header_looks_like_device_key_envelope_at(&bad[..64], bad.len() as u64),
+                "byte {at} on a {}-byte file",
+                bad.len()
+            );
+        }
+        let plain = br#"{"version":1,"nonce":"session-uuid","name":"ada","pad":"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"}"#;
+        assert!(plain.len() > 64);
+        assert!(!header_looks_like_device_key_envelope_at(
+            plain,
+            plain.len() as u64
+        ));
+        assert!(!header_looks_like_device_key_envelope_at(
+            &plain[..64],
+            40 * 1024 * 1024
+        ));
+        assert!(!header_looks_like_device_key_envelope_at(br#"{"#, 2));
+        assert!(!header_looks_like_device_key_envelope_at(
+            br#"{"#,
+            ENVELOPE_BYTE_LIMIT + 1
+        ));
     }
 
     #[test]

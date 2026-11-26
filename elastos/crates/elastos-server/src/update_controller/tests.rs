@@ -5864,3 +5864,64 @@ async fn first_home_start_notes_progress_while_it_waits() {
     note_while_starting(async {}, |seconds| quick.push(seconds)).await;
     assert!(quick.is_empty());
 }
+
+#[cfg(test)]
+#[test]
+fn a_copied_or_damaged_receipt_is_not_an_update_and_the_check_does_not_hash() {
+    let fixture = PrivateFixture::new();
+    publish_retained_receipt(&fixture);
+    let runtime = fixture.controller();
+    fs::remove_file(&runtime).unwrap();
+    fs::create_dir(&runtime).unwrap();
+    assert!(
+        !update_can_roll_back(&fixture.data),
+        "a receipt whose controller file cannot be hashed trapped local apps"
+    );
+    fs::write(fixture.directory.join(ACTIVE_REQUEST), b"{}").unwrap();
+    assert!(
+        !update_can_roll_back(&fixture.data),
+        "an orphaned request trapped local apps"
+    );
+    let lock = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .open(fixture.directory.join("controller.lock"))
+        .unwrap();
+    lock.try_lock().unwrap();
+    assert!(
+        update_can_roll_back(&fixture.data),
+        "a held lease was not an update"
+    );
+    drop(lock);
+    assert!(!update_can_roll_back(&fixture.data));
+    fs::write(
+        fixture
+            .binary
+            .parent()
+            .unwrap()
+            .join(".elastos.update-journal.json"),
+        b"{}",
+    )
+    .unwrap();
+    assert!(update_can_roll_back(&fixture.data), "a journal was missed");
+    let copy_root = tempfile::tempdir().unwrap();
+    let copy = fs::canonicalize(copy_root.path()).unwrap();
+    fs::create_dir(copy.join(DIRECTORY)).unwrap();
+    let copied = copy.join(DIRECTORY).join(RECEIPT);
+    fs::copy(fixture.directory.join(RECEIPT), &copied).unwrap();
+    fs::set_permissions(&copied, fs::Permissions::from_mode(0o600)).unwrap();
+    assert!(
+        !update_can_roll_back(&copy),
+        "a copied receipt trapped local apps"
+    );
+    let src = include_str!("../update_controller.rs");
+    let start = src.find("pub fn update_can_roll_back").unwrap();
+    let end = src.find("pub(crate) fn installed_writer_binary").unwrap();
+    let body = &src[start..end];
+    assert!(!body.contains("controller_file_digest"), "{body}");
+    assert!(!body.contains("validate_retained_receipt"), "{body}");
+    assert!(!body.contains("installed_writer_binary"), "{body}");
+}

@@ -1916,15 +1916,32 @@ fn prepare_controller(
     }
 }
 
-/// True while an update can still put the previous release back: an install journal beside the
-/// installed binary, or a request the controller has not finished. An unreadable state is true.
+/// In progress only: a journal beside the installed binary, or an active request with the lease
+/// held. A damaged or copied receipt is not one, and this read does not hash the controller binary.
+#[rustfmt::skip]
 pub fn update_can_roll_back(data_dir: &Path) -> bool {
-    let bin = installed_writer_binary(data_dir)
-        .and_then(|kept| crate::install_transaction::installed_binary(data_dir, kept));
-    let request = fs::symlink_metadata(data_dir.join(DIRECTORY).join(ACTIVE_REQUEST));
-    let pending = InstallTransaction::has_pending_recovery;
-    bin.map_or(true, |bin| bin.as_deref().is_some_and(pending))
-        || !matches!(request, Err(error) if error.kind() == std::io::ErrorKind::NotFound)
+    let dir = data_dir.join(DIRECTORY);
+    let journal = rollback_binary(data_dir).is_some_and(|bin| InstallTransaction::has_pending_recovery(&bin));
+    journal || (fs::symlink_metadata(dir.join(ACTIVE_REQUEST)).is_ok() && controller_lease_held(&dir))
+}
+
+#[rustfmt::skip]
+fn rollback_binary(data_dir: &Path) -> Option<PathBuf> {
+    if let Ok(receipt) = read_private_json::<Receipt>(&data_dir.join(DIRECTORY).join(RECEIPT)) {
+        if fs::canonicalize(data_dir).is_ok_and(|dir| dir == receipt.data_dir) { return Some(receipt.binary); }
+    }
+    crate::install_transaction::installed_binary(data_dir, None).ok().flatten()
+}
+
+#[cfg(unix)]
+#[rustfmt::skip]
+fn controller_lease_held(directory: &Path) -> bool {
+    OpenOptions::new().read(true).write(true).open(directory.join("controller.lock")).is_ok_and(|file| FileLock::try_exclusive(file).is_err())
+}
+
+#[cfg(not(unix))]
+fn controller_lease_held(_: &Path) -> bool {
+    false
 }
 
 /// The retained receipt locates the writer lock even during an interrupted sources rename.
