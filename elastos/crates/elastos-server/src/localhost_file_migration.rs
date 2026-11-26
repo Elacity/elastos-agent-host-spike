@@ -17,10 +17,9 @@
 //! `home --browser` call it before the auth lock under `ElastOS`, and serve
 //! calls it before `ensure_file_backed_roots`. When any of the five is already
 //! present, that call does not walk. An empty root that
-//! is still present is not moved aside. A matching marker still walks, so an
-//! older build's later device-key file is rewritten, one way: an older release cannot open it. A new-format header and a plain file are settled unread.
-//! The first pass opens each old file to check it, and keeps nothing. A refusal in that pass leaves every old file in place.
-//! A start runs the first pass only. When it finds an old file, Home serves with local apps off ("Local app files are moving"), and the second pass runs in the background once no update can put the previous release back (no install journal, no active update request). A rollback or crash before then leaves every file old.
+//! is still present is not moved aside. A matching (done) marker does no walk. A new-format header and a plain file are settled unread.
+//! Pass 1 verifies each old file and keeps nothing. A refusal in that pass leaves every old file in place. Pass 2 rewrites; an ordinary start runs one bringup (not three).
+//! Home binds first; the check runs in the background ("checking local app files"). When it finds an old file, local apps stay off ("Local app files are moving") until the second pass runs once no update can put the previous release back. A rollback or crash before then leaves every file old.
 //! The second pass walks again and rekeys one file at a time. A crash in the middle of the move is finished by the next start. A later
 //! start uses the size and time stored beside the marker and does not open a file
 //! that still matches. The walk logs a count every few seconds. A waiter on
@@ -98,6 +97,9 @@ thread_local! {
         std::cell::RefCell::new(None);
     static BEFORE_RENAME: std::cell::RefCell<Option<MigrationReplaceHook>> =
         std::cell::RefCell::new(None);
+    #[cfg(test)]
+    static BEFORE_WALK: std::cell::RefCell<Option<Box<dyn Fn()>>> =
+        std::cell::RefCell::new(None);
     static PROGRESS_CLOCK: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
     static BYTES_READ: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
     static OPENS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
@@ -141,6 +143,11 @@ pub(crate) fn set_localhost_migration_before_replace(hook: Option<MigrationRepla
 #[cfg(all(unix, test))]
 pub(crate) fn set_localhost_migration_before_rename(hook: Option<MigrationReplaceHook>) {
     BEFORE_RENAME.with(|slot| *slot.borrow_mut() = hook);
+}
+
+#[cfg(all(unix, test))]
+pub(crate) fn set_localhost_migration_before_walk(hook: Option<Box<dyn Fn()>>) {
+    BEFORE_WALK.with(|slot| *slot.borrow_mut() = hook);
 }
 
 /// Sets the progress clock. `None` uses the wall clock. A test moves this
@@ -238,6 +245,15 @@ fn run_before_rename(path: &Path) {
 
 #[cfg(all(unix, not(test)))]
 fn run_before_rename(_path: &Path) {}
+
+#[cfg(all(unix, test))]
+fn run_before_walk() {
+    let hook = BEFORE_WALK.with(|slot| slot.borrow_mut().take());
+    if let Some(hook) = hook {
+        hook();
+        BEFORE_WALK.with(|slot| *slot.borrow_mut() = Some(hook));
+    }
+}
 
 #[cfg(all(unix, test))]
 fn note_migration_lock_wait() {
@@ -634,7 +650,7 @@ fn seen_file(meta: &std::fs::Metadata, hard: bool) -> SeenFile {
     }
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, test))]
 #[rustfmt::skip]
 fn parse_seen(bytes: &[u8]) -> std::collections::HashMap<String, SeenFile> {
     let mut seen = std::collections::HashMap::new();
@@ -678,35 +694,6 @@ fn parse_seen(bytes: &[u8]) -> std::collections::HashMap<String, SeenFile> {
         );
     }
     seen
-}
-
-#[cfg(unix)]
-fn read_seen(path: &Path) -> anyhow::Result<std::collections::HashMap<String, SeenFile>> {
-    use std::io::Read;
-    use std::os::unix::fs::OpenOptionsExt;
-
-    let meta = match std::fs::symlink_metadata(path) {
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(std::collections::HashMap::new());
-        }
-        Err(_) => return Err(localhost_refused(path, "cannot be read")),
-        Ok(meta) => meta,
-    };
-    refuse_special(path, &meta, "is a link")?;
-    if meta.len() > localhost_provider::ENVELOPE_BYTE_LIMIT {
-        return Ok(std::collections::HashMap::new());
-    }
-    let mut file = std::fs::OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
-        .open(path)
-        .map_err(|_| localhost_refused(path, "cannot be read"))?;
-    let mut bytes = Vec::new();
-    file.by_ref()
-        .take(meta.len())
-        .read_to_end(&mut bytes)
-        .map_err(|_| localhost_refused(path, "cannot be read"))?;
-    Ok(parse_seen(&bytes))
 }
 
 #[cfg(unix)]
@@ -876,6 +863,10 @@ fn migrate_localhost_envelope(
     if version.is_none_or(|version| version == 2) {
         return Ok(MigratedFile::Settled);
     }
+    let head = &header[..read];
+    if !localhost_provider::header_is_device_key_envelope(head) && localhost_provider::header_looks_like_device_key_envelope(head) {
+        return Err(localhost_refused(path, "is cut off"));
+    }
     if extra > 0 { std::io::Seek::seek(&mut file, std::io::SeekFrom::Start(read as u64)).map_err(|_| localhost_refused(path, "cannot be read"))?; }
     if opened.len > localhost_provider::SEALED_READ_HARD_LIMIT {
         return Ok(MigratedFile::OverHard);
@@ -888,10 +879,10 @@ fn migrate_localhost_envelope(
         return Ok(MigratedFile::OverHard);
     }
     bytes.resize(n, 0);
-    let head = read.min(n);
-    bytes[..head].copy_from_slice(&header[..head]);
-    file.read_exact(&mut bytes[head..]).map_err(|err| localhost_refused(path, if err.kind() == std::io::ErrorKind::UnexpectedEof { "changed while it was being read" } else { "cannot be read" }))?;
-    note_bytes_read(n - head);
+    let keep = read.min(n);
+    bytes[..keep].copy_from_slice(&header[..keep]);
+    file.read_exact(&mut bytes[keep..]).map_err(|err| localhost_refused(path, if err.kind() == std::io::ErrorKind::UnexpectedEof { "changed while it was being read" } else { "cannot be read" }))?;
+    note_bytes_read(n - keep);
     run_before_replace(path);
     opened_file_still_matches(path, &opened)?;
     match localhost_provider::rekey_device_envelope(device_key, file_key, bytes, PASS_TWO.with(|slot| slot.get())) {
@@ -1257,12 +1248,17 @@ fn migrate_localhost_files_to_file_key(
     let _lock = acquire_migration_lock(data_dir)?;
     let plan = plan_for_this_home(data_dir, &marker, &file_key)?;
     sweep_identity_temps(&identity)?;
+    if matches!(plan, MarkerPlan::Keep) {
+        let seen = identity.join(LOCALHOST_SEEN);
+        if let Ok(meta) = std::fs::symlink_metadata(&seen) {
+            refuse_special(&seen, &meta, "is a link")?;
+        }
+        return Ok(());
+    }
+    #[cfg(test)]
+    run_before_walk();
     let seen_path = identity.join(LOCALHOST_SEEN);
-    let seen = if matches!(plan, MarkerPlan::Keep) {
-        read_seen(&seen_path)?
-    } else {
-        std::collections::HashMap::new()
-    };
+    let seen = std::collections::HashMap::new();
     let mut next = std::collections::HashMap::new();
     let mut over_hard = Vec::new();
     let mut walk = || -> anyhow::Result<()> {
@@ -1351,6 +1347,7 @@ pub(crate) enum LocalhostBringup {
 
 /// Local apps stay off with this sentence while old files wait for the second pass.
 pub(crate) const LOCALHOST_FILES_MOVING: &str = "Local app files are moving to the new key.";
+pub(crate) const LOCALHOST_FILES_CHECKING: &str = "checking local app files";
 
 pub(crate) fn localhost_bringup(data_dir: &Path, device_key: &[u8; 32]) -> LocalhostBringup {
     match localhost_provider_bridge_config(data_dir, device_key) {
@@ -1362,8 +1359,7 @@ pub(crate) fn localhost_bringup(data_dir: &Path, device_key: &[u8; 32]) -> Local
     }
 }
 
-/// The first pass only: old files stay as they are, refused with [`LOCALHOST_FILES_MOVING`]. The caller
-/// runs [`localhost_bringup`] once no update can put back a release that cannot open a moved file.
+/// Pass 1 only. Old files stay put with [`LOCALHOST_FILES_MOVING`].
 pub(crate) fn localhost_start_bringup(data_dir: &Path, device_key: &[u8; 32]) -> LocalhostBringup {
     #[cfg(unix)]
     if let Err(err) = migrate_localhost_files_to_file_key(data_dir, device_key, false) {
@@ -1372,10 +1368,10 @@ pub(crate) fn localhost_start_bringup(data_dir: &Path, device_key: &[u8; 32]) ->
     localhost_bringup(data_dir, device_key)
 }
 
-/// The first refusal stays, except the moving sentence, which a later walk replaces.
+/// The first refusal stays, except the checking and moving sentences, which a later walk replaces.
 fn refused(data_dir: &Path, fresh: String) -> LocalhostBringup {
     let kept = elastos_server::local_apps::local_apps_refusal(data_dir)
-        .filter(|kept| kept != LOCALHOST_FILES_MOVING);
+        .filter(|kept| kept != LOCALHOST_FILES_MOVING && kept != LOCALHOST_FILES_CHECKING);
     if kept.is_none() {
         elastos_server::local_apps::set_local_apps_refusal(data_dir, Some(fresh.clone()));
     }

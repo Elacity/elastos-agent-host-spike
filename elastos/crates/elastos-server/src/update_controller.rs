@@ -1927,6 +1927,9 @@ pub fn update_can_roll_back(data_dir: &Path) -> bool {
         || !matches!(request, Err(error) if error.kind() == std::io::ErrorKind::NotFound)
 }
 
+#[rustfmt::skip]
+pub fn update_receipt_is_damaged(data_dir: &Path) -> bool { path_present(&data_dir.join(DIRECTORY).join(RECEIPT)).map_or(true, |p| p && installed_writer_binary(data_dir).is_err()) }
+
 /// The retained receipt locates the writer lock even during an interrupted sources rename.
 pub(crate) fn installed_writer_binary(data_dir: &Path) -> Result<Option<PathBuf>> {
     let path = data_dir.join(DIRECTORY).join(RECEIPT);

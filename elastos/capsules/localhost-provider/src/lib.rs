@@ -86,6 +86,16 @@ pub fn header_is_device_key_envelope(header: &[u8]) -> bool {
 }
 
 #[rustfmt::skip]
+pub fn header_looks_like_device_key_envelope(header: &[u8]) -> bool {
+    const HEAD: &[u8] = br#"{"version":1,"nonce":""#; const MID: &[u8] = br#"","ciphertext":""#;
+    let mid_at = HEAD.len() + 24;
+    if header.is_empty() || (HEAD.starts_with(header) && header.len() < HEAD.len()) { return !header.is_empty(); }
+    header.len() >= mid_at + MID.len() && header.starts_with(HEAD)
+        && header[HEAD.len()..mid_at].iter().any(|b| !matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+        && header[mid_at..mid_at + MID.len()] == *MID
+}
+
+#[rustfmt::skip]
 fn open_new_format(key: &[u8; 32], bytes: Vec<u8>, name: &str) -> io::Result<Vec<u8>> {
     let Some((mut body, nonce, version)) = ciphertext_in_place(bytes) else {
         return Err(io::Error::new(io::ErrorKind::InvalidData, format!("{name} is cut off. Move it aside, or remove it.")));
@@ -141,6 +151,7 @@ mod scan {
         // A header this Home writes, new or old, is an envelope at every size. Do not scan the body.
         if super::header_is_file_key_envelope(header) { return Ok((Some(2), 0)); }
         if super::header_is_device_key_envelope(header) { return Ok((Some(1), 0)); }
+        if super::header_looks_like_device_key_envelope(header) { return Ok((Some(1), 0)); }
         if header_rules_out_envelope(header) || len <= ENVELOPE_BYTE_LIMIT { return Ok(((!header_rules_out_envelope(header)).then_some(0), 0)); }
         let mut s = Src { rest, n: 0, b: [0; 8192], i: 0, j: header.len().min(8192), v: 0 };
         s.b[..s.j].copy_from_slice(&header[..s.j]);
@@ -568,6 +579,28 @@ mod tests {
         .unwrap();
         assert!(!plain);
         assert_eq!(extra, 0);
+    }
+
+    #[test]
+    fn a_cut_prefix_and_a_flipped_nonce_read_as_old_format() {
+        let prefix = &br#"{"version":1,"nonce""#[..20];
+        assert!(header_looks_like_device_key_envelope(prefix));
+        assert!(!header_is_device_key_envelope(prefix));
+        let (version, _) = envelope_version(prefix, ENVELOPE_BYTE_LIMIT + 1, &mut Boom).unwrap();
+        assert_eq!(version, Some(1));
+        let mut sealed = encrypt_bytes(&[4; 32], b"x").unwrap();
+        sealed[br#"{"version":1,"nonce":""#.len()] = b'g';
+        assert!(header_looks_like_device_key_envelope(
+            &sealed[..ENVELOPE_HEADER]
+        ));
+        assert!(!header_is_device_key_envelope(&sealed[..ENVELOPE_HEADER]));
+        let (version, _) = envelope_version(
+            &sealed[..ENVELOPE_HEADER],
+            ENVELOPE_BYTE_LIMIT + 1,
+            &mut Boom,
+        )
+        .unwrap();
+        assert_eq!(version, Some(1));
     }
 
     #[test]

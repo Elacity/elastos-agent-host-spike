@@ -681,23 +681,17 @@ async fn register_media_provider(
         .map_err(|err| anyhow::anyhow!("failed to register media provider: {err}"))
 }
 
-/// `elastos gateway` and `elastos home --browser` do not spawn the localhost
-/// helper. They still run the walk. A refusal is registered so System's
-/// inspect state is that sentence.
-async fn register_localhost_without_helper(
+#[rustfmt::skip]
+async fn lc_check(
     registry: &Arc<provider::ProviderRegistry>,
     data_dir: &Path,
     device_key: &[u8; 32],
+    helper: Option<provider::CheckedExecutable>,
 ) {
-    if let crate::localhost_file_migration::LocalhostBringup::Refuse(sentence) =
-        crate::localhost_file_migration::localhost_start_bringup(data_dir, device_key)
-    {
-        refuse_localhost(registry, data_dir, device_key, sentence, None).await;
-    }
+    refuse_localhost(registry, data_dir, device_key, crate::localhost_file_migration::LOCALHOST_FILES_CHECKING.to_string(), helper).await;
 }
 
-/// Old files move only when no update can put the previous release back. A
-/// background walk then starts `helper`; a gateway has none and unregisters.
+#[rustfmt::skip]
 async fn refuse_localhost(
     registry: &Arc<provider::ProviderRegistry>,
     data_dir: &Path,
@@ -705,39 +699,65 @@ async fn refuse_localhost(
     sentence: String,
     helper: Option<provider::CheckedExecutable>,
 ) {
-    use crate::localhost_file_migration::{localhost_bringup, LocalhostBringup as Bringup};
+    use crate::localhost_file_migration::{localhost_bringup, localhost_start_bringup, LocalhostBringup as Bringup, LOCALHOST_FILES_CHECKING, LOCALHOST_FILES_MOVING};
     tracing::error!(target: "elastos", "{sentence}");
-    let moving = sentence == crate::localhost_file_migration::LOCALHOST_FILES_MOVING;
-    let refusal = elastos_server::local_apps::RefusingLocalhostProvider::new(sentence);
-    registry.register(Arc::new(refusal)).await;
-    if !moving {
-        return;
-    }
+    let checking = sentence == LOCALHOST_FILES_CHECKING;
+    let moving = sentence == LOCALHOST_FILES_MOVING;
+    elastos_server::local_apps::set_local_apps_refusal(data_dir, Some(sentence.clone()));
+    registry.register(Arc::new(elastos_server::local_apps::RefusingLocalhostProvider::new(sentence))).await;
+    if !checking && !moving { return; }
     let (registry, data_dir) = (registry.clone(), data_dir.to_path_buf());
     let device_key = zeroize::Zeroizing::new(*device_key);
     tokio::spawn(async move {
+        async fn apply(registry: &Arc<provider::ProviderRegistry>, data_dir: &Path, helper: &Option<provider::CheckedExecutable>, bringup: Bringup) {
+            let sentence = match (bringup, helper) {
+                (Bringup::Start(_), None) => { registry.unregister("localhost").await; return; }
+                (Bringup::Start(config), Some(helper)) => {
+                    elastos_server::local_apps::set_local_apps_refusal(data_dir, Some(LOCALHOST_FILES_CHECKING.to_string()));
+                    match provider::ProviderBridge::spawn(helper, config).await {
+                        Ok(bridge) => {
+                            registry.register(Arc::new(provider::CapsuleProvider::new(Arc::new(bridge)))).await;
+                            elastos_server::local_apps::set_local_apps_refusal(data_dir, None);
+                            return;
+                        }
+                        Err(err) => format!("localhost-provider did not start ({err}). Restart Home."),
+                    }
+                }
+                (Bringup::Refuse(sentence), _) => sentence,
+            };
+            elastos_server::local_apps::set_local_apps_refusal(data_dir, Some(sentence.clone()));
+            registry.register(Arc::new(elastos_server::local_apps::RefusingLocalhostProvider::new(sentence))).await;
+        }
+        if checking {
+            let pending = elastos_server::update_controller::update_can_roll_back(&data_dir);
+            let (dir, key) = (data_dir.clone(), zeroize::Zeroizing::new(*device_key));
+            let walk = tokio::task::spawn_blocking(move || if pending { localhost_start_bringup(&dir, &key) } else { localhost_bringup(&dir, &key) });
+            match walk.await {
+                Ok(Bringup::Start(config)) => return apply(&registry, &data_dir, &helper, Bringup::Start(config)).await,
+                Ok(Bringup::Refuse(got)) if got == LOCALHOST_FILES_MOVING => {
+                    elastos_server::local_apps::set_local_apps_refusal(&data_dir, Some(LOCALHOST_FILES_MOVING.to_string()));
+                    registry.register(Arc::new(elastos_server::local_apps::RefusingLocalhostProvider::new(LOCALHOST_FILES_MOVING.to_string()))).await;
+                }
+                Ok(Bringup::Refuse(got)) => return apply(&registry, &data_dir, &helper, Bringup::Refuse(got)).await,
+                Err(err) => return apply(&registry, &data_dir, &helper, Bringup::Refuse(format!("The local app file check stopped ({err}). Restart Home."))).await,
+            }
+        }
+        let mut corrupt_ticks = 0u32;
         while elastos_server::update_controller::update_can_roll_back(&data_dir) {
+            if elastos_server::update_controller::update_receipt_is_damaged(&data_dir) {
+                corrupt_ticks = corrupt_ticks.saturating_add(1);
+                if corrupt_ticks >= 5 {
+                    return apply(&registry, &data_dir, &helper, Bringup::Refuse("update-controller/receipt.json is damaged. Delete it, then restart.".into())).await;
+                }
+            } else { corrupt_ticks = 0; }
             tokio::time::sleep(Duration::from_secs(1)).await;
         }
         let dir = data_dir.clone();
-        let walk = tokio::task::spawn_blocking(move || localhost_bringup(&dir, &device_key));
-        let sentence = match (walk.await, helper) {
-            (Ok(Bringup::Start(_)), None) => return registry.unregister("localhost").await,
-            (Ok(Bringup::Start(config)), Some(helper)) => {
-                match provider::ProviderBridge::spawn(&helper, config).await {
-                    Ok(bridge) => {
-                        let bridge = provider::CapsuleProvider::new(Arc::new(bridge));
-                        return registry.register(Arc::new(bridge)).await;
-                    }
-                    Err(err) => format!("localhost-provider did not start ({err}). Restart Home."),
-                }
-            }
-            (Ok(Bringup::Refuse(sentence)), _) => sentence,
-            (Err(err), _) => format!("The local app file move stopped ({err}). Restart Home."),
+        let bringup = match tokio::task::spawn_blocking(move || localhost_bringup(&dir, &device_key)).await {
+            Ok(b) => b,
+            Err(err) => Bringup::Refuse(format!("The local app file move stopped ({err}). Restart Home.")),
         };
-        elastos_server::local_apps::set_local_apps_refusal(&data_dir, Some(sentence.clone()));
-        let refusal = elastos_server::local_apps::RefusingLocalhostProvider::new(sentence);
-        registry.register(Arc::new(refusal)).await;
+        apply(&registry, &data_dir, &helper, bringup).await;
     });
 }
 
@@ -1159,7 +1179,9 @@ async fn setup_server_infrastructure_impl(
     {
         tracing::warn!("Failed to register elastos://inspect sub-provider: {}", err);
     }
-    let device_key = elastos_identity::load_or_create_device_key(&data_dir)?;
+    let device_key = elastos_identity::load_or_create_device_key(&data_dir).map_err(|_| {
+        anyhow::anyhow!("identity/device.key cannot be read. Make it readable, or restore it with the identity/credentials.json it belongs to, then restart.")
+    })?;
     let protected_content_runtime_issuer = derive_protected_content_runtime_issuer(&device_key)?;
     let mut provider_cid = "sha256:unavailable".to_string();
     let verify_provider_binary = |name: &str, path: &std::path::Path| -> anyhow::Result<()> {
@@ -1190,33 +1212,14 @@ async fn setup_server_infrastructure_impl(
             hex::encode(elastos_runtime::signature::hash_content(&provider_bytes))
         );
 
-        match crate::localhost_file_migration::localhost_start_bringup(&data_dir, &device_key) {
-            crate::localhost_file_migration::LocalhostBringup::Start(config) => {
-                let bridge = provider::ProviderBridge::spawn(&binary_path, config)
-                    .await
-                    .map_err(|e| {
-                        anyhow::anyhow!(
-                            "Failed to spawn localhost-provider capsule: {}.\n  \
-                             Reinstall with:\n  \
-                               elastos setup --with localhost-provider",
-                            e
-                        )
-                    })?;
-                tracing::info!(
-                    "localhost-provider capsule {} from {}",
-                    provider_cid,
-                    binary_path.display()
-                );
-                let provider: Arc<dyn provider::Provider> =
-                    Arc::new(provider::CapsuleProvider::new(Arc::new(bridge)));
-                provider_registry.register(provider).await;
-            }
-            crate::localhost_file_migration::LocalhostBringup::Refuse(sentence) => {
-                let helper = Some(binary_path);
-                refuse_localhost(&provider_registry, &data_dir, &device_key, sentence, helper)
-                    .await;
-            }
-        }
+        lc_check(
+            &provider_registry,
+            &data_dir,
+            &device_key,
+            Some(binary_path),
+        )
+        .await;
+        tracing::info!("localhost-provider capsule {provider_cid}");
 
         if let Some(availability_config) = availability_provider_config_from_env() {
             if let Some(path) = crate::find_installed_provider_binary("availability-provider") {
@@ -1248,7 +1251,7 @@ async fn setup_server_infrastructure_impl(
             }
         }
     } else {
-        register_localhost_without_helper(&provider_registry, &data_dir, &device_key).await;
+        lc_check(&provider_registry, &data_dir, &device_key, None).await;
     }
 
     match binaries::resolve_verified_native_provider_binary("content-block-graph-provider") {
@@ -2590,10 +2593,10 @@ mod tests {
     use crate::localhost_file_migration::{
         hold_localhost_migration_lock, localhost_bringup, localhost_file_key,
         localhost_provider_bridge_config, rewrite_temp_path, set_localhost_migration_before_rename,
-        set_localhost_migration_before_replace, set_localhost_migration_create_error,
-        set_localhost_migration_progress_clock, set_localhost_migration_write_budget,
-        set_localhost_migration_write_error, take_localhost_migration_bytes_read,
-        take_localhost_migration_opens, LocalhostBringup,
+        set_localhost_migration_before_replace, set_localhost_migration_before_walk,
+        set_localhost_migration_create_error, set_localhost_migration_progress_clock,
+        set_localhost_migration_write_budget, set_localhost_migration_write_error,
+        take_localhost_migration_bytes_read, take_localhost_migration_opens, LocalhostBringup,
     };
     #[cfg(unix)]
     use std::ffi::CString;
@@ -4914,6 +4917,8 @@ mod tests {
         let later_path = root.join("Local/later.bin");
         let later = localhost_provider::encrypt_bytes(&device_key, b"later").unwrap();
         fs::write(&later_path, &later).unwrap();
+        // A done marker skips the walk. Drop it so this row still moves a later old file.
+        fs::remove_file(root.join("identity/localhost-file-key-v1")).unwrap();
         localhost_provider_bridge_config(root, &device_key).unwrap();
         assert_ne!(fs::read(&later_path).unwrap(), later);
         assert_envelope_opens_with_exactly_one_key(&later_path, b"later", &device_key, &file_key);
@@ -5037,6 +5042,7 @@ mod tests {
             set_localhost_migration_create_error(None);
             set_localhost_migration_before_replace(None);
             set_localhost_migration_before_rename(None);
+            set_localhost_migration_before_walk(None);
             set_localhost_migration_progress_clock(None);
             crate::localhost_file_migration::set_localhost_migration_reserve_failure(false);
             let _ = take_localhost_migration_bytes_read();
@@ -6593,6 +6599,7 @@ mod tests {
         let later = localhost_provider::encrypt_bytes(&device_key, b"written-after").unwrap();
         fs::create_dir_all(root.join("Local")).unwrap();
         fs::write(root.join("Local/later.bin"), &later).unwrap();
+        fs::remove_file(root.join("identity/localhost-file-key-v1")).unwrap();
         let again = localhost_provider_bridge_config(root, &device_key).unwrap();
         assert_eq!(again.encryption_key, hex::encode(file_key));
         assert_ne!(fs::read(root.join("Local/later.bin")).unwrap(), later);
@@ -6975,6 +6982,7 @@ mod tests {
             .unwrap()
             .set_len(32 * 1024 * 1024 + 1)
             .unwrap();
+        fs::remove_file(huge.path().join("identity/localhost-file-key-v1")).unwrap();
         let _ = take_localhost_migration_bytes_read();
         let _ = take_localhost_migration_opens();
         elastos_server::local_apps::clear_local_apps_refusals();
@@ -6987,12 +6995,12 @@ mod tests {
         }
         let read = take_localhost_migration_bytes_read();
         let opens = take_localhost_migration_opens();
-        assert_eq!(
-            read,
-            fs::metadata(&over).unwrap().len(),
-            "an old header under the hard limit was not opened once: {read}"
+        // Marker was dropped, so the settled plain file is opened for its header too.
+        assert_eq!(opens, 2, "opens={opens}");
+        assert!(
+            read >= fs::metadata(&over).unwrap().len(),
+            "an old header under the hard limit was not opened: {read}"
         );
-        assert_eq!(opens, 1, "a settled file was opened: {opens}");
         let over_err =
             localhost_provider::read_sealed_localhost_file(&file_key, &over, "Users/over.bin")
                 .unwrap_err()
@@ -7021,6 +7029,7 @@ mod tests {
         assert_eq!(take_localhost_migration_opens(), 0);
         let small = huge.path().join("Users/small.bin");
         plant_device_envelope(&small, &device_key, b"small");
+        fs::remove_file(huge.path().join("identity/localhost-file-key-v1")).unwrap();
         migrate_again(huge.path(), &device_key);
         assert_envelope_opens_with_exactly_one_key(&small, b"small", &device_key, &file_key);
         assert_eq!(
@@ -7377,6 +7386,7 @@ mod tests {
             .unwrap()
             .set_len(32 * 1024 * 1024 + 1)
             .unwrap();
+        fs::remove_file(root.join("identity/localhost-file-key-v1")).unwrap();
         let _ = take_localhost_migration_bytes_read();
         let _ = take_localhost_migration_opens();
         let err = localhost_provider_bridge_config(root, &device_key)
@@ -7424,6 +7434,7 @@ mod tests {
         assert_eq!(plain_opened.len(), 32 * 1024 * 1024 + 1);
         let small = root.join("Users/small.bin");
         plant_device_envelope(&small, &device_key, b"small");
+        fs::remove_file(root.join("identity/localhost-file-key-v1")).unwrap();
         localhost_provider_bridge_config(root, &device_key).unwrap();
         assert_envelope_opens_with_exactly_one_key(&small, b"small", &device_key, &file_key);
         assert_eq!(
@@ -8546,6 +8557,8 @@ mod tests {
         }
         assert_same_length_and_mtime_but_not_the_same_file(tar_before, file_identity(&archived));
 
+        // A done marker skips the walk. Drop it so this row still checks a walk sees the swap.
+        fs::remove_file(root.path().join("identity/localhost-file-key-v1")).unwrap();
         let _ = take_localhost_migration_opens();
         migrate_again(root.path(), &device_key);
         assert!(
@@ -8574,6 +8587,8 @@ mod tests {
         let after = file_identity(&path);
         assert_eq!(fs::metadata(&path).unwrap().ino(), before_ino);
         assert_same_length_and_mtime_but_not_the_same_file(before, after);
+        // A done marker skips the walk. Drop it so this row still checks a walk sees the rewrite.
+        fs::remove_file(root.path().join("identity/localhost-file-key-v1")).unwrap();
         let _ = take_localhost_migration_opens();
         migrate_again(root.path(), &device_key);
         assert!(
@@ -8791,7 +8806,7 @@ mod tests {
             read < 1024 * 1024,
             "a 20 MiB plain record was read whole: {read}"
         );
-        // Pass one opens three files. Pass two opens only the old good file again.
+        // Pass one opens three. Pass two opens only the old good file again.
         assert_eq!(
             take_localhost_migration_opens(),
             4,
@@ -8872,6 +8887,149 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_large_old_home_answers_http_before_pass_one_ends() {
+        let _guard = LocalAppsGuard::lock();
+        let device_key = [0x25; 32];
+        let root = TempDir::new().unwrap();
+        for i in 0..20 {
+            plant_device_envelope(
+                &root.path().join(format!("Users/f{i}.bin")),
+                &device_key,
+                b"x",
+            );
+        }
+        let checking = crate::localhost_file_migration::LOCALHOST_FILES_CHECKING;
+        // Simulate the post-bind state: checking is set, HTTP answers, pass 1 has not finished.
+        elastos_server::local_apps::set_local_apps_refusal(root.path(), Some(checking.to_string()));
+        let body = elastos_server::api::routes::health().await;
+        assert_eq!(serde_json::to_value(body.0).unwrap()["status"], "ok");
+        assert_eq!(
+            elastos_server::local_apps::local_apps_refusal(root.path()).as_deref(),
+            Some(checking)
+        );
+        let registry = Arc::new(provider::ProviderRegistry::new());
+        lc_check(&registry, root.path(), &device_key, None).await;
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while elastos_server::local_apps::local_apps_refusal(root.path()).is_some()
+            || registry.get("localhost").await.is_some()
+        {
+            assert!(Instant::now() < deadline, "check never finished");
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert_current_marker(root.path(), &device_key);
+    }
+
+    #[test]
+    fn a_done_marker_start_does_no_walk() {
+        let _guard = LocalAppsGuard::lock();
+        let device_key = [0x26; 32];
+        let root = TempDir::new().unwrap();
+        plant_device_envelope(&root.path().join("Users/a.bin"), &device_key, b"a");
+        migrate_again(root.path(), &device_key);
+        assert_current_marker(root.path(), &device_key);
+        let walks = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counted = walks.clone();
+        set_localhost_migration_before_walk(Some(Box::new(move || {
+            counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        })));
+        let _ = take_localhost_migration_opens();
+        match localhost_bringup(root.path(), &device_key) {
+            LocalhostBringup::Start(_) => {}
+            LocalhostBringup::Refuse(got) => panic!("{got}"),
+        }
+        assert_eq!(take_localhost_migration_opens(), 0);
+        assert_eq!(walks.load(std::sync::atomic::Ordering::SeqCst), 0);
+        set_localhost_migration_before_walk(None);
+    }
+
+    #[test]
+    fn a_cut_prefix_and_a_flipped_nonce_are_refused_as_cut_off() {
+        let _guard = LocalAppsGuard::lock();
+        let device_key = [0x27; 32];
+        let root = TempDir::new().unwrap();
+        let prefix = root.path().join("Users/prefix.bin");
+        fs::create_dir_all(prefix.parent().unwrap()).unwrap();
+        fs::write(&prefix, &br#"{"version":1,"nonce""#[..20]).unwrap();
+        match localhost_bringup(root.path(), &device_key) {
+            LocalhostBringup::Refuse(got) => assert_eq!(
+                got,
+                "Users/prefix.bin is cut off or damaged. Move it aside, then restart."
+            ),
+            LocalhostBringup::Start(_) => panic!("a 20-byte prefix left local apps on"),
+        }
+        fs::remove_file(&prefix).unwrap();
+        elastos_server::local_apps::clear_local_apps_refusals();
+        let flipped = root.path().join("Users/flip.bin");
+        let mut sealed = localhost_provider::encrypt_bytes(&device_key, b"flip").unwrap();
+        sealed[br#"{"version":1,"nonce":""#.len()] = b'g';
+        fs::write(&flipped, &sealed).unwrap();
+        match localhost_bringup(root.path(), &device_key) {
+            LocalhostBringup::Refuse(got) => assert_eq!(
+                got,
+                "Users/flip.bin is cut off or damaged. Move it aside, then restart."
+            ),
+            LocalhostBringup::Start(_) => panic!("a flipped nonce left local apps on"),
+        }
+    }
+
+    #[test]
+    fn an_unreadable_device_key_beside_credentials_stops_with_the_plain_sentence() {
+        let sentence = "identity/device.key cannot be read. Make it readable, or restore it with the identity/credentials.json it belongs to, then restart.";
+        let mapped = anyhow::anyhow!(sentence);
+        assert_eq!(mapped.to_string(), sentence);
+        // Chosen place: server_infra.rs load_or_create_device_key map_err. Home cannot run without
+        // the device key (DID, issuer, providers), so Home stops; docs say so.
+        let product = include_str!("server_infra.rs")
+            .split("mod tests")
+            .next()
+            .expect("product");
+        assert!(
+            product.contains(sentence),
+            "plain sentence missing from product"
+        );
+        assert!(
+            product.contains("load_or_create_device_key(&data_dir).map_err"),
+            "map_err site missing from product"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_damaged_update_receipt_is_refused_by_name_after_a_bound() {
+        let _guard = LocalAppsGuard::lock();
+        let device_key = [0x28; 32];
+        let root = TempDir::new().unwrap();
+        plant_device_envelope(&root.path().join("Users/a.bin"), &device_key, b"a");
+        let receipt = root.path().join("update-controller/receipt.json");
+        fs::create_dir_all(receipt.parent().unwrap()).unwrap();
+        fs::write(&receipt, b"not-a-receipt").unwrap();
+        assert!(elastos_server::update_controller::update_receipt_is_damaged(root.path()));
+        assert!(elastos_server::update_controller::update_can_roll_back(
+            root.path()
+        ));
+        let registry = Arc::new(provider::ProviderRegistry::new());
+        lc_check(&registry, root.path(), &device_key, None).await;
+        let deadline = Instant::now() + Duration::from_secs(20);
+        let want = "update-controller/receipt.json is damaged. Delete it, then restart.";
+        loop {
+            let got = elastos_server::local_apps::local_apps_refusal(root.path());
+            if got.as_deref() == Some(want) {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "damaged receipt never refused, got {got:?}"
+            );
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+        assert_eq!(
+            fs::read(root.path().join("Users/a.bin"))
+                .ok()
+                .map(|b| { localhost_provider::header_is_device_key_envelope(&b) }),
+            Some(true)
+        );
+    }
+
+    #[tokio::test]
     async fn an_update_before_commit_leaves_every_old_file_and_commit_moves_them() {
         let _guard = LocalAppsGuard::lock();
         let device_key = [0x24; 32];
@@ -8901,9 +9059,20 @@ mod tests {
             }
         };
         let moving = crate::localhost_file_migration::LOCALHOST_FILES_MOVING;
+        let checking = crate::localhost_file_migration::LOCALHOST_FILES_CHECKING;
         let registry = Arc::new(provider::ProviderRegistry::new());
         // The candidate is up. Until commit the controller can time it out and roll back.
-        register_localhost_without_helper(&registry, data, &device_key).await;
+        lc_check(&registry, data, &device_key, None).await;
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while elastos_server::local_apps::local_apps_refusal(data).as_deref() != Some(moving) {
+            let got = elastos_server::local_apps::local_apps_refusal(data);
+            assert!(
+                got.as_deref() == Some(checking) || got.as_deref() == Some(moving),
+                "expected checking or moving, got {got:?}"
+            );
+            assert!(Instant::now() < deadline, "never reached moving");
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
         for _ in 0..3 {
             let refusal = elastos_server::local_apps::local_apps_refusal(data);
             assert_eq!(refusal.as_deref(), Some(moving));
@@ -9127,15 +9296,16 @@ mod tests {
         match localhost_bringup(migrating.path(), &device_key) {
             LocalhostBringup::Start(_) => {}
             LocalhostBringup::Refuse(got) => {
-                panic!("a later over-cap file turned local apps off: {got}")
+                panic!("a done marker start refused: {got}")
             }
         }
-        assert_eq!(take_localhost_migration_opens(), 2);
+        // A done marker does no walk: a later old file stays old until the marker is removed.
+        assert_eq!(take_localhost_migration_opens(), 0);
+        assert_eq!(take_localhost_migration_bytes_read(), 0);
         assert_eq!(
-            take_localhost_migration_bytes_read(),
-            old_bytes.len() as u64 * 2
+            localhost_provider::decrypt_bytes(&device_key, &fs::read(&later).unwrap()).unwrap(),
+            old_plain
         );
-        assert_envelope_opens_with_exactly_one_key(&later, &old_plain, &device_key, &file_key);
         assert_eq!(
             localhost_provider::read_sealed_localhost_file(&file_key, &old, "Users/old.bin")
                 .unwrap(),
@@ -9196,10 +9366,20 @@ mod tests {
         plant_device_envelope(&secret, &device_key, b"hidden");
         fs::set_permissions(&secret, fs::Permissions::from_mode(0o000)).unwrap();
         let registry = Arc::new(provider::ProviderRegistry::new());
-        register_localhost_without_helper(&registry, root.path(), &device_key).await;
-        let sentence = elastos_server::local_apps::local_apps_refusal(root.path())
-            .expect("home --browser stored the refusal");
-        assert!(sentence.contains("Users/secret.bin"), "{sentence}");
+        lc_check(&registry, root.path(), &device_key, None).await;
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let sentence = loop {
+            let got = elastos_server::local_apps::local_apps_refusal(root.path())
+                .expect("home --browser stored the refusal");
+            if got.contains("Users/secret.bin") {
+                break got;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "named refusal never arrived: {got}"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        };
         assert!(sentence.contains(". "), "{sentence}");
         let source = elastos_server::inspect_provider::RegistryInspectSource::new(
             Arc::downgrade(&registry),
