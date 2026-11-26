@@ -91,6 +91,8 @@ struct PathAttr {
 pub(super) struct Prepared {
     plan: landlock_plan::Plan,
     filters: Vec<libc::sock_filter>,
+    /// The held rule descriptors, sorted before fork.
+    fds: Vec<i32>,
 }
 
 impl Prepared {
@@ -103,8 +105,8 @@ impl Prepared {
 
     #[cfg(test)]
     pub(super) fn drop_held_for_test(&mut self, index: usize) {
-        if let Some(slot) = self.plan.held.get_mut(index) {
-            slot.take();
+        if let Some(fd) = self.plan.held.get_mut(index).and_then(Option::take) {
+            self.fds.retain(|kept| *kept != fd.as_raw_fd());
         }
     }
 }
@@ -161,7 +163,9 @@ fn assemble(
         admitted,
         host_audit_arch(),
     ))?;
-    Ok(Prepared { plan, filters })
+    let mut fds: Vec<i32> = plan.held.iter().flatten().map(AsRawFd::as_raw_fd).collect();
+    fds.sort_unstable();
+    Ok(Prepared { plan, filters, fds })
 }
 
 pub(super) fn prepare(
@@ -175,27 +179,26 @@ pub(super) fn prepare(
     assemble(provider, admitted, plan)
 }
 
-/// Close every descriptor from 3 up except `keep`, which is sorted and unique.
-fn close_except(keep: &[i32]) -> Result<(), i32> {
-    if keep.iter().any(|fd| *fd < 3) {
-        return Err(libc::EINVAL);
-    }
+/// Close every descriptor from 3 up except `held`, which is sorted, and the
+/// two `extra` descriptors. The forked child runs this, so it allocates nothing.
+fn close_except(held: &[i32], extra: [i32; 2]) -> Result<(), i32> {
     let mut cursor = 3i32;
-    for &fd in keep {
-        if fd > cursor
-            && unsafe { libc::syscall(libc::SYS_close_range, cursor as u32, (fd - 1) as u32, 0u32) }
-                < 0
+    loop {
+        let mut next = held.iter().copied().find(|fd| *fd >= cursor);
+        for fd in extra {
+            if fd >= cursor && next.is_none_or(|kept| fd < kept) {
+                next = Some(fd);
+            }
+        }
+        let last = next.map_or(u32::MAX, |fd| (fd - 1) as u32);
+        if next != Some(cursor)
+            && unsafe { libc::syscall(libc::SYS_close_range, cursor as u32, last, 0u32) } < 0
         {
             return Err(unsafe { *libc::__errno_location() });
         }
-        if fd >= cursor {
-            cursor = fd + 1;
-        }
+        let Some(fd) = next else { return Ok(()) };
+        cursor = fd + 1;
     }
-    if unsafe { libc::syscall(libc::SYS_close_range, cursor as u32, u32::MAX, 0u32) } < 0 {
-        return Err(unsafe { *libc::__errno_location() });
-    }
-    Ok(())
 }
 
 /// # Safety
@@ -216,19 +219,7 @@ pub(super) unsafe fn install(
                 if keep < 3 || (executable != -1 && (executable < 3 || executable == keep)) {
                     return Err(libc::EINVAL);
                 }
-                let mut keep_fds = vec![keep];
-                if executable >= 0 {
-                    keep_fds.push(executable);
-                }
-                for fd in prepared.plan.held.iter().flatten() {
-                    let raw = fd.as_raw_fd();
-                    if raw >= 3 {
-                        keep_fds.push(raw);
-                    }
-                }
-                keep_fds.sort_unstable();
-                keep_fds.dedup();
-                close_except(&keep_fds)?;
+                close_except(&prepared.fds, [keep, executable])?;
                 0
             }
             Step::NoNewPrivileges => unsafe {

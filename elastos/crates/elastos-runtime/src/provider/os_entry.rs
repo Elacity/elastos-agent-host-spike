@@ -1289,6 +1289,69 @@ mod tests {
         assert!(production.contains("mod preexec_installer;"));
     }
 
+    /// `dispatch` says allocation finishes before the fork. The child runs the
+    /// launcher's `pid == 0` arm, its record writers, and the installer's
+    /// `sequence`, `close_except` and `install`. None of them names a call
+    /// that allocates on the heap.
+    #[test]
+    fn the_child_between_fork_and_exec_does_not_allocate() {
+        assert!(production_source().contains("Allocation finishes before the fork."));
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/provider");
+        let installer = std::fs::read_to_string(root.join("preexec_installer.rs")).unwrap();
+        let launcher = std::fs::read_to_string(root.join("failure_record.rs")).unwrap();
+        let between = |text: &str, from: &str, to: &str| -> String {
+            let start = text
+                .find(from)
+                .unwrap_or_else(|| panic!("{from} is missing"));
+            let end = start
+                + text[start..]
+                    .find(to)
+                    .unwrap_or_else(|| panic!("{to} is missing"));
+            text[start..end].to_string()
+        };
+        let child = [
+            between(
+                &installer,
+                "pub(super) fn record(&self)",
+                "pub(super) fn from_record(",
+            ),
+            between(&installer, "fn sequence(", "#[repr(C)]"),
+            between(
+                &installer,
+                "fn close_except(",
+                "pub(super) fn prepare_path_allow(",
+            ),
+            between(&launcher, "if pid == 0 {", "drop(stderr_null);"),
+            between(&launcher, "fn child_test_hook(hook", "fn decode("),
+        ];
+        let allocating = [
+            "vec!",
+            "Vec",
+            "Box",
+            "String",
+            "format!",
+            "to_string",
+            "to_vec",
+            "to_owned",
+            ".push(",
+            ".collect",
+            "CString",
+            ".sort",
+            ".dedup",
+            ".clone()",
+            "Arc",
+            "Rc::",
+        ];
+        for body in &child {
+            for call in allocating {
+                assert!(
+                    !body.contains(call),
+                    "the child between fork and exec calls {call}:\n{body}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn os_arms_install_the_admitted_rows() {
         let production = production_source();
