@@ -57,4 +57,6 @@
 # descriptors from a list sorted before fork (-11). Measured 26 Nov 2026.
 # +2: round 31 sets the launch fd in with_launch_fd and verifies once at spawn.
 # Measured 26 Nov 2026.
-15263
+# +35: round 33 swaps the object helper under one write lock and gates
+# CHECKED_DIRECTORY to Linux and tests. Measured 26 Nov 2026.
+15298

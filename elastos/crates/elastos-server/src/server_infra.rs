@@ -601,9 +601,8 @@ async fn restart_object_helper_for_roots(
     let Ok(bridge) = spawn_allow_listed_provider("object-provider", &checked, data_dir, config).await
     else { return object_helper_restart_give_up(data_dir, &kick, "spawn refused"); };
     let provider: Arc<dyn provider::Provider> = Arc::new(provider::CapsuleProvider::with_scheme(bridge, "object"));
-    let _ = registry.unregister_sub_provider("object").await;
-    if let Err(err) = registry.register_sub_provider("object", provider).await {
-        return object_helper_restart_give_up(data_dir, &kick, format!("register refused: {err}"));
+    if let Err(err) = registry.replace_sub_provider("object", provider).await {
+        return object_helper_restart_give_up(data_dir, &kick, format!("replace refused: {err}"));
     }
     elastos_server::library::store_object_helper_roots(data_dir, roots);
     elastos_server::library::after_capsule_install_saved(data_dir);
@@ -1171,6 +1170,9 @@ async fn setup_server_infrastructure_impl(
     };
 
     ensure_file_backed_roots(&data_dir).ok();
+    // Host creates Auth before any helper fence makes System read-only.
+    elastos_server::auth::verify_auth_audit_chain_ready(&data_dir)?;
+    // Host creates Auth before any helper fence makes System read-only.
     elastos_server::protected_content_runtime::log_unresolved_runtime_releases(&data_dir);
     let provider_registry = Arc::new(provider::ProviderRegistry::new());
     let mut managed_host_processes = Vec::new();

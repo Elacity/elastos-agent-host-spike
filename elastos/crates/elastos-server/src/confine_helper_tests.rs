@@ -594,12 +594,16 @@ async fn an_updated_home_reads_existing_files_through_the_fence() {
 /// Source and installed Homes both run `setup_server_infrastructure_impl`.
 /// That function creates every file-backed root before the first helper spawn.
 /// Chain's own directory is created inside `spawn_path_allow` before start.
+/// Audit-checkpoint state is ready before the object helper starts.
 #[test]
 fn file_backed_roots_exist_before_the_first_helper_spawn() {
     let server = include_str!("server_infra.rs");
     let roots = server
         .find("ensure_file_backed_roots(&data_dir)")
         .expect("roots");
+    let auth = server
+        .find("verify_auth_audit_chain_ready(&data_dir)")
+        .expect("auth checkpoint");
     let local = server
         .find("spawn_allow_listed_provider(\"localhost-provider\"")
         .expect("localhost");
@@ -612,7 +616,19 @@ fn file_backed_roots_exist_before_the_first_helper_spawn() {
         .find("spawn_allow_listed_provider(\"chain-provider\"")
         .map(|i| object + i)
         .expect("chain");
-    assert!(roots < local && local < object && object < chain);
+    assert!(roots < auth && auth < local && local < object && object < chain);
+    let restart = server
+        .find("async fn restart_object_helper_for_roots")
+        .expect("restart");
+    let replace = server[restart..]
+        .find("replace_sub_provider(\"object\"")
+        .map(|i| restart + i)
+        .expect("atomic replace");
+    let unregister = server[restart..replace].find("unregister_sub_provider(\"object\"");
+    assert!(
+        unregister.is_none(),
+        "restart must swap under one write lock, not unregister then register"
+    );
     let bridge = include_str!("../../elastos-runtime/src/provider/bridge.rs");
     let chain_root = bridge
         .find("Self::ensure_chain_provider_root(data_dir)")
@@ -621,6 +637,51 @@ fn file_backed_roots_exist_before_the_first_helper_spawn() {
         .find("super::os_entry::start_path_allow(")
         .expect("start");
     assert!(chain_root < start);
+}
+
+/// Fresh Home data: audit checkpoint is ready before the object helper starts,
+/// so the first Library roots call answers.
+#[cfg(all(
+    not(elastos_unsupported_os_check),
+    any(
+        target_os = "macos",
+        all(
+            target_os = "linux",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        )
+    )
+))]
+#[tokio::test]
+async fn fresh_data_dir_auth_ready_then_object_roots_answer() {
+    let (_hold, data) = helper_data_root();
+    assert!(
+        !data.join("ElastOS/System/Auth").exists(),
+        "fresh data must start without Auth"
+    );
+    crate::auth::verify_auth_audit_chain_ready(&data)
+        .unwrap_or_else(|err| panic!("audit checkpoint was not ready: {err:#}"));
+    assert!(
+        data.join("ElastOS/System/Auth").is_dir(),
+        "Host must create Auth before the object fence"
+    );
+    let principal = "person:local:ada";
+    crate::auth::store_test_human_principal(&data, principal);
+    let (_, did) = elastos_identity::load_or_create_did(&data).unwrap();
+    let object = spawn_object(&provider_binary("object-provider"), &data, &did).await;
+    let roots = exchange_ok(
+        object.bridge(),
+        serde_json::json!({"op": "roots", "principal_id": principal}),
+    )
+    .await;
+    assert_eq!(roots["status"], "ok", "{roots}");
+    assert!(
+        roots["data"]["roots"]
+            .as_array()
+            .map(|rows| !rows.is_empty())
+            .unwrap_or(false),
+        "roots must answer: {roots}"
+    );
+    object.bridge().shutdown().await.unwrap();
 }
 
 /// Library list through the fenced object-provider binary.

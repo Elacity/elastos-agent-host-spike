@@ -145,8 +145,13 @@ pub(super) enum Interpreter {
 
 thread_local! {
     static INTERPRETER_FD: std::cell::Cell<i32> = const { std::cell::Cell::new(-1) };
-    static CHECKED_DIRECTORY: std::cell::RefCell<Option<OwnedFd>> = const { std::cell::RefCell::new(None) };
     static LAST_OMITTED: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+#[cfg(any(target_os = "linux", test))]
+thread_local! {
+    // Held only while Linux builds the plan, and in tests that read that hold.
+    static CHECKED_DIRECTORY: std::cell::RefCell<Option<OwnedFd>> = const { std::cell::RefCell::new(None) };
 }
 
 fn remember_omitted(omitted: &[String]) {
