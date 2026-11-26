@@ -4842,3 +4842,76 @@ async fn an_unpolled_dispatch_settles_unknown_once() {
         "the grant was left {row:?}"
     );
 }
+
+/// The post-effect revoke is still awaiting when the task is dropped. The
+/// grant stays in the guard until that await ends, so the drop leaves it in
+/// the abandoned list. One revoke runs, and the pending store no longer holds
+/// the grant as granted.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_dropped_revoke_revokes_the_grant_once_and_frees_its_place() {
+    let plant = plant_approved(90, false, |_, target| {
+        json!({"steps": [{"scheme": "localhost", "operation": "write", "request": {
+            "path": target, "content": [112, 108, 97, 110]
+        }}]})
+    })
+    .await;
+    let pause = crate::resource_bridge::arm_plan_dispatch_hold(
+        &plant.id,
+        crate::resource_bridge::PlanDispatchPoint::Revoke,
+    );
+    let record = read_record(plant.dir.path(), &plant.id);
+    let id = plant.id.clone();
+    let owner = record["principal_id"].as_str().unwrap().to_string();
+    let requester = record["requester_id"].as_str().unwrap().to_string();
+    let capsule = record["id"].as_str().unwrap().to_string();
+    let session = record["session_id"].as_str().unwrap().to_string();
+    let dir = plant.dir.path().to_path_buf();
+    let step = record["request"].clone();
+    let task = tokio::spawn(async move {
+        crate::resource_bridge::dispatch_agent_plan_step(
+            &id, &owner, &requester, &capsule, &session, &dir, &step,
+        )
+        .await
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(15), pause.entered.notified())
+        .await
+        .expect("the revoke await was not held");
+    task.abort();
+    let dropped = task.await.expect_err("the revoke task kept running");
+    assert!(dropped.is_cancelled(), "{dropped:?}");
+    drop(crate::resource_bridge::take_parked_plan_guard(&plant.id));
+    crate::resource_bridge::revoke_abandoned_plan_grant(&plant.id).await;
+    let revokes = plant
+        .manager
+        .audit_log()
+        .recent_events(40)
+        .into_iter()
+        .filter(|event| {
+            matches!(
+                event,
+                elastos_runtime::primitives::audit::AuditEvent::CapabilityRevoke { reason, .. }
+                    if reason == "plan dispatch abandoned"
+            )
+        })
+        .count();
+    assert_eq!(revokes, 1, "the dropped revoke did not revoke once");
+    let rows = plant.store.list_requests().await;
+    let granted = rows
+        .iter()
+        .filter(|request| request.session_id.as_str() == plant.session && request.is_granted())
+        .count();
+    assert_eq!(granted, 0, "the pending store kept the grant");
+    let freed = rows
+        .iter()
+        .filter(|request| {
+            request.session_id.as_str() == plant.session
+                && matches!(
+                    &request.status,
+                    elastos_runtime::capability::pending::RequestStatus::Denied { reason, .. }
+                        if reason == "plan dispatch abandoned"
+                )
+        })
+        .count();
+    assert_eq!(freed, 1, "the pending place was not freed: {rows:?}");
+}

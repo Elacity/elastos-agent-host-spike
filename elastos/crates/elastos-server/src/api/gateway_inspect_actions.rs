@@ -803,14 +803,14 @@ async fn wait_plan_task_gate(request_id: &str) {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 struct PlanSettleFault {
     request_id: String,
     which: &'static str,
 }
 
 /// Faults for one request. Another request's settle does not take them.
-#[cfg(test)]
+#[cfg(all(test, unix))]
 fn plan_settle_faults() -> &'static std::sync::Mutex<Vec<PlanSettleFault>> {
     static FAULTS: std::sync::OnceLock<std::sync::Mutex<Vec<PlanSettleFault>>> =
         std::sync::OnceLock::new();
@@ -838,7 +838,7 @@ pub(crate) fn arm_plan_settle_faults(request_id: &str, which: &'static str, coun
 }
 
 fn take_plan_settle_fault(request_id: &str, which: &str) -> bool {
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     {
         let mut faults = plan_settle_faults()
             .lock()

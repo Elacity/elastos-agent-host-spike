@@ -589,6 +589,9 @@ pub(crate) enum PlanDispatchPoint {
     /// The effect has returned and the record is still `dispatching`.
     /// The flight is still held: settlement has not released it.
     BeforeSettle,
+    /// The effect has returned and the one-use grant is still in its guard.
+    /// The revoke of that grant has not run.
+    Revoke,
 }
 
 #[cfg(all(test, unix))]
@@ -972,7 +975,7 @@ fn plan_grant_spend_is_refused(token_id: &elastos_runtime::capability::token::To
         .any(|grant| grant.refused && grant.token.id() == token_id)
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 struct AbandonedRevokeGate {
     entered: Arc<std::sync::atomic::AtomicUsize>,
     skipped: Arc<std::sync::atomic::AtomicUsize>,
@@ -980,7 +983,7 @@ struct AbandonedRevokeGate {
     release: Arc<tokio::sync::Notify>,
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 static ABANDONED_REVOKE_GATE: Mutex<Vec<(String, AbandonedRevokeGate)>> = Mutex::new(Vec::new());
 
 /// Holds the first revoke open so a second caller is measured against it.
@@ -1032,7 +1035,7 @@ impl Drop for AbandonedRevokePause {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 fn note_abandoned_revoke_skipped(request_id: &str) {
     let gates = ABANDONED_REVOKE_GATE
         .lock()
@@ -1044,7 +1047,7 @@ fn note_abandoned_revoke_skipped(request_id: &str) {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 async fn pause_abandoned_revoke(request_id: &str) {
     let (entered, progress, release) = {
         let gates = ABANDONED_REVOKE_GATE
@@ -1074,7 +1077,7 @@ pub(crate) async fn revoke_abandoned_plan_grant(request_id: &str) {
             return;
         };
         if grant.revoking {
-            #[cfg(test)]
+            #[cfg(all(test, unix))]
             note_abandoned_revoke_skipped(request_id);
             return;
         }
@@ -1087,7 +1090,7 @@ pub(crate) async fn revoke_abandoned_plan_grant(request_id: &str) {
             grant.pending_id.clone(),
         )
     };
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pause_abandoned_revoke(request_id).await;
     revoke_plan_grant(
         &held.0,
@@ -1386,8 +1389,13 @@ pub(crate) async fn dispatch_agent_plan_step(
     let response = PLAN_STEP
         .scope(step, authorize_and_dispatch_resource_invoke(&request, &ctx))
         .await;
-    if let Some(mut held) = held {
-        if let Some(grant) = held.grant.take() {
+    if let Some(held) = held {
+        // The grant stays in the guard across this await. A timeout or abort
+        // while it is running still drops the guard, so the grant is abandoned
+        // and revoked once.
+        if let Some(grant) = held.grant.as_ref() {
+            #[cfg(all(test, unix))]
+            pause_plan_dispatch(request_id, PlanDispatchPoint::Revoke).await;
             if plan_effect_succeeded(&response) {
                 // The token was counted by validate. The pending record must
                 // leave Granted: Stop's settle writes every still-granted
