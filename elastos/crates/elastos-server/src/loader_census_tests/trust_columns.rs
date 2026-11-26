@@ -771,6 +771,16 @@ fn columns() -> Vec<TrustColumn> {
             evidence: ["ProviderBr", "idge::spawn"].concat(),
             os_path: "",
         },
+        TrustColumn {
+            file: "elastos-server/src/server_infra.rs",
+            function: "apply",
+            call: "ProviderBridge::spawn",
+            class: "n/a",
+            trust_root: "components-json-in-data-dir",
+            verified_when: "at-every-start",
+            evidence: ["ProviderBridge::", "spawn(helper, config)"].concat(),
+            os_path: "",
+        },
         // start_did_provider admits the exact binary through
         // verify_installed_component_start and pins that signed digest.
         // A Home with no signed digest, including dev_mode, is refused.
@@ -1565,8 +1575,8 @@ fn trust_columns_cover_each_loader_and_bind_to_source() {
         ),
         (
             "elastos-server/src/server_infra.rs",
-            "setup_server_infrastructure_impl",
-            ["ProviderBridge::", "spawn(&binary_path, config)"].concat(),
+            "apply",
+            ["ProviderBridge::", "spawn(helper, config)"].concat(),
             1,
         ),
         (
@@ -1686,13 +1696,13 @@ fn trust_column_counts_and_chokepoint_queue() {
         })
         .count();
     println!("loader trust rows={} classes={classes:?} roots={roots:?} verified_when={times:?} to_gate={to_gate}", columns.len());
-    assert_eq!(columns.len(), 105);
-    assert_eq!(classes.get("n/a"), Some(&56));
+    assert_eq!(columns.len(), 106);
+    assert_eq!(classes.get("n/a"), Some(&57));
     assert_eq!(classes.get("os-tool"), Some(&2));
     assert_eq!(classes.get("other"), Some(&37));
     assert_eq!(classes.get("own-binary"), Some(&5));
     assert_eq!(classes.get("release-component"), Some(&5));
-    assert_eq!(roots.get("components-json-in-data-dir"), Some(&11));
+    assert_eq!(roots.get("components-json-in-data-dir"), Some(&12));
     assert_eq!(roots.get("content-cid"), Some(&3));
     assert_eq!(roots.get("publisher-did-signature"), Some(&2));
     #[cfg(not(windows))]
@@ -1711,10 +1721,10 @@ fn trust_column_counts_and_chokepoint_queue() {
     );
     assert_eq!(roots.get("staged-cid"), Some(&8));
     #[cfg(not(windows))]
-    assert_eq!(times.get("at-every-start"), Some(&38));
+    assert_eq!(times.get("at-every-start"), Some(&39));
     #[cfg(windows)]
     {
-        assert_eq!(times.get("at-every-start"), Some(&33));
+        assert_eq!(times.get("at-every-start"), Some(&34));
         assert_eq!(times.get(own_command_verified_when()), Some(&3));
         assert_eq!(times.get(managed_runtime_verified_when()), Some(&2));
     }

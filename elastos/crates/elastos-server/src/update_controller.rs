@@ -1927,36 +1927,35 @@ pub fn update_can_roll_back(data_dir: &Path) -> bool {
         || !matches!(request, Err(error) if error.kind() == std::io::ErrorKind::NotFound)
 }
 
-#[rustfmt::skip]
-pub fn update_receipt_is_damaged(data_dir: &Path) -> bool {
-    matches!(path_present(&data_dir.join(DIRECTORY).join(RECEIPT)), Ok(true)) && installed_writer_binary(data_dir).is_err()
-}
-
-/// Named remedy when a rollback wait cannot clear itself. A real pending update
-/// (journal, or active request while the controller lease is held) returns None.
-/// There is no `elastos update status`; the check command is `elastos update --check`.
+/// Named remedy when a rollback wait cannot clear itself; `elastos update --check`
+/// prints it. A real pending update (journal under a good receipt, or an active
+/// request while the controller lease is held) returns None. A pending journal is
+/// recovered before a damaged receipt.json is ever named for deletion.
 pub fn update_rollback_fault_remedy(data_dir: &Path) -> Option<&'static str> {
-    const MSG: &str =
-        "Local apps stay off until the pending update finishes; run elastos update --check.";
     let dir = data_dir.join(DIRECTORY);
-    if path_present(&dir).is_err() {
-        return Some(MSG);
+    let request = fs::symlink_metadata(dir.join(ACTIVE_REQUEST));
+    let unread = matches!(&request, Err(error) if error.kind() != std::io::ErrorKind::NotFound);
+    if unread || path_present(&dir.join(RECEIPT)).is_err() {
+        return Some("update-controller cannot be read. Make it readable, then restart.");
     }
-    let journal = match installed_writer_binary(data_dir) {
-        Ok(kept) => crate::install_transaction::installed_binary(data_dir, kept)
-            .ok()
-            .flatten()
-            .is_some_and(|path| InstallTransaction::has_pending_recovery(&path)),
-        Err(_) => return Some(MSG),
-    };
-    if journal {
-        return None;
-    }
-    match fs::symlink_metadata(dir.join(ACTIVE_REQUEST)) {
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-        Err(_) => Some(MSG),
-        Ok(_) if controller_lease_free(&dir) => Some(MSG),
-        Ok(_) => None,
+    let kept = installed_writer_binary(data_dir);
+    let journal = crate::install_transaction::installed_binary(
+        data_dir,
+        kept.as_ref().ok().cloned().flatten(),
+    )
+    .ok()
+    .flatten()
+    .is_some_and(|path| InstallTransaction::has_pending_recovery(&path));
+    match (journal, kept.is_err()) {
+        (true, true) => Some("An update waits to be recovered. Run elastos update, then restart."),
+        (true, false) => None,
+        (false, true) => {
+            Some("update-controller/receipt.json is damaged. Delete it, then restart.")
+        }
+        (false, false) if request.is_ok() && controller_lease_free(&dir) => {
+            Some("update-controller/active-request.json is stuck. Delete it, then restart.")
+        }
+        (false, false) => None,
     }
 }
 

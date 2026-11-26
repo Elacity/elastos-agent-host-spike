@@ -714,7 +714,7 @@ async fn refuse_localhost(
                 (Bringup::Start(_), None) => {
                     registry.unregister("localhost").await;
                     elastos_server::local_apps::set_local_apps_refusal(data_dir, None);
-                    tracing::error!(target: "elastos", "local apps on");
+                    tracing::info!(target: "elastos", "local apps on");
                     return;
                 }
                 (Bringup::Start(config), Some(helper)) => {
@@ -723,7 +723,7 @@ async fn refuse_localhost(
                         Ok(bridge) => {
                             registry.register(Arc::new(provider::CapsuleProvider::new(Arc::new(bridge)))).await;
                             elastos_server::local_apps::set_local_apps_refusal(data_dir, None);
-                            tracing::error!(target: "elastos", "local apps on");
+                            tracing::info!(target: "elastos", "local apps on");
                             return;
                         }
                         Err(err) => format!("localhost-provider did not start ({err}). Restart Home."),
@@ -8888,6 +8888,37 @@ mod tests {
     }
 
     #[test]
+    fn the_first_old_file_says_moving_and_a_home_without_one_stays_checking() {
+        let _guard = LocalAppsGuard::lock();
+        let device_key = [0x2c; 32];
+        let checking = crate::localhost_file_migration::LOCALHOST_FILES_CHECKING;
+        let moving = crate::localhost_file_migration::LOCALHOST_FILES_MOVING;
+        let refusal = elastos_server::local_apps::local_apps_refusal;
+        let fresh = TempDir::new().unwrap();
+        fs::create_dir_all(fresh.path().join("Users")).unwrap();
+        elastos_server::local_apps::set_local_apps_refusal(fresh.path(), Some(checking.into()));
+        assert!(matches!(
+            localhost_bringup(fresh.path(), &device_key),
+            LocalhostBringup::Start(_)
+        ));
+        assert_eq!(refusal(fresh.path()).as_deref(), Some(checking));
+        let old = TempDir::new().unwrap();
+        plant_device_envelope(&old.path().join("Users/a.bin"), &device_key, b"a");
+        elastos_server::local_apps::set_local_apps_refusal(old.path(), Some(checking.into()));
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let (saw, data) = (seen.clone(), old.path().to_path_buf());
+        set_localhost_migration_before_replace(Some(Box::new(move |_: &std::path::Path| {
+            saw.lock().unwrap().push(refusal(&data));
+        })));
+        let got = localhost_bringup(old.path(), &device_key);
+        set_localhost_migration_before_replace(None);
+        assert!(matches!(got, LocalhostBringup::Start(_)));
+        // Pass 1 reads a.bin under "checking"; pass 2 rewrites it under "moving".
+        let want = vec![Some(checking.to_string()), Some(moving.to_string())];
+        assert_eq!(*seen.lock().unwrap(), want);
+    }
+
+    #[test]
     fn a_done_marker_start_does_no_walk() {
         let _guard = LocalAppsGuard::lock();
         let device_key = [0x26; 32];
@@ -8994,15 +9025,17 @@ mod tests {
         let receipt = root.path().join("update-controller/receipt.json");
         fs::create_dir_all(receipt.parent().unwrap()).unwrap();
         fs::write(&receipt, b"not-a-receipt").unwrap();
-        assert!(elastos_server::update_controller::update_receipt_is_damaged(root.path()));
+        let want = "update-controller/receipt.json is damaged. Delete it, then restart.";
+        assert_eq!(
+            elastos_server::update_controller::update_rollback_fault_remedy(root.path()),
+            Some(want)
+        );
         assert!(elastos_server::update_controller::update_can_roll_back(
             root.path()
         ));
         let registry = Arc::new(provider::ProviderRegistry::new());
         lc_check(&registry, root.path(), &device_key, None).await;
         let deadline = Instant::now() + Duration::from_secs(20);
-        let want =
-            "Local apps stay off until the pending update finishes; run elastos update --check.";
         loop {
             let got = elastos_server::local_apps::local_apps_refusal(root.path());
             if got.as_deref() == Some(want) {
@@ -9069,14 +9102,25 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stuck_request_and_unreadable_controller_use_one_update_sentence() {
+    async fn stuck_update_check_names_the_fault_and_the_remedy_brings_apps_on() {
         use std::os::unix::fs::PermissionsExt;
         let _guard = LocalAppsGuard::lock();
         let device_key = [0x2b; 32];
-        let want =
-            "Local apps stay off until the pending update finishes; run elastos update --check.";
-        let cases = ["request", "request-with-receipt", "controller"];
-        for name in cases {
+        let cases = [
+            (
+                "request",
+                "update-controller/active-request.json is stuck. Delete it, then restart.",
+            ),
+            (
+                "receipt",
+                "update-controller/receipt.json is damaged. Delete it, then restart.",
+            ),
+            (
+                "controller",
+                "update-controller cannot be read. Make it readable, then restart.",
+            ),
+        ];
+        for (name, want) in cases {
             let root = TempDir::new().unwrap();
             let data = root.path();
             plant_device_envelope(&data.join("Users/a.bin"), &device_key, b"a");
@@ -9091,17 +9135,10 @@ mod tests {
                     fs::create_dir_all(request.parent().unwrap()).unwrap();
                     fs::write(&request, b"{}").unwrap();
                 }
-                "request-with-receipt" => {
-                    let sources = serde_json::json!({
-                        "schema": "elastos.trusted-sources/v1",
-                        "sources": [{ "name": "t", "install_path": "/tmp/elastos-no-journal" }],
-                    });
-                    fs::write(data.join("sources.json"), sources.to_string()).unwrap();
+                "receipt" => {
                     let dir = data.join("update-controller");
                     fs::create_dir_all(&dir).unwrap();
-                    // A forged receipt keeps installed_writer_binary failing closed as damaged.
                     fs::write(dir.join("receipt.json"), b"not-a-receipt").unwrap();
-                    fs::write(dir.join("active-request.json"), b"{}").unwrap();
                 }
                 _ => {
                     let dir = data.join("update-controller");
@@ -9118,6 +9155,12 @@ mod tests {
                 elastos_server::update_controller::update_rollback_fault_remedy(data),
                 Some(want)
             );
+            // `elastos update --check` stops at the fault sentence, before any source or network step.
+            crate::release_cmd::run_update_command_for_data_dir(
+                data, true, None, true, None, false, "0.7.1",
+            )
+            .await
+            .expect("update --check reports the controller fault");
             let registry = Arc::new(provider::ProviderRegistry::new());
             lc_check(&registry, data, &device_key, None).await;
             let deadline = Instant::now() + Duration::from_secs(20);
@@ -9132,14 +9175,69 @@ mod tests {
                 );
                 tokio::time::sleep(Duration::from_millis(200)).await;
             }
-            if name == "controller" {
-                let dir = data.join("update-controller");
-                let mut perms = fs::metadata(&dir).unwrap().permissions();
-                perms.set_mode(0o755);
-                fs::set_permissions(&dir, perms).unwrap();
+            // Run the named remedy, then a restart: local apps come on.
+            match name {
+                "request" => {
+                    fs::remove_file(data.join("update-controller/active-request.json")).unwrap()
+                }
+                "receipt" => fs::remove_file(data.join("update-controller/receipt.json")).unwrap(),
+                _ => {
+                    let dir = data.join("update-controller");
+                    let mut perms = fs::metadata(&dir).unwrap().permissions();
+                    perms.set_mode(0o755);
+                    fs::set_permissions(&dir, perms).unwrap();
+                }
             }
+            assert!(
+                elastos_server::update_controller::update_rollback_fault_remedy(data).is_none()
+            );
             elastos_server::local_apps::clear_local_apps_refusals();
+            let registry = Arc::new(provider::ProviderRegistry::new());
+            lc_check(&registry, data, &device_key, None).await;
+            let deadline = Instant::now() + Duration::from_secs(20);
+            loop {
+                if elastos_server::local_apps::local_apps_refusal(data).is_none() {
+                    break;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "{name} remedy restart left apps off"
+                );
+                tokio::time::sleep(Duration::from_millis(200)).await;
+            }
+            assert!(localhost_provider::header_is_file_key_envelope(
+                &fs::read(data.join("Users/a.bin")).unwrap()
+            ));
         }
+    }
+
+    #[test]
+    fn a_pending_journal_is_recovered_before_a_damaged_receipt_is_named() {
+        let root = TempDir::new().unwrap();
+        let bin = TempDir::new().unwrap();
+        let data = root.path();
+        let sources = serde_json::json!({
+            "schema": "elastos.trusted-sources/v1",
+            "sources": [{ "name": "t", "install_path": bin.path().join("elastos") }],
+        });
+        fs::write(data.join("sources.json"), sources.to_string()).unwrap();
+        let journal = bin.path().join(".elastos.update-journal.json");
+        fs::write(&journal, b"{}").unwrap();
+        fs::create_dir_all(data.join("update-controller")).unwrap();
+        fs::write(
+            data.join("update-controller/receipt.json"),
+            b"not-a-receipt",
+        )
+        .unwrap();
+        assert_eq!(
+            elastos_server::update_controller::update_rollback_fault_remedy(data),
+            Some("An update waits to be recovered. Run elastos update, then restart.")
+        );
+        fs::remove_file(&journal).unwrap();
+        assert_eq!(
+            elastos_server::update_controller::update_rollback_fault_remedy(data),
+            Some("update-controller/receipt.json is damaged. Delete it, then restart.")
+        );
     }
 
     #[tokio::test]

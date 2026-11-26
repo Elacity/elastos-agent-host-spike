@@ -802,7 +802,7 @@ fn migrate_localhost_envelope(
         }
         Ok(localhost_provider::RekeyOutcome::Opens) => {
             opened_file_still_matches(path, &opened)?;
-            HELD.with(|slot| slot.set(true));
+            if !HELD.with(|slot| slot.replace(true)) { say_files_are_moving(); }
             Ok(MigratedFile::Held)
         }
         Err(err) if err.to_string().contains("does not decrypt") => {
@@ -810,6 +810,23 @@ fn migrate_localhost_envelope(
         }
         Err(err) => Err(err).with_context(|| localhost_refused(path, "cannot be sealed")),
     }
+}
+
+/// The first old file turns a waiting caller's "checking" into "moving"; a long move never times out.
+#[cfg(unix)]
+fn say_files_are_moving() {
+    MIGRATION_ROOT.with(|root| {
+        let root = root.borrow();
+        if elastos_server::local_apps::local_apps_refusal(&root).as_deref()
+            == Some(LOCALHOST_FILES_CHECKING)
+        {
+            tracing::info!(target: "elastos", "{LOCALHOST_FILES_MOVING}");
+            elastos_server::local_apps::set_local_apps_refusal(
+                &root,
+                Some(LOCALHOST_FILES_MOVING.into()),
+            );
+        }
+    });
 }
 
 #[cfg(unix)]
@@ -1338,7 +1355,7 @@ mod tests {
 
     /// Start cost on a big old Home. Run by hand, one process per step:
     /// `SL_R23_ROOT=<dir> SL_R23_BUILD=1` plants 2,000 files (3 old files of
-    /// 100 MiB, 1,900 small old files, 90 small and 7 20 MiB plain JSON files).
+    /// 50 MiB, 1,900 small old files, 90 small and 7 20 MiB plain JSON files).
     /// Without `SL_R23_BUILD` it starts that Home twice and prints time, peak
     /// memory, opens and bytes read.
     #[test]

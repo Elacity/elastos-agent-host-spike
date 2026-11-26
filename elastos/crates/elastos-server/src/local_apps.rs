@@ -135,15 +135,13 @@ pub fn local_apps_refusal(data_dir: &Path) -> Option<String> {
         .cloned()
 }
 
-/// Wait out [`LOCAL_APPS_CHECKING`]. `None` means local apps are on.
-#[rustfmt::skip]
+/// Wait out [`LOCAL_APPS_CHECKING`] with no time limit. `None` means local apps are on.
+/// Any other sentence, such as files moving, returns at once.
 pub async fn await_local_apps_decision(data_dir: &Path) -> Option<String> {
-    let end = tokio::time::Instant::now() + Duration::from_secs(120);
     loop {
         match local_apps_refusal(data_dir) {
             None => return None,
             Some(s) if s != LOCAL_APPS_CHECKING => return Some(s),
-            Some(_) if tokio::time::Instant::now() >= end => return Some("The local app file check timed out. Restart Home.".into()),
             Some(_) => tokio::time::sleep(Duration::from_millis(50)).await,
         }
     }
@@ -256,6 +254,20 @@ mod tests {
             Some("Users/secret.bin is not readable.")
         );
         assert_eq!(local_apps_refusal(second.path()).as_deref(), Some("other"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_long_check_never_times_out_and_a_move_is_said_at_once() {
+        let _guard = lock_local_apps_for_test();
+        let home = tempfile::tempdir().unwrap();
+        let moving = "Local app files are moving to the new key.";
+        set_local_apps_refusal(home.path(), Some(LOCAL_APPS_CHECKING.into()));
+        let dir = home.path().to_path_buf();
+        let wait = tokio::spawn(async move { await_local_apps_decision(&dir).await });
+        tokio::time::sleep(Duration::from_secs(300)).await;
+        assert!(!wait.is_finished(), "the wait gave up while checking");
+        set_local_apps_refusal(home.path(), Some(moving.into()));
+        assert_eq!(wait.await.unwrap().as_deref(), Some(moving));
     }
 
     #[test]

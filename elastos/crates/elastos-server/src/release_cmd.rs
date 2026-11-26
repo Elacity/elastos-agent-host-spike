@@ -58,7 +58,7 @@ pub async fn run_update_command(
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn run_update_command_for_data_dir(
+pub(crate) async fn run_update_command_for_data_dir(
     data_dir: &std::path::Path,
     check: bool,
     head_cid: Option<String>,
@@ -67,6 +67,12 @@ async fn run_update_command_for_data_dir(
     force: bool,
     current_version: &'static str,
 ) -> anyhow::Result<()> {
+    let fault =
+        check.then(|| elastos_server::update_controller::update_rollback_fault_remedy(data_dir));
+    if let Some(fault) = fault.flatten() {
+        println!("{fault}");
+        return Ok(());
+    }
     if !check {
         update::recover_pending_installation(data_dir)?;
     }
