@@ -103,6 +103,11 @@ export function bindAgents(doc, request, confirmStepUp) {
       row.append(copy, actions);
       return row;
     });
+    for (const [id, named] of unknownNotes) {
+      if (agents.some((agent) => agent.agent_id === id)) continue;
+      const state = el(doc, "div", "pc2-card-sublabel", `Unknown step: ${named}`);
+      state.dataset.agentState = id; rows.push(state);
+    }
     if (gate === "ready" && !rows.length && !failure && pendingId !== "create") rows.push(el(doc, "p", "pc2-card-sublabel", "You have no agents on this Home. Agents created on another Home stay there."));
     listNode.replaceChildren(...rows);
   }
@@ -233,8 +238,9 @@ export function bindAgents(doc, request, confirmStepUp) {
       if (!reply || reply.agent_id !== id || (!stopped.length && !still.length && !unknown.length)) {
         throw pageRefusal("The Home did not confirm that change.");
       }
-      await load();
-      if (unknown.length) unknownNotes.set(id, unknown.map((step) => `${text(step.request_id)} ${text(step.outcome)}`.trim()).join(", "));
+      const note = unknown.map((step) => `${text(step.request_id)} ${text(step.outcome)}`.trim()).filter(Boolean).join(", ");
+      try { await load(); } catch (error) { if (note) unknownNotes.set(id, note); throw error; }
+      if (note) unknownNotes.set(id, note);
       if (still.length) stopping.add(id);
       else stopping.delete(id);
       running.delete(id);
