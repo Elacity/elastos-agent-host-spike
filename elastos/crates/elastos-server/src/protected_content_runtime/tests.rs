@@ -10490,6 +10490,19 @@ pub(crate) fn write_device_key(data_dir: &Path, seed: u8) {
     fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
 }
 
+/// Replaces the stored pending wallet request with bytes that do not decode.
+#[cfg(unix)]
+pub(crate) fn plant_undecodable_pending_wallet_request(
+    data_dir: &Path,
+    principal_id: &str,
+    mint_id: Digest32,
+) {
+    let path = super::runtime_viewer_path(data_dir, principal_id, mint_id);
+    let mut record: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    record["pending_release"]["wallet_request_hex"] = json!("00");
+    fs::write(&path, serde_json::to_vec(&record).unwrap()).unwrap();
+}
+
 #[cfg(unix)]
 fn derived_device_key_for_seed(seed: u8) -> (SigningKey, String) {
     elastos_identity::derive_did(&[seed; 32])
@@ -13972,4 +13985,42 @@ async fn runtime_custody_open_for_an_agent_is_refused_before_custody() {
         refused.unwrap_err().to_string(),
         "proof-bound passkey session required"
     );
+}
+
+/// Each lifetime closes the release window on its own. The round is an
+/// injected reading, so no clock or sleep is involved.
+#[test]
+fn custody_release_round_fits_each_lifetime_on_its_own() {
+    use super::{
+        custody_release_round_fits as fits, RELEASE_CONTRIBUTION_WINDOW_SECS,
+        RELEASE_ISSUE_SKEW_SECS, WHOLE_RELEASE_SECS,
+    };
+    let round = 1_000;
+    let issued = round - RELEASE_ISSUE_SKEW_SECS;
+    let rights_end = round + WHOLE_RELEASE_SECS;
+    let prepared_end = round + RELEASE_CONTRIBUTION_WINDOW_SECS;
+    let pending_end = round + 1;
+    assert!(fits(round, issued, rights_end, prepared_end, pending_end));
+    assert!(!fits(
+        round,
+        issued + 1,
+        rights_end,
+        prepared_end,
+        pending_end
+    ));
+    assert!(!fits(
+        round,
+        issued,
+        rights_end - 1,
+        prepared_end,
+        pending_end
+    ));
+    assert!(!fits(
+        round,
+        issued,
+        rights_end,
+        prepared_end - 1,
+        pending_end
+    ));
+    assert!(!fits(round, issued, rights_end, prepared_end, round));
 }
