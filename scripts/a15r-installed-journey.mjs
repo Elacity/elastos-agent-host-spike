@@ -1847,6 +1847,7 @@ async function main() {
   let stopDuringStep = null;
   let runnerStoppedTooLate = false;
   let stopObserved = "";
+  let frozenLook = "";
   if (state.approveBody) {
     // Stop once, while the step is approved or dispatching and the note is
     // not on disk. Freeze the gateway for that look, queue Stop, then let it
@@ -1875,7 +1876,9 @@ async function main() {
         const record = inspectRecords().find((item) => item.request_id === state.requestId);
         const noteThere = fs.existsSync(notePath);
         const status = record?.status || "";
-        if (!((status === "approved" || status === "dispatching") && !noteThere)) {
+        if ((status === "approved" || status === "dispatching") && !noteThere) {
+          frozenLook = status;
+        } else {
           stopObserved = `frozen saw ${status} note=${noteThere}`;
           inflight = "";
         }
@@ -1944,17 +1947,24 @@ async function main() {
       step_outcome: stepOutcome,
       rows: stopRows.map((event) => event.result),
     });
-  } else if ((stopDuringStep?.status === 200 || stopDuringStep?.status === 202) && namedStop && stepOutcome) {
+  } else if (
+    frozenLook
+    && (stopDuringStep?.status === 200 || stopDuringStep?.status === 202)
+    && namedStop
+    && stepOutcome
+  ) {
     pass("stop_after_the_note_lands", {
       http: stopDuringStep.status,
       session_id: namedStop.session_id,
       stop_result: namedStop.result,
       step_outcome: stepOutcome,
+      frozen: frozenLook,
     });
   } else {
     mark("stop_after_the_note_lands", "fail", {
       http: stopDuringStep?.status || 0,
-      body: String(stopDuringStep?.text || "").slice(0, 240),
+      body: stopObserved || String(stopDuringStep?.text || "").slice(0, 240),
+      frozen: frozenLook,
       step_outcome: stepOutcome,
       rows: stopRows.map((event) => event.result),
     });
@@ -2032,6 +2042,8 @@ async function main() {
       dispatch_pid: gatewayPid,
       pids_equal: true,
       listener_owned: ownsListener,
+      pid_alive: true,
+      coords_mode: secretMode.toString(8),
       child_agent_capsules: childAgents,
       source_commit: process.env.A15R_SOURCE_COMMIT || "",
     });
