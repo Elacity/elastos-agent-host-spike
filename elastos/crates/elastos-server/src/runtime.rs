@@ -383,8 +383,8 @@ struct UnknownPlanStep {
     session_id: String,
     agent_id: String,
     request_id: String,
-    /// Drop this name at this instant. None while its session is live.
-    /// The session's end, or a record made after that end, sets it.
+    /// Drop this name at this instant. None while the session is live or a
+    /// flight of it is still in progress. The last flight's departure sets it.
     purge_at: Option<std::time::Instant>,
 }
 
@@ -486,16 +486,13 @@ fn finish_flight(book: &mut PlanBook, id: u64, as_unknown: bool) {
     forget_open_effect(&flight.request_id);
     let session_id = flight.session_id.clone();
     if as_unknown {
-        // No purge time while the session is live. After the end, one retention.
-        let purge_at = session_has_ended(book, &flight.session_id)
-            .then(|| book_now(book) + ENDED_CAPSULE_RETENTION);
         push_unknown(
             book,
             UnknownPlanStep {
                 session_id: flight.session_id,
                 agent_id: flight.agent_id,
                 request_id: flight.request_id,
-                purge_at,
+                purge_at: None,
             },
         );
     }
@@ -541,8 +538,8 @@ fn push_unknown(book: &mut PlanBook, step: UnknownPlanStep) {
     }
 }
 
-/// Drops names whose purge time has come. A live session's name has none,
-/// so a row sweep does not start its limit. The registry lock is not held.
+/// Drops names whose purge time has come. A name has none while its session
+/// is live or a flight of it is in progress. The registry lock is not held.
 fn purge_unknown_session(book: &mut PlanBook, _session_id: &str) {
     drop_due_unknown(book);
 }
@@ -619,6 +616,9 @@ fn reap(book: &mut PlanBook, session_id: &str) {
     {
         return;
     }
+    if session_has_ended(book, session_id) {
+        stamp_unknown_retention(book, session_id);
+    }
     if book
         .instances
         .get(session_id)
@@ -633,7 +633,6 @@ impl PlanBook {
         if let Some(inst) = self.instances.get_mut(session_id) {
             inst.stopping = true;
         }
-        stamp_unknown_retention(self, session_id);
         reap(self, session_id);
     }
 

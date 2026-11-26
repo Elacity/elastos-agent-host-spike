@@ -3997,6 +3997,47 @@ async fn an_unknown_on_a_live_run_is_named_when_stop_comes_later() {
     runtime.set_plan_clock_for_test(None);
 }
 
+/// U1 is unknown. U2 stays in flight past one retention. The session ends at
+/// two seconds. The Stop after U2 leaves still names U1.
+#[cfg(unix)]
+#[tokio::test]
+async fn an_unknown_name_stays_until_the_sessions_last_flight_is_gone() {
+    let dir = tempfile::tempdir().unwrap();
+    let runtime = bare_runtime(dir.path()).await;
+    let agent = "agent:r11-u1";
+    let session = "session-r11-u1";
+    let start = std::time::Instant::now();
+    runtime.set_plan_clock_for_test(Some(start));
+    register_open_row(&runtime, agent, session).await;
+    leave_flight(&runtime, session, agent, "U1");
+    crate::runtime::resolve_unknown_plan_effect("U1");
+    let guard =
+        crate::runtime::Runtime::try_enter_plan_effect(&runtime.plan_book(), session, agent, "U2")
+            .expect("U2 enters");
+    runtime.set_plan_clock_for_test(Some(start + std::time::Duration::from_secs(2)));
+    runtime.note_plan_instance_ended(session);
+    runtime.end_planted_session_for_test(session).await;
+    runtime.set_plan_clock_for_test(Some(
+        start
+            + std::time::Duration::from_secs(2)
+            + crate::runtime::ENDED_CAPSULE_RETENTION
+            + std::time::Duration::from_secs(1),
+    ));
+    assert_eq!(
+        runtime.unknown_count_for_test(agent),
+        1,
+        "U1 was dropped while U2 was still in flight"
+    );
+    guard.release();
+    let (status, body) = stop_one_capsule(runtime.clone(), session).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let named = body["unknown_steps"]
+        .as_array()
+        .is_some_and(|steps| steps.iter().any(|step| step == "U1"));
+    assert!(named, "the final Stop answer did not name U1: {body}");
+    runtime.set_plan_clock_for_test(None);
+}
+
 /// A capability poll watching the flag during a failing stop does not cancel.
 #[cfg(unix)]
 #[tokio::test]
