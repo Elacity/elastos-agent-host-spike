@@ -681,6 +681,9 @@ async fn register_media_provider(
         .map_err(|err| anyhow::anyhow!("failed to register media provider: {err}"))
 }
 
+/// While an update can still roll back and files need moving, each tick reads the update state again.
+const LOCALHOST_UPDATE_TICK: Duration = Duration::from_secs(1);
+
 #[rustfmt::skip]
 async fn lc_check(
     registry: &Arc<provider::ProviderRegistry>,
@@ -699,7 +702,7 @@ async fn refuse_localhost(
     sentence: String,
     helper: Option<provider::CheckedExecutable>,
 ) {
-    use crate::localhost_file_migration::{localhost_bringup, LocalhostBringup as Bringup, LOCALHOST_FILES_CHECKING};
+    use crate::localhost_file_migration::{localhost_bringup, LocalhostBringup as Bringup, LOCALHOST_FILES_CHECKING, LOCALHOST_FILES_PENDING_UPDATE};
     let checking = sentence == LOCALHOST_FILES_CHECKING;
     if checking { tracing::info!(target: "elastos", "{sentence}"); } else { tracing::error!(target: "elastos", "{sentence}"); }
     elastos_server::local_apps::set_local_apps_refusal(data_dir, Some(sentence.clone()));
@@ -736,12 +739,20 @@ async fn refuse_localhost(
             println!("{}", elastos_server::local_apps::local_apps_health_line(&sentence));
             let _ = std::io::Write::flush(&mut std::io::stdout());
         }
-        let dir = data_dir.clone();
-        let bringup = match tokio::task::spawn_blocking(move || localhost_bringup(&dir, &device_key)).await {
-            Ok(b) => b,
-            Err(err) => Bringup::Refuse(format!("The local app file move stopped ({err}). Restart Home.")),
-        };
-        apply(&registry, &data_dir, &helper, bringup).await;
+        let mut said = false;
+        loop {
+            let (dir, key) = (data_dir.clone(), device_key.clone());
+            let bringup = match tokio::task::spawn_blocking(move || localhost_bringup(&dir, &key)).await {
+                Ok(b) => b,
+                Err(err) => Bringup::Refuse(format!("The local app file move stopped ({err}). Restart Home.")),
+            };
+            if !matches!(&bringup, Bringup::Refuse(s) if s == LOCALHOST_FILES_PENDING_UPDATE) {
+                if said && matches!(bringup, Bringup::Start(_)) { drop(ensure_file_backed_roots(&data_dir)); }
+                return apply(&registry, &data_dir, &helper, bringup).await;
+            }
+            if !std::mem::replace(&mut said, true) { apply(&registry, &data_dir, &helper, bringup).await; }
+            tokio::time::sleep(LOCALHOST_UPDATE_TICK).await;
+        }
     });
 }
 
@@ -9022,15 +9033,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_pending_update_moves_nothing_and_a_restart_after_it_moves_files_once() {
+    async fn a_finished_system_update_turns_local_apps_on_with_no_restart() {
         let _guard = LocalAppsGuard::lock();
         let device_key = [0x2a; 32];
         let file_key = expected_localhost_file_key(&device_key);
         let pending = crate::localhost_file_migration::LOCALHOST_FILES_PENDING_UPDATE;
-        assert_eq!(
-            pending,
-            "Local apps stay off until the pending update finishes; run elastos update."
-        );
+        assert_eq!(pending, "Local apps come back on when the update finishes.");
         // A damaged receipt.json beside a pending journal, a journal alone, and an orphaned
         // request (a dead controller) all read as "an update can still roll back".
         for kind in ["damaged receipt", "journal", "request"] {
@@ -9078,32 +9086,20 @@ mod tests {
                 );
             };
             nothing_moved();
-            // The state is read once per start: a clean state alone does not turn apps on.
+            // The update finishes (journal and request gone): the next tick moves the files and
+            // turns local apps on. There is no restart and no second lc_check.
             for path in &state {
                 fs::remove_file(path).unwrap();
             }
-            assert!(
-                !elastos_server::update_controller::update_can_roll_back(data),
-                "{kind}"
-            );
-            tokio::time::sleep(Duration::from_millis(1200)).await;
-            assert_eq!(
-                elastos_server::local_apps::local_apps_refusal(data).as_deref(),
-                Some(pending),
-                "{kind}"
-            );
-            nothing_moved();
-            // A restart moves the files, once.
-            elastos_server::local_apps::clear_local_apps_refusals();
-            let registry = Arc::new(provider::ProviderRegistry::new());
-            lc_check(&registry, data, &device_key, None).await;
-            let deadline = Instant::now() + Duration::from_secs(30);
+            let finished = Instant::now();
+            let deadline = finished + Duration::from_secs(30);
             while elastos_server::local_apps::local_apps_refusal(data).is_some()
                 || registry.get("localhost").await.is_some()
             {
-                assert!(Instant::now() < deadline, "{kind} restart left apps off");
-                tokio::time::sleep(Duration::from_millis(50)).await;
+                assert!(Instant::now() < deadline, "{kind} apps stayed off");
+                tokio::time::sleep(Duration::from_millis(20)).await;
             }
+            assert!(finished.elapsed() < LOCALHOST_UPDATE_TICK * 5, "{kind}");
             for path in &paths {
                 assert_envelope_opens_with_exactly_one_key(path, b"kept", &device_key, &file_key);
             }
@@ -9144,8 +9140,7 @@ mod tests {
             LocalhostBringup::Refuse(_)
         ));
         assert!(!empty.path().join("identity/localhost-file-key-v1").exists());
-        // All five roots absent: prepare returns early. It writes no marker, makes no root
-        // and no device key, and leaves local apps off for the start that follows.
+        // All five roots absent: prepare writes no marker and makes no root. Local apps stay off.
         let fresh = TempDir::new().unwrap();
         let state = plant_update_state(fresh.path(), bin.path(), "request");
         crate::localhost_file_migration::prepare_localhost_files(fresh.path()).unwrap();
@@ -9153,7 +9148,7 @@ mod tests {
             elastos_server::local_apps::local_apps_refusal(fresh.path()).as_deref(),
             Some(pending)
         );
-        assert!(!fresh.path().join("identity").exists());
+        assert!(!fresh.path().join("identity/localhost-file-key-v1").exists());
         for root in ["AppCapsules", "ElastOS", "Local", "Users", "UsersAI"] {
             assert!(!fresh.path().join(root).exists(), "{root}");
         }
@@ -9164,6 +9159,62 @@ mod tests {
         assert!(elastos_server::local_apps::local_apps_refusal(fresh.path()).is_none());
         let key = elastos_identity::load_or_create_device_key(fresh.path()).unwrap();
         assert_current_marker(fresh.path(), &key);
+    }
+
+    #[tokio::test]
+    async fn a_home_already_moved_stays_on_through_an_update_and_a_fresh_home_waits_for_it() {
+        let _guard = LocalAppsGuard::lock();
+        let device_key = [0x2e; 32];
+        let bin = TempDir::new().unwrap();
+        let moved = TempDir::new().unwrap();
+        plant_device_envelope(&moved.path().join("Users/a.bin"), &device_key, b"kept");
+        migrate_again(moved.path(), &device_key);
+        let state = plant_update_state(moved.path(), bin.path(), "journal");
+        assert!(elastos_server::update_controller::update_can_roll_back(
+            moved.path()
+        ));
+        let registry = Arc::new(provider::ProviderRegistry::new());
+        lc_check(&registry, moved.path(), &device_key, None).await;
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while elastos_server::local_apps::local_apps_refusal(moved.path()).is_some() {
+            assert!(
+                Instant::now() < deadline,
+                "a moved Home was held by the update"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(elastos_server::update_controller::update_can_roll_back(
+            moved.path()
+        ));
+        assert!(!state.is_empty());
+        // A Home with no roots and no marker waits, then gets its five roots when apps come on.
+        let fresh = TempDir::new().unwrap();
+        let fresh_bin = TempDir::new().unwrap();
+        let state = plant_update_state(fresh.path(), fresh_bin.path(), "request");
+        let registry = Arc::new(provider::ProviderRegistry::new());
+        lc_check(&registry, fresh.path(), &device_key, None).await;
+        let pending = crate::localhost_file_migration::LOCALHOST_FILES_PENDING_UPDATE;
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while elastos_server::local_apps::local_apps_refusal(fresh.path()).as_deref()
+            != Some(pending)
+        {
+            assert!(Instant::now() < deadline, "the update sentence never came");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(!fresh.path().join("Users").exists());
+        fs::remove_file(&state[0]).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while elastos_server::local_apps::local_apps_refusal(fresh.path()).is_some() {
+            assert!(
+                Instant::now() < deadline,
+                "apps stayed off after the update"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        for root in ["AppCapsules", "ElastOS", "Local", "Users", "UsersAI"] {
+            assert!(fresh.path().join(root).is_dir(), "{root}");
+        }
+        assert_current_marker(fresh.path(), &device_key);
     }
 
     #[test]
