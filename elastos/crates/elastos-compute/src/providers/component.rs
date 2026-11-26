@@ -2080,14 +2080,18 @@ fn settle_guest_burn(
     }
 }
 
-/// A v2 bridge on the guest runtime. An async host call is awaited and dropped
+/// A v2 bridge on the guest runtime. The list stops at the first refusal, so
+/// the Runtime never counts a grant after it. An async host call is awaited and dropped
 /// when `deadline` passes, so a timeout keeps no thread. A call that blocks
 /// this poll runs to the end first. A sync host call, used by tests, runs on
 /// this thread and adds none.
 #[rustfmt::skip]
-async fn await_bridges(bridges: &[OpenBridge], deadline: std::time::Instant) -> Vec<HostAnswer> {
+async fn await_bridges(bridges: &[OpenBridge], deadline: std::time::Instant, spend: bool) -> Vec<HostAnswer> {
     let mut raws = Vec::with_capacity(bridges.len());
-    for bridge in bridges { raws.push(await_v2_bridge(bridge, deadline.saturating_duration_since(std::time::Instant::now())).await); }
+    for bridge in bridges {
+        raws.push(await_v2_bridge(bridge, deadline.saturating_duration_since(std::time::Instant::now())).await);
+        if raws.last().is_some_and(|raw| grant_counted(raw, spend).is_err()) { break; }
+    }
     raws
 }
 
@@ -2736,16 +2740,24 @@ impl ComponentState {
         for raw in &raws[..checks] {
             grant_counted(raw, false)?;
         }
+        // The guest book follows the Runtime: every answer that says
+        // `use_spent` is spent here, even after an earlier refusal.
         let mut counted: Vec<String> = Vec::new();
+        let mut refused = None;
         for (raw, (grant, _)) in raws[checks..].iter().zip(&image_grants(&frame)) {
-            if let Err(err) = grant_counted(raw, true) {
-                let mut book = self.grants.lock().expect("grant book");
-                for id in &counted {
-                    book.spend(id);
-                }
-                return Err(err);
+            if raw.as_deref().is_ok_and(runtime_spent_use) {
+                counted.push(grant.clone());
             }
-            counted.push(grant.clone());
+            if let Err(err) = grant_counted(raw, true) {
+                refused.get_or_insert(err);
+            }
+        }
+        if let Some(err) = refused {
+            let mut book = self.grants.lock().expect("grant book");
+            for id in &counted {
+                book.spend(id);
+            }
+            return Err(err);
         }
         let mut book = self.grants.lock().expect("grant book");
         #[cfg(test)]
@@ -2778,7 +2790,12 @@ impl ComponentState {
         let mut raws: Vec<_> = bridges[..half].iter().map(sync_bridge).collect();
         let checks = raws.len();
         if !raws.iter().any(|raw| grant_counted(raw, false).is_err()) {
-            raws.extend(bridges[half..].iter().map(sync_bridge));
+            for bridge in &bridges[half..] {
+                raws.push(sync_bridge(bridge));
+                if grant_counted(&raws[raws.len() - 1], true).is_err() {
+                    break;
+                }
+            }
         }
         self.store_present(frame, &raws, checks)
     }
@@ -3337,10 +3354,10 @@ impl v2::elastos::bus::ui::HostWithStore<ComponentState> for HasSelf<ComponentSt
         let outcome = async {
             let (frame, bridges) = prepared?;
             let half = bridges.len() / 2;
-            let mut raws = await_bridges(&bridges[..half], deadline).await;
+            let mut raws = await_bridges(&bridges[..half], deadline, false).await;
             let checks = raws.len();
             if !raws.iter().any(|raw| grant_counted(raw, false).is_err()) {
-                raws.extend(await_bridges(&bridges[half..], deadline).await);
+                raws.extend(await_bridges(&bridges[half..], deadline, true).await);
             }
             Ok((frame, raws, checks))
         }
@@ -6315,6 +6332,117 @@ mod tests {
                 !matches!(node, crate::providers::bus2_ui::FrameNode::Image { grant, .. } if grant == "early" || grant == "late")
             })
         }));
+    }
+
+    /// Two grants `[g1, g2]`, `g2` one-use, `g1` revoked after the checks. The
+    /// guest's book follows the Runtime's count on every path: the Phase 2 list
+    /// stops at the refusal, so the Runtime never counts `g2`; an answer that
+    /// does say `use_spent` is spent in the book, whatever came before it.
+    #[test]
+    fn a_refused_present_keeps_the_book_equal_to_the_runtime() {
+        let lines = Arc::new(Mutex::new(Vec::new()));
+        let seen = lines.clone();
+        let mut state = ComponentState::new(
+            Some(Arc::new(move |line, _, _| {
+                seen.lock().expect("lines").push(line.to_string());
+                let value: serde_json::Value = serde_json::from_str(line).expect("line");
+                let spend = value["request"]["body"]["use_grant"].as_bool() == Some(true);
+                if spend && value["request"]["token"] == "g1" {
+                    return Ok(serde_json::json!({
+                        "id": 1,
+                        "response": {"type": "error", "code": "denied", "message": "revoked"}
+                    })
+                    .to_string());
+                }
+                Ok(use_spent_host()("x", "y", None).expect("host"))
+            })),
+            "capsule".into(),
+            None,
+        );
+        let media = crate::providers::bus2_ui::UI_MEDIA_TYPE;
+        let once = |state: &mut ComponentState, id: &str| {
+            let pending = one_read_grant(state);
+            state
+                .finish_grant(pending, Ok(token_line(id, r#","max_uses":1"#)))
+                .expect("once")
+                .id
+        };
+        let frame_of = |ids: &[&str]| {
+            let nodes: Vec<_> = ids
+                .iter()
+                .map(|id| format!(r#"{{"image":{{"grant":"{id}"}}}}"#))
+                .collect();
+            format!(r#"{{"frame":[{}]}}"#, nodes.join(","))
+        };
+        let held = |state: &ComponentState, id: &str| {
+            !state.grants.lock().expect("grant book").blocks_read(id)
+        };
+        let spends = |lines: &Mutex<Vec<String>>, token: &str| {
+            let quoted = format!("\"{token}\"");
+            lines
+                .lock()
+                .expect("lines")
+                .iter()
+                .filter(|line| line.contains("\"use_grant\":true") && line.contains(&quoted))
+                .count()
+        };
+
+        let (g1, g2) = (once(&mut state, "g1"), once(&mut state, "g2"));
+        let err = state
+            .present_document(media, frame_of(&[&g1, &g2]).as_bytes())
+            .expect_err("the revoked grant fails the present by name");
+        assert!(
+            matches!(err, V2BusError::Denied(ref m) if m == "revoked"),
+            "{err:?}"
+        );
+        assert_eq!(spends(&lines, "g2"), 0, "the Runtime never counted g2");
+        assert!(held(&state, "g2"), "the book keeps g2, as the Runtime does");
+
+        let g3 = once(&mut state, "g3");
+        let err = state
+            .present_document(media, frame_of(&[&g3, &g1]).as_bytes())
+            .expect_err("the later refusal fails the present");
+        assert!(matches!(err, V2BusError::Denied(_)), "{err:?}");
+        assert_eq!(spends(&lines, "g3"), 1, "the Runtime counted g3");
+        assert!(!held(&state, "g3"), "the book spent what the Runtime spent");
+        let mut request = read_request(4);
+        request.grant = Some("g3".into());
+        let err = state.begin_read(&request, false).err().expect("refused");
+        assert!(
+            matches!(err, V2BusError::Denied(ref m) if m == "the grant is spent"),
+            "{err:?}"
+        );
+
+        // A Runtime that answered for every grant after the refusal.
+        let g4 = once(&mut state, "g4");
+        let (frame, bridges) = state
+            .present_parts(media, frame_of(&[&g1, &g4]).as_bytes())
+            .expect("parts");
+        let raws: Vec<_> = bridges.iter().map(sync_bridge).collect();
+        state
+            .store_present(frame, &raws, 2)
+            .expect_err("g1 is refused");
+        assert!(
+            !held(&state, "g4"),
+            "an answer after a refusal still spends"
+        );
+
+        // The Phase 2 list asks no further grant after the refusal.
+        let g5 = once(&mut state, "g5");
+        let (_, bridges) = state
+            .present_parts(media, frame_of(&[&g1, &g5]).as_bytes())
+            .expect("parts");
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("runtime");
+        let answered = rt.block_on(await_bridges(
+            &bridges[2..],
+            std::time::Instant::now() + V2_HOST_DEADLINE,
+            true,
+        ));
+        assert_eq!(answered.len(), 1, "the list stops at the first refusal");
+        assert_eq!(spends(&lines, "g5"), 0);
+        assert!(held(&state, "g5"));
     }
 
     #[test]
