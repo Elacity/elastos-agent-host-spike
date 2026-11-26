@@ -130,3 +130,76 @@ fn confirm_nonce() -> u64 {
     static NONCE: AtomicU64 = AtomicU64::new(1);
     NONCE.fetch_add(1, Ordering::Relaxed)
 }
+
+/// Another admin with a live passkey. `owner_id` is not a candidate.
+pub(crate) fn another_live_admin(
+    data_dir: &Path,
+    owner_id: &str,
+) -> Option<crate::auth::PrincipalRecord> {
+    crate::auth::load_owner_principals(data_dir)
+        .ok()?
+        .into_iter()
+        .find(|principal| {
+            principal.principal_id != owner_id
+                && crate::auth::is_admin(principal)
+                && principal
+                    .proof_binding
+                    .passkey
+                    .as_ref()
+                    .is_some_and(|passkey| passkey.revoked_at.is_none())
+        })
+}
+
+/// One agent whose latest `agent.stopped` row is `failed`, with the principal
+/// that signed it. A later `ok` or `stopping` row drops that agent.
+pub(crate) struct FailedAgentStop {
+    pub(crate) agent_id: String,
+    pub(crate) principal: crate::auth::PrincipalRecord,
+    pub(crate) reason: serde_json::Value,
+}
+
+pub(crate) fn latest_failed_agent_stops(data_dir: &Path) -> Vec<FailedAgentStop> {
+    let Ok(auth) = crate::auth::load_auth_state(data_dir) else {
+        return Vec::new();
+    };
+    let mut latest =
+        std::collections::HashMap::<String, (String, String, serde_json::Value)>::new();
+    for event in &auth.audit {
+        if event.event_type != "agent.stopped" {
+            continue;
+        }
+        let Ok(reason) = serde_json::from_str::<serde_json::Value>(&event.reason) else {
+            continue;
+        };
+        let Some(agent_id) = reason.get("agent_id").and_then(|value| value.as_str()) else {
+            continue;
+        };
+        let Some(principal_id) = event.principal_id.clone() else {
+            continue;
+        };
+        latest.insert(
+            agent_id.to_string(),
+            (event.result.clone(), principal_id, reason),
+        );
+    }
+    let mut failed = Vec::new();
+    for (agent_id, (result, principal_id, reason)) in latest {
+        if result != "failed" {
+            continue;
+        }
+        let Some(principal) = auth
+            .principals
+            .iter()
+            .find(|principal| principal.principal_id == principal_id)
+            .cloned()
+        else {
+            continue;
+        };
+        failed.push(FailedAgentStop {
+            agent_id,
+            principal,
+            reason,
+        });
+    }
+    failed
+}

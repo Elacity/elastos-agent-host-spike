@@ -2156,10 +2156,12 @@ async function main() {
         && (event.result === "ok" || event.result === "failed" || event.result === "stopping")
       ))
       : false;
-    if (restartClean && (confirmedStop || (!state.stoppingSession && lived))) {
+    if (restartClean && finished && unfinished && (confirmedStop || (!state.stoppingSession && lived))) {
       pass("home_restart_history", {
         session_id: state.stoppingSession || state.liveStoppedSession,
         confirmed: confirmedStop ? "ok" : "the stop finished in the same call",
+        finished,
+        unfinished,
         replay: restart.status,
       });
     } else {

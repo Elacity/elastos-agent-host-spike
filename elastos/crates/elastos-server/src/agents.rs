@@ -2346,35 +2346,9 @@ pub(crate) fn owner_is_admin_now(data_dir: &Path, owner_id: &str) -> anyhow::Res
     Ok(admin && (!passkey || live_passkey))
 }
 
-/// The route that demotes an owner stops that owner's agents itself.
-/// A demote that does not come through the route is not claimed, and the
-/// registered stop runs for that owner.
-static DEMOTE_STOP_CLAIMS: std::sync::LazyLock<
-    std::sync::Mutex<std::collections::HashSet<String>>,
-> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashSet::new()));
 type OwnerDemotedHook = fn(&Path, &str);
 static OWNER_DEMOTED_HOOK: std::sync::LazyLock<std::sync::Mutex<Option<OwnerDemotedHook>>> =
     std::sync::LazyLock::new(|| std::sync::Mutex::new(None));
-
-fn demote_stop_key(data_dir: &Path, owner_id: &str) -> String {
-    format!("{}\n{owner_id}", data_dir.display())
-}
-
-fn demote_claims() -> std::sync::MutexGuard<'static, std::collections::HashSet<String>> {
-    DEMOTE_STOP_CLAIMS
-        .lock()
-        .unwrap_or_else(|err| err.into_inner())
-}
-
-/// The demote route calls this before it changes the role, then stops the
-/// agents itself and releases the claim.
-pub(crate) fn claim_demoted_stop(data_dir: &Path, owner_id: &str) {
-    demote_claims().insert(demote_stop_key(data_dir, owner_id));
-}
-
-pub(crate) fn release_demoted_stop(data_dir: &Path, owner_id: &str) {
-    demote_claims().remove(&demote_stop_key(data_dir, owner_id));
-}
 
 /// The gateway registers the stop that a direct demote runs.
 pub(crate) fn set_owner_demoted_hook(hook: fn(&Path, &str)) {
@@ -2383,12 +2357,9 @@ pub(crate) fn set_owner_demoted_hook(hook: fn(&Path, &str)) {
         .unwrap_or_else(|err| err.into_inner()) = Some(hook);
 }
 
-/// A role change to Guest. The route's own stop is claimed and skips this.
-/// With no agents there is nothing to stop.
-pub(crate) fn owner_demoted(data_dir: &Path, owner_id: &str) {
-    if demote_claims().contains(&demote_stop_key(data_dir, owner_id)) {
-        return;
-    }
+/// After a direct demote outside the HTTP route, run the registered stop.
+#[cfg(test)]
+pub(crate) fn notify_owner_demoted(data_dir: &Path, owner_id: &str) {
     if ids_owned_by(data_dir, owner_id).is_empty() {
         return;
     }

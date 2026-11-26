@@ -1023,11 +1023,13 @@ fn settle_agent_plan_dispatch(
     status: &str,
     result: serde_json::Value,
 ) -> anyhow::Result<String> {
-    // A late landing does not become a new action. The stored unknown stays
-    // unknown: nothing here calls it done, completed, or refused.
+    // The first terminal row stays; a late landing does not overwrite it.
     if let Ok(stored) = read_inspect_action_record(data_dir, &record.request_id) {
-        if stored.status == "unknown" && status != "unknown" {
-            return Ok("Agent plan dispatch unknown.".to_string());
+        if !matches!(
+            stored.status.as_str(),
+            "pending" | "approved" | "dispatching" | "started"
+        ) {
+            return Ok(format!("Agent plan dispatch {}.", stored.status));
         }
     }
     // The stored record is the answer. A failed record write returns Err and
@@ -1177,6 +1179,8 @@ pub(crate) fn agent_plan_result_for_requester(
             | "agents off"
             | "stopped"
             | "agent off"
+            | "owner demoted"
+            | "passkey revoked"
     ) {
         anyhow::bail!("agent plan has no settled result");
     }

@@ -289,6 +289,12 @@ pub(super) fn forget_shell_url(api_url: &str) {
     }
 }
 
+fn retain_shell_urls(keep: &[String]) {
+    if let Ok(mut map) = shell_cache().lock() {
+        map.retain(|url, _| keep.iter().any(|kept| kept == url));
+    }
+}
+
 fn shell_cache() -> &'static std::sync::Mutex<std::collections::HashMap<String, String>> {
     static CACHE: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, String>>> =
         std::sync::OnceLock::new();
@@ -360,11 +366,21 @@ async fn live_pending(
     Vec<RuntimeCapabilityPendingRequest>,
     Vec<RuntimeCapabilityPendingRequest>,
 ) {
-    let home = rows_from(match load_live_runtime_coords(data_dir).await {
+    let home_coords = load_live_runtime_coords(data_dir).await;
+    let agent_coords = crate::api::agent_plane::live_coords(data_dir).await;
+    let mut keep = Vec::new();
+    if let Some(coords) = &home_coords {
+        keep.push(coords.api_url.clone());
+    }
+    if let Some(coords) = &agent_coords {
+        keep.push(coords.api_url.clone());
+    }
+    retain_shell_urls(&keep);
+    let home = rows_from(match home_coords {
         Some(coords) => Some(read_pending(&coords).await),
         None => None,
     });
-    let agent = rows_from(match crate::api::agent_plane::live_coords(data_dir).await {
+    let agent = rows_from(match agent_coords {
         Some(coords) => Some(read_pending(&coords).await),
         None => None,
     });
@@ -1520,6 +1536,26 @@ mod tests {
         assert!(map.get(gone).is_none());
         drop(map);
         shell_cache().lock().unwrap().remove(kept);
+    }
+
+    #[test]
+    fn a_restarted_home_url_drops_the_old_shell() {
+        let old_home = "http://127.0.0.1:9/old-home";
+        let plane = "http://127.0.0.1:9/plane";
+        shell_cache()
+            .lock()
+            .unwrap()
+            .insert(old_home.to_string(), "stale".to_string());
+        shell_cache()
+            .lock()
+            .unwrap()
+            .insert(plane.to_string(), "keep".to_string());
+        retain_shell_urls(&["http://127.0.0.1:9/new-home".into(), plane.to_string()]);
+        let map = shell_cache().lock().unwrap();
+        assert!(map.get(old_home).is_none(), "{map:?}");
+        assert_eq!(map.get(plane).map(String::as_str), Some("keep"));
+        drop(map);
+        shell_cache().lock().unwrap().remove(plane);
     }
 
     #[test]

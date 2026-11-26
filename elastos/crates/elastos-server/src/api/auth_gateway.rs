@@ -1234,18 +1234,7 @@ async fn passkey_demote_guest_inner(
     }
 
     let now = crate::auth::now_ts();
-    let owner_id = target.principal_id.clone();
-    // This route stops the agents. A demote that skips the route does not
-    // take the claim, so the same stop runs from the role change.
-    crate::agents::claim_demoted_stop(&state.data_dir, &owner_id);
-    let demoted =
-        match crate::auth::demote_passkey_to_guest(&state.data_dir, &proof_binding_id, now) {
-            Ok(demoted) => demoted,
-            Err(error) => {
-                crate::agents::release_demoted_stop(&state.data_dir, &owner_id);
-                return Err(error);
-            }
-        };
+    let demoted = crate::auth::demote_passkey_to_guest(&state.data_dir, &proof_binding_id, now)?;
     let audited = crate::auth::append_audit_event(
         &state.data_dir,
         audit_event(AuditEventInput {
@@ -1267,7 +1256,6 @@ async fn passkey_demote_guest_inner(
         "owner demoted",
     )
     .await;
-    crate::agents::release_demoted_stop(&state.data_dir, &owner_id);
     audited?;
     stopped?;
 

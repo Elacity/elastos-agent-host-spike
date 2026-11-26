@@ -4246,3 +4246,74 @@ async fn a_guest_submit_stops_at_the_open_plan_cap_and_keeps_older_rows() {
     );
     assert_eq!(plan_status(home.path(), &ids[0]), "pending");
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn demotion_leaves_dispatching_for_one_stop_settle() {
+    let (dir, owner, pending_id) = planted_plan(90);
+    let agent = read_record(dir.path(), &pending_id)["requester_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let flying = submit(
+        dir.path(),
+        &owner,
+        &agent,
+        json!({"steps": [{"scheme": "availability", "operation": "status", "request": {}}]}),
+        91,
+    );
+    let flying_id = flying["request_id"].as_str().unwrap().to_string();
+    let mut record = read_record(dir.path(), &flying_id);
+    record["status"] = json!("dispatching");
+    write_record(dir.path(), &flying_id, &record);
+    crate::api::gateway::close_owner_open_plans(dir.path(), &agent, "owner demoted").unwrap();
+    assert_eq!(plan_status(dir.path(), &pending_id), "owner demoted");
+    assert_eq!(plan_status(dir.path(), &flying_id), "dispatching");
+    let kept = super::gateway_inspect_actions::settle_plan_through_dispatch_for_test(
+        dir.path(),
+        &flying_id,
+        "unknown",
+        json!({"status": "unknown", "code": "dispatch_lost"}),
+    )
+    .unwrap();
+    assert!(kept.contains("unknown"), "{kept}");
+    assert_eq!(plan_status(dir.path(), &flying_id), "unknown");
+    let late =
+        super::gateway_inspect_actions::resettle_plan_for_test(dir.path(), &flying_id, "completed")
+            .unwrap();
+    assert!(late.contains("unknown"), "{late}");
+    assert_eq!(plan_status(dir.path(), &flying_id), "unknown");
+    assert_eq!(
+        closed_rows(dir.path(), &flying_id, "agent_plan.dispatch.unknown"),
+        1
+    );
+    assert_eq!(
+        closed_rows(dir.path(), &flying_id, "agent_plan.dispatch.completed"),
+        0
+    );
+}
+
+#[tokio::test]
+async fn a_parked_guest_reads_owner_demoted_and_passkey_revoked_by_name() {
+    for status in ["owner demoted", "passkey revoked"] {
+        let (dir, owner, request_id) = planted_plan(92);
+        let record = read_record(dir.path(), &request_id);
+        let agent = record["requester_id"].as_str().unwrap().to_string();
+        let capsule = record["id"].as_str().unwrap().to_string();
+        let session = record["session_id"].as_str().unwrap().to_string();
+        let mut closed = record;
+        closed["status"] = json!(status);
+        write_record(dir.path(), &request_id, &closed);
+        let receipt = super::gateway_inspect_actions::agent_plan_result_for_requester(
+            dir.path(),
+            &request_id,
+            &owner,
+            &agent,
+            &capsule,
+            &session,
+        )
+        .expect(status);
+        assert_eq!(receipt["status"], status, "{receipt}");
+        assert_ne!(receipt["status"], "pending");
+    }
+}

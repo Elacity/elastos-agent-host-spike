@@ -2821,11 +2821,17 @@ async fn demotion_stops_the_running_agent_and_closes_its_plans() {
     .await;
     assert_eq!(status, 200, "{body}");
     assert!(!capsule_live(&gateway.agent_url, &gateway.secret, &session).await);
-    for id in [&pending_id, &inflight_id] {
-        let stored = plan_file(&home.data, id);
-        assert_eq!(stored["status"], "owner demoted", "{stored}");
-        assert_eq!(stored["audit_recorded"], true, "{stored}");
-    }
+    let pending_stored = plan_file(&home.data, &pending_id);
+    assert_eq!(
+        pending_stored["status"], "owner demoted",
+        "{pending_stored}"
+    );
+    assert_eq!(pending_stored["audit_recorded"], true, "{pending_stored}");
+    // A claimed dispatching step is not overwritten as "owner demoted"; it
+    // stays for the stop settle path (unknown / unresolved) once.
+    let flying_stored = plan_file(&home.data, &inflight_id);
+    assert_ne!(flying_stored["status"], "owner demoted", "{flying_stored}");
+    assert_ne!(flying_stored["status"], "completed", "{flying_stored}");
     let (signer, cause, _) = stop_cause(&home.data, &agent, "agent.stop.requested");
     assert_eq!(signer, other.principal_id);
     assert_eq!(cause, "owner demoted");
@@ -2906,12 +2912,13 @@ async fn another_admin_stops_an_agent_whose_owner_was_demoted_directly() {
             .await
             .unwrap()
             .session_id;
-    crate::auth::demote_passkey_to_guest(
+    let demoted = crate::auth::demote_passkey_to_guest(
         &home.data,
         &owner.proof_binding_id,
         crate::auth::now_ts(),
     )
     .unwrap();
+    crate::agents::notify_owner_demoted(&home.data, &demoted.principal_id);
     let mut stopped = false;
     for _ in 0..50 {
         if !capsule_live(&gateway.agent_url, &gateway.secret, &session).await {

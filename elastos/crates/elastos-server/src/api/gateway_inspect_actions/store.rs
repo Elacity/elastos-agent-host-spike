@@ -369,11 +369,9 @@ pub(super) fn close_pending_agent_plans(
     let records = load_inspect_action_records(data_dir)?;
     let mut closed = Vec::new();
     for mut record in records {
+        // `open` closes pending|approved only; dispatching settles via stop.
         let open_status = if open {
-            matches!(
-                record.status.as_str(),
-                "pending" | "approved" | "dispatching" | "started"
-            )
+            matches!(record.status.as_str(), "pending" | "approved")
         } else {
             record.status == "pending"
         };

@@ -188,7 +188,7 @@ pub(in crate::api) async fn confirm_stopping_rows(
 /// A demotion or revocation whose stop failed is tried again at the next start.
 /// A later `ok` or `stopping` row means that agent is no longer owed a retry.
 async fn retry_failed_stops(data_dir: &std::path::Path) {
-    for stop in crate::auth::latest_failed_agent_stops(data_dir) {
+    for stop in crate::agent_record_audit::latest_failed_agent_stops(data_dir) {
         let agent_id = stop.agent_id;
         let reason = stop.reason;
         let principal_id = stop.principal.principal_id.clone();
@@ -1145,7 +1145,7 @@ fn owner_may_stop(
 /// A demote that did not come through the route. Another remaining admin
 /// signs the same stop. The route's own stop is claimed and does not reach here.
 pub(super) fn schedule_demoted_owner_stop(data_dir: &std::path::Path, owner_id: &str) {
-    let Some(other) = crate::auth::another_live_admin(data_dir, owner_id) else {
+    let Some(other) = crate::agent_record_audit::another_live_admin(data_dir, owner_id) else {
         tracing::warn!("demoted owner '{owner_id}' still has agents and no admin to sign the stop");
         return;
     };

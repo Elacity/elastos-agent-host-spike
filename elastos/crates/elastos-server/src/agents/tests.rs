@@ -3306,6 +3306,12 @@ fn the_cargo_feature_is_read_in_one_place() {
 }
 
 #[test]
+fn a_direct_demote_with_no_agents_does_not_run_a_stop() {
+    let dir = tempfile::tempdir().unwrap();
+    crate::agents::notify_owner_demoted(dir.path(), "nobody");
+}
+
+#[test]
 fn the_agent_files_name_no_owner_key_function_and_read_no_environment() {
     let sources = [
         ("agents.rs", include_str!("../agents.rs")),
