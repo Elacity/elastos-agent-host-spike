@@ -10490,6 +10490,19 @@ pub(crate) fn write_device_key(data_dir: &Path, seed: u8) {
     fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
 }
 
+/// Replaces the stored pending wallet request with bytes that do not decode.
+#[cfg(unix)]
+pub(crate) fn plant_undecodable_pending_wallet_request(
+    data_dir: &Path,
+    principal_id: &str,
+    mint_id: Digest32,
+) {
+    let path = super::runtime_viewer_path(data_dir, principal_id, mint_id);
+    let mut record: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    record["pending_release"]["wallet_request_hex"] = json!("00");
+    fs::write(&path, serde_json::to_vec(&record).unwrap()).unwrap();
+}
+
 #[cfg(unix)]
 fn derived_device_key_for_seed(seed: u8) -> (SigningKey, String) {
     elastos_identity::derive_did(&[seed; 32])

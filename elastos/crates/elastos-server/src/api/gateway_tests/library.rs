@@ -11775,6 +11775,39 @@ mod route_17_two_person_purchases {
         assert_ne!(route_17_approval_id(&again), stale, "{again}");
     }
 
+    /// A resume whose stored wallet request does not decode is refused, and it
+    /// clears the pending open like every other failed resume: the next open
+    /// asks the Wallet afresh and works at once.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn route_17_resume_with_an_undecodable_wallet_request_clears_the_open() {
+        let _guard = protected_content_gateway_mock_test_guard().lock().await;
+        let fixture = purchase_two_people(Route17OpenClock::Wall, false).await;
+        fixture.wallet.hold_rights_signatures();
+        let wall = crate::auth::now_ts();
+        let (pending, _) = route_17_open_on(&fixture, &[wall, wall]).await;
+        route_17_approval_id(&pending);
+        crate::protected_content_runtime::tests::plant_undecodable_pending_wallet_request(
+            fixture.dir.path(),
+            &fixture.p.principal_id,
+            fixture.mint_a,
+        );
+        fixture.wallet.clear_requests().await;
+
+        let (refused, _) = route_17_open_on(&fixture, &[wall, wall]).await;
+        assert_eq!(
+            refused["message"],
+            crate::protected_content_runtime::RUNTIME_CUSTODY_RELEASE_APPROVAL_UNAVAILABLE_MESSAGE,
+            "{refused}"
+        );
+        assert_eq!(route_17_rights_requests(&fixture).await, 0);
+
+        fixture.wallet.release_rights_signatures();
+        let (opened, _) = route_17_open_on(&fixture, &[wall, wall]).await;
+        assert_eq!(opened["status"], "ok", "{opened}");
+        assert_eq!(route_17_rights_requests(&fixture).await, 1);
+    }
+
     /// The same 2 s delay on a first open, with an approving Wallet.
     #[cfg(unix)]
     #[tokio::test]
