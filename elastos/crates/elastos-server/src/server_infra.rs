@@ -5618,7 +5618,7 @@ mod tests {
                 LocalhostBringup::Refuse(got) => panic!("migration refused: {got}"),
             }
             let delta = resident_peak().saturating_sub(before);
-            let bound = file_len * 2 + 8 * 1024 * 1024;
+            let bound = file_len + 8 * 1024 * 1024;
             eprintln!("SL_R22_MIGRATE_DELTA={delta} FILE={file_len} BOUND={bound}");
             assert!(
                 delta <= bound,
@@ -5642,7 +5642,7 @@ mod tests {
         }
         let one = lens.iter().map(|(_, _, len)| *len).max().unwrap();
         let total: i64 = lens.iter().map(|(_, _, len)| *len).sum();
-        let bound = one * 2 + 8 * 1024 * 1024;
+        let bound = one + 8 * 1024 * 1024;
         assert!(
             total > bound,
             "three files fit in one file's bound: total {total} one {one} bound {bound}"
@@ -5911,7 +5911,10 @@ mod tests {
             localhost_provider::read_sealed_localhost_file(&file_key, &cut, "Users/cut.bin")
                 .unwrap_err()
                 .to_string();
-        assert_eq!(cut_open, "Users/cut.bin is cut off. Remove it.");
+        assert_eq!(
+            cut_open,
+            "Users/cut.bin is cut off. Move it aside, or remove it."
+        );
         let huge_open =
             localhost_provider::read_sealed_localhost_file(&file_key, &huge, "Users/huge-v2.bin")
                 .unwrap_err()
@@ -6955,7 +6958,10 @@ mod tests {
             localhost_provider::read_sealed_localhost_file(&file_key, &over, "Users/over.bin")
                 .unwrap_err()
                 .to_string();
-        assert_eq!(over_err, "Users/over.bin is cut off. Remove it.");
+        assert_eq!(
+            over_err,
+            "Users/over.bin is cut off. Move it aside, or remove it."
+        );
         let big_opened =
             localhost_provider::read_sealed_localhost_file(&file_key, &big, "Users/big.bin")
                 .unwrap();
@@ -7347,7 +7353,10 @@ mod tests {
             localhost_provider::read_sealed_localhost_file(&file_key, &over, "Users/over.bin")
                 .unwrap_err()
                 .to_string();
-        assert_eq!(over_err, "Users/over.bin is cut off. Remove it.");
+        assert_eq!(
+            over_err,
+            "Users/over.bin is cut off. Move it aside, or remove it."
+        );
         let plain_opened =
             localhost_provider::read_sealed_localhost_file(&file_key, &plain, "Users/video.bin")
                 .unwrap();
@@ -8705,6 +8714,46 @@ mod tests {
     }
 
     #[test]
+    fn a_small_plain_record_is_decided_by_its_header_and_a_cut_old_file_stays_put() {
+        let _guard = LocalAppsGuard::lock();
+        let device_key = [0x43; 32];
+        let file_key = expected_localhost_file_key(&device_key);
+        let root = TempDir::new().unwrap();
+        let users = root.path().join("Users");
+        fs::create_dir_all(&users).unwrap();
+        let mut record = br#"{"records":["#.to_vec();
+        record.resize(20 * 1024 * 1024, b'0');
+        fs::write(users.join("record.json"), &record).unwrap();
+        fs::write(users.join("tiny.json"), br#"{"n":1}"#).unwrap();
+        let cut = users.join("cut.bin");
+        plant_real_old_sealed(&cut, &device_key, 100);
+        let cut_bytes = fs::read(&cut).unwrap();
+        assert!(localhost_provider::header_is_device_key_envelope(
+            &cut_bytes
+        ));
+        let good = users.join("good.bin");
+        plant_device_envelope(&good, &device_key, b"good");
+        let _ = take_localhost_migration_bytes_read();
+        migrate_again(root.path(), &device_key);
+        let read = take_localhost_migration_bytes_read();
+        assert!(
+            read < 1024 * 1024,
+            "a 20 MiB plain record was read whole: {read}"
+        );
+        home_is_up(root.path());
+        assert_eq!(fs::read(users.join("record.json")).unwrap(), record);
+        assert_eq!(fs::read(&cut).unwrap(), cut_bytes);
+        assert_envelope_opens_with_exactly_one_key(&good, b"good", &device_key, &file_key);
+        let err = localhost_provider::read_sealed_localhost_file(&file_key, &cut, "Users/cut.bin")
+            .unwrap_err()
+            .to_string();
+        assert_eq!(
+            err,
+            "Users/cut.bin is cut off. Move it aside, or remove it."
+        );
+    }
+
+    #[test]
     fn an_old_header_that_cannot_open_under_the_hard_limit_leaves_local_apps_on() {
         let _guard = LocalAppsGuard::lock();
         let device_key = [0x42; 32];
@@ -8739,7 +8788,10 @@ mod tests {
             let err = localhost_provider::read_sealed_localhost_file(&device_key, path, label)
                 .unwrap_err()
                 .to_string();
-            assert_eq!(err, format!("{label} is cut off. Remove it."));
+            assert_eq!(
+                err,
+                format!("{label} is cut off. Move it aside, or remove it.")
+            );
         }
     }
 

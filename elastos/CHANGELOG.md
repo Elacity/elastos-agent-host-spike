@@ -8,7 +8,7 @@ release's Added, Changed, Fixed, Removed and Security bullets before you update;
 
 ### Changed
 
-- The first start moves local app files onto a file key. The move is one way. This release opens them. An older release cannot open them afterwards. Copy the data folder before you upgrade if you want to run the older release again. A crash in the middle of that move is finished by the next start.
+- The first start moves local app files onto a file key. The move is one way. This release opens them. An older release cannot open them afterwards. Copy the data folder before you upgrade if you want to run the older release again. A crash in the middle of that move is finished by the next start. An old file that is cut off or damaged stays where it is: local apps stay on, and opening that file names it and says to move it aside.
 
 ### Fixed
 

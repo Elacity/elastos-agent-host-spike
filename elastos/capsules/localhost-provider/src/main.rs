@@ -419,7 +419,6 @@ impl LocalProvider {
             }
             let plaintext = match read_sealed_localhost_file(key, &full_path, path) {
                 Ok(bytes) => bytes,
-                Err(err) if err.kind() == io::ErrorKind::FileTooLarge => if localhost_provider::is_plain_localhost_file(&full_path)? { return read_span(); } else { return Err(err); },
                 Err(err) => return Err(err),
             };
 
@@ -1731,18 +1730,21 @@ mod tests {
         assert!(!localhost_provider::is_plain_localhost_file(&cut).unwrap());
         assert_eq!(
             refusal(&provider, "Users/cut.bin", None, None),
-            "Users/cut.bin is cut off. Remove it."
+            "Users/cut.bin is cut off. Move it aside, or remove it."
         );
         assert_eq!(
             refusal(&provider, "Users/cut.bin", Some(0), Some(4)),
-            "Users/cut.bin is cut off. Remove it."
+            "Users/cut.bin is cut off. Move it aside, or remove it."
         );
         let before = fs::read(&cut).unwrap();
         let err = provider
             .write_file("Users/cut.bin", "token", b"more", true)
             .unwrap_err()
             .to_string();
-        assert_eq!(err, "Users/cut.bin is cut off. Remove it.");
+        assert_eq!(
+            err,
+            "Users/cut.bin is cut off. Move it aside, or remove it."
+        );
         assert_eq!(fs::read(&cut).unwrap(), before);
 
         let bad = dir.path().join("Users/bad.bin");
@@ -1764,14 +1766,17 @@ mod tests {
         assert!(!localhost_provider::is_plain_localhost_file(&bad).unwrap());
         assert_eq!(
             refusal(&provider, "Users/bad.bin", None, None),
-            "Users/bad.bin is cut off. Remove it."
+            "Users/bad.bin is cut off. Move it aside, or remove it."
         );
         let bad_before = fs::metadata(&bad).unwrap().len();
         let err = provider
             .write_file("Users/bad.bin", "token", b"more", true)
             .unwrap_err()
             .to_string();
-        assert_eq!(err, "Users/bad.bin is cut off. Remove it.");
+        assert_eq!(
+            err,
+            "Users/bad.bin is cut off. Move it aside, or remove it."
+        );
         assert_eq!(fs::metadata(&bad).unwrap().len(), bad_before);
 
         let big = dir.path().join("Users/huge.bin");
@@ -1825,17 +1830,20 @@ mod tests {
         std::io::Read::read_exact(&mut fs::File::open(&cut).unwrap(), &mut head).unwrap();
         assert_eq!(
             refusal(&provider, "Users/cut.bin", None, None),
-            "Users/cut.bin is cut off. Remove it."
+            "Users/cut.bin is cut off. Move it aside, or remove it."
         );
         assert_eq!(
             refusal(&provider, "Users/cut.bin", Some(0), Some(4)),
-            "Users/cut.bin is cut off. Remove it."
+            "Users/cut.bin is cut off. Move it aside, or remove it."
         );
         let err = provider
             .write_file("Users/cut.bin", "token", b"more", true)
             .unwrap_err()
             .to_string();
-        assert_eq!(err, "Users/cut.bin is cut off. Remove it.");
+        assert_eq!(
+            err,
+            "Users/cut.bin is cut off. Move it aside, or remove it."
+        );
         assert_eq!(fs::metadata(&cut).unwrap().len(), before);
         let mut after = [0u8; 63];
         std::io::Read::read_exact(&mut fs::File::open(&cut).unwrap(), &mut after).unwrap();
@@ -1918,7 +1926,7 @@ mod tests {
         fs::write(dir.path().join("Users/old-cut.bin"), cut).unwrap();
         assert_eq!(
             refusal(&provider, "Users/old-cut.bin", None, None),
-            "Users/old-cut.bin is cut off. Remove it."
+            "Users/old-cut.bin is cut off. Move it aside, or remove it."
         );
     }
 

@@ -19,8 +19,8 @@
 //! present, that call does not walk. An empty root that
 //! is still present is not moved aside. A matching marker still walks, so an
 //! older build's later device-key file is rewritten, one way: an older release cannot open it. A new-format header and a plain file are settled unread.
-//! The first pass reads each old file and keeps its name and identity. A refusal in that pass leaves every old file in place.
-//! The second pass rekeys one file at a time. A crash in the middle of the move is finished by the next start. A later
+//! The first pass opens each old file to check it, and keeps nothing. A refusal in that pass leaves every old file in place.
+//! The second pass walks again and rekeys one file at a time. A crash in the middle of the move is finished by the next start. A later
 //! start uses the size and time stored beside the marker and does not open a file
 //! that still matches. The walk logs a count every few seconds. A waiter on
 //! `identity/localhost-file-key.lock` logs that. The walk runs from
@@ -34,7 +34,7 @@
 //! `ElastOS` (`gateway_cmd.rs`). A second one of these stops with "another ElastOS
 //! host already owns". Gateway and `home --browser` call
 //! `setup_gateway_infrastructure` or `setup_control_plane_infrastructure`
-//! (`spawn_host_providers` is false). They run this same walk. A foreign or undecryptable old-format file turns local apps off; an unparsable one is left in place and refuses on open. They register the refusing provider so
+//! (`spawn_host_providers` is false). They run this same walk. A foreign or undecryptable old-format file turns local apps off. An old-format file that is cut off or damaged is left in place: local apps stay on, and opening it names the file and says to move it aside. They register the refusing provider so
 //! System can show the sentence. They do not spawn the localhost helper.
 //! Update and the provider host take the same lock and do not run this walk.
 //! `elastos run` of a data capsule and `elastos open` call `serve_web_capsule`
@@ -261,7 +261,7 @@ thread_local! {
         const { std::cell::RefCell::new(std::path::PathBuf::new()) };
     static PROGRESS_AT: std::cell::Cell<(u64, u64)> = const { std::cell::Cell::new((0, 0)) };
     static CANON_ROOT: std::cell::RefCell<std::path::PathBuf> = const { std::cell::RefCell::new(std::path::PathBuf::new()) };
-    static HELD: std::cell::RefCell<Vec<(std::path::PathBuf, OpenedIdentity)>> = const { std::cell::RefCell::new(Vec::new()) };
+    static HELD: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static PASS_TWO: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
@@ -313,9 +313,7 @@ fn localhost_refused(path: &Path, why: &str) -> anyhow::Error {
             "{rel} does not match this Home (restored or copied folder, changed device key). Restore the matching identity/device.key, or move AppCapsules, ElastOS, Local, Users, and UsersAI aside to start empty, then restart."
         );
     }
-    let (cause, remedy) = if why.starts_with("larger") {
-        (why, "Move it out of the folder, then restart.")
-    } else if why.contains("directory link") {
+    let (cause, remedy) = if why.contains("directory link") {
         (
             "a directory link",
             "Replace the link with a directory, then restart.",
@@ -863,7 +861,7 @@ fn migrate_localhost_envelope(
         .read(&mut header)
         .with_context(|| localhost_refused(path, "cannot be read"))?;
     note_bytes_read(read);
-    let (plain, extra) = localhost_provider::reads_as_plain_bytes(&header[..read], opened.len, &mut file).with_context(|| localhost_refused(path, "cannot be read"))?;
+    let (plain, extra) = localhost_provider::reads_as_plain_bytes(&header[..read], opened.len.max(localhost_provider::ENVELOPE_BYTE_LIMIT + 1), &mut file).with_context(|| localhost_refused(path, "cannot be read"))?;
     note_bytes_read(extra as usize);
     // A file-key header is not plain, and its body stays unread at start.
     if plain || localhost_provider::header_is_file_key_envelope(&header[..read]) {
@@ -890,19 +888,17 @@ fn migrate_localhost_envelope(
     }
     run_before_replace(path);
     opened_file_still_matches(path, &opened)?;
-    match localhost_provider::rekey_device_envelope(device_key, file_key, bytes) {
+    match localhost_provider::rekey_device_envelope(device_key, file_key, bytes, PASS_TWO.with(|slot| slot.get())) {
         Ok(localhost_provider::RekeyOutcome::NotEnvelope)
         | Ok(localhost_provider::RekeyOutcome::AlreadyFileKey) => Ok(MigratedFile::Settled),
         Ok(localhost_provider::RekeyOutcome::Rewritten(sealed)) => {
-            if PASS_TWO.with(|slot| slot.get()) {
-                replace_file_fsync_rename(path, &sealed, kept_mode(opened.mode), Some(&opened)).map_err(|err| migration_io(path, "cannot be replaced", err))?;
-                Ok(MigratedFile::Written)
-            } else {
-                drop(sealed);
-                opened_file_still_matches(path, &opened)?;
-                HELD.with(|slot| slot.borrow_mut().push((path.to_path_buf(), opened)));
-                Ok(MigratedFile::Held)
-            }
+            replace_file_fsync_rename(path, &sealed, kept_mode(opened.mode), Some(&opened)).map_err(|err| migration_io(path, "cannot be replaced", err))?;
+            Ok(MigratedFile::Written)
+        }
+        Ok(localhost_provider::RekeyOutcome::Opens) => {
+            opened_file_still_matches(path, &opened)?;
+            HELD.with(|slot| slot.set(true));
+            Ok(MigratedFile::Held)
         }
         Err(err) if err.to_string().contains("does not decrypt") => {
             Err(localhost_refused(path, "does not decrypt"))
@@ -982,6 +978,7 @@ fn migrate_localhost_tree(
             return Err(localhost_refused(&path, "is linked from another path"));
         }
         let rel = relative_path(&path);
+        if PASS_TWO.with(|slot| slot.get()) && next.contains_key(&rel) { continue; }
         if let Some(old) = seen.get(&rel) {
             if old.len == meta.len()
                 && old.mtime == meta.mtime()
@@ -997,13 +994,12 @@ fn migrate_localhost_tree(
         }
         let remembered = seen_file(&meta, false);
         match migrate_localhost_envelope(&path, device_key, file_key)? {
-            MigratedFile::Settled => {
+            MigratedFile::Settled | MigratedFile::Written => {
                 let after = std::fs::symlink_metadata(&path)
                     .with_context(|| localhost_refused(&path, "cannot be read"))?;
                 next.insert(rel, seen_file(&after, false));
             }
             MigratedFile::Held => {}
-            MigratedFile::Written => return Err(localhost_refused(&path, "cannot be sealed")),
             MigratedFile::OverHard => {
                 over_hard.push(rel.clone());
                 next.insert(
@@ -1233,26 +1229,10 @@ fn write_localhost_marker(marker: &Path, record: &[u8]) -> anyhow::Result<()> {
 }
 
 #[cfg(unix)]
-#[rustfmt::skip]
-fn commit_held(device_key: &[u8; 32], file_key: &[u8; 32], next: &mut std::collections::HashMap<String, SeenFile>) -> anyhow::Result<()> {
-    let pending = HELD.with(|slot| std::mem::take(&mut *slot.borrow_mut()));
-    PASS_TWO.with(|slot| slot.set(true));
-    for (path, opened) in pending {
-        opened_file_still_matches(&path, &opened)?;
-        if !matches!(migrate_localhost_envelope(&path, device_key, file_key)?, MigratedFile::Written) {
-            return Err(localhost_refused(&path, "cannot be sealed"));
-        }
-        let meta = std::fs::symlink_metadata(&path).with_context(|| localhost_refused(&path, "cannot be read"))?;
-        next.insert(relative_path(&path), seen_file(&meta, false));
-    }
-    PASS_TWO.with(|slot| slot.set(false));
-    Ok(())
-}
-#[cfg(unix)]
 struct ClearHeld;
 #[cfg(unix)]
 #[rustfmt::skip]
-impl Drop for ClearHeld { fn drop(&mut self) { HELD.with(|s| s.borrow_mut().clear()); PASS_TWO.with(|s| s.set(false)); } }
+impl Drop for ClearHeld { fn drop(&mut self) { HELD.with(|s| s.set(false)); PASS_TWO.with(|s| s.set(false)); } }
 
 #[cfg(unix)]
 #[rustfmt::skip]
@@ -1278,6 +1258,7 @@ fn migrate_localhost_files_to_file_key(
     };
     let mut next = std::collections::HashMap::new();
     let mut over_hard = Vec::new();
+    let mut walk = || -> anyhow::Result<()> {
     for root in LOCALHOST_ENCRYPTED_ROOTS {
         let path = data_dir.join(root);
         match std::fs::symlink_metadata(&path) {
@@ -1304,7 +1285,12 @@ fn migrate_localhost_files_to_file_key(
         }
     }
     if !over_hard.is_empty() { return Err(anyhow::anyhow!(over_hard_sentence(&over_hard))); }
-    commit_held(device_key, &file_key, &mut next)?;
+    Ok(())
+    };
+    walk()?;
+    if HELD.with(|slot| slot.get()) {
+        PASS_TWO.with(|slot| slot.set(true)); walk()?;
+    }
     if next != seen || !seen_path.is_file() {
         write_seen(&seen_path, &next)?;
     }
@@ -1390,7 +1376,7 @@ pub(crate) fn prepare_localhost_files(data_dir: &Path) -> anyhow::Result<()> {
         if !encrypted_roots_absent(data_dir)? {
             return Ok(());
         }
-        let device_key = elastos_identity::load_or_create_device_key(data_dir)?;
+        let device_key = elastos_identity::load_or_create_device_key(data_dir).map_err(|_| anyhow::anyhow!("identity/device.key cannot be read. Make it readable, or restore it with the identity/credentials.json it belongs to, then restart."))?;
         if let LocalhostBringup::Refuse(sentence) = localhost_bringup(data_dir, &device_key) {
             return Err(anyhow::anyhow!(sentence));
         }

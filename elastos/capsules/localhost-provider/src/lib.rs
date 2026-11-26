@@ -88,7 +88,7 @@ pub fn header_is_device_key_envelope(header: &[u8]) -> bool {
 #[rustfmt::skip]
 fn open_new_format(key: &[u8; 32], bytes: Vec<u8>, name: &str) -> io::Result<Vec<u8>> {
     let Some((mut body, nonce, version)) = ciphertext_in_place(bytes) else {
-        return Err(io::Error::new(io::ErrorKind::InvalidData, format!("{name} is cut off. Remove it.")));
+        return Err(io::Error::new(io::ErrorKind::InvalidData, format!("{name} is cut off. Move it aside, or remove it.")));
     };
     let why = if version == FILE_KEY_ENVELOPE_VERSION {
         format!("{name} does not decrypt. Move it aside, or remove it.")
@@ -118,12 +118,12 @@ pub fn take_sealed_read_bytes() -> u64 {
 fn read_body_within_hard_limit(file: &mut std::fs::File, header: &[u8], len: u64, name: &str) -> io::Result<Vec<u8>> {
     if len > SEALED_READ_HARD_LIMIT { return Err(hard_limit_refusal(name)); }
     let Ok(n) = usize::try_from(len) else { return Err(hard_limit_refusal(name)); };
-    if header.len() > n { return Err(io::Error::new(io::ErrorKind::InvalidData, format!("{name} is cut off. Remove it."))); }
+    if header.len() > n { return Err(io::Error::new(io::ErrorKind::InvalidData, format!("{name} is cut off. Move it aside, or remove it."))); }
     let mut bytes = Vec::new();
     if bytes.try_reserve_exact(n).is_err() { return Err(hard_limit_refusal(name)); }
     bytes.resize(n, 0);
     bytes[..header.len()].copy_from_slice(header);
-    file.read_exact(&mut bytes[header.len()..]).map_err(|_| io::Error::new(io::ErrorKind::InvalidData, format!("{name} is cut off. Remove it.")))?;
+    file.read_exact(&mut bytes[header.len()..]).map_err(|_| io::Error::new(io::ErrorKind::InvalidData, format!("{name} is cut off. Move it aside, or remove it.")))?;
     note_sealed_bytes((n - header.len()) as u64);
     Ok(bytes)
 }
@@ -297,7 +297,7 @@ pub fn read_sealed_localhost_file(key: &[u8; 32], path: &Path, name: &str) -> io
         if header_is_file_key_envelope(&raw) || header_is_device_key_envelope(&raw) {
             return open_new_format(key, raw, name);
         }
-        return decrypt_bytes(key, &raw);
+        return decrypt_bytes(key, &raw).map_err(|_| io::Error::new(io::ErrorKind::InvalidData, format!("{name} is not an encrypted envelope this key opens. Move it aside, or remove it.")));
     }
     if header_is_file_key_envelope(header) || header_is_device_key_envelope(header) {
         if len > SEALED_READ_HARD_LIMIT {
@@ -369,47 +369,30 @@ fn encrypt_version(key: &[u8; 32], plaintext: &[u8], version: u8) -> io::Result<
     serde_json::to_vec(&envelope).map_err(|e| io::Error::other(format!("envelope serialize: {e}")))
 }
 
-/// What a device-key envelope became. The file bytes are dropped before the new envelope exists.
+/// What a device-key envelope became. The file bytes are dropped before the caller writes.
 pub enum RekeyOutcome {
     /// Sealed with the file key.
     Rewritten(Vec<u8>),
+    /// The device key opens it. `seal` was false, so nothing was re-encrypted.
+    Opens,
     /// The file key already opens it.
     AlreadyFileKey,
     /// Not an envelope. The caller leaves the bytes alone.
     NotEnvelope,
 }
 
-/// Rewrite one device-key envelope.
-///
-/// The file buffer is reused for the new envelope. The plaintext is the only
-/// extra buffer, and it is dropped before the new envelope is built. Peak
-/// memory is the file plus the plaintext: under twice the file, because the
-/// file is the hex encoding of that plaintext.
-pub fn rekey_device_envelope(
-    device_key: &[u8; 32],
-    file_key: &[u8; 32],
-    data: Vec<u8>,
-) -> io::Result<RekeyOutcome> {
-    let Some((mut buffer, nonce, _)) = ciphertext_in_place(data) else {
-        return Ok(RekeyOutcome::NotEnvelope);
-    };
-    let mut plain = match decrypt_parts(device_key, &nonce, &buffer) {
-        Ok(plain) => plain,
-        Err(_) => {
-            if let Ok(mut opened) = decrypt_parts(file_key, &nonce, &buffer) {
-                opened.fill(0);
-                return Ok(RekeyOutcome::AlreadyFileKey);
-            }
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "does not decrypt",
-            ));
-        }
-    };
-    buffer.clear();
-    buffer.extend_from_slice(&plain);
-    plain.fill(0);
-    drop(plain);
+/// Open one device-key envelope, and seal it when `seal` is true. Both steps
+/// work in the file's own buffer, so peak memory is the file.
+#[rustfmt::skip]
+pub fn rekey_device_envelope(device_key: &[u8; 32], file_key: &[u8; 32], data: Vec<u8>, seal: bool) -> io::Result<RekeyOutcome> {
+    let Some((mut buffer, nonce, _)) = ciphertext_in_place(data) else { return Ok(RekeyOutcome::NotEnvelope); };
+    let mut opens = |key: &[u8; 32]| Aes256Gcm::new_from_slice(key).is_ok_and(|c| c.decrypt_in_place(&Nonce::from(nonce), b"", &mut buffer).is_ok());
+    if !opens(device_key) {
+        if !opens(file_key) { return Err(io::Error::new(io::ErrorKind::InvalidData, "does not decrypt")); }
+        buffer.fill(0);
+        return Ok(RekeyOutcome::AlreadyFileKey);
+    }
+    if !seal { buffer.fill(0); return Ok(RekeyOutcome::Opens); }
     seal_into(&mut buffer, file_key, FILE_KEY_ENVELOPE_VERSION)?;
     Ok(RekeyOutcome::Rewritten(buffer))
 }
@@ -615,27 +598,75 @@ mod tests {
     }
 
     #[test]
+    fn a_cut_or_reordered_new_format_file_is_refused_by_name_with_a_remedy() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = [5u8; 32];
+        let sealed = encrypt_file_key_bytes(&key, b"secret").unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&sealed).unwrap();
+        let (nonce, mut body) = (
+            value["nonce"].as_str().unwrap().to_string(),
+            value["ciphertext"].as_str().unwrap().to_string(),
+        );
+        let reordered =
+            |body: &str| format!(r#"{{"ciphertext":"{body}","nonce":"{nonce}","version":2}}"#);
+        let good = dir.path().join("good.bin");
+        std::fs::write(&good, reordered(&body)).unwrap();
+        assert_eq!(
+            read_sealed_localhost_file(&key, &good, "Users/good.bin").unwrap(),
+            b"secret"
+        );
+        let flipped = if body.starts_with('0') { "1" } else { "0" };
+        body.replace_range(..1, flipped);
+        for (name, bytes) in [
+            (
+                "Users/short.bin",
+                br#"{"version":2,"nonce":"0011223344"#.to_vec(),
+            ),
+            ("Users/reordered.bin", reordered(&body).into_bytes()),
+        ] {
+            let path = dir.path().join(name.trim_start_matches("Users/"));
+            std::fs::write(&path, bytes).unwrap();
+            let err = read_sealed_localhost_file(&key, &path, name)
+                .unwrap_err()
+                .to_string();
+            assert!(err.starts_with(name), "{err}");
+            assert!(err.contains("Move it aside"), "{err}");
+            assert!(
+                !err.contains("device.key") && !err.contains("aead"),
+                "{err}"
+            );
+        }
+    }
+
+    #[test]
     fn a_device_envelope_is_rewritten_in_its_own_buffer() {
         let device = [1u8; 32];
         let file = [2u8; 32];
         let sealed = encrypt_bytes(&device, b"hello").unwrap();
-        match rekey_device_envelope(&device, &file, sealed).unwrap() {
+        match rekey_device_envelope(&device, &file, sealed, true).unwrap() {
             RekeyOutcome::Rewritten(next) => {
                 assert!(header_is_file_key_envelope(&next));
                 assert_eq!(decrypt_bytes(&file, &next).unwrap(), b"hello");
                 assert!(decrypt_bytes(&device, &next).is_err());
             }
-            RekeyOutcome::AlreadyFileKey | RekeyOutcome::NotEnvelope => {
+            RekeyOutcome::Opens | RekeyOutcome::AlreadyFileKey | RekeyOutcome::NotEnvelope => {
                 panic!("a device envelope was not rewritten")
             }
         }
+        let checked = encrypt_bytes(&device, b"hello").unwrap();
+        assert!(matches!(
+            rekey_device_envelope(&device, &file, checked, false).unwrap(),
+            RekeyOutcome::Opens
+        ));
+        let foreign = encrypt_bytes(&[9u8; 32], b"hello").unwrap();
+        assert!(rekey_device_envelope(&device, &file, foreign, false).is_err());
         let again = encrypt_file_key_bytes(&file, b"hello").unwrap();
         assert!(matches!(
-            rekey_device_envelope(&device, &file, again).unwrap(),
+            rekey_device_envelope(&device, &file, again, true).unwrap(),
             RekeyOutcome::AlreadyFileKey
         ));
         assert!(matches!(
-            rekey_device_envelope(&device, &file, b"plain".to_vec()).unwrap(),
+            rekey_device_envelope(&device, &file, b"plain".to_vec(), true).unwrap(),
             RekeyOutcome::NotEnvelope
         ));
     }
@@ -1022,7 +1053,7 @@ mod tests {
         assert_eq!(decrypt_bytes(&key, v10.as_bytes()).unwrap(), b"secret");
         assert!(plain_bytes(v10.as_bytes(), MID));
         assert!(matches!(
-            rekey_device_envelope(&key, &[3u8; 32], v10.into_bytes()).unwrap(),
+            rekey_device_envelope(&key, &[3u8; 32], v10.into_bytes(), true).unwrap(),
             RekeyOutcome::NotEnvelope
         ));
         let dup = format!(
