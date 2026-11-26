@@ -4,7 +4,6 @@
 //! can call the one implementation. It names a bundle or refuses; it admits and launches nothing.
 #![forbid(unsafe_code)]
 
-use std::cell::RefCell;
 #[cfg(unix)]
 use std::ffi::CString;
 use std::ffi::OsStr;
@@ -606,6 +605,7 @@ pub fn checked_bundle_observed(
     observe: impl FnMut(Moment, &str),
 ) -> Result<CheckedBundle, Refusal> {
     checked_bundle_within_observed(bundle, Budget::UNLIMITED, observe)
+        .map(|(checked, _report)| checked)
 }
 
 /// What one walk listed. The bundle's name is its files. An empty folder is
@@ -621,22 +621,6 @@ pub struct WalkReport {
     pub empty_folders: Vec<String>,
 }
 
-thread_local! {
-    static WALK_REPORT: RefCell<Option<WalkReport>> = const { RefCell::new(None) };
-}
-
-fn clear_walk_report() {
-    WALK_REPORT.with(|slot| *slot.borrow_mut() = None);
-}
-
-fn stash_walk_report(report: WalkReport) {
-    WALK_REPORT.with(|slot| *slot.borrow_mut() = Some(report));
-}
-
-fn take_walk_report() -> WalkReport {
-    WALK_REPORT.with(|slot| slot.borrow_mut().take().unwrap_or_default())
-}
-
 /// [`checked_bundle`] under a [`Budget`]: the same walk and the same manifest
 /// check, refused as [`Refusal::OverBudget`] as soon as a limit is passed.
 /// The walk's report is dropped. [`checked_bundle_within_reported`] keeps it.
@@ -646,26 +630,24 @@ pub fn checked_bundle_within(bundle: &Path, budget: Budget) -> Result<CheckedBun
 }
 
 /// [`checked_bundle_within`] that also fills `report`. One walk. The report
-/// replaces whatever `report` held. The seam below builds the [`CheckedBundle`];
-/// its shape is fixed, so this function reads the report that walk leaves.
+/// replaces whatever `report` held. The caller that asks takes it here.
 pub fn checked_bundle_within_reported(
     bundle: &Path,
     budget: Budget,
     report: &mut WalkReport,
 ) -> Result<CheckedBundle, Refusal> {
-    let checked = checked_bundle_within_observed(bundle, budget, |_, _| {})?;
-    *report = take_walk_report();
+    let (checked, found) = checked_bundle_within_observed(bundle, budget, |_, _| {})?;
+    *report = found;
     Ok(checked)
 }
 
 /// [`checked_bundle_observed`] under a [`Budget`]. This is the one walk; the
-/// other entry points call it.
+/// other entry points call it and take the report, or drop it.
 pub fn checked_bundle_within_observed(
     bundle: &Path,
     budget: Budget,
     mut observe: impl FnMut(Moment, &str),
-) -> Result<CheckedBundle, Refusal> {
-    clear_walk_report();
+) -> Result<(CheckedBundle, WalkReport), Refusal> {
     let mut tally = Tally::new(budget);
     let entries = collect_entries(bundle, &mut observe, &mut tally)?;
     let manifest = entries
@@ -686,12 +668,14 @@ pub fn checked_bundle_within_observed(
             name,
             role,
         })?;
-    stash_walk_report(WalkReport {
-        entries: listed,
-        bytes,
-        empty_folders,
-    });
-    Ok(built)
+    Ok((
+        built,
+        WalkReport {
+            entries: listed,
+            bytes,
+            empty_folders,
+        },
+    ))
 }
 
 /// Check the name `claimed` against the bundle at `bundle`.

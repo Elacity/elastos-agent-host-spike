@@ -223,9 +223,13 @@ fn checked_bundle_checks_the_manifest_once() {
     let unbudgeted = library_item(&code, "pub fn checked_bundle_observed(");
     assert!(
         unbudgeted.contains(
-            "{\n    checked_bundle_within_observed(bundle, Budget::UNLIMITED, observe)\n}"
+            "{\n    checked_bundle_within_observed(bundle, Budget::UNLIMITED, observe)\n        .map(|(checked, _report)| checked)\n}"
         ),
         "checked_bundle_observed is not the seam with no limit:\n{unbudgeted}"
+    );
+    assert!(
+        !code.contains("thread_local!"),
+        "a walk report must not stay on the thread between walks"
     );
     // The Runtime's parse and its validate() are both inside the Runtime's
     // own reader, which the library calls once; it makes neither call itself.
