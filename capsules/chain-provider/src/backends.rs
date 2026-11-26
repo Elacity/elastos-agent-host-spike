@@ -1,5 +1,11 @@
 use super::*;
 
+#[rustfmt::skip]
+fn chain_fault(network: &ChainNetwork, code: &str) -> Response {
+    let what = if code == "upstream_unreachable" { "transport failed" } else { "response could not be read" };
+    Response::error(code, &format!("chain {what} for {}", network.id))
+}
+
 pub(super) struct MainchainTip {
     pub(super) height: u64,
     pub(super) hash: String,
@@ -121,7 +127,7 @@ impl ChainProvider {
             .client
             .get(url)
             .send()
-            .map_err(|err| Response::error("upstream_unreachable", &err.to_string()))?;
+            .map_err(|_| chain_fault(network, "upstream_unreachable"))?;
         let status = response.status();
         if !status.is_success() {
             return Err(Response::error(
@@ -131,7 +137,7 @@ impl ChainProvider {
         }
         response
             .json::<Value>()
-            .map_err(|err| Response::error("upstream_invalid_json", &err.to_string()))
+            .map_err(|_| chain_fault(network, "upstream_invalid_json"))
     }
 
     pub(super) fn backend_get_text(
@@ -144,7 +150,7 @@ impl ChainProvider {
             .client
             .get(url)
             .send()
-            .map_err(|err| Response::error("upstream_unreachable", &err.to_string()))?;
+            .map_err(|_| chain_fault(network, "upstream_unreachable"))?;
         let status = response.status();
         if !status.is_success() {
             return Err(Response::error(
@@ -154,7 +160,7 @@ impl ChainProvider {
         }
         response
             .text()
-            .map_err(|err| Response::error("upstream_invalid_text", &err.to_string()))
+            .map_err(|_| chain_fault(network, "upstream_invalid_text"))
     }
 
     pub(super) fn evm_rpc(
@@ -173,12 +179,7 @@ impl ChainProvider {
                 "params": params,
             }))
             .send()
-            .map_err(|err| {
-                Response::error(
-                    "upstream_unreachable",
-                    &format!("EVM RPC request failed: {err}"),
-                )
-            })?;
+            .map_err(|_| chain_fault(network, "upstream_unreachable"))?;
         let status = response.status();
         if !status.is_success() {
             return Err(Response::error(
@@ -246,7 +247,7 @@ impl ChainProvider {
         }
         let response = request
             .send()
-            .map_err(|err| Response::error("upstream_unreachable", &err.to_string()))?;
+            .map_err(|_| chain_fault(network, "upstream_unreachable"))?;
         let status = response.status();
         if !status.is_success() {
             return Err(Response::error(
@@ -256,7 +257,7 @@ impl ChainProvider {
         }
         let body = response
             .json::<Value>()
-            .map_err(|err| Response::error("upstream_invalid_json", &err.to_string()))?;
+            .map_err(|_| chain_fault(network, "upstream_invalid_json"))?;
         if let Some(error) = body.get("error").filter(|value| !value.is_null()) {
             return Err(Response::error("upstream_rpc_error", &error.to_string()));
         }

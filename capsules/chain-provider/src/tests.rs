@@ -110,6 +110,114 @@ fn operator_settings_arrive_through_init_and_are_not_in_the_reply() {
     assert!(unknown.contains("unknown key"), "{unknown}");
 }
 
+fn default_urls(provider: &ChainProvider) -> (String, String, Option<String>) {
+    (
+        provider.rpc_url_for("base-mainnet").unwrap().to_string(),
+        provider.rpc_url_for("btc-mainnet").unwrap().to_string(),
+        provider.bitcoin_rpc_user_for_test().map(str::to_string),
+    )
+}
+
+fn assert_settings_unchanged(provider: &ChainProvider, before: &(String, String, Option<String>)) {
+    assert_eq!(
+        provider.rpc_url_for("base-mainnet"),
+        Some(before.0.as_str())
+    );
+    assert_eq!(provider.rpc_url_for("btc-mainnet"), Some(before.1.as_str()));
+    assert_eq!(provider.bitcoin_rpc_user_for_test(), before.2.as_deref());
+    assert!(provider.rpc_url_for("ela-mainnet").is_some());
+}
+
+#[test]
+fn an_invalid_cleartext_operator_url_leaves_networks_unchanged() {
+    let mut provider = ChainProvider::new();
+    let before = default_urls(&provider);
+    let secret = "cleartext-secret-key";
+    let response = provider.handle(Request::Init {
+        config: json!({
+            "networks": [{
+                "id": "base-mainnet",
+                "display_name": "Should Not Stick",
+                "kind": "evm_json_rpc",
+                "chain_id": 8453,
+                "native_symbol": "ETH",
+                "provider": "test",
+                "mainnet": true,
+                "explorer_url": null,
+                "rpc_url": "https://staged.example.invalid"
+            }],
+            "extra": {
+                "operator_settings": {
+                    "BASE_RPC_URL": format!("http://evil.example/v2/{secret}"),
+                    "BITCOIN_RPC_USER": "should-not-stick",
+                    "BITCOIN_RPC_PASSWORD": secret
+                }
+            }
+        }),
+    });
+    let text = serde_json::to_string(&response).unwrap();
+    assert!(text.contains("invalid_config"), "{text}");
+    assert!(!text.contains(secret), "{text}");
+    assert!(!text.contains("evil.example"), "{text}");
+    assert!(!text.contains("/v2/"), "{text}");
+    assert!(!text.contains("Should Not Stick"), "{text}");
+    assert_settings_unchanged(&provider, &before);
+}
+
+#[test]
+fn an_operator_url_with_credentials_leaves_networks_unchanged() {
+    let mut provider = ChainProvider::new();
+    let before = default_urls(&provider);
+    let secret = "userinfo-secret-key";
+    let response = provider.handle(Request::Init {
+        config: json!({
+            "extra": {
+                "operator_settings": {
+                    "BITCOIN_REST_URL": format!("https://user:{secret}@example.invalid/v2/{secret}?k={secret}"),
+                    "BITCOIN_RPC_USER": "should-not-stick",
+                    "BITCOIN_RPC_PASSWORD": secret
+                }
+            }
+        }),
+    });
+    let text = serde_json::to_string(&response).unwrap();
+    assert!(text.contains("invalid_config"), "{text}");
+    assert!(!text.contains(secret), "{text}");
+    assert!(!text.contains("example.invalid"), "{text}");
+    assert!(!text.contains("user:"), "{text}");
+    assert_settings_unchanged(&provider, &before);
+}
+
+#[test]
+fn a_transport_timeout_does_not_carry_the_rpc_url() {
+    let secret = "super-secret-rpc-key";
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        if let Ok((sock, _)) = listener.accept() {
+            let _ = sock;
+            std::thread::sleep(std::time::Duration::from_secs(2));
+        }
+    });
+    let url = format!("http://127.0.0.1:{port}/v2/{secret}?token={secret}");
+    let mut provider = provider_with_rpc(url);
+    provider.set_transport_timeout_for_test(std::time::Duration::from_millis(200));
+    let response = provider.handle(Request::Status {
+        network: "esc-local".to_string(),
+    });
+    let text = serde_json::to_string(&response).unwrap();
+    assert!(
+        text.contains("chain transport failed for esc-local"),
+        "{text}"
+    );
+    assert!(!text.contains(secret), "{text}");
+    assert!(!text.contains(&port.to_string()), "{text}");
+    assert!(!text.contains("/v2/"), "{text}");
+    assert!(!text.contains("127.0.0.1"), "{text}");
+    assert!(!text.contains("token="), "{text}");
+    assert!(!text.contains("http"), "{text}");
+}
+
 #[test]
 fn an_accepted_network_keeps_its_rpc_when_operator_settings_arrive_with_it() {
     let mut network = complete_protected_content_network("base-mainnet");

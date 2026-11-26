@@ -627,7 +627,10 @@ fn observe_audit_chain_activation_file_identity(
 fn observe_runtime_device_key_file_identity(
     data_dir: &Path,
 ) -> anyhow::Result<Option<RegularFileIdentity>> {
-    crate::auth_state_files::observe_device_key_for_auth_load(data_dir)
+    observe_optional_regular_file_identity(
+        &elastos_identity::device_key_path(data_dir),
+        "runtime device key",
+    )
 }
 
 fn invalidate_verified_auth_state_cache(data_dir: &Path) {
@@ -4814,15 +4817,10 @@ pub fn load_or_create_recovery_archive_key(data_dir: &Path) -> anyhow::Result<[u
         if bytes.len() != 32 {
             anyhow::bail!("invalid recovery archive key");
         }
-        if !elastos_identity::object_helper_process() {
-            set_secret_file_permissions(&path)?;
-        }
+        set_secret_file_permissions(&path)?;
         let mut key = [0u8; 32];
         key.copy_from_slice(&bytes);
         return Ok(key);
-    }
-    if elastos_identity::object_helper_process() {
-        anyhow::bail!(crate::auth_state_files::OBJECT_HELPER_RECOVERY_KEY_REFUSAL);
     }
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -4904,10 +4902,6 @@ fn with_audit_chain_activation_lock<T>(
     let _guard = audit_chain_activation_mutex(data_dir)
         .lock()
         .map_err(|_| anyhow!("audit activation lock poisoned"))?;
-    // The helper's load does not create or rewrite the lock file.
-    if elastos_identity::object_helper_process() {
-        return operation();
-    }
     let lock = lock_auth_state_file(open_audit_chain_activation_lock(data_dir)?)?;
     let value = operation()?;
     unlock_auth_state_file(lock)?;
@@ -4925,9 +4919,6 @@ fn persist_audit_chain_activation_unlocked(
     activated_at: u64,
     checkpoint: &AuditChainCheckpointV1,
 ) -> anyhow::Result<RegularFileIdentity> {
-    if elastos_identity::object_helper_process() {
-        anyhow::bail!(crate::auth_state_files::OBJECT_HELPER_CHECKPOINT_REFUSAL);
-    }
     let path = audit_chain_activation_path(data_dir)?;
     if let Some(parent) = path.parent() {
         ensure_regular_auth_parent(data_dir, parent)?;
@@ -12614,7 +12605,7 @@ pub(crate) fn create_owner_only_dir_all(data_dir: &Path, path: &Path) -> anyhow:
             && metadata.uid() == unsafe { libc::geteuid() }
             && metadata.permissions().mode() & 0o077 != 0
         {
-            crate::auth_state_files::restrict_nofollow_mode(path, 0o700)
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
                 .with_context(|| format!("failed to restrict {path:?} to owner-only"))?;
         }
     }

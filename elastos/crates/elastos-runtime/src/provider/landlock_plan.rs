@@ -467,6 +467,7 @@ fn glibc_libraries(
     Ok(PlannedLoaders { files, omitted })
 }
 
+#[rustfmt::skip]
 fn resolve_named(
     provider: RuntimeProviderId,
     arch: LoaderArch,
@@ -502,15 +503,22 @@ fn resolve_named(
             Err(fail) => return Err(fail.message(name, dirs, preferred)),
         }
     }
-    for name in OPTIONAL_LIBRARIES {
+    for name in std::iter::once("libgcc_s.so.1").chain(OPTIONAL_LIBRARIES.iter().copied()) {
         let must = library_required(name, required[0], needed.as_deref());
         match locate(root, dirs, name, None, trust_uid) {
             Ok(file) => files.push(file),
             Err(LocateFail::Missing) if !must => {}
-            Err(LocateFail::Refused { tried }) if !must => {
-                omitted.push(format!("omitted library {name}, tried {tried}"))
-            }
+            Err(LocateFail::Refused { tried }) if !must => omitted.push(format!("omitted library {name}, tried {tried}")),
             Err(fail) => return Err(fail.message(name, dirs, None)),
+        }
+    }
+    if let Some(list) = needed.as_ref() {
+        for name in list {
+            if name == required[0] || name == "libgcc_s.so.1" || OPTIONAL_LIBRARIES.contains(&name.as_str()) { continue; }
+            match locate(root, dirs, name, None, trust_uid) {
+                Ok(file) => files.push(file),
+                Err(fail) => return Err(fail.message(name, dirs, None)),
+            }
         }
     }
     Ok(PlannedLoaders { files, omitted })
@@ -666,10 +674,19 @@ fn hold_regular_follow(path: &Path) -> Option<OwnedFd> {
     let opened = if resolv { super::chain_resolver::resolv_conf_path() } else { path.to_path_buf() };
     let read = open_stat(&opened, flags).ok();
     if resolv {
-        elastos_common::resolv::note_opened_resolv(&opened, read.as_ref().map(|(i, _)| loader_identity(i)));
+        after_open_resolv(&opened);
+        elastos_common::resolv::note_opened_resolv(read.as_ref().map(|(i, _)| loader_identity(i)));
     }
     read.filter(|(i, _)| i.st_mode & libc::S_IFMT == libc::S_IFREG).map(|(_, fd)| fd)
 }
+
+#[cfg(test)]
+fn after_open_resolv(path: &Path) {
+    super::chain_resolver::swap_resolv_after_open(path);
+}
+
+#[cfg(not(test))]
+fn after_open_resolv(_path: &Path) {}
 
 #[cfg(any(target_os = "linux", test))]
 fn hold_directory_path(path: &Path) -> Option<OwnedFd> {
@@ -2316,5 +2333,71 @@ mod tests {
                 "an unnamed unsafe soname stays out: {arch:?}"
             );
         }
+    }
+
+    /// Musl maps `libgcc_s.so.1` the way glibc does. Any other named soname
+    /// that cannot be mapped is refused by that name before a process starts.
+    #[cfg(unix)]
+    #[test]
+    fn a_musl_helper_maps_libgcc_and_refuses_another_needed_library_by_name() {
+        use std::io::Write;
+        use std::os::fd::AsRawFd;
+        let uid = unsafe { libc::geteuid() };
+        let open_elf = |bytes: &[u8]| {
+            let mut file = tempfile::tempfile().unwrap();
+            file.write_all(bytes).unwrap();
+            file
+        };
+        let arch = LoaderArch::X86_64;
+        let loader = format!("/lib/{}", musl_loader_name(arch));
+        let root = tempfile::tempdir().unwrap();
+        plant(root.path(), &loader, 0o755);
+        let bare = with_interpreter_fd(-1, || {
+            resolve_named(
+                Chain,
+                arch,
+                root.path(),
+                Some(&["/lib"]),
+                uid,
+                Interpreter::Musl,
+            )
+        })
+        .unwrap_err();
+        assert!(bare.contains("libgcc_s.so.1"), "{bare}");
+        assert!(bare.contains("provider start is refused"), "{bare}");
+        plant(root.path(), "/lib/libgcc_s.so.1", 0o755);
+        let mapped = with_interpreter_fd(-1, || {
+            resolve_named(
+                Chain,
+                arch,
+                root.path(),
+                Some(&["/lib"]),
+                uid,
+                Interpreter::Musl,
+            )
+        })
+        .unwrap();
+        assert!(
+            mapped
+                .files
+                .iter()
+                .any(|file| file.path.ends_with("libgcc_s.so.1")),
+            "libgcc is mapped when the program descriptor is absent"
+        );
+        let named = open_elf(&elf_with_needed(&["libgcc_s.so.1", "libother.so.1"]));
+        let err = with_interpreter_fd(named.as_raw_fd(), || {
+            resolve_named(
+                Chain,
+                arch,
+                root.path(),
+                Some(&["/lib"]),
+                uid,
+                Interpreter::Musl,
+            )
+        })
+        .unwrap_err();
+        assert!(err.contains("libother.so.1"), "{err}");
+        assert!(err.contains("provider start is refused"), "{err}");
+        assert!(!err.contains("libgcc_s.so.1"), "{err}");
     }
 }

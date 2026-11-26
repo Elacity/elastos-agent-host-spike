@@ -985,8 +985,8 @@ fn rows() -> Vec<HeldRow> {
         mark("home-own", "audit chain", "Home", "Home reads its audit chain with this device"),
     ),
     row(
-        "elastos-server/src/auth_state_files.rs",
-        "observe_device_key_for_auth_load",
+        "elastos-server/src/auth.rs",
+        "observe_runtime_device_key_file_identity",
         "device_key_path",
         1,
         mark("home-own", "device key file", "Home", "Home watches the device key file so a changed key drops the cached auth state. The object helper treats a fence refusal to stat that file as absent and does not open it."),

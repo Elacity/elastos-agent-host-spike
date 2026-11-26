@@ -3979,6 +3979,11 @@ fn library_target(data_dir: &Path, principal_id: &str, uri: &str) -> anyhow::Res
         crate::auth::ResolvedPrincipalRoot::resolve(data_dir, data_dir, principal_id)?
             .localhost_root()
             .to_string();
+    crate::auth_state_files::refuse_object_helper_recovery_key_create(
+        data_dir,
+        principal_id,
+        &localhost_root,
+    )?;
     library_target_from_root(data_dir, &localhost_root, uri)
 }
 

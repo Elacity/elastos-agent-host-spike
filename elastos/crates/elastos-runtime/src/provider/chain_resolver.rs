@@ -9,7 +9,8 @@
 //! beside the bridge the caller already holds. The fence is that same start.
 //! One observed identity restarts at most once. The dispatch that saw the
 //! change before sending uses the replacement. An in-flight call ends with
-//! `chain_resolver_changed`. The caller retries. A failed start leaves the
+//! `chain_resolver_changed`. Only `accept_following_init` retries an Init once.
+//! Other dispatches return that name. A failed start leaves the
 //! helper down, and later dispatches return `chain is off`.
 
 use super::bridge::{BridgeError, ProviderBridge, ProviderConfig};
@@ -33,7 +34,7 @@ enum ResolverIdentity {
 static RESOLV_OVERRIDE: std::sync::Mutex<Option<PathBuf>> = std::sync::Mutex::new(None);
 
 #[cfg(test)]
-fn resolv_override() -> Option<PathBuf> {
+pub(super) fn resolv_override() -> Option<PathBuf> {
     RESOLV_OVERRIDE
         .lock()
         .unwrap_or_else(|err| err.into_inner())
@@ -53,15 +54,25 @@ pub(super) fn resolv_conf_path() -> PathBuf {
 static RESOLV_SWAP_AFTER_OPEN: AtomicBool = AtomicBool::new(false);
 
 #[cfg(test)]
-pub(super) fn arm_resolv_swap_after_open() {
-    RESOLV_SWAP_AFTER_OPEN.store(true, Ordering::SeqCst);
-    *elastos_common::resolv::TEST_AFTER_OPEN
-        .lock()
-        .unwrap_or_else(|err| err.into_inner()) = swap_resolv_after_open;
+static RACE_RESTART: AtomicBool = AtomicBool::new(false);
+
+#[cfg(test)]
+pub(super) fn arm_race_restart() {
+    RACE_RESTART.store(true, Ordering::SeqCst);
 }
 
 #[cfg(test)]
-fn swap_resolv_after_open(path: &Path) {
+pub(super) fn take_race_restart() -> bool {
+    RACE_RESTART.swap(false, Ordering::SeqCst)
+}
+
+#[cfg(test)]
+pub(super) fn arm_resolv_swap_after_open() {
+    RESOLV_SWAP_AFTER_OPEN.store(true, Ordering::SeqCst);
+}
+
+#[cfg(test)]
+pub(super) fn swap_resolv_after_open(path: &Path) {
     let next = path.with_extension("next");
     if next.is_file() && RESOLV_SWAP_AFTER_OPEN.swap(false, Ordering::SeqCst) {
         let _ = std::fs::rename(&next, path);
@@ -169,20 +180,24 @@ impl ChainResolver {
     pub(super) async fn before(
         &self,
         host: &ProviderBridge,
-    ) -> Result<Option<Arc<ProviderBridge>>, BridgeError> {
+    ) -> Result<(Option<Arc<ProviderBridge>>, u64), BridgeError> {
         let _lock = self.restart.lock().await;
         if self.off.load(Ordering::Acquire) {
             return Err(BridgeError::Refused(CHAIN_IS_OFF.to_string()));
         }
         let now = match read_identity(&self.inputs.resolv) {
             Ok(identity) => identity,
-            Err(()) => return Ok(self.live()),
+            Err(()) => return Ok(self.sampled()),
         };
         let held = *self.held.lock().unwrap_or_else(|err| err.into_inner());
         if now != held {
             self.restart_once(host).await?;
         }
-        Ok(self.live())
+        Ok(self.sampled())
+    }
+
+    fn sampled(&self) -> (Option<Arc<ProviderBridge>>, u64) {
+        (self.live(), self.generation())
     }
 
     fn live(&self) -> Option<Arc<ProviderBridge>> {
@@ -234,8 +249,9 @@ impl ChainResolver {
         Ok(())
     }
 
-    /// A call that overlapped a change does not keep its answer. The caller
-    /// retries. After a failed restart every answer is `chain is off`.
+    /// A call that overlapped a change does not keep its answer. Only
+    /// `accept_following_init` retries an Init once. After a failed restart
+    /// every answer is `chain is off`.
     pub(super) fn map_transport<T>(
         &self,
         observed: u64,
@@ -618,13 +634,13 @@ mod tests {
         }
 
         impl OperatorEnv {
-            fn set() -> Self {
+            fn set(base: &str, bitcoin: &str) -> Self {
                 let previous = Self {
                     base: std::env::var("BASE_RPC_URL").ok(),
                     bitcoin: std::env::var("BITCOIN_REST_URL").ok(),
                 };
-                std::env::set_var("BASE_RPC_URL", "https://127.0.0.1:8");
-                std::env::set_var("BITCOIN_REST_URL", "https://127.0.0.1:7");
+                std::env::set_var("BASE_RPC_URL", base);
+                std::env::set_var("BITCOIN_REST_URL", bitcoin);
                 previous
             }
         }
@@ -641,6 +657,70 @@ mod tests {
                 Some(value) => std::env::set_var(key, value),
                 None => std::env::remove_var(key),
             }
+        }
+
+        struct Hits {
+            port: u16,
+            hits: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+        }
+
+        impl Hits {
+            fn serve() -> Self {
+                let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+                let port = listener.local_addr().unwrap().port();
+                let hits = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+                let record = std::sync::Arc::clone(&hits);
+                std::thread::spawn(move || {
+                    for _ in 0..64 {
+                        let Ok((mut sock, _)) = listener.accept() else {
+                            break;
+                        };
+                        let mut buf = [0u8; 2048];
+                        let n = std::io::Read::read(&mut sock, &mut buf).unwrap_or(0);
+                        let text = String::from_utf8_lossy(&buf[..n]);
+                        let path = text.split_whitespace().nth(1).unwrap_or("").to_string();
+                        record.lock().unwrap().push(path.clone());
+                        let body: &[u8] = if text.contains("eth_chainId") {
+                            br#"{"jsonrpc":"2.0","id":1,"result":"0x2105"}"#
+                        } else if text.contains("eth_blockNumber") {
+                            br#"{"jsonrpc":"2.0","id":1,"result":"0x10"}"#
+                        } else if path.contains("tip/height") {
+                            b"800000"
+                        } else if path.contains("tip/hash") {
+                            b"0000000000000000000000000000000000000000000000000000000000000001"
+                        } else {
+                            b"{}"
+                        };
+                        let header = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                            body.len()
+                        );
+                        let _ = std::io::Write::write_all(&mut sock, header.as_bytes());
+                        let _ = std::io::Write::write_all(&mut sock, body);
+                    }
+                });
+                Self { port, hits }
+            }
+
+            fn saw(&self, marker: &str) -> bool {
+                self.hits
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|path| path.contains(marker))
+            }
+
+            fn clear(&self) {
+                self.hits.lock().unwrap().clear();
+            }
+        }
+
+        fn url_stayed_out(text: &str) {
+            assert!(!text.contains("127.0.0.1"), "{text}");
+            assert!(!text.contains("/env"), "{text}");
+            assert!(!text.contains("/accepted"), "{text}");
+            assert!(!text.contains("/btc"), "{text}");
+            assert!(!text.contains("/kept"), "{text}");
         }
 
         async fn status_text(bridge: &ProviderBridge, id: &str) -> String {
@@ -667,10 +747,16 @@ mod tests {
         #[tokio::test]
         async fn an_accepted_network_keeps_its_rpc_when_base_rpc_url_is_set() {
             let _lock = tests_lock().lock().await;
-            let _env = OperatorEnv::set();
+            let hits = Hits::serve();
+            let _env = OperatorEnv::set(
+                &format!("http://127.0.0.1:{}/env", hits.port),
+                &format!("http://127.0.0.1:{}/btc", hits.port),
+            );
             let mut extra = base_restart_settings();
             let id = extra["accepted_id"].as_str().unwrap().to_string();
-            let accepted = extra["accepted_rpc_url"].as_str().unwrap().to_string();
+            let accepted = format!("http://127.0.0.1:{}/accepted", hits.port);
+            extra["accepted_rpc_url"] = serde_json::json!(&accepted);
+            extra["protected_content_network"]["rpc_url"] = serde_json::json!(&accepted);
             let accepted_name = extra["accepted_display_name"].as_str().unwrap().to_string();
             let object = extra.as_object_mut().unwrap();
             object.remove("accepted_id");
@@ -678,9 +764,16 @@ mod tests {
             object.remove("accepted_display_name");
             let started = start(Some(b"nameserver 127.0.0.1\n")).await;
             let first = status_text(&started.bridge, &id).await;
-            assert!(first.contains("127.0.0.1:8"), "{first}");
+            assert!(
+                hits.saw("/env"),
+                "{first} hits {:?}",
+                hits.hits.lock().unwrap()
+            );
+            url_stayed_out(&first);
+            hits.clear();
             let bitcoin = status_text(&started.bridge, "btc-mainnet").await;
-            assert!(bitcoin.contains("127.0.0.1:7"), "{bitcoin}");
+            assert!(hits.saw("/btc"), "{bitcoin}");
+            url_stayed_out(&bitcoin);
             let applied = started
                 .bridge
                 .accept_following_init(ProviderConfig {
@@ -698,21 +791,114 @@ mod tests {
             );
             let armed = networks(&started.bridge).await.unwrap();
             assert_eq!(display_name(&armed, &id), accepted_name, "{armed}");
+            hits.clear();
             let armed_status = status_text(&started.bridge, &id).await;
-            assert!(armed_status.contains(&accepted), "{armed_status}");
-            assert!(!armed_status.contains("127.0.0.1:8"), "{armed_status}");
+            assert!(hits.saw("/accepted"), "{armed_status}");
+            assert!(!hits.saw("/env"), "{armed_status}");
+            url_stayed_out(&armed_status);
             replace_by_rename(&started.resolv, b"nameserver 127.0.0.7\n");
             let changed = networks(&started.bridge).await.unwrap();
             assert_eq!(display_name(&changed, &id), accepted_name, "{changed}");
             assert_eq!(started.bridge.chain_resolver_restarts(), 1);
             let after = networks(&started.bridge).await.unwrap();
             assert_eq!(display_name(&after, &id), accepted_name, "{after}");
+            hits.clear();
             let after_status = status_text(&started.bridge, &id).await;
-            assert!(after_status.contains(&accepted), "{after_status}");
-            assert!(!after_status.contains("127.0.0.1:8"), "{after_status}");
+            assert!(hits.saw("/accepted"), "{after_status}");
+            assert!(!hits.saw("/env"), "{after_status}");
+            url_stayed_out(&after_status);
+            hits.clear();
             let bitcoin_after = status_text(&started.bridge, "btc-mainnet").await;
-            assert!(bitcoin_after.contains("127.0.0.1:7"), "{bitcoin_after}");
+            assert!(hits.saw("/btc"), "{bitcoin_after}");
+            url_stayed_out(&bitcoin_after);
             assert_eq!(started.bridge.chain_resolver_restarts(), 1);
+            started.bridge.shutdown().await.unwrap();
+        }
+
+        /// A bad operator URL does not change the running network list, and
+        /// the refused Init is not what a resolv restart starts from.
+        #[tokio::test]
+        async fn an_invalid_operator_setting_leaves_the_saved_init() {
+            let _lock = tests_lock().lock().await;
+            let hits = Hits::serve();
+            let _env = OperatorEnv::set(
+                &format!("http://127.0.0.1:{}/kept", hits.port),
+                &format!("http://127.0.0.1:{}/btc", hits.port),
+            );
+            let started = start(Some(b"nameserver 192.0.2.10\n")).await;
+            let first = status_text(&started.bridge, "base-mainnet").await;
+            assert!(hits.saw("/kept"), "{first}");
+            url_stayed_out(&first);
+            let before = networks(&started.bridge).await.unwrap();
+            assert_eq!(display_name(&before, "base-mainnet"), "Base", "{before}");
+            let secret = "saved-init-secret-key";
+            let refused = started
+                .bridge
+                .request(super::super::super::bridge::ProviderRequest::Init {
+                    config: ProviderConfig {
+                        extra: serde_json::json!({
+                            "networks": [{
+                                "id": "base-mainnet",
+                                "display_name": "Should Not Stick",
+                                "kind": "evm_json_rpc",
+                                "chain_id": 8453,
+                                "native_symbol": "ETH",
+                                "provider": "test",
+                                "mainnet": true,
+                                "explorer_url": null,
+                                "rpc_url": "https://staged.example.invalid"
+                            }],
+                            "operator_settings": {
+                                "BASE_RPC_URL": format!("http://evil.example/v2/{secret}")
+                            }
+                        }),
+                        ..ProviderConfig::default()
+                    },
+                })
+                .await
+                .unwrap();
+            let refused_text = format!("{refused:?}");
+            assert!(
+                matches!(
+                    refused,
+                    super::super::super::bridge::ProviderResponse::Error { .. }
+                ),
+                "{refused:?}"
+            );
+            assert!(!refused_text.contains(secret), "{refused_text}");
+            assert!(!refused_text.contains("evil.example"), "{refused_text}");
+            let running = networks(&started.bridge).await.unwrap();
+            assert_eq!(display_name(&running, "base-mainnet"), "Base", "{running}");
+            assert_eq!(esc_name(&running), "Elastos Smart Chain", "{running}");
+            hits.clear();
+            let still = status_text(&started.bridge, "base-mainnet").await;
+            assert!(hits.saw("/kept"), "{still}");
+            assert!(!hits.saw("evil"), "{still}");
+            url_stayed_out(&still);
+            replace_by_rename(&started.resolv, b"nameserver 192.0.2.11\n");
+            hits.clear();
+            let after = networks(&started.bridge).await.unwrap();
+            assert_eq!(display_name(&after, "base-mainnet"), "Base", "{after}");
+            assert_eq!(esc_name(&after), "Elastos Smart Chain", "{after}");
+            assert_eq!(started.bridge.chain_resolver_restarts(), 1);
+            let after_status = status_text(&started.bridge, "base-mainnet").await;
+            assert!(hits.saw("/kept"), "{after_status}");
+            url_stayed_out(&after_status);
+            started.bridge.shutdown().await.unwrap();
+        }
+
+        /// The dispatch samples the generation under the restart lock. A
+        /// restart in that gap is `chain_resolver_changed`, not a dead process.
+        #[tokio::test]
+        async fn a_restart_during_dispatch_is_chain_resolver_changed() {
+            let _lock = tests_lock().lock().await;
+            let started = start(Some(b"nameserver 192.0.2.20\n")).await;
+            super::super::arm_race_restart();
+            let err = networks(&started.bridge)
+                .await
+                .expect_err("the raced dispatch must be the changed-resolver name");
+            let text = err.to_string();
+            assert_eq!(text, "chain_resolver_changed");
             started.bridge.shutdown().await.unwrap();
         }
 

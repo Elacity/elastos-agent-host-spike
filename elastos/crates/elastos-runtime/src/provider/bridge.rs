@@ -3042,12 +3042,35 @@ impl ProviderBridge {
                 target: None,
             });
         };
-        let target = resolver.before(self).await?;
+        let (target, observed) = resolver.before(self).await?;
+        self.race_restart_during_dispatch().await?;
         Ok(ChainHop {
-            observed: resolver.generation(),
+            observed,
             resolver: Some(resolver),
             target,
         })
+    }
+
+    #[cfg(test)]
+    async fn race_restart_during_dispatch(&self) -> Result<(), BridgeError> {
+        if !super::chain_resolver::take_race_restart() {
+            return Ok(());
+        }
+        if let Some(path) = super::chain_resolver::resolv_override() {
+            let next = path.with_extension("race");
+            let _ = std::fs::write(&next, b"nameserver 192.0.2.99\n");
+            let _ = std::fs::rename(&next, &path);
+        }
+        if let Some(resolver) = self.chain_resolver() {
+            resolver.before(self).await?;
+        }
+        Ok(())
+    }
+
+    #[cfg(not(test))]
+    async fn race_restart_during_dispatch(&self) -> Result<(), BridgeError> {
+        let _ = self;
+        Ok(())
     }
 
     fn finish_chain_dispatch<T>(

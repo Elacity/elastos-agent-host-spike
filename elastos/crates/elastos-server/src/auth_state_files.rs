@@ -80,7 +80,18 @@ pub(crate) fn ensure_regular_auth_parent(_data_dir: &Path, _parent: &Path) -> an
 }
 
 #[cfg(unix)]
+#[rustfmt::skip]
 pub(crate) fn open_regular_lock_file(path: &Path, label: &str) -> anyhow::Result<File> {
+    if elastos_identity::object_helper_process() && path.file_name().is_some_and(|n| n == "audit-chain-required.json.lock") {
+        let dir = path.ancestors().nth(4).context("object helper audit lock has no home")?.join("Users");
+        std::fs::create_dir_all(&dir)?;
+        let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
+        let file_path = dir.join(format!(".helper-audit-{}-{stamp}.lock", std::process::id()));
+        let file = OpenOptions::new().create_new(true).read(true).write(true).mode(0o600).open(&file_path)
+            .with_context(|| format!("failed to open a private audit lock in {dir:?}"))?;
+        let _ = std::fs::remove_file(&file_path);
+        return Ok(file);
+    }
     let mut options = OpenOptions::new();
     options.create(true).truncate(false).read(true).write(true);
     #[cfg(unix)]
@@ -112,7 +123,6 @@ pub(crate) fn open_regular_lock_file(_path: &Path, _label: &str) -> anyhow::Resu
 pub(crate) const OBJECT_HELPER_AUTH_WRITE_REFUSAL: &str =
     "object helper refuses to write Home sign-in files";
 
-/// The helper does not sign or rewrite a checkpoint that is behind auth-state.
 pub(crate) const OBJECT_HELPER_CHECKPOINT_REFUSAL: &str =
     "object helper refuses to repair the audit checkpoint";
 
@@ -133,7 +143,7 @@ fn auth_sign_in_family(path: &Path) -> bool {
 
 /// Open `path` with `O_NOFOLLOW` and `fchmod` it to `mode` when the mode
 /// differs. A symlink fails the open and its target stays as it is.
-#[cfg(unix)]
+#[cfg(all(test, unix))]
 pub(crate) fn restrict_nofollow_mode(path: &Path, mode: u32) -> anyhow::Result<()> {
     use std::os::unix::fs::OpenOptionsExt;
     let mut options = OpenOptions::new();
@@ -168,7 +178,9 @@ fn restrict_open_file_mode(file: &File, mode: u32) -> anyhow::Result<()> {
 }
 
 #[cfg(unix)]
+#[rustfmt::skip]
 pub(crate) fn set_secret_file_permissions(path: &Path) -> anyhow::Result<()> {
+    if elastos_identity::object_helper_process() && path.file_name().is_some_and(|n| n == "recovery-archive.key") { return Ok(()); }
     use std::os::unix::fs::OpenOptionsExt;
     let mut options = OpenOptions::new();
     options.read(true).custom_flags(libc::O_NOFOLLOW);
@@ -230,29 +242,6 @@ pub(crate) fn regular_file_identity_from_metadata(
     Err(unsupported_on_this_platform())
 }
 
-/// The object helper does not open the device key. On macOS the fence also
-/// refuses to stat it. That refusal is an absent identity, so sign-in still
-/// loads. Runtime outside the helper still sees a real permission error.
-pub(crate) fn observe_device_key_for_auth_load(
-    data_dir: &Path,
-) -> anyhow::Result<Option<RegularFileIdentity>> {
-    let path = elastos_identity::device_key_path(data_dir);
-    match observe_optional_regular_file_identity(&path, "runtime device key") {
-        Ok(identity) => Ok(identity),
-        Err(err) if object_helper_cannot_stat_device_key(&err) => Ok(None),
-        Err(err) => Err(err),
-    }
-}
-
-fn object_helper_cannot_stat_device_key(err: &anyhow::Error) -> bool {
-    elastos_identity::object_helper_process()
-        && err.chain().any(|cause| {
-            cause.downcast_ref::<std::io::Error>().is_some_and(|io| {
-                io.kind() == ErrorKind::PermissionDenied || io.raw_os_error() == Some(1)
-            })
-        })
-}
-
 pub(crate) fn observe_optional_regular_file_identity(
     path: &Path,
     label: &str,
@@ -260,11 +249,20 @@ pub(crate) fn observe_optional_regular_file_identity(
     let metadata = match std::fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
         Err(err) if err.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(err) if object_helper_device_key_miss(path, &err) => return Ok(None),
         Err(err) => {
             return Err(err).with_context(|| format!("failed to inspect {label} {path:?}"));
         }
     };
     Ok(Some(regular_file_identity_from_metadata(&metadata, label)?))
+}
+
+#[rustfmt::skip]
+fn object_helper_device_key_miss(path: &Path, err: &std::io::Error) -> bool {
+    let key = path.ends_with(Path::new("identity").join("device.key"))
+        || path.file_name().is_some_and(|n| n == ".object-helper-device-key-not-used");
+    elastos_identity::object_helper_process() && key
+        && (err.kind() == ErrorKind::PermissionDenied || err.raw_os_error() == Some(1))
 }
 
 #[cfg(unix)]
@@ -280,16 +278,33 @@ pub(crate) fn sync_parent_directory(_path: &Path) -> anyhow::Result<()> {
     Err(unsupported_on_this_platform())
 }
 
+#[rustfmt::skip]
+pub(crate) fn refuse_object_helper_recovery_key_create(
+    data_dir: &Path, principal_id: &str, root: &str,
+) -> anyhow::Result<()> {
+    #[cfg(unix)]
+    if elastos_identity::object_helper_process()
+        && !data_dir.join("ElastOS/System/Auth/recovery-archive.key").is_file()
+        && crate::auth::load_principal_root_protection(data_dir, principal_id, root)?.is_some()
+    { anyhow::bail!(OBJECT_HELPER_RECOVERY_KEY_REFUSAL); }
+    let _ = (data_dir, principal_id, root);
+    Ok(())
+}
+
 pub(crate) fn write_secret_json_atomic(path: &Path, value: &impl Serialize) -> anyhow::Result<()> {
     write_secret_bytes_atomic(path, &serde_json::to_vec_pretty(value)?).map(|_| ())
 }
 
+#[rustfmt::skip]
 pub(crate) fn write_secret_bytes_atomic(
     path: &Path,
     bytes: &[u8],
 ) -> anyhow::Result<Option<RegularFileIdentity>> {
     if elastos_identity::object_helper_process() && auth_sign_in_family(path) {
-        anyhow::bail!(OBJECT_HELPER_AUTH_WRITE_REFUSAL);
+        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        let checkpoint = name == "audit-chain-required.json"
+            || (name.starts_with(".audit-chain-required.json.") && name.ends_with(".tmp"));
+        anyhow::bail!(if checkpoint { OBJECT_HELPER_CHECKPOINT_REFUSAL } else { OBJECT_HELPER_AUTH_WRITE_REFUSAL });
     }
     let unique = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

@@ -285,7 +285,7 @@ fn canonicalize_protected_content_evidence_rpc_url(
     ))
 }
 
-fn validate_rpc_url_value(
+pub(super) fn validate_rpc_url_value(
     network_id: &str,
     url: &str,
     allow_empty_loopback_only: bool,
