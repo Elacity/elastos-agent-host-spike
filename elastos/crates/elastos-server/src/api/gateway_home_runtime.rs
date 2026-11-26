@@ -784,6 +784,7 @@ pub(super) struct UnknownRuntimeStep {
     pub(super) outcome: String,
 }
 
+#[derive(Default)]
 pub(super) struct RuntimeAgentStop {
     pub(super) stopped: Vec<StoppedRuntimeAgent>,
     pub(super) stopping: Vec<StoppedRuntimeAgent>,

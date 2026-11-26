@@ -598,6 +598,10 @@ async fn grant_if_asker_is_live(
                 if let Err(error) = crate::agents::refuse_inactive_agent(dir, &record.agent_id) {
                     return (StatusCode::CONFLICT, error.to_string()).into_response();
                 }
+                let owner = crate::agents::owner_of(dir, &record.agent_id).unwrap_or_default();
+                if !crate::agents::owner_is_admin_now(dir, &owner).unwrap_or(false) {
+                    return (StatusCode::FORBIDDEN, crate::agents::OWNER_NOT_ADMIN).into_response();
+                }
             }
         }
     }

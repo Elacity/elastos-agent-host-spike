@@ -693,13 +693,17 @@ pub(super) async fn agents_activate(
                 None => Vec::new(),
             };
             crate::api::agent_plane::revoke_agent_grants(&state.data_dir, &request.agent_id).await;
-            match super::gateway_home_runtime::stop_runtime_agent(
+            let stop = match super::gateway_home_runtime::stop_runtime_agent(
                 &state.data_dir,
                 &request.agent_id,
             )
             .await
             {
-                Ok(outcome) => {
+                Err(error) if stop_is_a_refusal(&error) => Ok(Default::default()),
+                stop => stop,
+            };
+            match stop {
+                Ok(outcome) if !outcome.stopped.is_empty() || !outcome.stopping.is_empty() => {
                     for session in &outcome.stopped {
                         let result = if session_ended(&session.status, session.ended) {
                             "ok"
@@ -732,11 +736,12 @@ pub(super) async fn agents_activate(
                         )?;
                     }
                 }
-                // No guest is running: the record is off, and that is the
+                // No guest is running, or it exited after the revoke and the
+                // stop found nothing: the record is off, and that is the
                 // whole effect. A session that was live before the grant
                 // revoke is still signed. A runtime that failed while a
                 // guest was up still signs `failed` and answers the error.
-                Err(error) if stop_is_a_refusal(&error) => {
+                Ok(_) => {
                     if let Some(runtime) = crate::api::agent_plane::plane_runtime(&state.data_dir) {
                         for session_id in prior {
                             let ended = runtime

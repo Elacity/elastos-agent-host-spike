@@ -1108,6 +1108,7 @@ async fn passkey_revoke_inner(
     let now = crate::auth::now_ts();
     let actor_record =
         crate::auth::load_principal_for_proof_binding(&state.data_dir, actor_proof_binding_id)?;
+    let gate = super::gateway::grant_answer_gate().lock().await;
     let revoked = crate::auth::revoke_passkey_for_actor(
         &state.data_dir,
         context.principal_id(),
@@ -1115,6 +1116,7 @@ async fn passkey_revoke_inner(
         &proof_binding_id,
         now,
     )?;
+    drop(gate);
     // The credential follows the committed revocation; when an earlier
     // attempt already removed it, there is nothing left to do.
     if let Some(credential_id) = manager
@@ -1234,7 +1236,10 @@ async fn passkey_demote_guest_inner(
     }
 
     let now = crate::auth::now_ts();
+    // An Inbox approval reads the owner's role under this same gate.
+    let gate = super::gateway::grant_answer_gate().lock().await;
     let demoted = crate::auth::demote_passkey_to_guest(&state.data_dir, &proof_binding_id, now)?;
+    drop(gate);
     let audited = crate::auth::append_audit_event(
         &state.data_dir,
         audit_event(AuditEventInput {

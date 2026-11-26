@@ -702,6 +702,8 @@ async fn stop_collected_agent_rows(
     if let Some(session_id) = only_session {
         ids.retain(|id| id == session_id);
     }
+    #[cfg(test)]
+    runtime.pause_before_stop_rows(agent_id).await;
     if ids.is_empty() {
         if let Some(response) = plan_write_still_open(runtime, agent_id) {
             return response;

@@ -93,6 +93,7 @@ mod gateway_home_update;
 mod gateway_home_wallet_connector;
 #[path = "gateway_inbox.rs"]
 mod gateway_inbox;
+pub(in crate::api) use gateway_inbox::grant_answer_gate;
 #[cfg(unix)]
 #[cfg(test)]
 pub(crate) use gateway_inbox::inbox_request_entries_for_test;

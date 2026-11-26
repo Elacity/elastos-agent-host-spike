@@ -3614,6 +3614,186 @@ async fn a_crash_between_the_owed_and_signed_stop_rows_settles_once_after_restar
     assert!(crate::agents::owed_stop_rows(&home.data).is_empty());
 }
 
+/// A crash after the signed `ok` settle and before its owed stop is cleared,
+/// with the open `stopping` row already pushed out of the kept list: two real
+/// starts leave that stop signed `ok` exactly once and owe nothing.
+#[tokio::test]
+async fn a_crash_after_the_signed_ok_settle_signs_the_stop_once_after_restart() {
+    let home = Home::open();
+    let (owner, _) = admins(&home, "crash-ok");
+    let reason = json!({ "agent_id": "agent-settled" }).to_string();
+    let stopping = audit_row(
+        &owner.principal_id,
+        Some("session-settled"),
+        "agent.stopped",
+        "stopping",
+        reason,
+    );
+    crate::agent_record_audit::append_agent_row(&home.data, stopping).unwrap();
+    for _ in 0..600 {
+        let pad = audit_row(&owner.principal_id, None, "audit.pad", "ok", "pad".into());
+        crate::auth::append_audit_event(&home.data, pad).unwrap();
+    }
+    assert!(stopped_rows(&home.data).is_empty(), "the pad did not wrap");
+    super::seams::arm_grant_kind(&home.data, "after-signed-stop");
+    let crashed = crate::agent_record_audit::confirm_stopping_rows(&home.data, |_| true);
+    assert!(
+        crashed.is_err(),
+        "the crash between the two writes did not fire"
+    );
+    assert_eq!(
+        stopped_rows(&home.data).len(),
+        1,
+        "the ok settle is signed before its owed stop is cleared"
+    );
+    for _ in 0..2 {
+        let gateway = Gateway::start(&home.data).await;
+        gateway.shutdown().await;
+    }
+    let rows = stopped_rows(&home.data);
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!(rows[0].result, "ok", "{rows:?}");
+    assert!(crate::agents::owed_stop_rows(&home.data).is_empty());
+}
+
+async fn register_live(home: &Home, session: &str, agent: &str) {
+    crate::api::agent_plane::plane_runtime(&home.data)
+        .expect("plane")
+        .register_capsule(crate::runtime::RunningCapsuleInfo {
+            id: session.to_string(),
+            name: "planted".to_string(),
+            status: crate::runtime::CAPSULE_RUNNING.to_string(),
+            capsule_type: elastos_common::CapsuleType::Wasm,
+            handle: None,
+            session_id: session.to_string(),
+            principal: Some(agent.to_string()),
+            cause: None,
+            ended_at: None,
+        })
+        .await;
+}
+
+/// A demotion committed while the owner's Inbox approval waits on its answer
+/// gate: the approval reads the role again under the gate, is refused by
+/// name, and signs no row and makes no grant.
+#[tokio::test]
+async fn a_demotion_while_the_approval_waits_on_its_gate_refuses_it_by_name() {
+    let home = Home::open();
+    let (owner, _) = admins(&home, "gate-demote");
+    let agent = create_owned_agent(&home.data, &owner, "bafkreigatedemote");
+    let gateway = Gateway::start(&home.data).await;
+    register_live(&home, "capsule:gate-demote", &agent).await;
+    let request_id = plant_pending(&home, "capsule:gate-demote", &agent).await;
+    let token = inbox_token(&home.data, &owner.principal_id, &owner.proof_binding_id);
+    let pause = super::seams::arm_answer_gate_pause(&home.data);
+    let (addr, id) = (gateway.addr.clone(), request_id.clone());
+    let approve = tokio::spawn(async move { http_approve(&addr, &token, &id).await });
+    tokio::time::timeout(Duration::from_secs(15), pause.entered.notified())
+        .await
+        .expect("the approval did not reach its gate");
+    let now = crate::auth::now_ts();
+    crate::auth::demote_passkey_to_guest(&home.data, &owner.proof_binding_id, now).unwrap();
+    pause.release.notify_one();
+    let (status, body) = approve.await.unwrap();
+    assert_ne!(status, 200, "{body}");
+    assert!(body.contains(crate::agents::OWNER_NOT_ADMIN), "{body}");
+    let rows = grant_audit(&home.data, &request_id);
+    assert!(rows.is_empty(), "a refused approval signed {rows:?}");
+    assert!(!usable_grant(&home.data, &request_id).await);
+    gateway.shutdown().await;
+}
+
+/// A grant that reaches the plane for an agent whose owner is no longer an
+/// admin is refused by name, and no grant is made.
+#[tokio::test]
+async fn the_plane_refuses_a_grant_when_the_owner_is_not_an_admin() {
+    let home = Home::open();
+    let (owner, _) = admins(&home, "plane-demote");
+    let agent = create_owned_agent(&home.data, &owner, "bafkreiplanedemote");
+    let gateway = Gateway::start(&home.data).await;
+    register_live(&home, "capsule:plane-demote", &agent).await;
+    let request_id = plant_pending(&home, "capsule:plane-demote", &agent).await;
+    let now = crate::auth::now_ts();
+    crate::auth::demote_passkey_to_guest(&home.data, &owner.proof_binding_id, now).unwrap();
+    let shell = shell_token(&gateway.agent_url, &gateway.secret).await;
+    let response = reqwest::Client::new()
+        .post(format!("{}/api/capability/grant", gateway.agent_url))
+        .header("authorization", format!("Bearer {shell}"))
+        .json(&json!({"request_id": request_id, "duration": "session"}))
+        .send()
+        .await
+        .unwrap();
+    let status = response.status().as_u16();
+    let text = response.text().await.unwrap();
+    assert_eq!(status, 403, "{text}");
+    assert_eq!(text, crate::agents::OWNER_NOT_ADMIN);
+    assert!(!usable_grant(&home.data, &request_id).await);
+    gateway.shutdown().await;
+}
+
+/// The demote route commits under the Inbox answer gate: while the gate is
+/// held the owner stays an admin, and the demotion lands once it is free.
+#[tokio::test]
+async fn the_demote_route_commits_under_the_answer_gate() {
+    let home = Home::open();
+    let (owner, other) = admins(&home, "route-gate");
+    let gateway = Gateway::start(&home.data).await;
+    let held = super::super::grant_answer_gate().lock().await;
+    let addr = gateway.addr.clone();
+    let token = other.system_token.clone();
+    let path = format!("/api/auth/passkeys/{}/demote-guest", owner.proof_binding_id);
+    let demote =
+        tokio::spawn(async move { home_http(&addr, &token, reqwest::Method::POST, &path).await });
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(
+        crate::agents::owner_is_admin_now(&home.data, &owner.principal_id).unwrap(),
+        "the demotion committed while the answer gate was held"
+    );
+    drop(held);
+    let (status, body) = demote.await.unwrap();
+    assert_eq!(status, 200, "{body}");
+    assert!(!crate::agents::owner_is_admin_now(&home.data, &owner.principal_id).unwrap());
+    gateway.shutdown().await;
+}
+
+/// Agents Off for an agent whose guest exits after the grant revoke, between
+/// the stop's list of live rows and its read of them: the stop finds nothing
+/// to end, and Off still signs that session stopped, once.
+#[tokio::test]
+async fn an_agent_that_exits_between_the_revoke_and_the_stop_is_signed_stopped_once() {
+    let home = Home::open();
+    let agent = home.create_agent("Exits", "bafkreiexits");
+    let gateway = Gateway::start(&home.data).await;
+    let token = system_token(&home);
+    register_live(&home, "session-exits", &agent).await;
+    let runtime = crate::api::agent_plane::plane_runtime(&home.data).unwrap();
+    let after_list = runtime.arm_stop_before_rows(&agent);
+    let before_rows = runtime.arm_stop_before_rows(&agent);
+    let addr = gateway.addr.clone();
+    let body = json!({ "agent_id": agent, "active": false }).to_string();
+    let off = tokio::spawn(async move {
+        post_json(&addr, &token, "/api/apps/system/agents/activate", &body).await
+    });
+    tokio::time::timeout(Duration::from_secs(15), before_rows.entered.notified())
+        .await
+        .expect("the stop did not reach its mark");
+    before_rows.release.notify_one();
+    tokio::time::timeout(Duration::from_secs(15), after_list.entered.notified())
+        .await
+        .expect("the stop did not list the session");
+    runtime.end_planted_session_for_test("session-exits").await;
+    after_list.release.notify_one();
+    let (status, body) = off.await.unwrap();
+    assert_eq!(status, 200, "{body}");
+    let rows: Vec<_> = stopped_rows(&home.data)
+        .into_iter()
+        .filter(|row| row.session_id.as_deref() == Some("session-exits"))
+        .collect();
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!(rows[0].result, "ok", "{rows:?}");
+    gateway.shutdown().await;
+}
+
 /// A plane stop that names one session denies only that session's waiting
 /// asks. Another live session of the same agent keeps its ask.
 #[tokio::test]

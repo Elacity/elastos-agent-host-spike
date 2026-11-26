@@ -17,6 +17,33 @@ static GRANT_KINDS: LazyLock<Mutex<HashMap<PathBuf, String>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 static PARK_MS: LazyLock<Mutex<HashMap<PathBuf, u64>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
+static GATE_PAUSES: LazyLock<Mutex<HashMap<PathBuf, GatePause>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// One Inbox answer of this Home stops before the answer gate until released.
+#[derive(Clone)]
+pub(crate) struct GatePause {
+    pub(crate) entered: std::sync::Arc<tokio::sync::Notify>,
+    pub(crate) release: std::sync::Arc<tokio::sync::Notify>,
+}
+
+#[cfg(all(unix, feature = "prototype-agents"))]
+pub(crate) fn arm_answer_gate_pause(data_dir: &Path) -> GatePause {
+    let pause = GatePause {
+        entered: Default::default(),
+        release: Default::default(),
+    };
+    guard(&GATE_PAUSES).insert(data_dir.to_path_buf(), pause.clone());
+    pause
+}
+
+pub(crate) async fn pause_before_answer_gate(data_dir: &Path) {
+    let Some(pause) = guard(&GATE_PAUSES).remove(data_dir) else {
+        return;
+    };
+    pause.entered.notify_one();
+    pause.release.notified().await;
+}
 
 pub(crate) fn arm_record_audit(data_dir: &Path) {
     guard(&RECORD_AUDIT).insert(data_dir.to_path_buf());
@@ -37,7 +64,7 @@ pub(crate) fn take_grant_fault(data_dir: &Path, crash: bool) -> bool {
 }
 
 /// One named fault for this Home: `before-send`, `after-mint`, `minted-row`,
-/// `timeout`, `sent`, or `started`.
+/// `timeout`, `sent`, `started`, or `after-signed-stop`.
 pub(crate) fn arm_grant_kind(data_dir: &Path, kind: &str) {
     guard(&GRANT_KINDS).insert(data_dir.to_path_buf(), kind.to_string());
 }

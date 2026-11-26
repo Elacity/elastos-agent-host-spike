@@ -54,12 +54,22 @@ pub(crate) fn repair_recorded_audit(
     )
 }
 
-/// The agent file's owed stops change first, and a failed write is the
-/// answer. The signed row follows. `reconcile_owed_stops` settles a crash
-/// between the two at the next start.
+/// An open stop (`stopping` or `failed`) is owed in the agent file first, and
+/// a failed write is the answer. A settling row is signed first and its owed
+/// stop is cleared after. Either way one of the two records always exists,
+/// and `reconcile_owed_stops` settles a crash between them at the next start.
 pub(crate) fn append_agent_row(data_dir: &Path, event: RuntimeAuditEventV1) -> anyhow::Result<()> {
-    crate::agents::note_stop_rows(data_dir, std::slice::from_ref(&event))?;
-    crate::auth::append_audit_event(data_dir, event)
+    let row = std::slice::from_ref(&event);
+    if matches!(event.result.as_str(), "stopping" | "failed") {
+        crate::agents::note_stop_rows(data_dir, row)?;
+        return crate::auth::append_audit_event(data_dir, event);
+    }
+    crate::auth::append_audit_event(data_dir, event.clone())?;
+    #[cfg(test)]
+    if crate::api::gateway::seams::take_grant_kind(data_dir, "after-signed-stop") {
+        anyhow::bail!("crash after the signed stop row");
+    }
+    crate::agents::note_stop_rows(data_dir, row)
 }
 
 /// At start, an owed row the kept chain lacks is signed once. Then the kept

@@ -1161,7 +1161,13 @@ async fn answer_agent_ask(
         anyhow::bail!("a path outside the agent's own folder is not pending");
     }
     // One answer at a time, so two approvals of one ask mint one grant.
+    #[cfg(test)]
+    super::gateway_tests::seams::pause_before_answer_gate(data_dir).await;
     let _gate = grant_answer_gate().lock().await;
+    // A demotion commits under this gate, so the role read here holds until the grant.
+    if !crate::agents::owner_is_admin_now(data_dir, caller)? {
+        anyhow::bail!(crate::agents::OWNER_NOT_ADMIN);
+    }
     if !approve {
         sign_agent_grant(data_dir, caller, ask, request_id, "denied", "denied")
             .map_err(|error| super::inbox_audit_refusal(error, "Deny this ask again."))?;
@@ -1261,7 +1267,7 @@ async fn answer_agent_ask(
     }
 }
 
-fn grant_answer_gate() -> &'static tokio::sync::Mutex<()> {
+pub(in crate::api) fn grant_answer_gate() -> &'static tokio::sync::Mutex<()> {
     static GATE: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
     GATE.get_or_init(|| tokio::sync::Mutex::new(()))
 }
