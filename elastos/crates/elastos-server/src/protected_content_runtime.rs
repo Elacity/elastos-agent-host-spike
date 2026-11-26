@@ -179,7 +179,7 @@ pub(crate) const RUNTIME_CUSTODY_RELEASE_APPROVAL_UNAVAILABLE_MESSAGE: &str =
 pub(crate) const RUNTIME_CUSTODY_OPEN_PENDING_MESSAGE: &str =
     "Runtime custody viewer release is pending exact Wallet approval";
 pub(crate) const RUNTIME_CUSTODY_RELEASE_WINDOW_CLOSED_MESSAGE: &str =
-    "Runtime custody viewer release window has closed";
+    "Runtime custody viewer release window has closed; open it again";
 pub(crate) const RELEASE_ISSUE_SKEW_SECS: u64 = RIGHTS_CLOCK_SKEW_SECS;
 pub(crate) const RELEASE_CONTRIBUTION_WINDOW_SECS: u64 = 50;
 pub(crate) const WHOLE_RELEASE_SECS: u64 =
@@ -198,7 +198,7 @@ pub(crate) fn custody_release_round_fits(
         && round < prepared_expires_at.min(pending_expires_at)
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub(crate) fn latest_custody_resume_offset_secs() -> u64 {
     let prepared_after =
         MAX_RECIPIENT_KEY_AUTHORIZATION_LIFETIME_SECS.saturating_sub(RELEASE_ISSUE_SKEW_SECS);
@@ -6198,6 +6198,27 @@ fn viewer_decision_now() -> u64 {
     crate::auth::now_ts()
 }
 
+/// Clears the stale open so the next open starts at once, then refuses by name.
+async fn refuse_closed_custody_release_window(
+    data_dir: &Path,
+    registry: &Arc<ProviderRegistry>,
+    listing: &RuntimeCustodyListingRecord,
+    principal_id: &str,
+    mint_id: Digest32,
+    open_pending: RuntimeCustodyViewerRecord,
+) -> anyhow::Error {
+    let _ = settle_runtime_custody_viewer_cleanup(
+        data_dir,
+        registry.clone(),
+        listing,
+        principal_id,
+        mint_id,
+        open_pending,
+    )
+    .await;
+    anyhow::anyhow!(RUNTIME_CUSTODY_RELEASE_WINDOW_CLOSED_MESSAGE)
+}
+
 pub(crate) async fn open_runtime_custody_viewer(
     data_dir: &Path,
     registry: Arc<ProviderRegistry>,
@@ -6433,7 +6454,15 @@ pub(crate) async fn open_runtime_custody_viewer(
             prepared.expires_at(),
             open_pending.expires_at,
         ) {
-            anyhow::bail!(RUNTIME_CUSTODY_RELEASE_WINDOW_CLOSED_MESSAGE);
+            return Err(refuse_closed_custody_release_window(
+                data_dir,
+                &registry,
+                &listing,
+                &input.principal_id,
+                mint_id,
+                open_pending,
+            )
+            .await);
         }
     }
     let (release_wallet_request, release_wallet_response, signed_rights) =
@@ -6521,6 +6550,25 @@ pub(crate) async fn open_runtime_custody_viewer(
     // The 50 s contribution budget starts here, after availability, media,
     // recipient prepare and the wallet. It is not a longer timeout.
     let release_now = viewer_decision_now().max(now);
+    // The wallet and policy steps took time: refuse before any custody
+    // release that cannot finish inside every lifetime.
+    if !custody_release_round_fits(
+        release_now,
+        signed_rights.request().issued_at(),
+        signed_rights.request().expires_at(),
+        prepared.expires_at(),
+        open_pending.expires_at,
+    ) {
+        return Err(refuse_closed_custody_release_window(
+            data_dir,
+            &registry,
+            &listing,
+            &input.principal_id,
+            mint_id,
+            open_pending,
+        )
+        .await);
+    }
     let release_request = match KeyReleaseRequestV1::new(
         signed_rights.request().binding().clone(),
         signed_rights
