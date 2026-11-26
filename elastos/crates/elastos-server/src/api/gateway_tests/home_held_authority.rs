@@ -75,16 +75,6 @@ fn row(
 /// so a new open site cannot land by editing only the row's status.
 const OPEN_ROWS: &[(&str, &str, &str)] = &[
     (
-        "elastos-server/src/api/gateway_home_token.rs",
-        "local_home_launch_token_context",
-        "HomeLaunchTokenContext::resolved",
-    ),
-    (
-        "elastos-server/src/api/gateway_home_token.rs",
-        "local_home_launch_token_context",
-        "load_or_create_did",
-    ),
-    (
         "elastos-server/src/server_infra.rs",
         "register_chain_provider_plane",
         "load_or_create_device_key",
@@ -600,7 +590,7 @@ fn rows() -> Vec<HeldRow> {
         "issue_home_launch_token_with_context",
         "issue_home_launch_token_at",
         1,
-        mark("open-latent", "caller-named app token", "caller-named app", "This issuer has no grant.apps check; its only production caller restricts the app to home and home-cli"),
+        mark("delegated", "caller-named app token", "grant app", "The issuer refuses an app the stored grant does not name"),
     ),
     row(
         "elastos-server/src/api/gateway_home_token.rs",
@@ -635,14 +625,14 @@ fn rows() -> Vec<HeldRow> {
         "local_home_launch_token_context",
         "HomeLaunchTokenContext::resolved",
         1,
-        mark("open", "device launch context", "Home device", "The device context is built with no grant, passkey, or page origin"),
+        mark("home-own", "device launch context", "home and home-cli", "The device context stores a grant for home and home-cli, and the issuer looks that grant up"),
     ),
     row(
         "elastos-server/src/api/gateway_home_token.rs",
         "local_home_launch_token_context",
         "load_or_create_did",
         1,
-        mark("open", "device DID root", "Home device", "The device DID is the principal root of the device context; its only production caller uses that context for home and home-cli"),
+        mark("home-own", "device DID root", "Home", "The device DID is Home's own principal, and this context is only for home and home-cli"),
     ),
     row(
         "elastos-server/src/api/gateway_home_token.rs",

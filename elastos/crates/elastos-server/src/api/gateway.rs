@@ -194,6 +194,8 @@ pub(super) use gateway_home_token::issue_home_launch_token_with_context;
 #[cfg(unix)]
 #[cfg(test)]
 pub(super) use gateway_home_token::launch_principal_root;
+#[cfg(test)]
+pub(super) use gateway_home_token::sign_direct_launch_for_test;
 pub(super) use gateway_home_token::HomeLaunchTokenContext;
 pub(crate) use gateway_home_token::RuntimeWalletAuthority;
 pub(crate) use gateway_home_token::VerifiedLaunchGrant;

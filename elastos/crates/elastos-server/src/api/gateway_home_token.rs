@@ -322,11 +322,25 @@ pub(in crate::api) fn local_home_launch_token_context(
     let principal_id = elastos_runtime::auth::PrincipalId::device_did(&did)
         .as_str()
         .to_string();
+    let root = crate::auth::ResolvedPrincipalRoot::resolve(data_dir, data_dir, &principal_id)?;
+    let now = now_ts();
+    let session_id = format!("local:{}", uuid_like_token());
+    let grant_id = format!("grant:local:{}", uuid_like_token());
+    crate::auth::store_session_grant(
+        &home_launch_auth_data_dir(data_dir),
+        elastos_runtime::auth::AuthSessionGrantV1 {
+            schema: elastos_runtime::auth::AuthSessionGrantV1::SCHEMA.to_string(),
+            grant_id: grant_id.clone(),
+            session_id: session_id.clone(),
+            principal_id,
+            proof_binding_id: String::new(),
+            issued_at: now,
+            expires_at: now.saturating_add(HOME_LAUNCH_TOKEN_TTL_SECS),
+            apps: vec![HOME_CAPSULE_ID.to_string(), HOME_CLI_SHELL_ID.to_string()],
+        },
+    )?;
     Ok(HomeLaunchTokenContext::resolved(
-        crate::auth::ResolvedPrincipalRoot::resolve(data_dir, data_dir, &principal_id)?,
-        format!("local:{}", uuid_like_token()),
-        None,
-        format!("grant:local:{}", uuid_like_token()),
+        root, session_id, None, grant_id,
     ))
 }
 
@@ -478,7 +492,7 @@ pub(in crate::api) fn issue_home_agent_launch_token_with_context(
     context: &HomeLaunchTokenContext,
 ) -> anyhow::Result<String> {
     let issued_at = now_ts();
-    let expiry = grant_bound_token_expiry(data_dir, context, issued_at, 60)?;
+    let expiry = grant_bound_token_expiry(data_dir, context, HOME_CAPSULE_ID, issued_at, 60)?;
     let token = issue_home_launch_token_at(
         data_dir,
         &HomeLaunchContext::projection(&format!("elastos://agent/{agent_id}"), executable_actor),
@@ -600,11 +614,20 @@ pub(in crate::api) fn issue_home_launch_token_at(
     {
         anyhow::bail!("home launch token is missing authority context");
     }
+    let app = match (
+        context.proof_binding_id().is_none(),
+        launch_context.selected_resource.starts_with(LAUNCH_BOUND),
+    ) {
+        (true, false) => launch_context.executable_actor.as_str(),
+        _ => launch_context.authority_actor.as_str(),
+    };
+    let ttl = HOME_LAUNCH_TOKEN_TTL_SECS;
+    let bound = grant_bound_token_expiry(data_dir, context, app, issued_at, ttl);
+    let pending = context.proof_binding_id().is_some()
+        && matches!(bound, Err(ref err) if err.to_string().contains("not active"));
     let expires_at = match grant_expires_at {
-        Some(expiry) => issued_at
-            .saturating_add(HOME_LAUNCH_TOKEN_TTL_SECS)
-            .min(expiry),
-        None => grant_bound_token_expiry(data_dir, context, issued_at, HOME_LAUNCH_TOKEN_TTL_SECS)?,
+        Some(expiry) if bound.is_ok() || pending => issued_at.saturating_add(ttl).min(expiry),
+        _ => bound?,
     };
     let (signing_key, _did) = elastos_identity::load_or_create_did(data_dir)?;
     let envelope = HomeLaunchTokenEnvelope {
@@ -640,18 +663,19 @@ pub(in crate::api) fn issue_home_launch_token_at(
 pub(super) fn grant_bound_token_expiry(
     data_dir: &std::path::Path,
     context: &HomeLaunchTokenContext,
+    app: &str,
     issued_at: u64,
     ttl_secs: u64,
 ) -> anyhow::Result<u64> {
-    grant_bound_expiry(
+    let grant_exp = grant_bound_expiry(
         data_dir,
         context.principal_id(),
         context.session_id(),
         context.proof_binding_id(),
         context.grant_id(),
-        issued_at,
-        ttl_secs,
-    )
+        app,
+    )?;
+    Ok(issued_at.saturating_add(ttl_secs).min(grant_exp))
 }
 
 /// The same bound for a caller that holds the authority fields but no launch
@@ -663,26 +687,24 @@ pub(super) fn grant_bound_expiry(
     session_id: &str,
     proof_binding_id: Option<&str>,
     grant_id: &str,
-    issued_at: u64,
-    ttl_secs: u64,
+    app: &str,
 ) -> anyhow::Result<u64> {
-    let expires_at = issued_at.saturating_add(ttl_secs);
-    let Some(proof_binding_id) = proof_binding_id else {
-        return Ok(expires_at);
-    };
     let grant = crate::auth::load_active_session_grant(
         &home_launch_auth_data_dir(data_dir),
         session_id,
         now_ts(),
     )
     .map_err(|_| anyhow::anyhow!("home launch token auth session is not active"))?;
-    if grant.principal_id != principal_id
-        || grant.proof_binding_id != proof_binding_id
-        || grant.grant_id != grant_id
-    {
+    let proof_matches = proof_binding_id.map_or(grant.proof_binding_id.is_empty(), |proof| {
+        grant.proof_binding_id == proof
+    });
+    if grant.principal_id != principal_id || grant.grant_id != grant_id || !proof_matches {
         anyhow::bail!("home launch token authority context mismatch");
     }
-    Ok(expires_at.min(grant.expires_at))
+    if !grant.apps.iter().any(|allowed| allowed == app) {
+        anyhow::bail!("auth session grant is not authorized for app");
+    }
+    Ok(grant.expires_at)
 }
 
 #[cfg(unix)]
@@ -1438,7 +1460,7 @@ pub(in crate::api) fn issue_launch_page_token(
 ) -> anyhow::Result<String> {
     let issued_at = now_ts();
     let ttl = LAUNCH_PAGE_TOKEN_TTL_SECS;
-    let expires_at = grant_bound_token_expiry(data_dir, context, issued_at, ttl)?;
+    let expires_at = grant_bound_token_expiry(data_dir, context, HOME_CAPSULE_ID, issued_at, ttl)?;
     let bound = format!("{LAUNCH_BOUND}{id}/{content_name}/{binding}");
     let launch_context = HomeLaunchContext::projection(&bound, page);
     issue_home_launch_token_at(
@@ -1833,6 +1855,9 @@ pub(crate) fn set_test_home_launch_auth_data_dir(
 }
 
 #[cfg(test)]
+pub(crate) use tests::sign_direct_launch_for_test;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -1942,13 +1967,22 @@ mod tests {
         sign_launch_token_for_test(data_dir, envelope, HOME_LAUNCH_TOKEN_DOMAIN)
     }
 
+    pub(crate) fn sign_direct_launch_for_test(
+        data_dir: &std::path::Path,
+        app: &str,
+        context: &HomeLaunchTokenContext,
+    ) -> String {
+        sign_context_for_test(data_dir, HomeLaunchContext::direct(app), context)
+    }
+
     #[cfg(unix)]
     #[test]
     fn r8_bad_signature_refuses_device_witness_and_root() {
         let data_dir = tempfile::tempdir().unwrap();
         let context = local_home_launch_token_context(data_dir.path()).unwrap();
         let token =
-            issue_home_launch_token_with_context(data_dir.path(), "marketplace", &context).unwrap();
+            issue_home_launch_token_with_context(data_dir.path(), HOME_CAPSULE_ID, &context)
+                .unwrap();
         let mut envelope = decode_launch_token(&token);
         envelope.signature = "00".to_string();
         let bad = base64::engine::general_purpose::URL_SAFE_NO_PAD
@@ -1957,7 +1991,7 @@ mod tests {
         let error = require_home_launch_token_value_from_expected_did(
             data_dir.path(),
             &bad,
-            &["marketplace"],
+            &[HOME_CAPSULE_ID],
             expected_did,
             data_dir.path(),
         )
@@ -1973,7 +2007,7 @@ mod tests {
         let child = tempfile::tempdir().unwrap();
         let parent_context = local_home_launch_token_context(parent.path()).unwrap();
         let token =
-            issue_home_launch_token_with_context(parent.path(), "marketplace", &parent_context)
+            issue_home_launch_token_with_context(parent.path(), HOME_CAPSULE_ID, &parent_context)
                 .unwrap();
         let (_, child_did) = elastos_identity::load_or_create_did(child.path()).unwrap();
         let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
@@ -1990,7 +2024,7 @@ mod tests {
         let error = require_home_launch_token_value_from_expected_did(
             child.path(),
             &token,
-            &["marketplace"],
+            &[HOME_CAPSULE_ID],
             child_did,
             child.path(),
         )
@@ -2444,13 +2478,24 @@ mod tests {
             },
         )
         .unwrap();
-        let unauthorized = issue_home_projection_launch_token_with_context(
+        let refused_projection = issue_home_projection_launch_token_with_context(
             data_dir.path(),
             "chat-room",
             "chat-room",
             &system_context,
         )
-        .unwrap();
+        .unwrap_err();
+        assert!(
+            refused_projection
+                .to_string()
+                .contains("not authorized for app"),
+            "{refused_projection}"
+        );
+        let unauthorized = sign_context_for_test(
+            data_dir.path(),
+            HomeLaunchContext::projection("chat-room", "chat-room"),
+            &system_context,
+        );
         assert!(require_home_projection_launch_token_context(
             data_dir.path(),
             &capsule_headers(&unauthorized),
@@ -2505,7 +2550,7 @@ mod tests {
     #[test]
     fn launch_token_rejects_expiry_stale_schema_and_mixed_shape() {
         let data_dir = tempfile::tempdir().unwrap();
-        let context = local_home_launch_token_context(data_dir.path()).unwrap();
+        let context = bind_device_session_grant(data_dir.path(), &["browser"]).unwrap();
         let expired =
             issue_expired_home_launch_token_with_context(data_dir.path(), "browser", &context)
                 .unwrap();
@@ -2723,9 +2768,18 @@ mod tests {
             assert!(error.contains("authority context mismatch") || error.contains("not active"));
         }
 
-        let wrong_actor =
+        let refused_inbox =
             issue_home_launch_token_with_context(data_dir.path(), INBOX_CAPSULE_ID, &stored)
-                .unwrap();
+                .unwrap_err();
+        assert!(
+            refused_inbox.to_string().contains("not authorized for app"),
+            "{refused_inbox}"
+        );
+        let wrong_actor = sign_context_for_test(
+            data_dir.path(),
+            HomeLaunchContext::direct(INBOX_CAPSULE_ID),
+            &stored,
+        );
         assert!(require_home_launch_token_context(
             data_dir.path(),
             &capsule_headers(&wrong_actor),
@@ -2742,9 +2796,17 @@ mod tests {
             stored.grant_id().to_string(),
             crate::auth::PrincipalKind::Human,
         );
-        let token =
-            issue_home_launch_token_with_context(data_dir.path(), SYSTEM_CAPSULE_ID, &proofless)
-                .unwrap();
+        assert!(issue_home_launch_token_with_context(
+            data_dir.path(),
+            SYSTEM_CAPSULE_ID,
+            &proofless
+        )
+        .is_err());
+        let token = sign_context_for_test(
+            data_dir.path(),
+            HomeLaunchContext::direct(SYSTEM_CAPSULE_ID),
+            &proofless,
+        );
         assert!(require_home_launch_token_context(
             data_dir.path(),
             &capsule_headers(&token),
@@ -3013,8 +3075,20 @@ mod tests {
         .to_string()
         .contains("must not carry browser provenance"));
 
-        let regular_token =
-            issue_home_launch_token_with_context(data_dir.path(), "regular-app", &context).unwrap();
+        let refused_regular =
+            issue_home_launch_token_with_context(data_dir.path(), "regular-app", &context)
+                .unwrap_err();
+        assert!(
+            refused_regular
+                .to_string()
+                .contains("not authorized for app"),
+            "{refused_regular}"
+        );
+        let regular_token = sign_context_for_test(
+            data_dir.path(),
+            HomeLaunchContext::direct("regular-app"),
+            &context,
+        );
         let mut regular_headers = HeaderMap::new();
         regular_headers.insert("x-elastos-home-token", regular_token.parse().unwrap());
         assert!(require_internal_shell_runtime_wallet_authority(
@@ -3595,7 +3669,8 @@ mod tests {
     fn verifier_refuses_a_proofless_device_token_for_people() {
         let dir = tempfile::tempdir().unwrap();
         let context = local_home_launch_token_context(dir.path()).unwrap();
-        let direct = issue_home_launch_token_with_context(dir.path(), "people", &context).unwrap();
+        let direct =
+            sign_context_for_test(dir.path(), HomeLaunchContext::direct("people"), &context);
         let direct_err = require_carried_home_launch_token(dir.path(), &direct, &["people"])
             .unwrap_err()
             .to_string();
@@ -3603,13 +3678,11 @@ mod tests {
             direct_err.contains("proofless home launch token is limited to home and home-cli"),
             "{direct_err}"
         );
-        let projected = issue_home_projection_launch_token_with_context(
+        let projected = sign_context_for_test(
             dir.path(),
-            "people",
-            "people",
+            HomeLaunchContext::projection("people", "people"),
             &context,
-        )
-        .unwrap();
+        );
         let projected_err = require_carried_home_launch_token(dir.path(), &projected, &["people"])
             .unwrap_err()
             .to_string();
@@ -3622,5 +3695,105 @@ mod tests {
             require_carried_home_launch_token(dir.path(), &token, &[app])
                 .unwrap_or_else(|err| panic!("{app} stays accepted: {err}"));
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn device_context_refuses_an_app_outside_the_grant() {
+        let dir = tempfile::tempdir().unwrap();
+        let context = local_home_launch_token_context(dir.path()).unwrap();
+        let direct = issue_home_launch_token_with_context(dir.path(), "people", &context)
+            .expect_err("people is outside the device grant");
+        assert!(
+            direct.to_string().contains("not authorized for app"),
+            "{direct}"
+        );
+        let projected = issue_home_projection_launch_token_with_context(
+            dir.path(),
+            "people",
+            "people",
+            &context,
+        )
+        .expect_err("a device projection for people is outside the grant");
+        assert!(
+            projected.to_string().contains("not authorized for app"),
+            "{projected}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn device_context_refuses_a_token_without_a_stored_grant() {
+        let dir = tempfile::tempdir().unwrap();
+        let context = local_home_launch_token_context(dir.path()).unwrap();
+        crate::auth::revoke_session_grant(
+            &home_launch_auth_data_dir(dir.path()),
+            context.session_id(),
+            now_ts(),
+        )
+        .expect("the device grant is stored");
+        let issued = issue_home_launch_token_with_context(dir.path(), HOME_CAPSULE_ID, &context);
+        assert!(
+            issued.is_err(),
+            "a device token with no stored grant was issued: {issued:?}"
+        );
+        assert!(
+            issued.unwrap_err().to_string().contains("not active"),
+            "the refusal must be the missing grant"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn device_home_and_home_cli_launches_work_end_to_end() {
+        let dir = tempfile::tempdir().unwrap();
+        for app in [HOME_CAPSULE_ID, HOME_CLI_SHELL_ID] {
+            let token = issue_local_runtime_home_launch_token(dir.path(), app)
+                .unwrap_or_else(|err| panic!("{app} launch: {err}"));
+            require_carried_home_launch_token(dir.path(), &token, &[app])
+                .unwrap_or_else(|err| panic!("{app} verify: {err}"));
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn passkey_bound_home_launch_is_unchanged() {
+        let dir = tempfile::tempdir().unwrap();
+        elastos_identity::load_or_create_did(dir.path()).unwrap();
+        let now = now_ts();
+        let context = HomeLaunchTokenContext::for_test(
+            "person:local:passkey-home",
+            "auth:passkey-home",
+            Some("proof:passkey:home".to_string()),
+            "grant:passkey-home",
+            crate::auth::PrincipalKind::Human,
+        );
+        crate::auth::store_test_human_principal(dir.path(), context.principal_id());
+        let grant = elastos_runtime::auth::AuthSessionGrantV1 {
+            schema: elastos_runtime::auth::AuthSessionGrantV1::SCHEMA.to_string(),
+            grant_id: context.grant_id.clone(),
+            session_id: context.session_id.clone(),
+            principal_id: context.principal_id().to_string(),
+            proof_binding_id: context.proof_binding_id.clone().unwrap(),
+            issued_at: now,
+            expires_at: now + HOME_LAUNCH_TOKEN_TTL_SECS,
+            apps: vec![HOME_CAPSULE_ID.to_string(), "system".to_string()],
+        };
+        crate::auth::store_session_grant(dir.path(), grant.clone()).unwrap();
+        let token =
+            issue_home_launch_token_for_auth_grant(dir.path(), HOME_CAPSULE_ID, &grant).unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert("x-elastos-home-token", token.parse().unwrap());
+        headers.insert("host", "localhost:61180".parse().unwrap());
+        headers.insert("origin", "http://localhost:61180".parse().unwrap());
+        headers.insert("sec-fetch-site", "same-origin".parse().unwrap());
+        let verified = require_home_token_context(dir.path(), &headers).unwrap();
+        assert_eq!(verified.principal_id(), context.principal_id());
+        let refused =
+            issue_home_launch_token_for_auth_grant(dir.path(), "people", &grant).unwrap_err();
+        assert!(
+            refused.to_string().contains("not authorized for app"),
+            "{refused}"
+        );
     }
 }

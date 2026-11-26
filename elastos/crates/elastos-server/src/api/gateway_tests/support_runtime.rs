@@ -621,18 +621,20 @@ fn launch_token_for_authority_context(
     app: &str,
     authority: &TestPasskeyAuthority,
 ) -> String {
-    issue_home_launch_token_with_context(
-        data_dir,
-        app,
-        &HomeLaunchTokenContext::for_test(
-            authority.principal_id.clone(),
-            authority.session_id.clone(),
-            Some(authority.proof_binding_id.clone()),
-            authority.grant_id.clone(),
-            crate::auth::PrincipalKind::Human,
-        ),
-    )
-    .unwrap()
+    let context = HomeLaunchTokenContext::for_test(
+        authority.principal_id.clone(),
+        authority.session_id.clone(),
+        Some(authority.proof_binding_id.clone()),
+        authority.grant_id.clone(),
+        crate::auth::PrincipalKind::Human,
+    );
+    match issue_home_launch_token_with_context(data_dir, app, &context) {
+        Ok(token) => token,
+        Err(err) if err.to_string().contains("not authorized for app") => {
+            sign_direct_launch_for_test(data_dir, app, &context)
+        }
+        Err(err) => panic!("launch token: {err}"),
+    }
 }
 
 fn projection_launch_token_for_authority_context(

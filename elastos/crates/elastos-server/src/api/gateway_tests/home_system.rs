@@ -2670,14 +2670,11 @@ async fn direct_home_cli_token_rejects_home_owned_grant_authority() {
     )
     .unwrap();
 
-    let token =
-        issue_home_launch_token_with_context(dir.path(), HOME_CLI_CAPSULE_ID_FOR_TEST, &context)
-            .unwrap();
     let err =
-        require_carried_home_launch_token(dir.path(), &token, &[HOME_CLI_CAPSULE_ID_FOR_TEST])
+        issue_home_launch_token_with_context(dir.path(), HOME_CLI_CAPSULE_ID_FOR_TEST, &context)
             .unwrap_err()
             .to_string();
-    assert!(err.contains("home launch token authority context mismatch"));
+    assert!(err.contains("not authorized for app"), "{err}");
 }
 #[cfg(unix)]
 #[tokio::test]
@@ -8193,8 +8190,7 @@ async fn test_system_guest_registration_requires_admin_passkey() {
     let app = gateway_router(test_state(dir.path()));
     let local_context = local_home_launch_token_context(dir.path()).unwrap();
     let local_system_token =
-        issue_home_launch_token_with_context(dir.path(), SYSTEM_CAPSULE_ID, &local_context)
-            .unwrap();
+        sign_direct_launch_for_test(dir.path(), SYSTEM_CAPSULE_ID, &local_context);
     let authority = passkey_authority(dir.path());
     let guest = passkey_authority_with_name_role(
         dir.path(),
@@ -8294,8 +8290,7 @@ async fn system_community_membership_is_home_wide_and_requires_current_owner_aut
         .join("collaboration-community-membership-v1.json");
     let local_context = local_home_launch_token_context(dir.path()).unwrap();
     let mut denied_tokens = vec![
-        issue_home_launch_token_with_context(dir.path(), SYSTEM_CAPSULE_ID, &local_context)
-            .unwrap(),
+        sign_direct_launch_for_test(dir.path(), SYSTEM_CAPSULE_ID, &local_context),
         projection_launch_token_for_authority_context(dir.path(), PEOPLE_CAPSULE_ID, &authority),
     ];
     for index in 0..3 {
@@ -15968,7 +15963,7 @@ async fn home_external_link_names_the_launched_app_and_the_exact_address() {
                 dir.path(),
                 LIBRARY_CAPSULE_ID,
                 LIBRARY_CAPSULE_ID,
-                &other_session,
+                &bind_device_session_grant(dir.path(), &[HOME_CAPSULE_ID]).unwrap(),
             )
             .unwrap(),
         ),
@@ -15983,7 +15978,12 @@ async fn home_external_link_names_the_launched_app_and_the_exact_address() {
             "app token Home did not mint",
             "http://localhost:61180",
             home_token.clone(),
-            issue_home_launch_token_with_context(dir.path(), LIBRARY_CAPSULE_ID, &context).unwrap(),
+            issue_home_launch_token_with_context(
+                dir.path(),
+                LIBRARY_CAPSULE_ID,
+                &bind_device_session_grant(dir.path(), &[LIBRARY_CAPSULE_ID]).unwrap(),
+            )
+            .unwrap(),
         ),
         (
             "Home GUI is not a link sender",
@@ -16033,9 +16033,12 @@ async fn home_external_link_names_the_launched_app_and_the_exact_address() {
         assert_eq!(status, StatusCode::FORBIDDEN, "{label}: {body}");
     }
 
-    let expired =
-        issue_expired_home_launch_token_with_context(dir.path(), LIBRARY_CAPSULE_ID, &context)
-            .unwrap();
+    let expired = issue_expired_home_launch_token_with_context(
+        dir.path(),
+        LIBRARY_CAPSULE_ID,
+        &bind_device_session_grant(dir.path(), &[LIBRARY_CAPSULE_ID]).unwrap(),
+    )
+    .unwrap();
     let (status, body) = home_external_link_raw(
         &app,
         "http://localhost:61180",
