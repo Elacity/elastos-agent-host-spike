@@ -12,6 +12,7 @@ sys.path.insert(0, str(HERE.parent / "capsule-kit" / "falsify"))
 import falsify_kit as kit  # noqa: E402
 
 ROWS_CALL = 'python3 -I "${VIEWER_DIR}/rows_test.py"'
+FALSIFY = 'python3 -I "${VIEWER_DIR}/falsify.py"'
 GATE_TEST = 'python3 -I "${VIEWER_DIR}/verify_gate_test.py"'
 LAST_LINE = 'echo "gba-viewer: rows green, gate falsifier caught"'
 
@@ -66,9 +67,11 @@ class GateTests(unittest.TestCase):
         """the gate runs the rows before its last line"""
         source = (HERE / "verify.sh").read_text()
         self.assertEqual(source.count(ROWS_CALL), 1)
+        self.assertEqual(source.count(FALSIFY + "\n"), 1)
         self.assertEqual(source.count(GATE_TEST + "\n"), 1)
         self.assertEqual(source.count(GATE_TEST + " --falsify\n"), 1)
-        self.assertLess(source.index(ROWS_CALL + "\n"), source.index(GATE_TEST + "\n"))
+        self.assertLess(source.index(ROWS_CALL + "\n"), source.index(FALSIFY + "\n"))
+        self.assertLess(source.index(FALSIFY + "\n"), source.index(GATE_TEST + "\n"))
         self.assertLess(
             source.index(GATE_TEST + " --falsify\n"), source.index(LAST_LINE),
         )

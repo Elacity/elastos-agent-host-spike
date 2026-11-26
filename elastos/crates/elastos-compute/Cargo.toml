@@ -27,6 +27,7 @@ tracing = "0.1"
 
 [features]
 test-fixtures = []
+test-hooks = []
 
 [dev-dependencies]
 tokio = { version = "1.0", features = ["full", "test-util"] }

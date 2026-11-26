@@ -499,6 +499,118 @@ test("stop posts the agent id and does not ask for the passkey", async () => {
   assert.equal(steps, 0);
 });
 
+test("a stop shows each unknown step by request id and outcome", async () => {
+  const ui = mount((path, init = {}) => {
+    if ((init.method || "GET") === "GET") {
+      return Promise.resolve({
+        agents: [{ agent_id: AGENT_ID, display_name: "Helper", active: true }],
+      });
+    }
+    return Promise.resolve({
+      agent_id: AGENT_ID,
+      stopped: [{ session_id: "session-1", status: "stopped" }],
+      unknown: [
+        { session_id: "session-1", request_id: "step-9", outcome: "unknown" },
+        { session_id: "session-1", request_id: "step-10", outcome: "unknown" },
+      ],
+    });
+  });
+  await ui.load();
+  ui.button("Stop").click();
+  await flush();
+  await flush();
+  assert.equal(ui.state(AGENT_ID), "Unknown step: step-9 unknown, step-10 unknown");
+});
+
+test("a stop keeps the unknown names when the reload fails or comes back empty", async () => {
+  let failedGets = 0;
+  const failed = mount((path, init = {}) => {
+    if ((init.method || "GET") === "GET") {
+      failedGets += 1;
+      if (failedGets > 1) return Promise.reject(new Error("request failed: 500 the list failed"));
+      return Promise.resolve({
+        agents: [{ agent_id: AGENT_ID, display_name: "Helper", active: true }],
+      });
+    }
+    return Promise.resolve({
+      agent_id: AGENT_ID,
+      stopped: [{ session_id: "session-1", status: "stopped" }],
+      unknown: [{ session_id: "session-1", request_id: "step-9", outcome: "unknown" }],
+    });
+  });
+  await failed.load();
+  failed.button("Stop").click();
+  await flush();
+  await flush();
+  assert.equal(failed.state(AGENT_ID), "Unknown step: step-9 unknown");
+
+  let emptyGets = 0;
+  const empty = mount((path, init = {}) => {
+    if ((init.method || "GET") === "GET") {
+      emptyGets += 1;
+      return Promise.resolve({
+        agents: emptyGets > 1 ? [] : [{ agent_id: AGENT_ID, display_name: "Helper", active: true }],
+      });
+    }
+    return Promise.resolve({
+      agent_id: AGENT_ID,
+      stopped: [{ session_id: "session-1", status: "stopped" }],
+      unknown: [{ session_id: "session-1", request_id: "step-9", outcome: "unknown" }],
+    });
+  });
+  await empty.load();
+  empty.button("Stop").click();
+  await flush();
+  await flush();
+  assert.equal(empty.state(AGENT_ID), "Unknown step: step-9 unknown");
+});
+
+test("a stop that is still stopping keeps that mark when the reload throws", async () => {
+  let gets = 0;
+  const ui = mount((path, init = {}) => {
+    if ((init.method || "GET") === "GET") {
+      gets += 1;
+      if (gets > 1) return Promise.reject(new Error("request failed: 500 the list failed"));
+      return Promise.resolve({
+        agents: [{ agent_id: AGENT_ID, display_name: "Helper", active: true }],
+      });
+    }
+    return Promise.resolve({
+      agent_id: AGENT_ID,
+      stopped: [],
+      stopping: [{ session_id: "session-1", status: "stopping" }],
+      unknown: [{ session_id: "session-1", request_id: "step-9", outcome: "unknown" }],
+    });
+  });
+  await ui.load();
+  ui.button("Stop").click();
+  await flush();
+  await flush();
+  assert.equal(ui.state(AGENT_ID), "Stopping. Unknown step: step-9 unknown");
+  assert.equal(ui.button("Start").disabled, true);
+});
+
+test("a stop that is still stopping names the unknown step as well", async () => {
+  const ui = mount((path, init = {}) => {
+    if ((init.method || "GET") === "GET") {
+      return Promise.resolve({
+        agents: [{ agent_id: AGENT_ID, display_name: "Helper", active: true }],
+      });
+    }
+    return Promise.resolve({
+      agent_id: AGENT_ID,
+      stopped: [],
+      stopping: [{ session_id: "session-1", status: "stopping" }],
+      unknown: [{ session_id: "session-1", request_id: "step-9", outcome: "unknown" }],
+    });
+  });
+  await ui.load();
+  ui.button("Stop").click();
+  await flush();
+  await flush();
+  assert.equal(ui.state(AGENT_ID), "Stopping. Unknown step: step-9 unknown");
+});
+
 test("a stop that is still stopping stays Stopping and Start is disabled", async () => {
   const calls = [];
   const ui = mount((path, init = {}) => {
@@ -650,6 +762,37 @@ test("a refused Start with the already-running code stays Running and does not o
   assert.equal(ui.button("Start").disabled, false);
 });
 
+test("a live step labels the agent Running and a landing step labels it Stopping", async () => {
+  let landing = false;
+  const ui = mount((path, init = {}) => {
+    if ((init.method || "GET") === "GET") {
+      return Promise.resolve({
+        agents: [{ agent_id: AGENT_ID, display_name: "Helper", active: true }],
+      });
+    }
+    return landing
+      ? refusal("agent_stopping", "this agent is stopping")
+      : refusal("agent_already_running", "this agent is already running");
+  }, () => Promise.resolve("step-token"));
+  await ui.load();
+  ui.button("Start").click();
+  await flush();
+  await flush();
+  await flush();
+  assert.equal(ui.state(AGENT_ID), "Running");
+  assert.equal(ui.status.textContent, "this agent is already running");
+  assert.equal(ui.button("Start").disabled, true);
+  landing = true;
+  await ui.load();
+  ui.button("Start").click();
+  await flush();
+  await flush();
+  await flush();
+  assert.equal(ui.state(AGENT_ID), "Stopping");
+  assert.equal(ui.status.textContent, "this agent is stopping");
+  assert.equal(ui.button("Start").disabled, true);
+});
+
 test("a refused Start with the stopping code stays Stopping", async () => {
   const ui = mount((path, init = {}) => {
     if ((init.method || "GET") === "GET") {
@@ -718,6 +861,25 @@ test("an agent that is off has Stop and no Start", async () => {
   const stopped = calls.filter((call) => call.path.endsWith("/stop"));
   assert.equal(stopped.length, 1);
   assert.deepEqual(stopped[0].body, { agent_id: AGENT_ID });
+});
+
+test("an empty list says agents stay on the Home where they were created", async () => {
+  const ui = mount(() => Promise.resolve({ agents: [] }));
+  await ui.load();
+  assert.equal(ui.list.children.length, 1);
+  assert.equal(
+    ui.list.children[0].textContent,
+    "You have no agents on this Home. Agents created on another Home stay there.",
+  );
+});
+
+test("a build without agents does not show that sentence", async () => {
+  const ui = mount(() => Promise.reject(new Error(`request failed: 409 ${NOT_BUILT}`)));
+  await ui.load();
+  assert.equal(ui.status.textContent, "Agents are not built into this Runtime");
+  assert.equal(ui.list.children.length, 0);
+  const shown = JSON.stringify(ui.list.children) + ui.status.textContent;
+  assert.equal(shown.includes("another Home"), false);
 });
 
 test("the page's two refusal sentences are the server's", () => {

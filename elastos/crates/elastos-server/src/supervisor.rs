@@ -446,6 +446,7 @@ impl Supervisor {
                 model_budget: None,
                 stop: None,
                 v2_guests: self.v2_guests.clone(),
+                plan_book: None,
             }),
             _ => None,
         }

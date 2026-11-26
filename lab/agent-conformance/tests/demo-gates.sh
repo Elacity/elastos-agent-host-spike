@@ -52,7 +52,11 @@ before=$(cd -- "$installed" && find . | sort)
 # recorded hash is that of <hashed-table>, the table itself unless given.
 receipt() {
     local table=$2 hashed=${3:-$2} hash
-    hash=$(printf '%s' "$hashed" | shasum -a 256 | cut -d ' ' -f 1)
+    if command -v sha256sum >/dev/null 2>&1; then
+        hash=$(printf '%s' "$hashed" | sha256sum | cut -d ' ' -f 1)
+    else
+        hash=$(printf '%s' "$hashed" | shasum -a 256 | cut -d ' ' -f 1)
+    fi
     mkdir "$root/receipt-$1"
     printf '{"report":{"table":"%s","sha256":"%s"}}\n' "${table//$'\n'/\\n}" "$hash" \
         >"$root/receipt-$1/VERSIONS.json"

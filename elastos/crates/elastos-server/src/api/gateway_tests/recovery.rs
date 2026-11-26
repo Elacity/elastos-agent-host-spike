@@ -2525,30 +2525,40 @@ fn recovery_status_reports_pending_journal_and_damage() {
     .unwrap();
     assert!(status.root_encrypted);
     assert!(status.objects_needing_attention.is_empty());
-    let keys: std::collections::BTreeSet<String> = serde_json::to_value(&status)
-        .unwrap()
-        .as_object()
-        .unwrap()
-        .keys()
-        .cloned()
-        .collect();
+    let value = serde_json::to_value(&status).unwrap();
+    let keys: std::collections::BTreeSet<String> =
+        value.as_object().unwrap().keys().cloned().collect();
+    let mut expected: std::collections::BTreeSet<String> = [
+        "schema",
+        "principal_id",
+        "localhost_root",
+        "root_encrypted",
+        "recovery_configured",
+        "recovery_download_available",
+        "protection_configured",
+        "required_actions",
+        "crypto",
+    ]
+    .into_iter()
+    .map(String::from)
+    .collect();
+    // agents_built is left out when false. A reader still accepts that JSON.
+    if status.agents_built {
+        expected.insert("agents_built".to_string());
+    }
+    assert_eq!(keys, expected);
     assert_eq!(
-        keys,
-        [
-            "schema",
-            "principal_id",
-            "localhost_root",
-            "root_encrypted",
-            "recovery_configured",
-            "recovery_download_available",
-            "protection_configured",
-            "required_actions",
-            "crypto",
-        ]
-        .into_iter()
-        .map(String::from)
-        .collect()
+        value.get("agents_built").is_some(),
+        crate::agents::build_allows()
     );
+    let sent: elastos_runtime::auth::PrincipalRootRecoveryStatusV1 =
+        serde_json::from_value(value.clone()).unwrap();
+    assert_eq!(sent.agents_built, status.agents_built);
+    let mut without = value;
+    without.as_object_mut().unwrap().remove("agents_built");
+    let reread: elastos_runtime::auth::PrincipalRootRecoveryStatusV1 =
+        serde_json::from_value(without).expect("a reader accepts agents_built left out");
+    assert!(!reread.agents_built);
 
     // A damaged label is listed with its problem and action.
     let dir = tempfile::tempdir().unwrap();
@@ -2664,4 +2674,37 @@ fn recovery_status_reads_headers_only() {
     assert_eq!(after.file_opens - before.file_opens, 1_101);
     // Heads only: no body is read, so nothing is decrypted.
     assert!(after.bytes_read - before.bytes_read <= 1_101 * (4 * 1024 + 3));
+}
+
+#[cfg(unix)]
+#[test]
+fn recovery_status_reports_agents_built_on_an_unprotected_root() {
+    let dir = tempfile::tempdir().unwrap();
+    let owner = passkey_authority_with_name(dir.path(), Some("unprotected"));
+    let principal =
+        crate::auth::load_principal_for_proof_binding(dir.path(), &owner.proof_binding_id).unwrap();
+    let status = crate::api::auth_gateway::principal_root_recovery_status_for_verified_principal(
+        dir.path(),
+        &principal.principal_id,
+        &principal.localhost_root,
+    )
+    .unwrap();
+    assert!(!status.protection_configured);
+    assert_eq!(status.agents_built, crate::agents::build_allows());
+}
+
+#[cfg(unix)]
+#[test]
+fn recovery_status_reports_agents_built_on_a_protected_root() {
+    let dir = tempfile::tempdir().unwrap();
+    let principal_id = "person:local:agents-built-protected";
+    let protection = crate::auth::store_test_principal_root_protection(dir.path(), principal_id);
+    let status = crate::api::auth_gateway::principal_root_recovery_status_for_verified_principal(
+        dir.path(),
+        principal_id,
+        &protection.localhost_root,
+    )
+    .unwrap();
+    assert!(status.protection_configured);
+    assert_eq!(status.agents_built, crate::agents::build_allows());
 }

@@ -350,7 +350,6 @@ fn load_hosted_validate_fixtures_unlocked(
 }
 
 /// Load owner-scoped validate fixtures. An absent file keeps the public HTTPS pins.
-#[cfg(any(test, target_os = "macos"))]
 pub(crate) fn load_hosted_validate_fixtures(
     data_dir: &Path,
 ) -> anyhow::Result<Option<HostedValidateFixtures>> {
@@ -625,7 +624,6 @@ fn hosted_offer(
     })
 }
 
-#[cfg(any(test, target_os = "macos"))]
 pub(crate) fn offer_uses_connection_authority(
     data_dir: &Path,
     offer_id: &str,

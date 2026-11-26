@@ -676,6 +676,7 @@ mod tests {
                     model_budget: None,
                     stop: None,
                     v2_guests: None,
+                    plan_book: None,
                 };
                 let line = line.to_string();
                 Box::pin(async move {
@@ -795,6 +796,7 @@ mod tests {
                 model_budget: None,
                 stop: None,
                 v2_guests: None,
+                plan_book: None,
             },
         )
         .await
@@ -832,6 +834,7 @@ mod tests {
             model_budget: None,
             stop: None,
             v2_guests: None,
+            plan_book: None,
         };
         let deny_pending = pending.clone();
         let waiting = tokio::spawn(async move {
@@ -964,6 +967,7 @@ mod tests {
                     model_budget: None,
                     stop: None,
                     v2_guests: None,
+                    plan_book: None,
                 };
                 let line = line.to_string();
                 Box::pin(async move {

@@ -5,7 +5,9 @@
 
 use super::*;
 use crate::api::routes::tests::make_admin;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::cell::Cell;
 
 static DISPATCH_FIXTURES: std::sync::OnceLock<Mutex<std::collections::HashSet<PathBuf>>> =
     std::sync::OnceLock::new();
@@ -14,6 +16,15 @@ pub(crate) fn dispatch_fixture_enabled(data_dir: &Path) -> bool {
     DISPATCH_FIXTURES
         .get()
         .is_some_and(|homes| homes.lock().unwrap().contains(data_dir))
+}
+
+/// Lets a file-format row charge on a Home the feature-off build would refuse.
+fn allow_dispatch_spend(data_dir: &Path) {
+    DISPATCH_FIXTURES
+        .get_or_init(|| Mutex::new(std::collections::HashSet::new()))
+        .lock()
+        .unwrap()
+        .insert(data_dir.to_path_buf());
 }
 
 pub(crate) fn plant_for_dispatch(data_dir: &Path, owner_id: &str, admin_id: &str) -> String {
@@ -71,6 +82,197 @@ pub(crate) fn plant_for_dispatch(data_dir: &Path, owner_id: &str, admin_id: &str
         .unwrap()
         .insert(data_dir.to_path_buf());
     id
+}
+
+/// A second active agent for `owner_id` in a Home `plant_for_dispatch` already set up.
+pub(crate) fn plant_another_dispatch(data_dir: &Path, owner_id: &str, request_id: &str) -> String {
+    let owner = crate::auth::stored_principal_record(data_dir, owner_id)
+        .unwrap()
+        .unwrap();
+    let caller = Caller {
+        principal_id: owner_id,
+        proof_binding_id: &owner.proof_binding_id,
+        session_id: SESSION_ID,
+    };
+    let id = create_in_any_build(data_dir, &caller, &request(request_id), admit, 12)
+        .unwrap()
+        .agent_id;
+    let opened = open(data_dir, true).unwrap();
+    let mut after = opened.file.clone();
+    let agent = after
+        .agents
+        .iter_mut()
+        .find(|agent| agent.record.principal_id == id)
+        .unwrap();
+    agent.active = true;
+    agent.record.updated_at = 13;
+    after.sequence += 1;
+    write(
+        data_dir,
+        &opened,
+        Operation::SetActive,
+        &after,
+        &caller,
+        &id,
+        13,
+    )
+    .unwrap();
+    id
+}
+
+pub(crate) struct HeldAgentFileLock {
+    _lock: WriteLock,
+}
+
+pub(crate) fn hold_agent_file_lock_for_test(data_dir: &Path) -> anyhow::Result<HeldAgentFileLock> {
+    Ok(HeldAgentFileLock {
+        _lock: lock_for_write(data_dir, None)?,
+    })
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SpendFault {
+    None,
+    AppendFails,
+    StopBeforeFile,
+    FileWriteFails,
+}
+
+thread_local! {
+    static SPEND_FAULT: Cell<SpendFault> = const { Cell::new(SpendFault::None) };
+    static LOCK_WAIT: Cell<Option<std::time::Duration>> = const { Cell::new(None) };
+}
+
+pub(crate) struct SpendFaultGuard;
+
+impl Drop for SpendFaultGuard {
+    fn drop(&mut self) {
+        SPEND_FAULT.with(|fault| fault.set(SpendFault::None));
+    }
+}
+
+/// The next charge append returns an error and does not write the agent file.
+pub(crate) fn fail_spend_append() -> SpendFaultGuard {
+    SPEND_FAULT.with(|fault| fault.set(SpendFault::AppendFails));
+    SpendFaultGuard
+}
+
+/// The next charge appends the spend event and returns before the file write.
+pub(crate) fn stop_before_spend_file() -> SpendFaultGuard {
+    SPEND_FAULT.with(|fault| fault.set(SpendFault::StopBeforeFile));
+    SpendFaultGuard
+}
+
+/// The next charge appends the spend event and then the file write fails.
+pub(crate) fn fail_spend_file_write() -> SpendFaultGuard {
+    SPEND_FAULT.with(|fault| fault.set(SpendFault::FileWriteFails));
+    SpendFaultGuard
+}
+
+pub(crate) fn spend_append_fails() -> bool {
+    SPEND_FAULT.with(|fault| fault.get() == SpendFault::AppendFails)
+}
+
+pub(crate) fn spend_stops_before_file() -> bool {
+    SPEND_FAULT.with(|fault| fault.get() == SpendFault::StopBeforeFile)
+}
+
+pub(crate) fn note_agent_lock_wait(elapsed: std::time::Duration) {
+    LOCK_WAIT.with(|slot| slot.set(Some(elapsed)));
+}
+
+fn take_agent_lock_wait() -> Option<std::time::Duration> {
+    LOCK_WAIT.with(|slot| slot.take())
+}
+
+pub(crate) fn spend_file_write_fails() -> bool {
+    SPEND_FAULT.with(|fault| fault.get() == SpendFault::FileWriteFails)
+}
+
+thread_local! {
+    static WINDOWS_CUSTODY: Cell<bool> = const { Cell::new(false) };
+}
+
+pub(crate) struct WindowsCustodyGuard;
+
+impl Drop for WindowsCustodyGuard {
+    fn drop(&mut self) {
+        WINDOWS_CUSTODY.with(|flag| flag.set(false));
+    }
+}
+
+/// The next agent-file read is refused the way Windows refuses custody.
+pub(crate) fn plant_windows_custody() -> WindowsCustodyGuard {
+    WINDOWS_CUSTODY.with(|flag| flag.set(true));
+    WindowsCustodyGuard
+}
+
+pub(crate) fn windows_custody_is_planted() -> bool {
+    WINDOWS_CUSTODY.with(|flag| flag.get())
+}
+
+/// Retires a planted agent. The spent total stays on the record.
+pub(crate) fn retire_for_dispatch(data_dir: &Path, owner_id: &str, agent_id: &str) {
+    let owner = crate::auth::stored_principal_record(data_dir, owner_id)
+        .unwrap()
+        .unwrap();
+    let caller = Caller {
+        principal_id: owner_id,
+        proof_binding_id: &owner.proof_binding_id,
+        session_id: SESSION_ID,
+    };
+    retire_in_any_build(data_dir, &caller, agent_id, 20).unwrap();
+}
+
+/// Turns one planted agent's `active` flag on or off. The feature gate is not involved.
+pub(crate) fn set_dispatch_active(data_dir: &Path, owner_id: &str, agent_id: &str, active: bool) {
+    let owner = crate::auth::stored_principal_record(data_dir, owner_id)
+        .unwrap()
+        .unwrap();
+    let caller = Caller {
+        principal_id: owner_id,
+        proof_binding_id: &owner.proof_binding_id,
+        session_id: SESSION_ID,
+    };
+    let opened = open(data_dir, true).unwrap();
+    let mut after = opened.file.clone();
+    let agent = after
+        .agents
+        .iter_mut()
+        .find(|agent| agent.record.principal_id == agent_id)
+        .unwrap();
+    if agent.active == active {
+        return;
+    }
+    agent.active = active;
+    agent.record.updated_at = 30;
+    after.sequence += 1;
+    write(
+        data_dir,
+        &opened,
+        Operation::SetActive,
+        &after,
+        &caller,
+        agent_id,
+        30,
+    )
+    .unwrap();
+}
+
+/// Writes one agent's stored total and active flag. No audit event is appended.
+pub(crate) fn plant_stored_total(data_dir: &Path, agent_id: &str, spent: u64, active: bool) {
+    let opened = open(data_dir, true).unwrap();
+    let mut after = opened.file.clone();
+    let agent = after
+        .agents
+        .iter_mut()
+        .find(|agent| agent.record.principal_id == agent_id)
+        .unwrap();
+    agent.model_tokens_spent = spent;
+    agent.active = active;
+    after.sequence += 1;
+    let bytes = serde_json::to_vec_pretty(&after).unwrap();
+    crate::auth::atomic_write(&agent_file_path(data_dir).unwrap(), &bytes).unwrap();
 }
 
 pub(crate) fn stop_dispatch_agent(data_dir: &Path, owner_id: &str, agent_id: &str, disable: bool) {
@@ -269,6 +471,7 @@ fn stored_agent(owner: &str, id: &str) -> StoredAgent {
             updated_at: 5,
         },
         active: true,
+        model_tokens_spent: 0,
     }
 }
 
@@ -1050,12 +1253,18 @@ fn a_new_agent_protection_opens_under_its_own_derived_key_only() {
 }
 
 /// The reason of a named refusal.
-fn refusal_of<T: std::fmt::Debug>(result: anyhow::Result<T>) -> String {
-    let error = result.expect_err("the operation was not refused");
-    match error.downcast_ref::<Refused>() {
-        Some(refused) => refused.0.clone(),
-        None => panic!("not a named refusal: {error:#}"),
+fn refusal_of<T>(result: anyhow::Result<T>) -> String {
+    let error = match result {
+        Err(error) => error,
+        Ok(_) => panic!("the operation was not refused"),
+    };
+    if let Some(refused) = error.downcast_ref::<Refused>() {
+        return refused.0.clone();
     }
+    if let Some(named) = error.downcast_ref::<Named>() {
+        return named.to_string();
+    }
+    panic!("the refusal has no type: {error}");
 }
 
 fn turn_on(home: &Home) {
@@ -1232,6 +1441,421 @@ pub(crate) fn plant_enabled_home_with_one_agent(
     create_in_any_build(data_dir, &caller, &request("request-fixture"), admit, 9)
         .unwrap()
         .agent_id
+}
+
+#[cfg(not(feature = "prototype-agents"))]
+#[test]
+fn a_writer_pause_is_armed_until_its_guard_drops() {
+    let dir = tempfile::tempdir().unwrap();
+    let guard = arm_agent_writer_pause(dir.path(), PAUSE_BEFORE_STORE);
+    assert!(!agent_writer_pause_arrived(dir.path()));
+    drop(guard);
+    assert!(!agent_writer_pause_arrived(dir.path()));
+}
+
+const REMOVED_LOCK_TEST: &str = "agents::tests::a_waiter_does_not_hold_a_removed_agents_lock";
+
+fn trace_opened_agents_lock(file: &std::fs::File) {
+    let Ok(path) = std::env::var("U5_AGENT_LOCK_OPENED") else {
+        return;
+    };
+    if std::fs::symlink_metadata(&path).is_ok() {
+        return;
+    }
+    use std::os::unix::fs::MetadataExt;
+    let meta = file.metadata().expect("opened agents lock");
+    std::fs::write(path, format!("{} {}", meta.dev(), meta.ino())).expect("record opened lock");
+}
+
+fn parse_lock_identity(text: &str) -> (u64, u64) {
+    let mut parts = text.split_whitespace();
+    (
+        parts.next().expect("device").parse().expect("device"),
+        parts.next().expect("inode").parse().expect("inode"),
+    )
+}
+
+/// The re-exec'd half of the removed-lock row. It is a create: it takes the
+/// same lock an import holds, and it keeps that lock until the parent says
+/// to drop it.
+fn removed_lock_waiter() {
+    set_agent_lock_opened_trace(Some(trace_opened_agents_lock));
+    let home = PathBuf::from(std::env::var("U5_LOCK_HOME").expect("home"));
+    let held_path = std::env::var("U5_LOCK_HELD").expect("held");
+    let release = PathBuf::from(std::env::var("U5_LOCK_RELEASE").expect("release"));
+    let lock = acquire_agent_lock(&home, true).expect("the waiter takes the agents lock");
+    let (dev, ino) = agent_lock_identity(&lock);
+    std::fs::write(&held_path, format!("{dev} {ino}")).expect("record the held lock");
+    let started = std::time::Instant::now();
+    while started.elapsed() < std::time::Duration::from_secs(30) {
+        if release.is_file() {
+            drop(lock);
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    panic!("the remover did not release the waiter");
+}
+
+struct StopChild(std::process::Child);
+
+impl Drop for StopChild {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+fn wait_for_lock_note(path: &Path, child: &mut std::process::Child) -> String {
+    let started = std::time::Instant::now();
+    while started.elapsed() < std::time::Duration::from_secs(15) {
+        if let Ok(text) = std::fs::read_to_string(path) {
+            if !text.is_empty() {
+                return text;
+            }
+        }
+        match child.try_wait() {
+            Ok(Some(status)) => panic!("waiter exited early: {status}"),
+            Ok(None) => std::thread::sleep(std::time::Duration::from_millis(20)),
+            Err(error) => panic!("waiter status: {error}"),
+        }
+    }
+    panic!("timed out waiting for {}", path.display());
+}
+
+/// One process holds the import lock and removes it while another process is
+/// waiting on that file. The waiter is a create. The two do not hold the
+/// lock together afterwards: the waiter's file is the one at the path, and
+/// a second open cannot lock it.
+#[test]
+fn a_waiter_does_not_hold_a_removed_agents_lock() {
+    if std::env::var("U5_LOCK_ROLE").ok().as_deref() == Some("waiter") {
+        removed_lock_waiter();
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path().join("home");
+    std::fs::create_dir(&home).unwrap();
+    let opened = root.path().join("opened");
+    let held = root.path().join("held");
+    let release = root.path().join("release");
+    let remover = acquire_agent_lock(&home, false).expect("the import takes the agents lock");
+    let remover_id = agent_lock_identity(&remover);
+    let mut child = StopChild(
+        std::process::Command::new(std::env::current_exe().expect("test binary"))
+            .args(["--exact", REMOVED_LOCK_TEST])
+            .env("U5_LOCK_ROLE", "waiter")
+            .env("U5_LOCK_HOME", &home)
+            .env("U5_AGENT_LOCK_OPENED", &opened)
+            .env("U5_LOCK_HELD", &held)
+            .env("U5_LOCK_RELEASE", &release)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("re-exec the waiter"),
+    );
+    let opened_text = wait_for_lock_note(&opened, &mut child.0);
+    assert_eq!(
+        parse_lock_identity(&opened_text),
+        remover_id,
+        "the waiter opened the lock the import holds"
+    );
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    assert!(
+        !held.is_file(),
+        "the waiter took the lock while the import still held it"
+    );
+    assert!(
+        child.0.try_wait().expect("waiter status").is_none(),
+        "the waiter exited before the import removed the lock"
+    );
+    drop(remover);
+    let held_text = wait_for_lock_note(&held, &mut child.0);
+    let (dev, ino) = parse_lock_identity(&held_text);
+    let path = agent_file_path(&home)
+        .unwrap()
+        .with_file_name(format!("{AGENT_RECORDS_FILE}.lock"));
+    use std::os::unix::fs::MetadataExt;
+    let current = std::fs::symlink_metadata(&path)
+        .ok()
+        .filter(|meta| meta.is_file());
+    let same = current
+        .as_ref()
+        .is_some_and(|meta| meta.dev() == dev && meta.ino() == ino);
+    let second_took_it = if same {
+        crate::host_lock::FileLock::try_exclusive(std::fs::File::open(&path).unwrap()).is_ok()
+    } else {
+        crate::auth_state_files::open_regular_lock_file(&path, "agent records")
+            .ok()
+            .and_then(|file| crate::host_lock::FileLock::try_exclusive(file).ok())
+            .is_some()
+    };
+    assert!(
+        same && !second_took_it,
+        "the waiter and a second process hold the agents lock together (same={same}, second={second_took_it}, waiter={dev}:{ino})"
+    );
+    std::fs::write(&release, b"go").unwrap();
+    let status = child.0.wait().expect("waiter");
+    assert!(status.success(), "waiter failed: {status}");
+}
+
+struct ClearDisplace;
+
+impl Drop for ClearDisplace {
+    fn drop(&mut self) {
+        displace_agent_lock_on_the_next_tries(0);
+    }
+}
+
+#[test]
+fn a_lock_that_keeps_changing_is_refused_by_name() {
+    let _clear = ClearDisplace;
+    let dir = tempfile::tempdir().unwrap();
+    displace_agent_lock_on_the_next_tries(AGENT_LOCK_IDENTITY_TRIES);
+    let error = match acquire_agent_lock(dir.path(), true) {
+        Ok(_lock) => panic!("the lock settled"),
+        Err(error) => error,
+    };
+    assert_eq!(error.to_string(), AGENTS_LOCK_CHANGED);
+    let settled = acquire_agent_lock(dir.path(), false).expect("a settled lock is taken");
+    drop(settled);
+    assert!(
+        agent_file_path(dir.path())
+            .unwrap()
+            .symlink_metadata()
+            .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound),
+        "the agents file stays absent"
+    );
+}
+
+fn plain_bytes(value: &Value) -> Vec<u8> {
+    serde_json::to_vec(value).unwrap()
+}
+
+fn assert_plain_unreadable(bytes: &[u8]) {
+    assert_eq!(owners_in_plain_json(bytes), Err(DOES_NOT_PARSE));
+    let home = Home::new();
+    let path = home.agent_file();
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, bytes).unwrap();
+    set_mode(&path, 0o600);
+    let error = plain_owner_names(home.path()).expect_err("an unreadable agents file");
+    assert_eq!(error.to_string(), AGENTS_FILE_UNREADABLE);
+}
+
+fn plain_record(owner: &str, retired_at: Option<Value>) -> Value {
+    let mut record = json!({ "owner": owner });
+    if let Some(retired_at) = retired_at {
+        record["retired_at"] = retired_at;
+    }
+    json!({
+        "schema": AGENT_RECORDS_SCHEMA,
+        "agents": [{ "record": record }]
+    })
+}
+
+#[test]
+fn a_plain_file_from_a_newer_home_is_unreadable() {
+    let newer = plain_bytes(&json!({
+        "schema": "elastos.agent.records/v2",
+        "agents": [{ "record": { "owner": OWNER_ID } }]
+    }));
+    assert_plain_unreadable(&newer);
+    let missing = plain_bytes(&json!({
+        "agents": [{ "record": { "owner": OWNER_ID } }]
+    }));
+    assert_plain_unreadable(&missing);
+}
+
+#[test]
+fn a_plain_entry_without_a_record_is_unreadable() {
+    assert_plain_unreadable(&plain_bytes(&json!({
+        "schema": AGENT_RECORDS_SCHEMA,
+        "agents": [{ "owner": OWNER_ID }]
+    })));
+}
+
+#[test]
+fn a_plain_entry_without_an_owner_string_is_unreadable() {
+    assert_plain_unreadable(&plain_bytes(&json!({
+        "schema": AGENT_RECORDS_SCHEMA,
+        "agents": [{ "record": {} }]
+    })));
+    assert_plain_unreadable(&plain_bytes(&json!({
+        "schema": AGENT_RECORDS_SCHEMA,
+        "agents": [{ "record": { "owner": 4 } }]
+    })));
+    assert_plain_unreadable(&plain_bytes(&json!({
+        "schema": AGENT_RECORDS_SCHEMA,
+        "agents": [{ "record": { "owner": null } }]
+    })));
+}
+
+#[test]
+fn a_plain_retired_at_that_is_not_absent_null_or_unsigned_is_unreadable() {
+    for retired_at in [json!(false), json!("4"), json!(-1), json!(1.5), json!([])] {
+        assert_plain_unreadable(&plain_bytes(&plain_record(OWNER_ID, Some(retired_at))));
+    }
+}
+
+#[test]
+fn a_plain_file_of_today_still_names_its_owner() {
+    let absent = owners_in_plain_json(&plain_bytes(&plain_record(OWNER_ID, None))).unwrap();
+    assert_eq!(absent, vec![(OWNER_ID.to_string(), false)]);
+    let null_retired =
+        owners_in_plain_json(&plain_bytes(&plain_record(OWNER_ID, Some(json!(null))))).unwrap();
+    assert_eq!(null_retired, vec![(OWNER_ID.to_string(), false)]);
+    let retired =
+        owners_in_plain_json(&plain_bytes(&plain_record(OWNER_ID, Some(json!(4))))).unwrap();
+    assert_eq!(retired, vec![(OWNER_ID.to_string(), true)]);
+
+    let home = Home::new();
+    let caller = home.caller();
+    set_enabled_in_any_build(home.path(), &caller, true, 9).unwrap();
+    create_in_any_build(
+        home.path(),
+        &caller,
+        &request("request-plain-today"),
+        admit,
+        9,
+    )
+    .unwrap();
+    let owners = owners_in_plain_json(&home.agent_bytes()).expect("a file this Runtime writes");
+    assert_eq!(owners, vec![(OWNER_ID.to_string(), false)]);
+}
+
+#[test]
+fn a_missing_agent_file_is_checked_before_windows_refuses_custody() {
+    let source = include_str!("../agents.rs");
+    let missing = source
+        .find("NotFound => return Ok(None)")
+        .expect("the read names a missing file");
+    let windows = source
+        .find("agent file custody is unsupported on Windows")
+        .expect("Windows still refuses a file that is there");
+    assert!(
+        missing < windows,
+        "a missing file returns before Windows refuses custody"
+    );
+}
+
+#[test]
+fn the_refusal_names_the_count_and_what_to_do() {
+    // The same words with the feature on and off: this Home has no Retire control.
+    assert_eq!(
+        agents_would_stop_opening(1),
+        "1 agent on this Home would stop opening, so nothing was changed. Use this Recovery Kit on another Home instead."
+    );
+    assert_eq!(
+        agents_would_stop_opening(2),
+        "2 agents on this Home would stop opening, so nothing was changed. Use this Recovery Kit on another Home instead."
+    );
+    assert_eq!(
+        agents_use_a_key_not_in_a_kit(1),
+        "1 agent on this Home uses a key this Home can't put in a Recovery Kit yet, so nothing was changed."
+    );
+    assert_eq!(
+        agents_use_a_key_not_in_a_kit(2),
+        "2 agents on this Home use a key this Home can't put in a Recovery Kit yet, so nothing was changed."
+    );
+    assert!(!agents_would_stop_opening(1).contains("Retire"));
+    assert!(!agents_use_a_key_not_in_a_kit(1).contains("Retire"));
+    assert_eq!(
+        agents_would_belong_to_nobody(1),
+        "1 agent on this Home would belong to nobody. This recovery changes the owner id its record names."
+    );
+    assert_eq!(
+        agents_would_belong_to_nobody(2),
+        "2 agents on this Home would belong to nobody. This recovery changes the owner id their records name."
+    );
+}
+
+/// One agent whose note opens under the owner's current key. The caller has
+/// already stored that owner's protection. The owner is an admin.
+#[cfg(feature = "prototype-agents")]
+pub(crate) struct PlantedAgent {
+    pub agent_id: String,
+    pub root: String,
+    pub uri: String,
+    pub path: PathBuf,
+    pub note: Vec<u8>,
+}
+
+#[cfg(feature = "prototype-agents")]
+pub(crate) fn plant_opening_agent(
+    data_dir: &Path,
+    owner_id: &str,
+    request_id: &str,
+) -> PlantedAgent {
+    let owner = crate::auth::stored_principal_record(data_dir, owner_id)
+        .unwrap()
+        .unwrap();
+    let caller = Caller {
+        principal_id: owner_id,
+        proof_binding_id: &owner.proof_binding_id,
+        session_id: "session:plant",
+    };
+    set_enabled_in_any_build(data_dir, &caller, true, 9).unwrap();
+    let agent_id = create_in_any_build(data_dir, &caller, &request(request_id), admit, 10)
+        .unwrap()
+        .agent_id;
+    let note = b"note-opens-under-the-key-in-force".to_vec();
+    DISPATCH_FIXTURES
+        .get_or_init(|| Mutex::new(std::collections::HashSet::new()))
+        .lock()
+        .unwrap()
+        .insert(data_dir.to_path_buf());
+    let root = crate::auth::principal_stored_localhost_root(Some(data_dir), &agent_id).unwrap();
+    let uri = format!("{root}/journal/stable-id.txt");
+    let path = elastos_common::localhost::rooted_localhost_fs_path(data_dir, &uri).unwrap();
+    crate::auth::write_principal_root_object(data_dir, &agent_id, &root, &uri, &path, &note)
+        .unwrap();
+    assert_eq!(
+        crate::auth::read_principal_root_object(data_dir, &agent_id, &root, &uri, &path).unwrap(),
+        note,
+        "the planted note opens under the key in force"
+    );
+    PlantedAgent {
+        agent_id,
+        root,
+        uri,
+        path,
+        note,
+    }
+}
+
+/// The same plant, then the agent is retired. The note still opens: retirement
+/// keeps the wrap. The note is data the owner already stopped using.
+#[cfg(feature = "prototype-agents")]
+pub(crate) fn plant_retired_agent(
+    data_dir: &Path,
+    owner_id: &str,
+    request_id: &str,
+) -> PlantedAgent {
+    let planted = plant_opening_agent(data_dir, owner_id, request_id);
+    let owner = crate::auth::stored_principal_record(data_dir, owner_id)
+        .unwrap()
+        .unwrap();
+    let caller = Caller {
+        principal_id: owner_id,
+        proof_binding_id: &owner.proof_binding_id,
+        session_id: "session:plant",
+    };
+    retire_in_any_build(data_dir, &caller, &planted.agent_id, 11).unwrap();
+    assert_eq!(
+        crate::auth::read_principal_root_object(
+            data_dir,
+            &planted.agent_id,
+            &planted.root,
+            &planted.uri,
+            &planted.path
+        )
+        .unwrap(),
+        planted.note,
+        "a retired agent's note still opens under the key that wrapped it"
+    );
+    planted
 }
 
 #[test]
@@ -2320,6 +2944,13 @@ fn with_the_feature_off_every_operation_refuses_by_name() {
     assert_eq!(home.audit().len(), events);
 }
 
+#[cfg(not(feature = "prototype-agents"))]
+#[test]
+fn model_spend_on_a_home_without_the_feature_is_refused() {
+    let home = Home::new();
+    assert_eq!(model_spend(home.path(), "agent:v2:none"), Err(FEATURE_OFF));
+}
+
 #[cfg(feature = "prototype-agents")]
 #[test]
 fn with_the_feature_on_the_operations_are_served() {
@@ -2443,11 +3074,110 @@ fn the_agent_files_name_no_owner_key_function_and_read_no_environment() {
     assert_eq!(calls, [1, 0, 0]);
 }
 
+#[derive(Serialize, Deserialize)]
+struct FrozenOlderAgentFile {
+    schema: String,
+    sequence: u64,
+    enabled: Option<Value>,
+    agents: Vec<FrozenOlderAgent>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct FrozenOlderAgent {
+    record: Value,
+    protection: Value,
+    #[serde(default = "frozen_active", skip_serializing_if = "is_frozen_active")]
+    active: bool,
+}
+
+fn frozen_active() -> bool {
+    true
+}
+
+fn is_frozen_active(active: &bool) -> bool {
+    *active
+}
+
+/// The agent-file parser from before `model_tokens_spent`: `parse_strict`'s
+/// round-trip, on a record shape that does not know the field.
+fn frozen_older_agent_parser(bytes: &[u8]) -> Result<(), &'static str> {
+    let file: FrozenOlderAgentFile = serde_json::from_slice(bytes).map_err(|_| DOES_NOT_PARSE)?;
+    let found: Value = serde_json::from_slice(bytes).map_err(|_| DOES_NOT_PARSE)?;
+    let written = serde_json::to_value(file).map_err(|_| DOES_NOT_PARSE)?;
+    if written != found {
+        return Err(NOT_OUR_FORM);
+    }
+    Ok(())
+}
+
+#[test]
+fn an_older_build_refuses_a_spent_file_by_name_and_home_still_loads() {
+    let home = Home::new();
+    turn_on(&home);
+    let agent = create_one(&home, "request-older");
+    write_change(&home, Operation::SetActive, |file| {
+        let slot = &mut file.agents[0];
+        slot.active = true;
+        slot.record.updated_at = 10;
+    })
+    .unwrap();
+    let field_less = home.agent_bytes();
+    assert!(
+        !std::str::from_utf8(&field_less)
+            .unwrap()
+            .contains("model_tokens_spent"),
+        "a zero total is absent from the file"
+    );
+    assert!(
+        parse_strict(&field_less).is_ok(),
+        "this build accepts the field-less file"
+    );
+    assert_eq!(frozen_older_agent_parser(&field_less), Ok(()));
+    allow_dispatch_spend(home.path());
+    charge_model_spend(home.path(), OWNER_ID, &agent.agent_id, (0, 0), 1, 64, None).unwrap();
+    let bytes = home.agent_bytes();
+    assert!(std::str::from_utf8(&bytes)
+        .unwrap()
+        .contains("model_tokens_spent"));
+    assert_eq!(frozen_older_agent_parser(&bytes), Err(NOT_OUR_FORM));
+    let mut without = serde_json::from_slice::<Value>(&bytes).unwrap();
+    without["agents"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("model_tokens_spent");
+    let without = serde_json::to_vec(&without).unwrap();
+    assert_eq!(frozen_older_agent_parser(&without), Ok(()));
+    assert!(
+        parse_strict(&without).is_ok(),
+        "the older build accepts a field-less file parse_strict accepts"
+    );
+    let state = crate::auth::load_auth_state(home.path()).unwrap();
+    assert!(
+        state
+            .principals
+            .iter()
+            .any(|record| record.principal_id == OWNER_ID),
+        "Home still loads the owner"
+    );
+    assert!(
+        parse_strict(&bytes).is_ok(),
+        "the newer build reads the file"
+    );
+}
+
 #[test]
 fn an_audit_chain_holding_agent_events_checks_with_the_frozen_code() {
     let home = Home::new();
     turn_on(&home);
     let agent = create_one(&home, "request-1");
+    write_change(&home, Operation::SetActive, |file| {
+        let slot = &mut file.agents[0];
+        slot.active = true;
+        slot.record.updated_at = 10;
+    })
+    .unwrap();
+    allow_dispatch_spend(home.path());
+    charge_model_spend(home.path(), OWNER_ID, &agent.agent_id, (0, 0), 1, 64, None).unwrap();
     rename_in_any_build(home.path(), &home.caller(), &agent.agent_id, "Helper 2", 10).unwrap();
     retire_in_any_build(home.path(), &home.caller(), &agent.agent_id, 11).unwrap();
     set_enabled_in_any_build(home.path(), &home.caller(), false, 12).unwrap();
@@ -2470,11 +3200,19 @@ fn an_audit_chain_holding_agent_events_checks_with_the_frozen_code() {
         [
             "agent.records.enable",
             "agent.record.create",
+            "agent.record.active",
+            "agent.record.spend",
             "agent.record.rename",
             "agent.record.retire",
             "agent.records.disable",
         ]
     );
+    let spend = stored
+        .audit
+        .iter()
+        .find(|event| event.event_type == "agent.record.spend")
+        .expect("one spend row");
+    assert!(spend.proof_binding_id.is_none() && spend.session_id.is_none());
     // Each stored event has exactly the frozen event's fields.
     let ours = serde_json::to_value(home.audit()).unwrap();
     assert_eq!(serde_json::to_value(&stored.audit).unwrap(), ours);
@@ -3113,4 +3851,804 @@ fn with_the_feature_off_the_owner_load_carries_no_agent_record() {
             .unwrap()
             .is_none()
     );
+}
+
+/// This thread already holds the agent file lock. A second write lock is refused.
+#[test]
+fn lock_for_write_refuses_when_this_thread_already_holds_it() {
+    let home = Home::new();
+    let _held = hold_agent_file_lock_for_test(home.path()).unwrap();
+    let err = match open(home.path(), true) {
+        Err(err) => err,
+        Ok(_) => panic!("a second write lock was taken"),
+    };
+    assert_eq!(
+        err.downcast_ref::<Named>().map(|named| named.0),
+        Some(LOCK_ORDER),
+        "{err}"
+    );
+}
+
+fn source_from<'a>(source: &'a str, needle: &str) -> &'a str {
+    let start = source
+        .find(needle)
+        .unwrap_or_else(|| panic!("missing {needle}"));
+    &source[start..]
+}
+
+fn source_until<'a>(source: &'a str, needle: &str) -> &'a str {
+    let end = source
+        .find(needle)
+        .unwrap_or_else(|| panic!("missing {needle}"));
+    &source[..end]
+}
+
+/// Gateway, public gateway, `home --browser`, and standalone serve heal after
+/// the host lock. The managed runtime does not. A heal is one write for every
+/// non-retired agent and it is not stopped at 64.
+#[test]
+fn host_starts_heal_after_the_lock_and_skip_no_agent() {
+    let agents = include_str!("../agents.rs");
+    let raise = source_until(
+        source_from(agents, "fn raise_spend_file_to_signed_floor"),
+        "\nfn quiet_when_agents_are_unavailable",
+    );
+    let sub = raise.find("is_subordinate_managed_runtime()").unwrap();
+    let opened = raise.find("open(").unwrap();
+    assert!(sub < opened, "the managed runtime returns before any read");
+    assert!(!raise.contains("0..64"), "a heal stops after 64 agents");
+    assert!(!raise.contains("!agent.active"));
+    let copy = source_until(
+        source_from(agents, "fn raised_copy"),
+        "\npub(crate) fn charge_model_spend",
+    );
+    assert!(!copy.contains("0..64"));
+    assert!(
+        !copy.contains("!agent.active"),
+        "an inactive agent is skipped"
+    );
+    assert!(!copy.contains("load_auth_state"));
+    assert!(!copy.contains("signed_spend_floor"));
+    assert!(copy.contains(".floor("));
+    assert_eq!(raise.matches("load_spend_audit(").count(), 1);
+    let lock_fn = source_until(source_from(agents, "fn lock_for_write"), "\nfn open(");
+    let open_fail = lock_fn.find("Err(_) => Err(Named(LOCK_NOT_FREE)").unwrap();
+    let waited = lock_fn.find("exclusive_within").unwrap();
+    let process = lock_fn.find("AGENT_WRITE").unwrap();
+    assert!(
+        open_fail < waited,
+        "a lock that cannot be opened waits out the bound"
+    );
+    assert!(waited < process, "the flock wait holds the process mutex");
+    assert!(!agents.contains("auth-state.json"));
+    let bounded = [
+        source_until(
+            source_from(agents, "fn wait_agent_file_lock"),
+            "\npub(crate) fn model_spend",
+        ),
+        source_until(
+            source_from(agents, "fn model_spend"),
+            "\nfn hosted_owner_still_approved",
+        ),
+        source_until(
+            source_from(agents, "fn hosted_charge_still_standing"),
+            "\n/// Writes every non-retired",
+        ),
+        source_until(
+            source_from(agents, "fn charge_model_spend"),
+            "\n/// Writes `after`",
+        ),
+    ];
+    for body in bounded {
+        assert!(
+            body.contains("CHARGE_LOCK_WAIT"),
+            "a charge, spend, or standing check does not bound the agent file lock"
+        );
+    }
+
+    let start = source_until(
+        source_from(include_str!("../host_lock.rs"), "fn start_host_for_agents"),
+        "\npub fn acquire_host_process_lock",
+    );
+    let lock = start.find("acquire_host_process_lock(").unwrap();
+    let heal = start.find("raise_spend_file_to_signed_floor(").unwrap();
+    assert!(lock < heal, "host lock, then the heal");
+    assert!(start.contains("tracing::warn!"));
+    assert!(start.contains("agent spend heal did not run"));
+    assert!(!start.contains(".map_err(anyhow::Error::msg)?"));
+
+    let serve = source_from(include_str!("../serve_cmd.rs"), "pub async fn run_serve");
+    let serve = source_until(serve, "\n#[cfg");
+    assert!(!serve.contains("raise_spend_file_to_signed_floor"));
+    let branch = serve.find("if subordinate_host").unwrap();
+    let call = serve.find("start_host_for_agents(").unwrap();
+    assert!(branch < call, "the subordinate check comes first");
+    assert!(serve[branch..call].contains("} else {"));
+
+    let gateway = include_str!("../gateway_cmd.rs");
+    assert_eq!(gateway.matches("start_host_for_agents(").count(), 2);
+    assert!(gateway.contains("start_host_for_agents(&data_dir, \"gateway\", &addr)"));
+    assert!(gateway.contains("start_host_for_agents(&data_dir, \"gateway-public\", &addr)"));
+
+    let browser = source_from(
+        include_str!("../gateway_entry.rs"),
+        "pub async fn run_browser_home",
+    );
+    assert!(
+        browser.contains("run_gateway_direct_with_ready("),
+        "home --browser starts the local gateway"
+    );
+
+    let decision = source_until(
+        source_from(
+            include_str!("../api/model_provider_egress_decision.rs"),
+            "fn approved_for_owner",
+        ),
+        "\n/// Stages the pending",
+    );
+    let prefix = decision.find("model:hosted-").unwrap();
+    let contract = decision.find("offer_uses_connection_authority").unwrap();
+    assert!(prefix < contract);
+    assert!(decision.contains("connection.is_none()"));
+    assert!(decision.contains("requested_by_proof"));
+}
+
+fn fresh_agent_home() -> (tempfile::TempDir, String, String) {
+    let dir = tempfile::tempdir().unwrap();
+    let owner = "person:local:file-owner";
+    crate::auth::store_test_human_principal(dir.path(), owner);
+    let agent = plant_for_dispatch(dir.path(), owner, owner);
+    (dir, owner.to_string(), agent)
+}
+
+fn kept_bytes(dir: &Path) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
+    let agent = std::fs::read(agent_file_path(dir).unwrap()).unwrap();
+    let auth = std::fs::read(crate::auth::auth_state_path(dir).unwrap()).unwrap();
+    let lock_path = agent_file_path(dir)
+        .unwrap()
+        .with_file_name("agent-records.json.lock");
+    let lock = std::fs::read(&lock_path).unwrap_or_default();
+    (agent, auth, lock)
+}
+
+fn assert_start_refuses(dir: &Path, owner: &str, agent: &str, reason: &'static str) {
+    let before = kept_bytes(dir);
+    for role in ["gateway", "gateway-public", "serve"] {
+        crate::host_lock::start_host_for_agents(dir, role, "127.0.0.1:9").unwrap();
+        assert_eq!(
+            kept_bytes(dir),
+            before,
+            "{role} wrote before or during the heal"
+        );
+    }
+    let err = charge_model_spend(dir, owner, agent, (0, 0), 1, 64, None).unwrap_err();
+    assert!(
+        matches!(err, SpendRefusal::Name(name) if name == reason),
+        "{err:?}"
+    );
+    assert_eq!(kept_bytes(dir), before, "a refused charge wrote the file");
+}
+
+/// A damaged, newer, unreadable, or Windows agents file still lets Home start.
+/// A charge is refused by that file's name, and nothing is written.
+#[test]
+fn a_damaged_newer_unreadable_or_windows_agents_file_still_starts() {
+    use std::os::unix::fs::PermissionsExt;
+    let (dir, owner, agent) = fresh_agent_home();
+    let path = agent_file_path(dir.path()).unwrap();
+    let good = std::fs::read(&path).unwrap();
+
+    std::fs::write(&path, b"{").unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    assert_start_refuses(dir.path(), &owner, &agent, DOES_NOT_PARSE);
+
+    let mut newer: Value = serde_json::from_slice(&good).unwrap();
+    newer["later_field"] = json!(1);
+    crate::auth::atomic_write(&path, &serde_json::to_vec_pretty(&newer).unwrap()).unwrap();
+    assert_start_refuses(dir.path(), &owner, &agent, NOT_OUR_FORM);
+
+    crate::auth::atomic_write(&path, &good).unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+    assert_start_refuses(dir.path(), &owner, &agent, MODE_TOO_WIDE);
+
+    let before = kept_bytes(dir.path());
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+    crate::host_lock::start_host_for_agents(dir.path(), "serve", "127.0.0.1:9").unwrap();
+    let err = charge_model_spend(dir.path(), &owner, &agent, (0, 0), 1, 64, None).unwrap_err();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    assert!(matches!(err, SpendRefusal::Name(NOT_REGULAR)), "{err:?}");
+    assert_eq!(kept_bytes(dir.path()), before);
+
+    crate::auth::atomic_write(&path, &good).unwrap();
+    let _windows = plant_windows_custody();
+    assert_start_refuses(dir.path(), &owner, &agent, WINDOWS_AGENT_FILE);
+}
+
+#[derive(Clone)]
+struct HealLog(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl std::io::Write for HealLog {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+fn capture_warns(body: impl FnOnce()) -> String {
+    let buf = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let writer = HealLog(buf.clone());
+    let subscriber = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::WARN)
+        .with_ansi(false)
+        .without_time()
+        .with_writer(move || writer.clone())
+        .finish();
+    tracing::subscriber::with_default(subscriber, body);
+    let text = String::from_utf8(buf.lock().unwrap().clone()).unwrap();
+    text
+}
+
+fn file_spent(dir: &Path, agent: &str) -> u64 {
+    let path = agent_file_path(dir).unwrap();
+    let value: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    value["agents"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["record"]["principal_id"] == agent)
+        .and_then(|row| row["model_tokens_spent"].as_u64())
+        .unwrap_or(0)
+}
+
+fn event_floor(dir: &Path, agent: &str) -> u64 {
+    crate::auth::load_auth_state(dir)
+        .unwrap()
+        .audit
+        .iter()
+        .filter(|event| {
+            event.event_type == "agent.record.spend" && event.principal_id.as_deref() == Some(agent)
+        })
+        .filter_map(|event| {
+            event
+                .reason
+                .split_whitespace()
+                .find_map(|word| word.strip_prefix("spent=")?.parse::<u64>().ok())
+        })
+        .max()
+        .unwrap()
+}
+
+fn spend_events(dir: &Path) -> usize {
+    crate::auth::load_auth_state(dir)
+        .unwrap()
+        .audit
+        .iter()
+        .filter(|event| event.event_type == "agent.record.spend")
+        .count()
+}
+
+struct Behind {
+    dir: tempfile::TempDir,
+    owner: String,
+    agent: String,
+    other: String,
+    floor: u64,
+    other_floor: u64,
+}
+
+fn home_behind_its_floor() -> Behind {
+    let (dir, owner, agent) = fresh_agent_home();
+    let other = plant_another_dispatch(dir.path(), &owner, "request-b");
+    charge_model_spend(dir.path(), &owner, &agent, (0, 0), 40, 100, None).unwrap();
+    charge_model_spend(dir.path(), &owner, &other, (0, 0), 30, 100, None).unwrap();
+    let floor = event_floor(dir.path(), &agent);
+    let other_floor = event_floor(dir.path(), &other);
+    assert!(floor >= 40, "{floor}");
+    assert!(other_floor >= 30, "{other_floor}");
+    plant_stored_total(dir.path(), &agent, 0, true);
+    plant_stored_total(dir.path(), &other, 0, true);
+    assert_eq!(file_spent(dir.path(), &agent), 0);
+    assert_eq!(file_spent(dir.path(), &other), 0);
+    Behind {
+        dir,
+        owner,
+        agent,
+        other,
+        floor,
+        other_floor,
+    }
+}
+
+fn assert_named(err: SpendRefusal, reason: &str) {
+    match err {
+        SpendRefusal::Name(name) => assert_eq!(name, reason),
+        other => panic!("unnamed refusal {other:?}"),
+    }
+}
+
+fn assert_charge_refused(home: &Behind, reason: &str) {
+    let files = (
+        file_spent(home.dir.path(), &home.agent),
+        file_spent(home.dir.path(), &home.other),
+    );
+    let err = charge_model_spend(
+        home.dir.path(),
+        &home.owner,
+        &home.agent,
+        (0, 0),
+        1,
+        100,
+        None,
+    )
+    .unwrap_err();
+    assert_named(err, reason);
+    assert_eq!(
+        (
+            file_spent(home.dir.path(), &home.agent),
+            file_spent(home.dir.path(), &home.other),
+        ),
+        files,
+        "a refused charge wrote a total"
+    );
+}
+
+fn charge_then_restart_stays_above_the_floor(home: &Behind) {
+    let rows = spend_events(home.dir.path());
+    let _ = crate::model_budget::take_spend_audit_loads();
+    raise_spend_file_to_signed_floor(home.dir.path()).unwrap();
+    assert_eq!(
+        crate::model_budget::take_spend_audit_loads(),
+        1,
+        "a heal read the sign-in file once for two agents"
+    );
+    assert_eq!(
+        spend_events(home.dir.path()),
+        rows,
+        "the heal appended a spend"
+    );
+    assert_eq!(file_spent(home.dir.path(), &home.agent), home.floor);
+    assert_eq!(file_spent(home.dir.path(), &home.other), home.other_floor);
+    charge_model_spend(
+        home.dir.path(),
+        &home.owner,
+        &home.agent,
+        (0, 0),
+        1,
+        100,
+        None,
+    )
+    .unwrap();
+    let charged = file_spent(home.dir.path(), &home.agent);
+    assert!(charged > home.floor, "{charged} {}", home.floor);
+    assert_eq!(file_spent(home.dir.path(), &home.other), home.other_floor);
+    crate::host_lock::start_host_for_agents(home.dir.path(), "serve", "127.0.0.1:9").unwrap();
+    assert_eq!(file_spent(home.dir.path(), &home.agent), charged);
+    assert_eq!(file_spent(home.dir.path(), &home.other), home.other_floor);
+    charge_model_spend(
+        home.dir.path(),
+        &home.owner,
+        &home.agent,
+        (0, 0),
+        1,
+        100,
+        None,
+    )
+    .unwrap();
+    let again = file_spent(home.dir.path(), &home.agent);
+    assert!(again > charged, "{again} {charged}");
+    assert!(again > home.floor, "{again} {}", home.floor);
+}
+
+fn warn_once_on_start(dir: &Path, reason: &str) -> String {
+    let _ = crate::model_budget::take_spend_audit_loads();
+    let log = capture_warns(|| {
+        crate::host_lock::start_host_for_agents(dir, "gateway", "127.0.0.1:9").unwrap();
+    });
+    assert_eq!(
+        crate::model_budget::take_spend_audit_loads(),
+        1,
+        "start read the sign-in file once: {log}"
+    );
+    assert_eq!(log.matches(reason).count(), 1, "{log}");
+    log
+}
+
+/// A full disk is an injected write failure. Home starts, the charge is refused
+/// by name, and the next charge that can heal stays at or above the signed floor.
+#[test]
+fn a_full_disk_lets_home_start_and_the_charge_keeps_the_floor() {
+    let home = home_behind_its_floor();
+    let _fault = fail_spend_file_write();
+    let log = warn_once_on_start(home.dir.path(), CANNOT_WRITE);
+    assert!(
+        !log.contains(SIGN_IN_CANNOT_READ),
+        "a write failure was named as the sign-in file: {log}"
+    );
+    assert_eq!(file_spent(home.dir.path(), &home.agent), 0);
+    let rows = spend_events(home.dir.path());
+    assert_charge_refused(&home, CANNOT_WRITE);
+    assert_eq!(spend_events(home.dir.path()), rows);
+    drop(_fault);
+    charge_then_restart_stays_above_the_floor(&home);
+}
+
+/// Windows answers before the sign-in read and before the parent check.
+#[test]
+fn windows_answers_before_the_sign_in_read_and_the_parent_check() {
+    let agents = include_str!("../agents.rs");
+    let raise = source_until(
+        source_from(agents, "fn raise_spend_file_to_signed_floor"),
+        "\nfn quiet_when_agents_are_unavailable",
+    );
+    let windows = raise.find("cfg(not(unix))").expect("windows heal");
+    let audit = raise.find("load_spend_audit(").expect("spend audit");
+    assert!(
+        windows < audit,
+        "the heal reads the sign-in file on Windows"
+    );
+    let wait = source_until(
+        source_from(agents, "fn wait_agent_file_lock"),
+        "\nfn release_probe_lock",
+    );
+    let named = wait.find("WINDOWS_AGENT_FILE").expect("windows wait");
+    let parent = wait
+        .find("ensure_regular_auth_parent")
+        .expect("parent check");
+    assert!(named < parent, "the wait checks the parent on Windows");
+    let lock = source_until(
+        source_from(agents, "fn lock_for_write"),
+        "\nfn acquire_agent_lock(",
+    );
+    let named = lock.find("WINDOWS_AGENT_FILE").expect("windows writer");
+    let take = lock.find("acquire_agent_lock_for").expect("writer take");
+    assert!(named < take, "the writer checks the parent on Windows");
+}
+
+/// The spend heal does not block the start. The gateway's own audit check
+/// still needs a readable sign-in file, and that check stays.
+#[test]
+fn the_spend_heal_does_not_block_the_start_and_the_gateway_audit_still_needs_a_readable_sign_in_file(
+) {
+    let gateway = include_str!("../gateway_cmd.rs");
+    assert_eq!(
+        gateway.matches("verify_auth_audit_chain_ready(").count(),
+        2,
+        "gateway and gateway-public keep their own sign-in audit check"
+    );
+    use std::os::unix::fs::PermissionsExt;
+    let home = home_behind_its_floor();
+    let path = crate::auth::auth_state_path(home.dir.path()).unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+    crate::auth::invalidate_verified_auth_state_cache_for_test(home.dir.path());
+    let log = warn_once_on_start(home.dir.path(), SIGN_IN_CANNOT_READ);
+    assert!(
+        !log.contains(CANNOT_READ),
+        "the sign-in file was named as the agent file: {log}"
+    );
+    assert_eq!(file_spent(home.dir.path(), &home.agent), 0);
+    assert_charge_refused(&home, SIGN_IN_CANNOT_READ);
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    crate::auth::invalidate_verified_auth_state_cache_for_test(home.dir.path());
+    charge_then_restart_stays_above_the_floor(&home);
+}
+
+fn assert_heal_wait(elapsed: std::time::Duration) {
+    let slack = std::time::Duration::from_millis(20);
+    assert!(
+        elapsed + slack >= HEAL_LOCK_WAIT,
+        "the held lock did not wait: {elapsed:?}"
+    );
+    assert!(
+        elapsed <= HEAL_LOCK_WAIT + std::time::Duration::from_secs(2),
+        "the heal waited {elapsed:?}, bound {HEAL_LOCK_WAIT:?}"
+    );
+}
+
+/// A held agent lock makes start return within the bound. The charge is refused
+/// by name until the lock is free, then it stays at or above the signed floor.
+#[test]
+fn a_held_agent_lock_lets_home_start_within_the_bound() {
+    let home = home_behind_its_floor();
+    let path = agent_file_path(home.dir.path())
+        .unwrap()
+        .with_file_name("agent-records.json.lock");
+    let held = crate::host_lock::FileLock::exclusive(
+        std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .unwrap(),
+    )
+    .unwrap();
+    let _ = take_agent_lock_wait();
+    assert_eq!(
+        raise_spend_file_to_signed_floor(home.dir.path()),
+        Err(LOCK_NOT_FREE)
+    );
+    assert_heal_wait(take_agent_lock_wait().expect("the heal did not wait"));
+    let log = warn_once_on_start(home.dir.path(), LOCK_NOT_FREE);
+    assert_heal_wait(take_agent_lock_wait().expect("start did not wait"));
+    assert!(!log.contains(CANNOT_READ), "{log}");
+    let rows = spend_events(home.dir.path());
+    assert_charge_refused(&home, LOCK_NOT_FREE);
+    assert_heal_wait(take_agent_lock_wait().expect("the charge did not wait"));
+    assert_eq!(spend_events(home.dir.path()), rows);
+    assert_eq!(file_spent(home.dir.path(), &home.agent), 0);
+    drop(held);
+    charge_then_restart_stays_above_the_floor(&home);
+}
+
+/// A lock path that cannot be opened is the same name, and Home still starts.
+#[test]
+fn a_lock_that_cannot_be_opened_lets_home_start() {
+    let home = home_behind_its_floor();
+    let path = agent_file_path(home.dir.path())
+        .unwrap()
+        .with_file_name("agent-records.json.lock");
+    std::fs::remove_file(&path).unwrap();
+    std::fs::create_dir(&path).unwrap();
+    let _ = take_agent_lock_wait();
+    assert_eq!(
+        raise_spend_file_to_signed_floor(home.dir.path()),
+        Err(LOCK_NOT_FREE)
+    );
+    assert!(
+        take_agent_lock_wait().is_none(),
+        "a lock that cannot be opened waited"
+    );
+    warn_once_on_start(home.dir.path(), LOCK_NOT_FREE);
+    assert!(
+        take_agent_lock_wait().is_none(),
+        "start waited on a lock that cannot be opened"
+    );
+    let rows = spend_events(home.dir.path());
+    assert_charge_refused(&home, LOCK_NOT_FREE);
+    assert_eq!(spend_events(home.dir.path()), rows);
+    std::fs::remove_dir(&path).unwrap();
+    charge_then_restart_stays_above_the_floor(&home);
+}
+
+fn home_at_its_floor() -> (tempfile::TempDir, String, String) {
+    let (dir, owner, agent) = fresh_agent_home();
+    charge_model_spend(dir.path(), &owner, &agent, (0, 0), 40, 100, None).unwrap();
+    assert_eq!(
+        file_spent(dir.path(), &agent),
+        event_floor(dir.path(), &agent)
+    );
+    (dir, owner, agent)
+}
+
+fn hold_external_agent_lock(dir: &Path) -> crate::host_lock::FileLock {
+    let path = agent_file_path(dir)
+        .unwrap()
+        .with_file_name("agent-records.json.lock");
+    crate::host_lock::FileLock::exclusive(
+        std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .unwrap(),
+    )
+    .unwrap()
+}
+
+fn assert_charge_wait(elapsed: std::time::Duration) {
+    let slack = std::time::Duration::from_millis(50);
+    assert!(
+        elapsed + slack >= CHARGE_LOCK_WAIT,
+        "the held lock did not wait out the bound: {elapsed:?}"
+    );
+    assert!(
+        elapsed <= CHARGE_LOCK_WAIT + std::time::Duration::from_secs(2),
+        "the check waited {elapsed:?}, bound {CHARGE_LOCK_WAIT:?}"
+    );
+}
+
+/// The file already holds its signed floor. A held lock refuses the charge,
+/// the spend read, and the standing check by name, within the bound, and the
+/// three waits overlap.
+#[test]
+fn a_held_lock_on_a_current_file_refuses_within_two_seconds() {
+    let (dir, owner, agent) = home_at_its_floor();
+    let _held = hold_external_agent_lock(dir.path());
+    let started = std::time::Instant::now();
+    let spawn = |owner: String, agent: String, kind: u8| {
+        let dir = dir.path().to_path_buf();
+        std::thread::spawn(move || {
+            let _ = take_agent_lock_wait();
+            let name = |err: SpendRefusal| match err {
+                SpendRefusal::Name(name) => name,
+                other => panic!("{other:?}"),
+            };
+            let refusal = match kind {
+                0 => name(
+                    charge_model_spend(&dir, &owner, &agent, (0, 0), 1, 100, None).unwrap_err(),
+                ),
+                1 => model_spend(&dir, &agent).unwrap_err(),
+                _ => name(
+                    hosted_charge_still_standing(&dir, &owner, &agent, "offer-held").unwrap_err(),
+                ),
+            };
+            (refusal, take_agent_lock_wait())
+        })
+    };
+    let charge = spawn(owner.clone(), agent.clone(), 0);
+    let spend = spawn(owner.clone(), agent.clone(), 1);
+    let standing = spawn(owner, agent.clone(), 2);
+    let charge = charge.join().unwrap();
+    let spend = spend.join().unwrap();
+    let standing = standing.join().unwrap();
+    let elapsed = started.elapsed();
+    for (refusal, wait) in [&charge, &spend, &standing] {
+        assert_eq!(*refusal, LOCK_NOT_FREE);
+        assert_charge_wait(wait.expect("the check did not wait"));
+    }
+    assert!(
+        elapsed < CHARGE_LOCK_WAIT + std::time::Duration::from_millis(1500),
+        "the three waits were one after another: {elapsed:?}"
+    );
+    assert_eq!(
+        file_spent(dir.path(), &agent),
+        event_floor(dir.path(), &agent)
+    );
+}
+
+/// A directory at the lock path is the lock name, on a file that is current.
+#[test]
+fn a_lock_directory_on_a_current_file_is_named_lock_not_free() {
+    let (dir, owner, agent) = home_at_its_floor();
+    let path = agent_file_path(dir.path())
+        .unwrap()
+        .with_file_name("agent-records.json.lock");
+    std::fs::remove_file(&path).unwrap();
+    std::fs::create_dir(&path).unwrap();
+    let _ = take_agent_lock_wait();
+    let err = charge_model_spend(dir.path(), &owner, &agent, (0, 0), 1, 100, None).unwrap_err();
+    assert_named(err, LOCK_NOT_FREE);
+    assert!(take_agent_lock_wait().is_none(), "a lock directory waited");
+    assert_eq!(model_spend(dir.path(), &agent), Err(LOCK_NOT_FREE));
+    assert!(take_agent_lock_wait().is_none(), "spend waited");
+    let standing =
+        hosted_charge_still_standing(dir.path(), &owner, &agent, "offer-dir").unwrap_err();
+    assert_named(standing, LOCK_NOT_FREE);
+    assert!(take_agent_lock_wait().is_none(), "standing waited");
+}
+
+static BOUNDED_LOCK_NOTE: std::sync::Mutex<Option<std::path::PathBuf>> =
+    std::sync::Mutex::new(None);
+static BOUNDED_LOCK_OPENS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+fn note_bounded_lock_open(file: &std::fs::File) {
+    use std::sync::atomic::Ordering;
+    let seen = BOUNDED_LOCK_OPENS.fetch_add(1, Ordering::SeqCst);
+    if seen != 0 {
+        return;
+    }
+    let Some(path) = BOUNDED_LOCK_NOTE.lock().unwrap().clone() else {
+        return;
+    };
+    use std::os::unix::fs::MetadataExt;
+    let meta = file.metadata().expect("opened agents lock");
+    std::fs::write(path, format!("{} {}", meta.dev(), meta.ino())).expect("note the opened lock");
+}
+
+struct ClearBoundedNote;
+
+impl Drop for ClearBoundedNote {
+    fn drop(&mut self) {
+        *BOUNDED_LOCK_NOTE.lock().unwrap() = None;
+        BOUNDED_LOCK_OPENS.store(0, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// The outside wait settles on the file that is at the path. A lock removed
+/// during that wait is opened again, and the second wait stays inside the
+/// original bound.
+#[test]
+fn a_bounded_wait_opens_a_removed_lock_again_inside_its_bound() {
+    use std::sync::atomic::Ordering;
+    let _clear = ClearBoundedNote;
+    BOUNDED_LOCK_OPENS.store(0, Ordering::SeqCst);
+    let (dir, _owner, _agent) = home_at_its_floor();
+    let path = agent_file_path(dir.path())
+        .unwrap()
+        .with_file_name("agent-records.json.lock");
+    let old = hold_external_agent_lock(dir.path());
+    let note = dir.path().join("bounded-open");
+    *BOUNDED_LOCK_NOTE.lock().unwrap() = Some(note.clone());
+    let home = dir.path().to_path_buf();
+    let (tx, rx) = std::sync::mpsc::channel();
+    let waiter = std::thread::spawn(move || {
+        set_agent_lock_opened_trace(Some(note_bounded_lock_open));
+        let started = std::time::Instant::now();
+        let result = wait_agent_file_lock(&home);
+        let _ = tx.send((result, started.elapsed()));
+    });
+    let opened_at = std::time::Instant::now();
+    while !note.is_file() {
+        assert!(
+            waiter.is_finished() || opened_at.elapsed() < std::time::Duration::from_secs(5),
+            "the bounded wait did not open the lock"
+        );
+        assert!(
+            !waiter.is_finished(),
+            "the waiter exited before opening the lock"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    std::thread::sleep(std::time::Duration::from_millis(1200));
+    std::fs::remove_file(&path).unwrap();
+    let replacement = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(&path)
+        .unwrap();
+    let new_lock = crate::host_lock::FileLock::exclusive(replacement).unwrap();
+    drop(old);
+    let outcome = rx.recv_timeout(CHARGE_LOCK_WAIT + std::time::Duration::from_millis(400));
+    drop(new_lock);
+    let _ = waiter.join();
+    let (result, elapsed) = outcome.expect("the bounded wait ran past its bound");
+    match result {
+        Err(name) => assert_eq!(name, LOCK_NOT_FREE, "{elapsed:?}"),
+        Ok(_) => panic!("the bounded wait took a removed lock: {elapsed:?}"),
+    }
+    assert!(
+        BOUNDED_LOCK_OPENS.load(Ordering::SeqCst) >= 2,
+        "the removed lock was not opened again"
+    );
+    assert!(
+        elapsed + std::time::Duration::from_millis(50) >= std::time::Duration::from_millis(1200),
+        "the wait returned before the lock was removed: {elapsed:?}"
+    );
+    assert!(
+        elapsed <= CHARGE_LOCK_WAIT + std::time::Duration::from_millis(500),
+        "the reopen used a new bound: {elapsed:?}"
+    );
+}
+
+/// A wait on a Home with no agents file does not leave the lock file behind.
+#[test]
+fn a_lock_wait_on_a_home_without_agents_leaves_no_lock_file() {
+    let dir = tempfile::tempdir().unwrap();
+    crate::auth::store_test_human_principal(dir.path(), "person:local:no-agents");
+    allow_dispatch_spend(dir.path());
+    let records = agent_file_path(dir.path()).unwrap();
+    assert!(
+        records
+            .symlink_metadata()
+            .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound),
+        "the home has an agents file"
+    );
+    let _waited = wait_agent_file_lock(dir.path()).expect("the wait takes the lock");
+    let path = records.with_file_name("agent-records.json.lock");
+    assert!(
+        path.symlink_metadata()
+            .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound),
+        "the wait left a lock file on a home without agents"
+    );
+}
+
+/// An unreadable sign-in file is named at the open, with no message-text test.
+#[test]
+fn an_unreadable_sign_in_file_is_named_where_the_agents_file_opens() {
+    use std::os::unix::fs::PermissionsExt;
+    let (dir, owner, agent) = home_at_its_floor();
+    assert!(!include_str!("../agents.rs").contains("auth-state.json"));
+    let path = crate::auth::auth_state_path(dir.path()).unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+    crate::auth::invalidate_verified_auth_state_cache_for_test(dir.path());
+    assert_eq!(model_spend(dir.path(), &agent), Err(SIGN_IN_CANNOT_READ));
+    let standing =
+        hosted_charge_still_standing(dir.path(), &owner, &agent, "offer-sign").unwrap_err();
+    assert_named(standing, SIGN_IN_CANNOT_READ);
+    let err = charge_model_spend(dir.path(), &owner, &agent, (0, 0), 1, 100, None).unwrap_err();
+    assert_named(err, SIGN_IN_CANNOT_READ);
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
 }

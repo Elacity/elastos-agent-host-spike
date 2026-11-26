@@ -382,6 +382,10 @@ pub struct PrincipalRootRecoveryStatusV1 {
     pub recovery_configured: bool,
     pub recovery_download_available: bool,
     pub protection_configured: bool,
+    /// Whether this Runtime build carries agents. The Recovery page reads
+    /// this field. It is not derived from an agents-list error.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub agents_built: bool,
     pub required_actions: Vec<String>,
     pub crypto: PrincipalRootCryptoProfileV1,
     /// Up to 20 protected files whose label is damaged or bound elsewhere.
@@ -416,6 +420,7 @@ impl PrincipalRootRecoveryStatusV1 {
             recovery_configured: false,
             recovery_download_available: false,
             protection_configured: false,
+            agents_built: false,
             required_actions: vec![
                 "generate_principal_data_key".to_string(),
                 "encrypt_principal_root".to_string(),

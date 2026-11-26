@@ -1,3 +1,4 @@
+# A pull request whose branch starts with spark/ skips the full proof: those jobs carry `if: !(github.event_name == 'pull_request' && startsWith(github.head_ref, 'spark/'))`, and required sets may_skip to that same set when SPARK_PULL_REQUEST is true, so a green spark pull request is the quick checks only. A merge_group event is not a pull_request, so those guards do not skip the queue, and required does not treat the full-proof set as optional there. source-home-macos is the one full-proof job the queue itself does not start: its if is `github.event_name == 'push' || github.event_name == 'schedule'`, and required adds it to may_skip unless POST_MERGE, which is that same push or schedule. The push to spike/agent-host after the merge is that push. Those pushes share one concurrency group and a run that has started is not cancelled, so the macOS proof runs for that started merge and for the newest merge still queued on this branch.
 name: CI
 
 on:
@@ -68,6 +69,10 @@ jobs:
       - name: cargo fmt
         working-directory: elastos
         run: cargo fmt --all -- --check
+      # An expired re-review date in elastos/.cargo/audit.toml fails here and
+      # names the advisory. This step does not fetch.
+      - name: audit re-review dates
+        run: ./scripts/test-source-gate.sh audit
       # scripts/test-source-gate.sh owns the list; the local pre-push gate runs it too.
       - name: product data contracts
         run: ./scripts/test-source-gate.sh product-data
@@ -79,6 +84,8 @@ jobs:
         run: ./scripts/test-source-gate.sh release
       - name: lab red-team plant anchors
         run: ./scripts/test-source-gate.sh redteam
+      - name: trusted code list
+        run: ./scripts/test-source-gate.sh trusted
 
   # cancel-on-failure cannot run for a fork pull request (its token cannot cancel), so
   # there the compile jobs wait here for source-gate's verdict and are skipped when it
@@ -552,11 +559,23 @@ jobs:
       - uses: dtolnay/rust-toolchain@035fceb3c12fb0c6a9461b52775e16473133e591 # 1.95.0
         with:
           targets: wasm32-unknown-unknown
+      - name: gba-viewer gate
+        run: bash examples/gba-viewer/verify.sh
       - name: stand-in contract journeys
         working-directory: lab/agent-conformance
         run: |
           cargo test --locked --lib
           cargo test --locked --test standin_contract
+      # A14's receipt contract. demo.sh itself needs an installed Runtime binary
+      # and data folder, then runs run.sh against them; that path stays out of
+      # this job. tests/demo-gates.sh is the dry run that needs no installed
+      # Home: it uses a stub suite and a stub install. The report test runs that
+      # dry run too (demo_gates_hold_with_a_stub_suite).
+      - name: A14 report contract and demo.sh dry run
+        working-directory: lab/agent-conformance
+        run: |
+          cargo test --locked --test report
+          bash tests/demo-gates.sh "${{ runner.temp }}/a14-demo-gates"
       - name: prepare stand-in probe component
         run: |
           bash scripts/build-component-capsule.sh lab/agent-conformance/probe
@@ -1149,6 +1168,69 @@ jobs:
             echo "run=true" >> "$GITHUB_OUTPUT"
           fi
 
+  # The archive viewer's parser part (guest tests and the fuel gate) is the
+  # pull-request check. examples-nightly.yml runs the whole verify.sh. This job
+  # loads scripts/ci-archive-viewer-paths.py from the pull request's base
+  # commit, so a pull request cannot replace the rule that decides it. A missing
+  # base, a failing rule, or any answer but the one line "run=false" runs the
+  # parser. A merge queue and a manual run also run it. A push and the nightly
+  # schedule do not: the nightly examples workflow runs the whole gate.
+  archive-viewer-paths:
+    name: archive-viewer-paths
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      run: ${{ (github.event_name == 'pull_request' && steps.decide.outputs.run != 'false') || github.event_name == 'merge_group' || github.event_name == 'workflow_dispatch' }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        if: github.event_name == 'pull_request'
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.ref || github.sha }}
+          persist-credentials: false
+          fetch-depth: 0
+      - name: decide whether the archive parser must run
+        id: decide
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_REF: ${{ github.base_ref }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          # The rule that decides is the copy in this event's base commit, never the pull
+          # request's own: a pull request that rewrites the rule is judged by the rule it
+          # would replace. A base commit that is missing or holds no rule, a rule that fails
+          # and any answer but the one line "run=false" all run the parser. The copy runs
+          # from outside the checkout.
+          rule="$RUNNER_TEMP/archive-viewer-paths-rule.py"
+          answer="$RUNNER_TEMP/archive-viewer-paths-answer"
+          : > "$answer"
+          if [[ "$BASE_SHA" =~ ^[0-9a-f]{40,64}$ ]] \
+              && git show "${BASE_SHA}:scripts/ci-archive-viewer-paths.py" > "$rule" \
+              && GITHUB_OUTPUT="$answer" python3 -I "$rule" \
+              && printf 'run=false\n' | cmp -s - "$answer"; then
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  archive-viewer-parser:
+    name: archive-viewer-parser
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    needs: [archive-viewer-paths, fork-gate]
+    if: ${{ needs.archive-viewer-paths.outputs.run == 'true' }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.ref || github.sha }}
+      - uses: dtolnay/rust-toolchain@035fceb3c12fb0c6a9461b52775e16473133e591 # 1.95.0
+        with:
+          targets: wasm32-unknown-unknown
+      - name: archive viewer parser and fuel gate
+        run: bash examples/archive-viewer/verify.sh --parser
+
   # The source-home jobs run in parallel with tests across the three
   # architectures, beside the cheap source gate. setup-source-home compiles the
   # runtime, shell, home-cli and every provider in --release; ARM also
@@ -1557,6 +1639,23 @@ jobs:
             grep -Eq '^test result: ok\. 1 passed; 0 failed;' "$log" \
               || { echo "::error::${name} selected no test or failed"; exit 1; }
           done
+      # The seven hosted agent rows need this Mac and the agents feature.
+      # A cold library build on this runner is the 25-minute class recorded on
+      # the step above, so this stays on the post-merge job and off pull requests.
+      # The same target directory keeps the second build on that tree.
+      - name: hosted agent rows
+        timeout-minutes: 45
+        working-directory: elastos
+        env:
+          CARGO_TARGET_DIR: ${{ runner.temp }}/b4r-s4-target
+          CARGO_BUILD_BUILD_DIR: ${{ runner.temp }}/b4r-s4-build
+        run: |
+          set -euo pipefail
+          mkdir -p "$CARGO_TARGET_DIR" "$CARGO_BUILD_BUILD_DIR"
+          log="${RUNNER_TEMP}/hosted-agent-rows.log"
+          cargo test --locked -p elastos-server --lib --features prototype-agents hosted_agent_rows:: -- --test-threads=8 | tee "$log"
+          grep -Eq '^test result: ok\. 7 passed; 0 failed;' "$log" \
+            || { echo "::error::hosted agent rows did not pass 7 tests"; exit 1; }
       - name: reserve hosted Mac build and fixture capacity
         timeout-minutes: 10
         run: python3 scripts/update-hop-compare.py prepare-ci-disk
@@ -2149,7 +2248,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     if: always()
-    needs: [source-gate, fork-gate, pr-substance, test-behaviour, cargo-audit, core-size, engine-llama-amd64, engine-llama-arm64, lint, lab-gates, lab-standin, lab-operator-effects-macos, lab-wasm-capsule, test-elastos, test-capsules, custody-harness-smoke, release-upstream-paths, release-upstream-assets, installed-app-paths, source-home-linux, source-home-linux-arm64, source-home-macos, update-hop-linux, musl-check-linux, musl-check-linux-arm64]
+    needs: [source-gate, fork-gate, pr-substance, test-behaviour, cargo-audit, core-size, engine-llama-amd64, engine-llama-arm64, lint, lab-gates, lab-standin, lab-operator-effects-macos, lab-wasm-capsule, test-elastos, test-capsules, custody-harness-smoke, release-upstream-paths, release-upstream-assets, installed-app-paths, archive-viewer-paths, archive-viewer-parser, source-home-linux, source-home-linux-arm64, source-home-macos, update-hop-linux, musl-check-linux, musl-check-linux-arm64]
     steps:
       - name: every job passed or was skipped by its own guard
         env:
@@ -2179,6 +2278,12 @@ jobs:
           # A pull request that changes only notes and lab files skips the installed-app jobs.
           if os.environ["PULL_REQUEST"] == "true" and needs.get("installed-app-paths", {}).get("outputs", {}).get("run") == "false":
               may_skip.update(("source-home-linux", "source-home-linux-arm64", "update-hop-linux", "musl-check-linux", "musl-check-linux-arm64"))
+          # The archive parser may be skipped only when its paths job wrote the
+          # exact answer run=false, and only on a pull request or after the merge
+          # (a push or the schedule). A merge queue and a manual run do not skip
+          # it. An empty answer, a missing answer, or any other word does not skip it.
+          if (os.environ["PULL_REQUEST"] == "true" or os.environ["POST_MERGE"] == "true") and needs.get("archive-viewer-paths", {}).get("outputs", {}).get("run") == "false":
+              may_skip.add("archive-viewer-parser")
           failed = [f"{job}: {need['result']}" for job, need in sorted(needs.items())
                     if need["result"] != "success" and not (need["result"] == "skipped" and job in may_skip)]
           for line in failed:
@@ -2211,8 +2316,9 @@ jobs:
             sleep 20
             # cargo-audit reports RustSec advisories in its own red job but does not cancel the rest: base has open advisories, and cancelling on it killed every PR run within a minute.
             # A core-size job whose only failed step is its budget verdict does not cancel either: that is settled by changing CORE-BUDGET or moving code, and the review wants the test results. Its counter tests, refusals, checkout and timeouts still cancel.
+            # required then fails because that verdict failed. The other jobs have already finished, so cancelling on required does nothing useful.
             counts="$(gh api "$run/attempts/$GITHUB_RUN_ATTEMPT/jobs?per_page=100" --jq \
-              '[.jobs[] | select(.name != "cancel-on-failure" and .name != "cargo-audit") | select(.name != "core-size" or .conclusion != "failure" or ([.steps[]? | select(.conclusion == "failure") | .name] != ["core size against elastos/CORE-BUDGET"]))] | "\(map(select(.conclusion == "failure" or .conclusion == "timed_out")) | length) \(map(select(.status != "completed")) | length)"')" || continue
+              '[.jobs[] | select(.name != "cancel-on-failure" and .name != "cargo-audit" and .name != "required") | select(.name != "core-size" or .conclusion != "failure" or ([.steps[]? | select(.conclusion == "failure") | .name] != ["core size against elastos/CORE-BUDGET"]))] | "\(map(select(.conclusion == "failure" or .conclusion == "timed_out")) | length) \(map(select(.status != "completed")) | length)"')" || continue
             read -r failed pending <<< "$counts"
             if (( failed > 0 )); then
               echo "A job failed; cancelling the rest of this pull request run."

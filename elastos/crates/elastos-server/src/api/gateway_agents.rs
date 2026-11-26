@@ -70,12 +70,17 @@ fn agents_owner(state: &GatewayState, headers: &HeaderMap) -> anyhow::Result<Age
     Ok(AgentsOwner { context, principal })
 }
 
-/// A named refusal answers 409 with its reason. Anything else answers as the
-/// System routes do, so a caller who fails the owner check gets 403.
+/// A coded refusal answers 409 as JSON with `code` and `reason`. A named
+/// refusal, including a file the loader refuses, answers 409 as plain text.
+/// Anything else answers as the System routes do, so a caller who fails the
+/// owner check gets 403.
 fn agents_response<T: Serialize>(result: anyhow::Result<T>) -> Response {
     match result {
         Ok(value) => Json(value).into_response(),
         Err(error) => {
+            // A coded refusal is JSON the Home page matches by `code`.
+            // A named refusal, including a file the loader refuses, stays
+            // plain text at 409.
             if let Some(coded) = error.downcast_ref::<CodedRefusal>() {
                 return (
                     StatusCode::CONFLICT,
@@ -86,8 +91,8 @@ fn agents_response<T: Serialize>(result: anyhow::Result<T>) -> Response {
                 )
                     .into_response();
             }
-            match error.downcast_ref::<Refused>() {
-                Some(refused) => (StatusCode::CONFLICT, refused.to_string()).into_response(),
+            match crate::agents::refusal_text(&error) {
+                Some(text) => (StatusCode::CONFLICT, text).into_response(),
                 None => system_error_response(error),
             }
         }
@@ -295,11 +300,21 @@ struct AgentStoppedSession {
 }
 
 #[derive(Serialize)]
+struct AgentUnknownStep {
+    session_id: String,
+    request_id: String,
+    outcome: String,
+}
+
+#[derive(Serialize)]
 struct AgentStopResponse {
     agent_id: String,
     stopped: Vec<AgentStoppedSession>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     stopping: Vec<AgentStoppedSession>,
+    /// Steps the Runtime named as unknown. The owner sees the same names.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    unknown: Vec<AgentUnknownStep>,
 }
 
 pub(super) async fn agents_stop(
@@ -348,7 +363,7 @@ async fn stop_agent(
     let request: AgentStopRequest = agents_request(body)?;
     owner_may_stop(state, headers, Some(&request.agent_id))?;
     let outcome = stop_runtime_agent(&state.data_dir, &request.agent_id).await?;
-    if outcome.stopped.is_empty() && outcome.stopping.is_empty() {
+    if outcome.stopped.is_empty() && outcome.stopping.is_empty() && outcome.unknown.is_empty() {
         return Err(match outcome.already.as_deref() {
             Some("stopped") => CodedRefusal {
                 code: "agent_already_stopped",
@@ -370,5 +385,14 @@ async fn stop_agent(
         agent_id: request.agent_id,
         stopped: outcome.stopped.into_iter().map(&session).collect(),
         stopping: outcome.stopping.into_iter().map(&session).collect(),
+        unknown: outcome
+            .unknown
+            .into_iter()
+            .map(|step| AgentUnknownStep {
+                session_id: step.session_id,
+                request_id: step.request_id,
+                outcome: step.outcome,
+            })
+            .collect(),
     })
 }

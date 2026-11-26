@@ -104,6 +104,24 @@ impl AdmissionContext {
     }
 }
 
+#[cfg(all(test, unix))]
+impl AdmissionContext {
+    /// A context for a Start that returns before it reads the manifest.
+    pub(crate) fn for_test(actor: &str) -> Self {
+        let manifest = format!(
+            r#"{{"schema":"elastos.capsule/v1","version":"0.1.0","name":"already-running","role":"app","type":"wasm","runtime_abi":"elastos.component/v1","bus_contract":"{}","wit_world_sha256":"{}","execution":"component","projections":["cli"],"entrypoint":"app.component.wasm"}}"#,
+            elastos_common::ELASTOS_BUS_V1_CONTRACT,
+            elastos_common::elastos_bus_v1_wit_sha256()
+        );
+        Self {
+            actor: actor.to_string(),
+            manifest: serde_json::from_str(&manifest).expect("test manifest"),
+            entrypoint: Vec::new(),
+            model_token_ceiling: 0,
+        }
+    }
+}
+
 /// The refusal a launch gives when it names an agent and no launcher is.
 pub(crate) const NO_LAUNCHER: &str = "an agent launch needs its owner's launch grant";
 

@@ -98,7 +98,13 @@ pub(crate) use gateway_inbox::inbox_request_entries_for_test;
 #[path = "gateway_inspect_actions.rs"]
 mod gateway_inspect_actions;
 pub(crate) use gateway_inspect_actions::agent_plan_result_for_requester;
+#[cfg(all(test, unix))]
+pub(in crate::api) use gateway_inspect_actions::dispatch_approved_agent_plan;
 pub(crate) use gateway_inspect_actions::submit_pending_agent_plan;
+#[cfg(all(test, unix))]
+pub(in crate::api) use gateway_inspect_actions::{
+    clear_plan_dispatch_wait_for_test, set_plan_dispatch_wait_for_test,
+};
 #[path = "gateway_model_remote.rs"]
 mod gateway_model_remote;
 #[path = "gateway_model_service.rs"]
@@ -115,6 +121,12 @@ mod gateway_origin;
 mod gateway_passkey_step_up;
 #[path = "gateway_provider_proxy.rs"]
 mod gateway_provider_proxy;
+#[cfg(all(test, unix))]
+#[path = "gateway_provider_proxy_tests/hosted_gate.rs"]
+mod hosted_gate;
+pub(crate) use gateway_provider_proxy::{
+    hosted_charge_still_approved, HOSTED_AGENT_RUN_REFUSED, HOSTED_AGENT_RUN_SENTENCE,
+};
 #[path = "gateway_room.rs"]
 mod gateway_room;
 #[path = "gateway_server.rs"]
@@ -127,6 +139,9 @@ mod gateway_transaction_effects;
 mod gateway_wallet;
 #[path = "gateway_wallet_adapter.rs"]
 mod gateway_wallet_adapter;
+#[cfg(test)]
+#[path = "gateway_provider_proxy_tests/http_hosted.rs"]
+pub(crate) mod http_hosted_agent;
 use gateway_agents::*;
 #[cfg(unix)]
 #[cfg(test)]
