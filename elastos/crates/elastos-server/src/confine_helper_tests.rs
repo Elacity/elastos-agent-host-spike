@@ -802,56 +802,52 @@ async fn fenced_object_library_list_gets_viewers_from_the_runtime() {
     recovery_kit_touch(&provider_binary("object-provider")).await;
 }
 
-/// Deleting the gateway's object fill (the call after `send_raw`) turns this
-/// red. The same function fills resource_bridge, the desktop list, trash
-/// roots, desktop events, and library events.
+/// Deleting the object fill after a provider send turns this red, including
+/// a caller in a file this list did not name. A scheme variable compared with
+/// "object" in the same window has to fill too.
 #[test]
 fn gateway_object_reply_calls_fill_fenced_library_fields() {
-    let proxy = include_str!("api/gateway_provider_proxy.rs");
-    let object_reply = proxy
-        .split("if scheme == \"object\" {")
-        .nth(1)
-        .expect("gateway object reply");
-    let window = &object_reply[..object_reply.find("\n    if ").unwrap_or(object_reply.len())];
+    let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut misses = Vec::new();
+    scan_object_sends(&root, &mut misses);
     assert!(
-        window.contains("crate::library::fill_fenced_library_fields"),
-        "deleting gateway_provider_proxy's object fill turns this row red"
+        misses.is_empty(),
+        "object send without fill_fenced_library_fields: {misses:?}"
     );
-    let home = include_str!("api/gateway_home_system.rs");
-    let bridge = include_str!("resource_bridge.rs");
-    let server = include_str!("server_infra.rs");
-    // One deleted call site stays red. A `contains` check stays green when
-    // another call in the same file remains.
-    assert_eq!(
-        proxy.matches("fill_fenced_library_fields(").count(),
-        2,
-        "gateway_provider_proxy fill sites"
-    );
-    assert_eq!(
-        home.matches("fill_fenced_library_fields(").count(),
-        3,
-        "desktop, trash, and desktop events"
-    );
-    assert_eq!(
-        bridge.matches("fill_fenced_library_fields(").count(),
-        1,
-        "resource_bridge fill sites"
-    );
-    assert_eq!(
-        server.matches("fill_fenced_library_fields(").count(),
-        1,
-        "server_infra fill sites"
-    );
-    for (label, path) in [
-        ("desktop", home),
-        ("resource_bridge", bridge),
-        ("library events", proxy),
-    ] {
-        assert!(
-            path.contains("fill_fenced_library_fields"),
-            "{label} object reply does not use the one fill"
-        );
+}
+
+fn scan_object_sends(dir: &std::path::Path, misses: &mut Vec<String>) {
+    for entry in std::fs::read_dir(dir).unwrap() {
+        let path = entry.unwrap().path();
+        if path.is_dir() {
+            scan_object_sends(&path, misses);
+            continue;
+        }
+        if path.extension().is_none_or(|ext| ext != "rs") {
+            continue;
+        }
+        let text = std::fs::read_to_string(&path).unwrap();
+        let mut from = 0;
+        while let Some(at) = text[from..].find("send_raw(") {
+            let start = from + at;
+            let end = text.floor_char_boundary(text.len().min(start + 2400));
+            let window = &text[start..end];
+            let head = window.find(')').map(|end| &window[..end]).unwrap_or(window);
+            let literal = argument_is_object(head);
+            let scheme = head.contains("&scheme") || head.contains("&dispatch.scheme");
+            let object_scheme = scheme && window.contains("== \"object\"");
+            if (literal || object_scheme) && !window.contains("fill_fenced_library_fields") {
+                let line = text[..start].lines().count();
+                misses.push(format!("{}:{line}", path.display()));
+            }
+            from = start + "send_raw(".len();
+        }
     }
+}
+
+fn argument_is_object(head: &str) -> bool {
+    let rest = head.trim_start_matches("send_raw(").trim_start();
+    rest.starts_with("\"object\"")
 }
 
 /// Release musl helpers, started by `spawn_path_allow` on Linux. The CI step

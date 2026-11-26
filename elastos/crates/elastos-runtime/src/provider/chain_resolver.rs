@@ -8,7 +8,7 @@
 //! The config is the last Init the helper accepted. The new helper is kept
 //! beside the bridge the caller already holds. The fence is that same start.
 //! One observed identity restarts at most once. The dispatch that saw the
-//! change, and any call already on the old helper, ends with
+//! change before sending uses the replacement. An in-flight call ends with
 //! `chain_resolver_changed`. The caller retries. A failed start leaves the
 //! helper down, and later dispatches return `chain is off`.
 
@@ -45,8 +45,35 @@ fn resolv_override() -> Option<PathBuf> {
     None
 }
 
-fn resolv_conf_path() -> PathBuf {
+pub(super) fn resolv_conf_path() -> PathBuf {
     resolv_override().unwrap_or_else(|| PathBuf::from("/etc/resolv.conf"))
+}
+
+#[cfg(test)]
+static RESOLV_SWAP_AFTER_OPEN: AtomicBool = AtomicBool::new(false);
+
+#[cfg(test)]
+pub(super) fn arm_resolv_swap_after_open() {
+    RESOLV_SWAP_AFTER_OPEN.store(true, Ordering::SeqCst);
+    *elastos_common::resolv::TEST_AFTER_OPEN
+        .lock()
+        .unwrap_or_else(|err| err.into_inner()) = swap_resolv_after_open;
+}
+
+#[cfg(test)]
+fn swap_resolv_after_open(path: &Path) {
+    let next = path.with_extension("next");
+    if next.is_file() && RESOLV_SWAP_AFTER_OPEN.swap(false, Ordering::SeqCst) {
+        let _ = std::fs::rename(&next, path);
+    }
+}
+
+fn identity_from(opened: Option<Option<(u64, u64)>>, path: &Path) -> ResolverIdentity {
+    match opened {
+        Some(Some((dev, ino))) => ResolverIdentity::File { dev, ino },
+        Some(None) => ResolverIdentity::Absent,
+        None => read_identity(path).unwrap_or(ResolverIdentity::Absent),
+    }
 }
 
 /// `metadata` follows a symlink. Absence is `NotFound`. Any other error is
@@ -90,9 +117,10 @@ impl ChainResolver {
         binary: &CheckedExecutable,
         data_dir: &Path,
         config: &ProviderConfig,
+        opened: Option<Option<(u64, u64)>>,
     ) -> Arc<Self> {
         let resolv = resolv_conf_path();
-        let held = read_identity(&resolv).unwrap_or(ResolverIdentity::Absent);
+        let held = identity_from(opened, &resolv);
         Arc::new(Self {
             inputs: Inputs {
                 component_key: component_key.to_string(),
@@ -131,32 +159,28 @@ impl ChainResolver {
         self.restarts.load(Ordering::Acquire)
     }
 
+    #[cfg(test)]
+    fn bump_generation_for_test(&self) {
+        self.generation.fetch_add(1, Ordering::Release);
+    }
+
     /// `None` means the call uses the bridge it already has. `Some` is the
     /// helper started after a previous change. An error is the whole dispatch.
     pub(super) async fn before(
         &self,
         host: &ProviderBridge,
     ) -> Result<Option<Arc<ProviderBridge>>, BridgeError> {
-        let observed = self.generation();
         let _lock = self.restart.lock().await;
         if self.off.load(Ordering::Acquire) {
             return Err(BridgeError::Refused(CHAIN_IS_OFF.to_string()));
         }
         let now = match read_identity(&self.inputs.resolv) {
             Ok(identity) => identity,
-            Err(()) => {
-                if self.generation.load(Ordering::Acquire) != observed {
-                    return Err(BridgeError::Refused(CHAIN_RESOLVER_CHANGED.to_string()));
-                }
-                return Ok(self.live());
-            }
+            Err(()) => return Ok(self.live()),
         };
         let held = *self.held.lock().unwrap_or_else(|err| err.into_inner());
         if now != held {
-            return Err(self.restart_once(host, now).await);
-        }
-        if self.generation.load(Ordering::Acquire) != observed {
-            return Err(BridgeError::Refused(CHAIN_RESOLVER_CHANGED.to_string()));
+            self.restart_once(host).await?;
         }
         Ok(self.live())
     }
@@ -168,7 +192,7 @@ impl ChainResolver {
             .clone()
     }
 
-    async fn restart_once(&self, host: &ProviderBridge, now: ResolverIdentity) -> BridgeError {
+    async fn restart_once(&self, host: &ProviderBridge) -> Result<(), BridgeError> {
         // Bump before the await so a call already on the old helper sees the
         // change without a second flag.
         self.generation.fetch_add(1, Ordering::Release);
@@ -192,6 +216,8 @@ impl ChainResolver {
         .await;
         self.restarts.fetch_add(1, Ordering::Release);
         let off = spawned.is_err();
+        #[rustfmt::skip]
+        let now = identity_from(spawned.as_ref().ok().and_then(|c| c.bridge().resolv_opened.get().copied()), &self.inputs.resolv);
         let replacement = spawned.ok().map(|confined| Arc::clone(confined.bridge()));
         *self
             .replacement
@@ -203,13 +229,9 @@ impl ChainResolver {
         self.generation.fetch_add(1, Ordering::Release);
         if off {
             self.off.store(true, Ordering::Release);
+            return Err(BridgeError::Refused(CHAIN_IS_OFF.to_string()));
         }
-        let name = if off {
-            CHAIN_IS_OFF
-        } else {
-            CHAIN_RESOLVER_CHANGED
-        };
-        BridgeError::Refused(name.to_string())
+        Ok(())
     }
 
     /// A call that overlapped a change does not keep its answer. The caller
@@ -402,7 +424,6 @@ mod tests {
             )
             .await
             .unwrap_or_else(|err| panic!("chain start failed: {err}"));
-            set_resolv_override(None);
             Started {
                 bridge: Arc::clone(bridge.bridge()),
                 resolv,
@@ -425,7 +446,7 @@ mod tests {
 
         /// Absent at start, then the file appears, then a rename. Each observed
         /// identity restarts once. The dispatch that sees the change is
-        /// `chain_resolver_changed`. The next dispatch uses the new helper.
+        /// answered by the replacement.
         #[tokio::test]
         async fn chain_resolver_rename_and_absent_start_restart_once() {
             let _lock = tests_lock().lock().await;
@@ -434,15 +455,15 @@ mod tests {
             assert_eq!(first["status"], "ok", "{first}");
             assert_eq!(started.bridge.chain_resolver_restarts(), 0);
             std::fs::write(&started.resolv, b"nameserver 127.0.0.1\n").unwrap();
-            let changed = networks(&started.bridge).await.unwrap_err();
-            assert_eq!(changed.to_string(), CHAIN_RESOLVER_CHANGED);
+            let changed = networks(&started.bridge).await.unwrap();
+            assert_eq!(changed["status"], "ok", "{changed}");
             assert_eq!(started.bridge.chain_resolver_restarts(), 1);
             let again = networks(&started.bridge).await.unwrap();
             assert_eq!(again["status"], "ok", "{again}");
             assert_eq!(started.bridge.chain_resolver_restarts(), 1);
             replace_by_rename(&started.resolv, b"nameserver 127.0.0.2\n");
-            let renamed = networks(&started.bridge).await.unwrap_err();
-            assert_eq!(renamed.to_string(), CHAIN_RESOLVER_CHANGED);
+            let renamed = networks(&started.bridge).await.unwrap();
+            assert_eq!(renamed["status"], "ok", "{renamed}");
             assert_eq!(started.bridge.chain_resolver_restarts(), 2);
             let after = networks(&started.bridge).await.unwrap();
             assert_eq!(after["status"], "ok", "{after}");
@@ -451,7 +472,7 @@ mod tests {
         }
 
         /// Two dispatches that both see one new identity start one helper.
-        /// Both calls end with the retryable name.
+        /// Neither has sent yet, so both are answered by that helper.
         #[tokio::test]
         async fn chain_resolver_two_dispatches_restart_once() {
             let _lock = tests_lock().lock().await;
@@ -465,8 +486,8 @@ mod tests {
             let (one, two) = tokio::join!(async move { networks(&left).await }, async move {
                 networks(&right).await
             },);
-            assert_eq!(one.unwrap_err().to_string(), CHAIN_RESOLVER_CHANGED);
-            assert_eq!(two.unwrap_err().to_string(), CHAIN_RESOLVER_CHANGED);
+            assert_eq!(one.unwrap()["status"], "ok");
+            assert_eq!(two.unwrap()["status"], "ok");
             assert_eq!(bridge.chain_resolver_restarts(), 1);
             let after = networks(&bridge).await.unwrap();
             assert_eq!(after["status"], "ok", "{after}");
@@ -502,7 +523,6 @@ mod tests {
             )
             .await
             .unwrap_or_else(|err| panic!("chain start failed: {err}"));
-            set_resolv_override(None);
             let bridge = Arc::clone(started.bridge());
             let warm = networks(&bridge).await.unwrap();
             assert_eq!(warm["status"], "ok", "{warm}");
@@ -574,8 +594,8 @@ mod tests {
             let armed = networks(&started.bridge).await.unwrap();
             assert_eq!(esc_name(&armed), "Protected ESC", "{armed}");
             replace_by_rename(&started.resolv, b"nameserver 127.0.0.2\n");
-            let changed = networks(&started.bridge).await.unwrap_err();
-            assert_eq!(changed.to_string(), CHAIN_RESOLVER_CHANGED);
+            let changed = networks(&started.bridge).await.unwrap();
+            assert_eq!(esc_name(&changed), "Protected ESC", "{changed}");
             assert_eq!(started.bridge.chain_resolver_restarts(), 1);
             let after = networks(&started.bridge).await.unwrap();
             assert_eq!(esc_name(&after), "Protected ESC", "{after}");
@@ -682,8 +702,9 @@ mod tests {
             assert!(armed_status.contains(&accepted), "{armed_status}");
             assert!(!armed_status.contains("127.0.0.1:8"), "{armed_status}");
             replace_by_rename(&started.resolv, b"nameserver 127.0.0.7\n");
-            let changed = networks(&started.bridge).await.unwrap_err();
-            assert_eq!(changed.to_string(), CHAIN_RESOLVER_CHANGED);
+            let changed = networks(&started.bridge).await.unwrap();
+            assert_eq!(display_name(&changed, &id), accepted_name, "{changed}");
+            assert_eq!(started.bridge.chain_resolver_restarts(), 1);
             let after = networks(&started.bridge).await.unwrap();
             assert_eq!(display_name(&after, &id), accepted_name, "{after}");
             let after_status = status_text(&started.bridge, &id).await;
@@ -691,12 +712,13 @@ mod tests {
             assert!(!after_status.contains("127.0.0.1:8"), "{after_status}");
             let bitcoin_after = status_text(&started.bridge, "btc-mainnet").await;
             assert!(bitcoin_after.contains("127.0.0.1:7"), "{bitcoin_after}");
+            assert_eq!(started.bridge.chain_resolver_restarts(), 1);
             started.bridge.shutdown().await.unwrap();
         }
 
         /// resolv.conf changes after spawn and before Home's second Init.
-        /// That Init meets `chain_resolver_changed` once, tries again once,
-        /// and the protected settings land on the new helper.
+        /// That Init has not been sent, so it is answered by the replacement
+        /// and the protected settings land there.
         #[tokio::test]
         async fn a_change_between_spawn_and_the_second_init_is_tried_once() {
             let _lock = tests_lock().lock().await;
@@ -743,12 +765,97 @@ mod tests {
                 "{refused:?}"
             );
             replace_by_rename(&started.resolv, b"nameserver 127.0.0.5\n");
-            let changed = networks(&started.bridge).await.unwrap_err();
-            assert_eq!(changed.to_string(), CHAIN_RESOLVER_CHANGED);
             let after = networks(&started.bridge).await.unwrap();
             assert_eq!(after["status"], "ok", "{after}");
             assert_eq!(esc_name(&after), "Elastos Smart Chain", "{after}");
+            assert_eq!(started.bridge.chain_resolver_restarts(), 1);
             started.bridge.shutdown().await.unwrap();
+        }
+
+        /// Replace resolv.conf, then read a wallet balance. The helper answers
+        /// that read. The address is not hex, so the row does not call upstream.
+        #[tokio::test]
+        async fn a_resolv_change_then_a_balance_read_is_answered_once() {
+            let _lock = tests_lock().lock().await;
+            let started = start(Some(b"nameserver 127.0.0.1\n")).await;
+            replace_by_rename(&started.resolv, b"nameserver 127.0.0.3\n");
+            let answer = started
+                .bridge
+                .send_raw(&serde_json::json!({
+                    "op": "balance",
+                    "network": "esc-mainnet",
+                    "address": "0xnot",
+                }))
+                .await
+                .unwrap_or_else(|err| panic!("balance was not answered: {err}"));
+            assert_eq!(answer["status"], "error", "{answer}");
+            assert_eq!(answer["code"], "invalid_address", "{answer}");
+            assert_eq!(started.bridge.chain_resolver_restarts(), 1);
+            started.bridge.shutdown().await.unwrap();
+        }
+
+        /// The file is replaced after the fence opens it and before the record.
+        /// The record is the opened descriptor, so the next read restarts once.
+        #[tokio::test]
+        async fn a_resolv_file_replaced_between_open_and_record_restarts_once() {
+            let _lock = tests_lock().lock().await;
+            let home = tempfile::tempdir().unwrap();
+            let data = home.path().join("data");
+            std::fs::create_dir(&data).unwrap();
+            std::fs::set_permissions(&data, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let resolv = home.path().join("resolv.conf");
+            std::fs::write(&resolv, b"nameserver 127.0.0.1\n").unwrap();
+            std::fs::write(resolv.with_extension("next"), b"nameserver 127.0.0.2\n").unwrap();
+            let _guard = ClearOverride;
+            set_resolv_override(Some(resolv));
+            super::super::arm_resolv_swap_after_open();
+            let started = ProviderBridge::spawn_path_allow(
+                "chain-provider",
+                &authority(),
+                &pinned(&chain_binary(), &data),
+                &data,
+                ProviderConfig {
+                    base_path: data.display().to_string(),
+                    ..ProviderConfig::default()
+                },
+            )
+            .await
+            .unwrap_or_else(|err| panic!("chain start failed: {err}"));
+            let bridge = started.bridge();
+            let answer = networks(bridge)
+                .await
+                .unwrap_or_else(|err| panic!("not answered: {err}"));
+            assert_eq!(answer["status"], "ok", "{answer}");
+            assert_eq!(bridge.chain_resolver_restarts(), 1);
+            let again = networks(bridge).await.unwrap();
+            assert_eq!(again["status"], "ok", "{again}");
+            assert_eq!(bridge.chain_resolver_restarts(), 1);
+            bridge.shutdown().await.unwrap();
+        }
+
+        /// `chain_resolver_changed` is the generation moving under a call that
+        /// already sampled it. A call that has not sent yet does not use it.
+        #[tokio::test]
+        async fn chain_resolver_changed_is_only_an_in_flight_call() {
+            let _lock = tests_lock().lock().await;
+            let home = tempfile::tempdir().unwrap();
+            let data = home.path().join("data");
+            std::fs::create_dir(&data).unwrap();
+            let resolver = super::super::ChainResolver::prepare(
+                "chain-provider",
+                &authority(),
+                &pinned(&chain_binary(), &data),
+                &data,
+                &ProviderConfig::default(),
+                None,
+            );
+            let observed = resolver.generation();
+            resolver.bump_generation_for_test();
+            let err = resolver.map_transport(observed, Ok(())).unwrap_err();
+            assert_eq!(err.to_string(), CHAIN_RESOLVER_CHANGED);
+            assert!(resolver
+                .map_transport(resolver.generation(), Ok(()))
+                .is_ok());
         }
     }
 }

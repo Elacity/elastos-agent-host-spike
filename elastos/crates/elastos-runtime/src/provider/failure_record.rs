@@ -1,5 +1,4 @@
 //! Fixed child install report. All allocation and path preparation finish before fork.
-#![allow(dead_code)] // The server does not call this launcher yet.
 
 use super::super::CheckedExecutable;
 use super::super::{landlock_plan, rights::AdmittedRights, rights_table::RuntimeProviderId};

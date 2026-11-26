@@ -492,10 +492,8 @@ fn resolve_named(
     if interp == Interpreter::Glibc {
         return glibc_libraries(arch, root, dirs, trust_uid);
     }
-    // Musl requires only its loader. An optional soname the program names stays
-    // optional: promoting it does not fit the core budget. The dynamic linker
-    // still refuses a soname it cannot open.
     let required = [musl_loader_name(arch)];
+    let needed = program_needed()?;
     let (mut files, mut omitted) = (Vec::new(), Vec::new());
     for name in required {
         let preferred = (name == loader_name(arch)).then_some(preferred_loader(arch));
@@ -505,12 +503,14 @@ fn resolve_named(
         }
     }
     for name in OPTIONAL_LIBRARIES {
+        let must = library_required(name, required[0], needed.as_deref());
         match locate(root, dirs, name, None, trust_uid) {
             Ok(file) => files.push(file),
-            Err(LocateFail::Missing) => {}
-            Err(LocateFail::Refused { tried }) => {
+            Err(LocateFail::Missing) if !must => {}
+            Err(LocateFail::Refused { tried }) if !must => {
                 omitted.push(format!("omitted library {name}, tried {tried}"))
             }
+            Err(fail) => return Err(fail.message(name, dirs, None)),
         }
     }
     Ok(PlannedLoaders { files, omitted })
@@ -658,12 +658,19 @@ fn hold_regular_nofollow(path: &Path) -> Option<OwnedFd> {
 
 /// Follow the final symlink once and hold that regular file. Chain's
 /// resolver names are often symlinks; the rule is the held target.
+#[rustfmt::skip]
 fn hold_regular_follow(path: &Path) -> Option<OwnedFd> {
     #[cfg(target_os = "linux")]
     let flags = libc::O_PATH | libc::O_CLOEXEC;
     #[cfg(not(target_os = "linux"))]
     let flags = libc::O_RDONLY | libc::O_CLOEXEC;
-    hold_if(path, flags, false)
+    let resolv = path.as_os_str() == "/etc/resolv.conf";
+    let opened = if resolv { super::chain_resolver::resolv_conf_path() } else { path.to_path_buf() };
+    let read = open_stat(&opened, flags).ok();
+    if resolv {
+        elastos_common::resolv::note_opened_resolv(&opened, read.as_ref().map(|(i, _)| loader_identity(i)));
+    }
+    read.filter(|(i, _)| i.st_mode & libc::S_IFMT == libc::S_IFREG).map(|(_, fd)| fd)
 }
 
 #[cfg(any(target_os = "linux", test))]
@@ -2245,6 +2252,62 @@ mod tests {
             assert!(
                 err.contains("the executable dynamic section is malformed"),
                 "{arch:?} {err}"
+            );
+        }
+    }
+
+    /// A musl soname the program names is required. A group-writable copy is
+    /// refused by that name. A soname the program does not name stays optional.
+    #[cfg(unix)]
+    #[test]
+    fn a_musl_named_soname_is_required() {
+        use std::io::Write;
+        use std::os::fd::AsRawFd;
+        let uid = unsafe { libc::geteuid() };
+        let open_elf = |bytes: &[u8]| {
+            let mut file = tempfile::tempfile().unwrap();
+            file.write_all(bytes).unwrap();
+            file
+        };
+        for arch in [LoaderArch::X86_64, LoaderArch::Aarch64] {
+            let root = tempfile::tempdir().unwrap();
+            let loader = format!("/lib/{}", musl_loader_name(arch));
+            plant(root.path(), &loader, 0o755);
+            plant(root.path(), "/lib/libdl.so.2", 0o775);
+            let named = open_elf(&elf_with_needed(&["libdl.so.2"]));
+            let err = with_interpreter_fd(named.as_raw_fd(), || {
+                resolve_named(
+                    Chain,
+                    arch,
+                    root.path(),
+                    Some(&["/lib"]),
+                    uid,
+                    Interpreter::Musl,
+                )
+            })
+            .unwrap_err();
+            assert!(
+                err.contains("libdl.so.2"),
+                "a named group-writable soname is refused: {arch:?} {err}"
+            );
+            let plain = open_elf(&elf_with_needed(&[]));
+            let planned = with_interpreter_fd(plain.as_raw_fd(), || {
+                resolve_named(
+                    Chain,
+                    arch,
+                    root.path(),
+                    Some(&["/lib"]),
+                    uid,
+                    Interpreter::Musl,
+                )
+            })
+            .unwrap();
+            assert!(
+                planned
+                    .files
+                    .iter()
+                    .all(|file| !file.path.ends_with("libdl.so.2")),
+                "an unnamed unsafe soname stays out: {arch:?}"
             );
         }
     }

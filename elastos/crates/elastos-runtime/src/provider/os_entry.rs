@@ -229,9 +229,8 @@ fn start_path_allow_os(
 /// directory swapped onto the path is readable, including a file moved into
 /// it. `identity/device.key` is not under any allowed root, so that path
 /// stays unread. The three helpers do not compare the device and
-/// inode again after the profile is on: the recorded identity has to be
-/// passed into three binaries that do not share a startup crate, and that
-/// hand-off is more than fifteen lines.
+/// inode again after the profile is on. sandbox-exec resolved the rules by
+/// name, so a same-user swap after that is the helper's own read.
 ///
 /// `plan.root_dev` lines up with the storage roots, which are the first rules.
 /// The executable, loader, and resolver paths are not roots. Metadata literals

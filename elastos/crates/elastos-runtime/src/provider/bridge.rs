@@ -486,6 +486,7 @@ pub struct BridgeTail {
     /// Chain's resolver file. Empty for every other helper. A restart keeps
     /// the new helper here, on the bridge the caller already holds.
     chain_resolver: std::sync::Mutex<Option<Arc<super::chain_resolver::ChainResolver>>>,
+    pub(super) resolv_opened: std::sync::OnceLock<Option<(u64, u64)>>,
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     _local_brokers: Mutex<BrokerTasks>,
     #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -1810,6 +1811,9 @@ impl ProviderBridge {
             helper_owner: Mutex::new(None),
             tail: BridgeTail::new(SHUTDOWN_TIMEOUT, launched.omitted_libraries),
         };
+        if let Some(opened) = elastos_common::resolv::take_opened_resolv() {
+            bridge.resolv_opened.set(opened).ok();
+        }
         #[cfg(target_os = "macos")]
         bridge.watch_confined_executable_copy();
         Ok(bridge)
@@ -2029,6 +2033,7 @@ impl ProviderBridge {
                 binary_path,
                 data_dir,
                 &config,
+                bridge.resolv_opened.get().copied(),
             ));
         }
         bridge.init_provider(config, INIT_TIMEOUT).await?;
@@ -3037,10 +3042,9 @@ impl ProviderBridge {
                 target: None,
             });
         };
-        let observed = resolver.generation();
         let target = resolver.before(self).await?;
         Ok(ChainHop {
-            observed,
+            observed: resolver.generation(),
             resolver: Some(resolver),
             target,
         })

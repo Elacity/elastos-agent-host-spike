@@ -4,7 +4,7 @@ use super::rights_table::RuntimeProviderId;
 use super::seccomp_program::number;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[allow(dead_code)] // The installer is a later B3 slice.
+#[allow(dead_code)] // Unused when the Linux installer is not compiled (unsupported-OS check, macOS lib).
 pub(super) enum AuditArch {
     X86_64,
     Aarch64,
