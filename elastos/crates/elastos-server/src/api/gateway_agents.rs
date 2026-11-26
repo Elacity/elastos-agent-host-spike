@@ -197,11 +197,11 @@ async fn retry_failed_stops(data_dir: &std::path::Path) {
         else {
             continue;
         };
-        let context = super::gateway_home_token::HomeLaunchTokenContext::resolved(
+        let context = super::gateway_home_token::agent_stop_signer_context(
             root,
-            format!("session:retry:{principal_id}"),
+            &principal_id,
             Some(stop.principal.proof_binding_id.clone()),
-            format!("grant:retry:{principal_id}"),
+            "retry",
         );
         let owner = AgentsOwner {
             context,
@@ -1162,11 +1162,11 @@ pub(super) fn schedule_demoted_owner_stop(data_dir: &std::path::Path, owner_id: 
             tracing::warn!("demoted owner '{owner_id}' has no admin root to sign the stop");
             return;
         };
-        let context = super::gateway_home_token::HomeLaunchTokenContext::resolved(
+        let context = super::gateway_home_token::agent_stop_signer_context(
             root,
-            format!("session:demote:{}", other.principal_id),
+            &other.principal_id,
             Some(other.proof_binding_id.clone()),
-            format!("grant:demote:{}", other.principal_id),
+            "demote",
         );
         if let Err(error) =
             stop_agents_after_admin_lost(&data_dir, &context, &other, &owner_id, "owner demoted")

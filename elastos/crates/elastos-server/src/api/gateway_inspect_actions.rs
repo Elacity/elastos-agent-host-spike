@@ -979,41 +979,50 @@ async fn wait_plan_task_gate(request_id: &str) {
 }
 
 #[cfg(test)]
-fn plan_settle_faults() -> &'static std::sync::Mutex<Vec<&'static str>> {
-    static FAULTS: std::sync::OnceLock<std::sync::Mutex<Vec<&'static str>>> =
-        std::sync::OnceLock::new();
-    FAULTS.get_or_init(|| std::sync::Mutex::new(Vec::new()))
+fn plan_settle_faults(
+) -> &'static std::sync::Mutex<std::collections::HashMap<std::path::PathBuf, Vec<&'static str>>> {
+    static FAULTS: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<std::path::PathBuf, Vec<&'static str>>>,
+    > = std::sync::OnceLock::new();
+    FAULTS.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
 }
 
-/// The next settle fails at `which`: `"record"` or `"audit"`.
+/// The next settle for this Home fails at `which`: `"record"` or `"audit"`.
 #[cfg(all(test, unix))]
-pub(crate) fn arm_plan_settle_fault(which: &'static str) {
-    arm_plan_settle_faults(which, 1);
+pub(crate) fn arm_plan_settle_fault(data_dir: &FsPath, which: &'static str) {
+    arm_plan_settle_faults(data_dir, which, 1);
 }
 
-/// `count` failures of `which`, consumed one per settle attempt.
+/// `count` failures of `which` for this Home, consumed one per settle attempt.
 #[cfg(all(test, unix))]
-pub(crate) fn arm_plan_settle_faults(which: &'static str, count: usize) {
+pub(crate) fn arm_plan_settle_faults(data_dir: &FsPath, which: &'static str, count: usize) {
     let mut faults = plan_settle_faults()
         .lock()
         .unwrap_or_else(|err| err.into_inner());
+    let list = faults.entry(data_dir.to_path_buf()).or_default();
     for _ in 0..count {
-        faults.push(which);
+        list.push(which);
     }
 }
 
-fn take_plan_settle_fault(which: &str) -> bool {
+fn take_plan_settle_fault(data_dir: &FsPath, which: &str) -> bool {
     #[cfg(test)]
     {
         let mut faults = plan_settle_faults()
             .lock()
             .unwrap_or_else(|err| err.into_inner());
-        if let Some(pos) = faults.iter().rposition(|fault| *fault == which) {
-            faults.swap_remove(pos);
+        let Some(list) = faults.get_mut(data_dir) else {
+            return false;
+        };
+        if let Some(pos) = list.iter().rposition(|fault| *fault == which) {
+            list.swap_remove(pos);
+            if list.is_empty() {
+                faults.remove(data_dir);
+            }
             return true;
         }
     }
-    let _ = which;
+    let _ = (data_dir, which);
     false
 }
 
@@ -1045,7 +1054,7 @@ fn settle_agent_plan_dispatch(
     // is the last write) and the caller resolves the flight as unknown.
     let mut wrote = false;
     for _ in 0..3 {
-        if take_plan_settle_fault("record") {
+        if take_plan_settle_fault(data_dir, "record") {
             continue;
         }
         if write_inspect_action_record(data_dir, &record).is_ok() {
@@ -1057,7 +1066,7 @@ fn settle_agent_plan_dispatch(
         anyhow::bail!("plan record write failed");
     }
     crate::resource_bridge::notify_plan_waiters();
-    if take_plan_settle_fault("audit") {
+    if take_plan_settle_fault(data_dir, "audit") {
         tracing::warn!(
             "agent plan dispatch audit was not stored: injected plan audit write failure"
         );

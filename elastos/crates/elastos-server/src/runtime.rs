@@ -4625,15 +4625,20 @@ impl Runtime {
 
         let Some(stop) = stop else {
             // No watcher holds this activation: stop it through its provider
-            // and take its entry away, as before. A provider error leaves the
-            // row up, so the plan end is not decided.
+            // and take its entry away, as before. A stop that fails still
+            // closes the plan instance: the owner asked to stop, so a later
+            // dispatch cannot run under that failed stop.
             #[cfg(test)]
             if self.take_failing_capsule_stop(id) {
+                plan_book(&self.plan_book).mark_stopping(id);
                 return Err(ElastosError::Compute("capsule stop failed".into()));
             }
             if let Some((handle, provider)) = provider {
                 tracing::info!("Stopping capsule '{}' ({})", info.name, id);
-                provider.stop(handle).await?;
+                if let Err(error) = provider.stop(handle).await {
+                    plan_book(&self.plan_book).mark_stopping(id);
+                    return Err(error);
+                }
             }
             // This call removes the row. The end is decided here, for this session.
             plan_book(&self.plan_book).mark_stopping(id);

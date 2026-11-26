@@ -10524,7 +10524,8 @@ fn after() {
                 // The claim rebuilds the approved binding, then the existing signer uses it.
                 ("elastos-server/src/api/gateway_home_cli_mint.rs", 1),
                 ("elastos-server/src/api/gateway_home_system.rs", 2),
-                ("elastos-server/src/api/gateway_home_token.rs", 4),
+                // Includes agent_stop_signer_context for retry and demote stops.
+                ("elastos-server/src/api/gateway_home_token.rs", 5),
                 ("elastos-server/src/api/gateway_model_service.rs", 1),
                 // The Bus request resolves its principal root from Runtime state.
                 ("elastos-server/src/api/gateway_provider_proxy.rs", 1),

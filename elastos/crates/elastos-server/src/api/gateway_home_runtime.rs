@@ -884,6 +884,9 @@ async fn stop_runtime_agent_rows(
     let coords = match live_agent_coords(data_dir).await {
         Ok(coords) => coords,
         Err(error) if error.to_string() == crate::api::agent_plane::TASK_ENDED => {
+            // Listener gone: end any guests still on the in-process plane, then
+            // answer as already ended so Stop/Retire/demote can sign.
+            crate::api::agent_plane::end_plane_guests_after_task_panic(data_dir).await;
             return Ok(RuntimeAgentStop {
                 stopped: Vec::new(),
                 stopping: Vec::new(),

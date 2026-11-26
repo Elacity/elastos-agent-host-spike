@@ -3239,10 +3239,11 @@ async fn a_missing_stop_leaves_the_run_able_to_dispatch() {
     assert_the_run_can_still_dispatch(&plant).await;
 }
 
-/// A stop that fails before the row ends does not close the instance.
+/// A stop that fails before the row ends still closes the plan instance, so
+/// a later dispatch cannot run under that failed stop.
 #[cfg(unix)]
 #[tokio::test]
-async fn a_failed_stop_leaves_the_run_able_to_dispatch() {
+async fn a_failed_stop_leaves_the_run_unable_to_dispatch() {
     let plant = plant_approved(45, false, |_, target| {
         json!({"steps": [{"scheme": "localhost", "operation": "write", "request": {
             "path": target, "content": [112, 108, 97, 110]
@@ -3252,12 +3253,25 @@ async fn a_failed_stop_leaves_the_run_able_to_dispatch() {
     plant.runtime.arm_failing_capsule_stop(&plant.session);
     let (status, body) = stop_plan_agent(plant.runtime.clone(), &plant.agent).await;
     assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{body}");
-    assert!(crate::runtime::Runtime::plan_instance_is_open(
-        &plant.runtime.plan_book(),
-        &plant.session,
-        &plant.agent
-    ));
-    assert_the_run_can_still_dispatch(&plant).await;
+    assert!(
+        !crate::runtime::Runtime::plan_instance_is_open(
+            &plant.runtime.plan_book(),
+            &plant.session,
+            &plant.agent
+        ),
+        "a failed stop left the plan instance open"
+    );
+    let answer = dispatch_planted(&plant)
+        .await
+        .expect("a closed instance still answers");
+    assert!(
+        answer.contains("refused"),
+        "a failed stop left the run able to dispatch: {answer}"
+    );
+    let record = read_record(plant.dir.path(), &plant.id);
+    assert_eq!(record["status"], "refused", "{record}");
+    assert_eq!(record["result"]["code"], "instance ended", "{record}");
+    assert_eq!(std::fs::read(&plant.path).unwrap(), plant.before);
 }
 
 /// Dropping the Stop request before it ends the row leaves the run able to dispatch.
@@ -3419,7 +3433,7 @@ async fn a_failed_settle_write_matches_the_stored_record() {
         }}]})
     })
     .await;
-    super::gateway_inspect_actions::arm_plan_settle_fault("audit");
+    super::gateway_inspect_actions::arm_plan_settle_fault(audit.dir.path(), "audit");
     let answer = dispatch_planted(&audit)
         .await
         .expect("a failed audit still answers with the stored outcome");
@@ -3437,7 +3451,7 @@ async fn a_failed_settle_write_matches_the_stored_record() {
         }}]})
     })
     .await;
-    super::gateway_inspect_actions::arm_plan_settle_fault("record");
+    super::gateway_inspect_actions::arm_plan_settle_fault(missed.dir.path(), "record");
     let answer = dispatch_planted(&missed)
         .await
         .expect("one record fault is retried");
@@ -3455,7 +3469,7 @@ async fn a_failed_settle_write_matches_the_stored_record() {
         }}]})
     })
     .await;
-    super::gateway_inspect_actions::arm_plan_settle_faults("record", 3);
+    super::gateway_inspect_actions::arm_plan_settle_faults(stuck.dir.path(), "record", 3);
     let refused = dispatch_planted(&stuck).await;
     assert!(
         refused.is_err(),

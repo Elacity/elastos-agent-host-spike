@@ -5,9 +5,12 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-#[cfg(all(test, unix))]
+#[cfg(test)]
 use std::sync::atomic::AtomicBool;
-use std::sync::atomic::{AtomicU64, Ordering};
+#[cfg(unix)]
+use std::sync::atomic::AtomicU64;
+#[cfg(any(test, unix))]
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
@@ -131,6 +134,7 @@ fn dirs() -> &'static Mutex<HashMap<PathBuf, u64>> {
     DIRS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+#[cfg(unix)]
 fn next_instance() -> u64 {
     static NEXT: AtomicU64 = AtomicU64::new(1);
     NEXT.fetch_add(1, Ordering::Relaxed)
@@ -204,6 +208,12 @@ impl AgentPlane {
                 .agent_session(&id)
                 .await
                 .map(|record| record.agent_id)
+                .or_else(|| {
+                    capsules
+                        .iter()
+                        .find(|info| info.id == id)
+                        .and_then(|info| info.principal.clone())
+                })
                 .unwrap_or_default();
             let _ = self
                 .runtime
@@ -1023,12 +1033,27 @@ fn spawn_agent_server(config: ServerConfig, data_dir: PathBuf) -> RunningServer 
         if let Err(error) = server.await {
             if error.is_panic() {
                 note_fault(&data_dir, TASK_ENDED);
+                end_plane_guests_after_task_panic(&data_dir).await;
             }
         }
     });
     RunningServer {
         server: abort,
         watcher,
+    }
+}
+
+/// The listener task ended in a panic, or Stop met `TASK_ENDED`. Stop every
+/// live guest on the in-process plane runtime and revoke its grants.
+pub(crate) async fn end_plane_guests_after_task_panic(data_dir: &Path) {
+    let Some(runtime) = plane_runtime(data_dir) else {
+        return;
+    };
+    for info in runtime.list_capsules().await {
+        if info.ended_at.is_some() {
+            continue;
+        }
+        let _ = runtime.stop_capsule_with_reason(&info.id, TASK_ENDED).await;
     }
 }
 
