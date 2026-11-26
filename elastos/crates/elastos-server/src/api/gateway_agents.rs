@@ -464,13 +464,88 @@ pub(super) async fn agents_enable(
     agents_response(enabled)
 }
 
+async fn owe_live_stops(
+    data_dir: &std::path::Path,
+    owner: &AgentsOwner,
+    agent_id: Option<&str>,
+    cause: &str,
+) -> anyhow::Result<()> {
+    let mut rows = Vec::new();
+    for runtime in crate::api::agent_plane::watched_runtimes(data_dir) {
+        for info in runtime.list_capsules().await {
+            let Some(agent) = info.principal.as_deref().filter(|id| !id.is_empty()) else {
+                continue;
+            };
+            if info.ended_at.is_some() || agent_id.is_some_and(|wanted| wanted != agent) {
+                continue;
+            }
+            let session = info.id.clone();
+            rows.push(RuntimeAuditEventV1 {
+                schema: RuntimeAuditEventV1::SCHEMA.to_string(),
+                event_id: format!("audit:{}", gateway_home_token::uuid_like_token()),
+                event_type: "agent.stopped".to_string(),
+                principal_id: Some(owner.principal.principal_id.clone()),
+                proof_binding_id: Some(owner.principal.proof_binding_id.clone()),
+                session_id: Some(session),
+                challenge_id: None,
+                capsule_id: Some(stopped_capsule_id(data_dir, agent)),
+                result: "stopping".to_string(),
+                reason: serde_json::json!({ "agent_id": agent, "cause": cause }).to_string(),
+                occurred_at: now_ts(),
+                signer_did: None,
+                signature: None,
+            });
+        }
+    }
+    crate::agents::note_stop_rows(data_dir, &rows)
+}
+
+/// The failed signature has no session, so it does not clear the session debt
+/// recorded before the stop. Drop that debt once the failed row is signed.
+/// The failed row stays owed. A crash before that signature leaves the debt.
+fn release_signed_stop(
+    data_dir: &std::path::Path,
+    agent_id: &str,
+    cause: &str,
+) -> anyhow::Result<()> {
+    let rows: Vec<_> = crate::agents::owed_stop_rows(data_dir)
+        .into_iter()
+        .filter(|row| {
+            row.result == "stopping"
+                && row.session_id.is_some()
+                && row.reason.contains(agent_id)
+                && row.reason.contains(cause)
+        })
+        .map(|mut row| {
+            row.result = "ok".to_string();
+            row.reason = "{}".to_string();
+            row
+        })
+        .collect();
+    crate::agents::note_stop_rows(data_dir, &rows)
+}
+
 pub(super) async fn agents_disable(
     State(state): State<GatewayState>,
     headers: HeaderMap,
 ) -> Response {
     let disabled = agents_set_enabled(&state, &headers, false);
     if disabled.is_ok() {
+        if let Ok(owner) = agents_owner(&state, &headers) {
+            if let Err(error) = owe_live_stops(&state.data_dir, &owner, None, "agents off").await {
+                crate::resource_bridge::notify_plan_waiters();
+                return agents_response(Err(error) as anyhow::Result<serde_json::Value>);
+            }
+        }
         let (ended, closed) = crate::api::agent_plane::stop_running(&state.data_dir).await;
+        #[cfg(test)]
+        if crate::api::gateway::seams::take_grant_kind(&state.data_dir, "after-off-stop") {
+            crate::resource_bridge::notify_plan_waiters();
+            return agents_response(
+                Err(anyhow::anyhow!("crash after the stop")) as anyhow::Result<serde_json::Value>
+            );
+        }
+        let mut sign_error = None;
         if let Ok(owner) = agents_owner(&state, &headers) {
             for guest in &ended {
                 if guest.agent_id.is_empty() || guest.session_id.is_empty() {
@@ -485,18 +560,23 @@ pub(super) async fn agents_disable(
                 } else {
                     "stopping"
                 };
-                if let Err(error) = sign_stopped(
+                let signed = sign_stopped(
                     &state.data_dir,
                     &owner,
                     &guest.agent_id,
                     Some(&guest.session_id),
                     result,
                     serde_json::json!({ "agent_id": guest.agent_id, "cause": "agents off" }),
-                ) {
-                    crate::resource_bridge::notify_plan_waiters();
-                    return agents_response(Err(error) as anyhow::Result<serde_json::Value>);
-                }
+                );
+                sign_error = sign_error.or(signed.err());
             }
+            if ended.is_empty() {
+                sign_error = sign_error.or(confirm_stopping_rows(&state.data_dir).await.err());
+            }
+        }
+        if let Some(error) = sign_error {
+            crate::resource_bridge::notify_plan_waiters();
+            return agents_response(Err(error) as anyhow::Result<serde_json::Value>);
         }
         if let Err(error) = recorded_plan_close(closed.map(|_| 0)) {
             crate::resource_bridge::notify_plan_waiters();
@@ -576,6 +656,7 @@ pub(super) async fn agents_retire(
             &owner.principal.principal_id,
             &request.agent_id,
         )?;
+        owe_live_stops(&state.data_dir, &owner, Some(&request.agent_id), "retire").await?;
         let ended = end_live_agent(&state.data_dir, &request.agent_id).await?;
         for (session_id, result) in &ended {
             sign_stopped(
@@ -1237,6 +1318,7 @@ pub(in crate::api) async fn stop_agents_after_admin_lost(
         if !agent_has_live_session(data_dir, &agent_id).await {
             continue;
         }
+        owe_live_stops(data_dir, &signer, Some(&agent_id), cause).await?;
         let reason = serde_json::json!({ "agent_id": agent_id, "cause": cause });
         let _ = append_agent_lifecycle_audit(
             data_dir,
@@ -1260,7 +1342,7 @@ pub(in crate::api) async fn stop_agents_after_admin_lost(
                     } else {
                         "stopping"
                     };
-                    let _ = sign_stopped(
+                    let signed = sign_stopped(
                         data_dir,
                         &signer,
                         &agent_id,
@@ -1268,9 +1350,10 @@ pub(in crate::api) async fn stop_agents_after_admin_lost(
                         result,
                         reason.clone(),
                     );
+                    failed = failed.or(signed.err());
                 }
                 for session in &outcome.stopping {
-                    let _ = sign_stopped(
+                    let signed = sign_stopped(
                         data_dir,
                         &signer,
                         &agent_id,
@@ -1278,6 +1361,7 @@ pub(in crate::api) async fn stop_agents_after_admin_lost(
                         "stopping",
                         reason.clone(),
                     );
+                    failed = failed.or(signed.err());
                 }
             }
             Err(error) if stop_is_a_refusal(&error) => {}
@@ -1288,6 +1372,9 @@ pub(in crate::api) async fn stop_agents_after_admin_lost(
                 );
                 let signed =
                     sign_stopped(data_dir, &signer, &agent_id, None, "failed", reason.clone());
+                if signed.is_ok() {
+                    release_signed_stop(data_dir, &agent_id, cause)?;
+                }
                 if failed.is_none() {
                     failed = Some(
                         signed

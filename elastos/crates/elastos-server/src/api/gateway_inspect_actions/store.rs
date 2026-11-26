@@ -56,7 +56,12 @@ pub(super) fn pending_inspect_action_requests(
     records.sort_by_key(|record| record.created_at);
     Ok(records
         .into_iter()
-        .filter(|record| record.status == "pending" && record.principal_id == principal_id)
+        .filter(|record| {
+            record.status == "pending"
+                && record.principal_id == principal_id
+                && !(record.kind == AGENT_PLAN_KIND
+                    && approval_landed(data_dir, &record.request_id))
+        })
         .filter_map(pending_request_view)
         .collect())
 }
@@ -185,13 +190,36 @@ pub(super) fn claim_pending_agent_plan_for_owner(
     }
     // The passkey is spent in `commit` before the approval row. A failed
     // append leaves the card pending and costs one re-verification.
+    if approval_landed(data_dir, &record.request_id) {
+        record.status = "approved".to_string();
+        record.updated_at = updated_at;
+        write_inspect_action_record_unlocked(data_dir, &record)?;
+        return Ok(record);
+    }
     let mut approved = record.clone();
     approved.status = "approved".to_string();
     approved.updated_at = updated_at;
     commit(&approved, true)?;
     record = approved;
-    write_inspect_action_record_unlocked(data_dir, &record)?;
+    if let Err(error) = write_inspect_action_record_unlocked(data_dir, &record) {
+        if !approval_landed(data_dir, &record.request_id) {
+            return Err(error);
+        }
+        write_inspect_action_record_unlocked(data_dir, &record)?;
+    }
     Ok(record)
+}
+
+fn approval_landed(data_dir: &Path, request_id: &str) -> bool {
+    crate::auth::load_auth_state(data_dir)
+        .ok()
+        .is_some_and(|state| {
+            state.audit.iter().any(|event| {
+                event.event_type == "agent.plan.approved"
+                    && event.result == "approved"
+                    && event.challenge_id.as_deref() == Some(request_id)
+            })
+        })
 }
 
 /// A durable one-way claim. A stranded dispatching record has an unknown
@@ -270,6 +298,10 @@ fn write_inspect_action_record_unlocked(
     record: &InspectActionRequestRecord,
 ) -> anyhow::Result<()> {
     let root = inspect_actions_root(data_dir);
+    #[cfg(test)]
+    if crate::api::gateway::seams::take_grant_kind(data_dir, "plan-file") {
+        anyhow::bail!("injected plan file write failure");
+    }
     std::fs::create_dir_all(&root)?;
     let path = inspect_action_path(data_dir, &record.request_id)?;
     let data = serde_json::to_vec_pretty(record)?;
@@ -378,6 +410,9 @@ pub(super) fn close_pending_agent_plans(
         if record.kind != AGENT_PLAN_KIND || !open_status || !keep(&record) {
             continue;
         }
+        if record.status == "pending" && approval_landed(data_dir, &record.request_id) {
+            continue;
+        }
         record.status = outcome.to_string();
         record.error = Some(outcome.to_string());
         record.updated_at = now;
@@ -459,6 +494,12 @@ fn settle_records_in_place(
 ) {
     let reason = "a dispatch cannot survive a restart";
     for (path, mut record) in records {
+        if record.kind == AGENT_PLAN_KIND
+            && record.status == "pending"
+            && approval_landed(data_dir, &record.request_id)
+        {
+            record.status = "approved".into();
+        }
         let lost = matches!(record.status.as_str(), "approved" | "dispatching");
         let owed = record.status == "unresolved" && !record.audit_recorded;
         let down = record.status == "pending"
@@ -481,7 +522,7 @@ fn settle_records_in_place(
                     continue;
                 }
             }
-            if instance_end_audit_landed(data_dir, &record.request_id) {
+            if instance_end_audit_landed(data_dir, &record.request_id, record.updated_at) {
                 record.audit_recorded = true;
                 let _ = write_inspect_action_at_path(&path, &record);
                 continue;
@@ -524,7 +565,7 @@ fn settle_records_in_place(
                 continue;
             }
         }
-        if unresolved_audit_landed(data_dir, &record.request_id) {
+        if unresolved_audit_landed(data_dir, &record.request_id, record.updated_at) {
             record.audit_recorded = true;
             let _ = write_inspect_action_at_path(&path, &record);
             continue;
@@ -583,7 +624,8 @@ fn record_terminal_audit(data_dir: &Path, path: &Path, record: &mut InspectActio
     } else {
         "agent.plan.closed"
     };
-    if plan_row_landed(data_dir, event_type, &status, &record.request_id) {
+    let at = record.updated_at;
+    if plan_row_landed(data_dir, event_type, &status, &record.request_id, at) {
         record.audit_recorded = true;
         let _ = write_inspect_action_at_path(path, record);
         return;
@@ -600,37 +642,48 @@ fn record_terminal_audit(data_dir: &Path, path: &Path, record: &mut InspectActio
     let _ = write_inspect_action_at_path(path, record);
 }
 
-fn plan_row_landed(data_dir: &Path, event_type: &str, result: &str, request_id: &str) -> bool {
+fn row_rolled_off(state: &crate::auth::AuthState, at: u64) -> bool {
+    let oldest = state.audit.first().map(|event| event.occurred_at);
+    !(state.audit_chain_anchor.is_none() || oldest.is_some_and(|oldest| oldest < at))
+}
+
+fn plan_row_landed(
+    data_dir: &Path,
+    event_type: &str,
+    result: &str,
+    request_id: &str,
+    at: u64,
+) -> bool {
     crate::auth::load_auth_state(data_dir)
         .map(|state| {
             state.audit.iter().any(|event| {
                 event.event_type == event_type
                     && event.result == result
                     && event.challenge_id.as_deref() == Some(request_id)
-            })
+            }) || row_rolled_off(&state, at)
         })
         .unwrap_or(false)
 }
 
-fn instance_end_audit_landed(data_dir: &Path, request_id: &str) -> bool {
+fn instance_end_audit_landed(data_dir: &Path, request_id: &str, at: u64) -> bool {
     crate::auth::load_auth_state(data_dir)
         .map(|state| {
             state.audit.iter().any(|event| {
                 event.event_type == "agent.plan.closed"
                     && event.result == "instance ended"
                     && event.challenge_id.as_deref() == Some(request_id)
-            })
+            }) || row_rolled_off(&state, at)
         })
         .unwrap_or(false)
 }
 
-fn unresolved_audit_landed(data_dir: &Path, request_id: &str) -> bool {
+fn unresolved_audit_landed(data_dir: &Path, request_id: &str, at: u64) -> bool {
     crate::auth::load_auth_state(data_dir)
         .map(|state| {
             state.audit.iter().any(|event| {
                 event.event_type == "agent_plan.dispatch.unresolved"
                     && event.challenge_id.as_deref() == Some(request_id)
-            })
+            }) || row_rolled_off(&state, at)
         })
         .unwrap_or(false)
 }
@@ -1105,6 +1158,272 @@ mod tests {
                 .unwrap()
                 .status,
             "approved"
+        );
+    }
+    fn audit_rows(
+        dir: &std::path::Path,
+        event_type: &str,
+        result: &str,
+        request_id: &str,
+    ) -> usize {
+        crate::auth::load_auth_state(dir)
+            .unwrap()
+            .audit
+            .iter()
+            .filter(|event| {
+                event.event_type == event_type
+                    && event.result == result
+                    && event.challenge_id.as_deref() == Some(request_id)
+            })
+            .count()
+    }
+
+    fn planted_pending(dir: &std::path::Path) -> (String, serde_json::Value) {
+        let created = super::super::submit_pending_agent_plan(
+            dir,
+            "person:owner",
+            "agent:v2:0123456789abcdef0123456789abcdef",
+            "capsule:agent-host",
+            "session:agent-1",
+            &serde_json::json!({
+                "steps": [{ "scheme": "availability", "operation": "status", "request": {} }]
+            }),
+            1,
+        )
+        .unwrap();
+        let request_id = created["request_id"].as_str().unwrap().to_string();
+        (request_id, created["request_binding"].clone())
+    }
+
+    /// The approval row is signed and the plan file write then fails. The file
+    /// becomes approved from that row. Inbox has nothing to approve or deny,
+    /// and a second approval or a denial adds no row.
+    #[test]
+    fn a_failed_plan_file_write_after_the_signed_approval_is_reconciled() {
+        let dir = tempfile::tempdir().unwrap();
+        let owner = "person:owner";
+        let (request_id, binding) = planted_pending(dir.path());
+        crate::api::gateway::seams::arm_grant_kind(dir.path(), "plan-file");
+        let approved = super::claim_pending_agent_plan_for_owner(
+            dir.path(),
+            &request_id,
+            owner,
+            true,
+            &binding,
+            2,
+            |record, audit_first| {
+                if audit_first {
+                    super::super::append_agent_plan_decision_audit(
+                        dir.path(),
+                        record,
+                        "agent.plan.approved",
+                        "approved",
+                    )?;
+                }
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(approved.status, "approved");
+        assert_eq!(
+            super::read_inspect_action_record(dir.path(), &request_id)
+                .unwrap()
+                .status,
+            "approved"
+        );
+        assert!(
+            super::pending_inspect_action_requests(dir.path(), owner)
+                .unwrap()
+                .is_empty(),
+            "Inbox still offers Approve/Deny"
+        );
+        assert_eq!(
+            audit_rows(dir.path(), "agent.plan.approved", "approved", &request_id),
+            1
+        );
+        let denied = super::super::deny_agent_plan_request(dir.path(), owner, &request_id);
+        assert!(denied.is_err(), "Deny was offered on an approved plan");
+        assert_eq!(
+            audit_rows(dir.path(), "agent.plan.closed", "denied", &request_id),
+            0
+        );
+        let again = super::claim_pending_agent_plan_for_owner(
+            dir.path(),
+            &request_id,
+            owner,
+            true,
+            &binding,
+            3,
+            |_, audit_first| {
+                if audit_first {
+                    super::super::append_agent_plan_decision_audit(
+                        dir.path(),
+                        &super::read_inspect_action_record(dir.path(), &request_id).unwrap(),
+                        "agent.plan.approved",
+                        "approved",
+                    )?;
+                }
+                Ok(())
+            },
+        );
+        assert!(again.is_err(), "a second approval was accepted");
+        assert_eq!(
+            audit_rows(dir.path(), "agent.plan.approved", "approved", &request_id),
+            1,
+            "the approval row was signed twice"
+        );
+    }
+
+    /// The process dies after the signed approval and before the file write.
+    /// Restart settles that pending plan as unresolved, once, and Inbox does
+    /// not offer Approve or Deny on it.
+    #[test]
+    fn a_crash_after_the_signed_approval_settles_unresolved_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let owner = "person:owner";
+        let (request_id, _) = planted_pending(dir.path());
+        let record = super::read_inspect_action_record(dir.path(), &request_id).unwrap();
+        super::super::append_agent_plan_decision_audit(
+            dir.path(),
+            &record,
+            "agent.plan.approved",
+            "approved",
+        )
+        .unwrap();
+        assert_eq!(record.status, "pending");
+        assert!(
+            super::pending_inspect_action_requests(dir.path(), owner)
+                .unwrap()
+                .is_empty(),
+            "Inbox offers Approve/Deny for a plan that is already signed approved"
+        );
+        let denied = super::super::deny_agent_plan_request(dir.path(), owner, &request_id);
+        assert!(
+            denied.is_err(),
+            "Deny closed a plan that was already approved"
+        );
+        assert_eq!(
+            super::read_inspect_action_record(dir.path(), &request_id)
+                .unwrap()
+                .status,
+            "pending"
+        );
+        assert_eq!(
+            audit_rows(dir.path(), "agent.plan.closed", "denied", &request_id),
+            0
+        );
+        super::settle_agent_plans_lost_before_start(dir.path(), 4).unwrap();
+        let settled = super::read_inspect_action_record(dir.path(), &request_id).unwrap();
+        assert_eq!(settled.status, "unresolved");
+        assert_ne!(settled.status, "instance ended");
+        assert_eq!(
+            audit_rows(
+                dir.path(),
+                "agent_plan.dispatch.unresolved",
+                "unresolved",
+                &request_id
+            ),
+            1
+        );
+        assert_eq!(
+            audit_rows(dir.path(), "agent.plan.approved", "approved", &request_id),
+            1
+        );
+        super::settle_agent_plans_lost_before_start(dir.path(), 5).unwrap();
+        assert_eq!(
+            audit_rows(
+                dir.path(),
+                "agent_plan.dispatch.unresolved",
+                "unresolved",
+                &request_id
+            ),
+            1,
+            "restart signed the unresolved row twice"
+        );
+        assert!(super::pending_inspect_action_requests(dir.path(), owner)
+            .unwrap()
+            .is_empty());
+    }
+
+    /// A terminal plan whose signed row has rolled off the kept audit, with
+    /// the file still saying the row was not recorded. Restart does not sign
+    /// that terminal row again.
+    #[test]
+    fn a_rolled_off_terminal_plan_is_not_signed_twice() {
+        let dir = tempfile::tempdir().unwrap();
+        let (request_id, _) = planted_pending(dir.path());
+        let mut record = super::read_inspect_action_record(dir.path(), &request_id).unwrap();
+        record.status = "completed".to_string();
+        record.audit_recorded = false;
+        record.updated_at = 1_700_000_000;
+        super::write_inspect_action_record(dir.path(), &record).unwrap();
+        crate::auth::append_audit_event(
+            dir.path(),
+            elastos_runtime::auth::RuntimeAuditEventV1 {
+                schema: elastos_runtime::auth::RuntimeAuditEventV1::SCHEMA.to_string(),
+                event_id: "audit:terminal:completed".to_string(),
+                event_type: "agent_plan.dispatch.completed".to_string(),
+                principal_id: Some("person:owner".to_string()),
+                proof_binding_id: None,
+                session_id: Some("session:agent-1".to_string()),
+                challenge_id: Some(request_id.clone()),
+                capsule_id: Some("capsule:agent-host".to_string()),
+                result: "completed".to_string(),
+                reason: "completed".to_string(),
+                occurred_at: 1_700_000_000,
+                signer_did: None,
+                signature: None,
+            },
+        )
+        .unwrap();
+        for index in 0..513u64 {
+            crate::auth::append_audit_event(
+                dir.path(),
+                elastos_runtime::auth::RuntimeAuditEventV1 {
+                    schema: elastos_runtime::auth::RuntimeAuditEventV1::SCHEMA.to_string(),
+                    event_id: format!("audit:pad:{index}"),
+                    event_type: "audit.pad".to_string(),
+                    principal_id: Some("person:owner".to_string()),
+                    proof_binding_id: None,
+                    session_id: None,
+                    challenge_id: None,
+                    capsule_id: None,
+                    result: "ok".to_string(),
+                    reason: "pad".to_string(),
+                    occurred_at: 1_700_000_001 + index,
+                    signer_did: None,
+                    signature: None,
+                },
+            )
+            .unwrap();
+        }
+        let state = crate::auth::load_auth_state(dir.path()).unwrap();
+        assert!(state.audit_chain_anchor.is_some(), "the chain did not roll");
+        assert_eq!(
+            audit_rows(
+                dir.path(),
+                "agent_plan.dispatch.completed",
+                "completed",
+                &request_id
+            ),
+            0,
+            "the pad did not roll the terminal row off the kept audit"
+        );
+        super::settle_agent_plans_lost_before_start(dir.path(), 9).unwrap();
+        assert_eq!(
+            audit_rows(
+                dir.path(),
+                "agent_plan.dispatch.completed",
+                "completed",
+                &request_id
+            ),
+            0,
+            "startup signed a second terminal row"
+        );
+        assert!(
+            super::read_inspect_action_record(dir.path(), &request_id)
+                .unwrap()
+                .audit_recorded
         );
     }
 }

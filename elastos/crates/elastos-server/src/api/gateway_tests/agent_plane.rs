@@ -4108,3 +4108,158 @@ async fn two_list_loads_retry_a_failed_stop_once() {
     assert_ne!(rows[1].result, "failed");
     gateway.shutdown().await;
 }
+
+fn ok_stops(data: &Path, session: &str) -> usize {
+    stopped_rows(data)
+        .iter()
+        .filter(|event| event.result == "ok" && event.session_id.as_deref() == Some(session))
+        .count()
+}
+
+async fn two_live_agents(home: &Home) -> (Gateway, String, String) {
+    let dir = home._temp.path().join("probe");
+    let cid = sign_probe(&dir);
+    let first = home.create_agent("One", &cid);
+    let second = home.create_agent("Two", &cid);
+    let gateway = Gateway::start(&home.data).await;
+    let one = home.launch(&first, &dir).await;
+    let two = home.launch(&second, &dir).await;
+    (gateway, one, two)
+}
+
+/// Sign fails on the first of two running agents. Both stops were owed before
+/// the stop. The loop signs the other one. A retry of Agents Off signs the
+/// one that failed, once.
+#[tokio::test]
+async fn a_failed_first_stop_signature_owes_both_and_signs_each_once() {
+    let home = Home::open();
+    let (gateway, one, two) = two_live_agents(&home).await;
+    super::super::gateway_agents::fail_next_agent_audit(&home.data);
+    let (status, body) = post_json(
+        &gateway.addr,
+        &system_token(&home),
+        "/api/apps/system/agents/disable",
+        "{}",
+    )
+    .await;
+    assert_ne!(status, 200, "{body}");
+    let owed = crate::agents::owed_stop_rows(&home.data);
+    let owed_one = owed
+        .iter()
+        .any(|row| row.session_id.as_deref() == Some(one.as_str()));
+    let owed_two = owed
+        .iter()
+        .any(|row| row.session_id.as_deref() == Some(two.as_str()));
+    let signed = |session: &str| {
+        stopped_rows(&home.data)
+            .iter()
+            .any(|row| row.session_id.as_deref() == Some(session))
+    };
+    assert!(
+        (owed_one || signed(&one)) && (owed_two || signed(&two)),
+        "a running session was neither owed nor signed: owed={owed:?}"
+    );
+    assert!(
+        owed_one || owed_two,
+        "the failed signature left nothing owed: {owed:?}"
+    );
+    assert!(
+        signed(&one) || signed(&two),
+        "Agents Off stopped at the first signature failure"
+    );
+    let (retry, retry_body) = post_json(
+        &gateway.addr,
+        &system_token(&home),
+        "/api/apps/system/agents/disable",
+        "{}",
+    )
+    .await;
+    assert_eq!(retry, 200, "{retry_body}");
+    assert_eq!(
+        ok_stops(&home.data, &one),
+        1,
+        "session one was not signed once"
+    );
+    assert_eq!(
+        ok_stops(&home.data, &two),
+        1,
+        "session two was not signed once"
+    );
+    assert!(crate::agents::owed_stop_rows(&home.data).is_empty());
+    let (again, again_body) = post_json(
+        &gateway.addr,
+        &system_token(&home),
+        "/api/apps/system/agents/disable",
+        "{}",
+    )
+    .await;
+    assert_eq!(again, 200, "{again_body}");
+    assert_eq!(
+        ok_stops(&home.data, &one),
+        1,
+        "retry signed session one twice"
+    );
+    assert_eq!(
+        ok_stops(&home.data, &two),
+        1,
+        "retry signed session two twice"
+    );
+    gateway.shutdown().await;
+}
+
+/// Both guests are stopped and the process dies before either stop is signed.
+/// Restart signs each once.
+#[tokio::test]
+async fn a_crash_after_agents_off_stops_signs_both_once_on_restart() {
+    let home = Home::open();
+    let (gateway, one, two) = two_live_agents(&home).await;
+    super::seams::arm_grant_kind(&home.data, "after-off-stop");
+    let (status, body) = post_json(
+        &gateway.addr,
+        &system_token(&home),
+        "/api/apps/system/agents/disable",
+        "{}",
+    )
+    .await;
+    assert_ne!(status, 200, "{body}");
+    assert_eq!(ok_stops(&home.data, &one), 0);
+    assert_eq!(ok_stops(&home.data, &two), 0);
+    let owed = crate::agents::owed_stop_rows(&home.data);
+    assert!(
+        owed.iter()
+            .any(|row| row.session_id.as_deref() == Some(one.as_str())),
+        "the first stop was not owed: {owed:?}"
+    );
+    assert!(
+        owed.iter()
+            .any(|row| row.session_id.as_deref() == Some(two.as_str())),
+        "the second stop was not owed: {owed:?}"
+    );
+    let owed_ids: Vec<String> = owed.iter().map(|row| row.event_id.clone()).collect();
+    gateway.shutdown().await;
+    // Agents are off, so the restarted gateway has no plane address.
+    for _ in 0..2 {
+        let mut restarted = Gateway::start(&home.data).await;
+        let _ = restarted.stop.take().unwrap().send(());
+        restarted.task.await.unwrap().unwrap();
+    }
+    assert_eq!(
+        ok_stops(&home.data, &one),
+        1,
+        "restart signed session one twice or not at all"
+    );
+    assert_eq!(
+        ok_stops(&home.data, &two),
+        1,
+        "restart signed session two twice or not at all"
+    );
+    let signed = stopped_rows(&home.data);
+    for id in &owed_ids {
+        assert_eq!(
+            signed.iter().filter(|row| row.event_id == *id).count(),
+            1,
+            "owed stop {id} was not signed once: {signed:?}"
+        );
+    }
+    assert!(crate::agents::owed_stop_rows(&home.data).is_empty());
+}
