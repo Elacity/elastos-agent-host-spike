@@ -1,0 +1,111 @@
+# Linux evidence for M1 checks B4 and C9.
+#
+# The helper runs lab/linux-confine, lab/fail-closed-linux and lab/owned-storage
+# when those folders are on the branch. A missing folder is a skip. A skip is
+# not a pass. A check is proven only when the lanes that ran all exited 0 and
+# a passing lane recorded both of these lines:
+#
+#   CI-LINUX-ROW B4 permitted <reason>
+#   CI-LINUX-ROW B4 refused <reason>
+#   CI-LINUX-ROW C9 permitted <reason>
+#   CI-LINUX-ROW C9 refused <reason>
+#
+# B4.suffix and C9.suffix count for that check. The evidence file is the
+# record of the run. confinement_proven is yes only when both checks are proven.
+name: Lab Linux matrix
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - .github/workflows/lab-linux-matrix.yml
+      - lab/ci-linux/**
+      - lab/linux-confine/**
+      - lab/fail-closed-linux/**
+      - lab/owned-storage/**
+      - rust-toolchain.toml
+  push:
+    branches:
+      - spike/agent-host
+    paths:
+      - .github/workflows/lab-linux-matrix.yml
+      - lab/ci-linux/**
+      - lab/linux-confine/**
+      - lab/fail-closed-linux/**
+      - lab/owned-storage/**
+      - rust-toolchain.toml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: lab-linux-matrix-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  linux:
+    name: ${{ matrix.platform }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: bash
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux-x86-64
+            os: ubuntu-24.04
+          - platform: linux-aarch64
+            os: ubuntu-24.04-arm
+    env:
+      LAB_LINUX_PLATFORM: ${{ matrix.platform }}
+      LAB_LINUX_RUNS_ON: ${{ matrix.os }}
+      CARGO_TERM_COLOR: never
+      RUST_TEST_THREADS: "2"
+    steps:
+      - name: check out the branch
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+
+      - name: see whether a lane needs Rust
+        id: lanes
+        run: |
+          set -euo pipefail
+          need=false
+          for lane in linux-confine fail-closed-linux owned-storage; do
+            if [[ -f lab/$lane/Cargo.toml || -f lab/$lane/run-ci-linux.sh ]]; then
+              need=true
+            fi
+          done
+          echo "need_rust=$need" >> "$GITHUB_OUTPUT"
+          echo "Rust is required: $need"
+
+      - name: install the pinned Rust toolchain
+        if: steps.lanes.outputs.need_rust == 'true'
+        uses: dtolnay/rust-toolchain@72504271e02fb719eb4eb3eaece3a8e3d06f57c0 # 1.91.0
+        with:
+          toolchain: 1.91.0
+
+      - name: test the evidence helper
+        run: python3 -I lab/ci-linux/test_run.py
+
+      - name: write platform evidence
+        id: evidence
+        run: |
+          set -euo pipefail
+          python3 -I lab/ci-linux/run.py \
+            --platform "$LAB_LINUX_PLATFORM" \
+            --root "$GITHUB_WORKSPACE" \
+            --evidence-dir "$RUNNER_TEMP/lab-linux-evidence" \
+            --command-timeout 1200
+
+      - name: upload platform evidence
+        if: always()
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        with:
+          name: lab-linux-evidence-${{ matrix.platform }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/lab-linux-evidence/evidence.txt
+          if-no-files-found: error
+          retention-days: 14
