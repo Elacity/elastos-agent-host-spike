@@ -8734,11 +8734,18 @@ mod tests {
         let good = users.join("good.bin");
         plant_device_envelope(&good, &device_key, b"good");
         let _ = take_localhost_migration_bytes_read();
+        let _ = take_localhost_migration_opens();
         migrate_again(root.path(), &device_key);
         let read = take_localhost_migration_bytes_read();
         assert!(
             read < 1024 * 1024,
             "a 20 MiB plain record was read whole: {read}"
+        );
+        // Pass one opens four files. Pass two opens only the old good file again.
+        assert_eq!(
+            take_localhost_migration_opens(),
+            5,
+            "pass two opened a settled file"
         );
         home_is_up(root.path());
         assert_eq!(fs::read(users.join("record.json")).unwrap(), record);
