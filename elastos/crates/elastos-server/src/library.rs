@@ -4080,6 +4080,44 @@ pub fn object_helper_init_extra(data_dir: &Path, did: &str) -> Value {
     })
 }
 
+// Fence cannot widen: restart object helper when storage roots change; refuse writes until then.
+type ObjectHelperSlot = Option<(
+    PathBuf,
+    Result<Vec<String>, String>,
+    tokio::sync::mpsc::UnboundedSender<()>,
+)>;
+static OBJECT_HELPER: std::sync::Mutex<ObjectHelperSlot> = std::sync::Mutex::new(None);
+
+pub fn remember_object_helper(data_dir: &Path, kick: tokio::sync::mpsc::UnboundedSender<()>) {
+    let roots = crate::api::capsule_inventory::read_active_storage_grants(data_dir);
+    *OBJECT_HELPER.lock().unwrap_or_else(|e| e.into_inner()) =
+        Some((data_dir.to_path_buf(), roots, kick));
+}
+
+pub fn library_write_refused_while_object_roots_change(data_dir: &Path) -> anyhow::Result<()> {
+    let guard = OBJECT_HELPER.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((dir, roots, _)) = guard.as_ref() {
+        if dir == data_dir
+            && roots != &crate::api::capsule_inventory::read_active_storage_grants(data_dir)
+        {
+            bail!("library write was not saved: retry after the object helper restarts");
+        }
+    }
+    Ok(())
+}
+
+pub fn after_capsule_install_saved(data_dir: &Path) {
+    let guard = OBJECT_HELPER.lock().unwrap_or_else(|e| e.into_inner());
+    let Some((dir, roots, kick)) = guard.as_ref() else {
+        return;
+    };
+    if dir == data_dir
+        && roots != &crate::api::capsule_inventory::read_active_storage_grants(data_dir)
+    {
+        let _ = kick.send(());
+    }
+}
+
 /// The start walk's folder-depth rule for Library writes (#449). Home does
 /// not start while a protected folder is 16 or more folders below its root,
 /// so Library refuses to create such a file or folder, by write, upload,
@@ -9219,6 +9257,25 @@ fn anyhow_error_detail(error: &anyhow::Error) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn object_helper_kicks_a_restart_when_storage_roots_change() {
+        let data = tempfile::tempdir().unwrap();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        super::remember_object_helper(data.path(), tx);
+        assert!(super::library_write_refused_while_object_roots_change(data.path()).is_ok());
+        std::fs::write(data.path().join("components.json"), b"{").unwrap();
+        let refused = super::library_write_refused_while_object_roots_change(data.path())
+            .expect_err("roots changed");
+        assert!(
+            refused
+                .to_string()
+                .contains("retry after the object helper restarts"),
+            "{refused}"
+        );
+        super::after_capsule_install_saved(data.path());
+        assert_eq!(rx.try_recv().ok(), Some(()));
+    }
+
     #[test]
     fn archive_preview_viewers_match_the_unfenced_answer_including_an_empty_list() {
         let data = tempfile::tempdir().unwrap();

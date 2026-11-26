@@ -390,6 +390,25 @@ impl AdmittedProvider {
         Self::admit_with_bin_dir(data_dir, key, bin_dir.as_deref(), &signers)
     }
 
+    /// Admit exact `binary_path` (name must be `key`) against this Home's signed release.
+    pub fn admit_path(
+        data_dir: &Path,
+        key: &str,
+        binary_path: &Path,
+    ) -> anyhow::Result<Option<Self>> {
+        anyhow::ensure!(
+            binary_path.file_name().and_then(|n| n.to_str()) == Some(key) && binary_path.is_file(),
+            "component '{key}' path {} is refused by name",
+            binary_path.display()
+        );
+        Self::admit_with_bin_dir(
+            data_dir,
+            key,
+            binary_path.parent(),
+            &setup::installed_release_signers(data_dir)?,
+        )
+    }
+
     fn admit_with_bin_dir(
         data_dir: &Path,
         key: &str,
@@ -1258,18 +1277,23 @@ mod tests {
         // The two heads; an alias or a free function over the type adds one.
         assert_eq!(code.matches(&type_name).count(), 2);
         let maker_name = ["admit_with", "_bin_dir"].concat();
-        // The maker stays private and has one caller, `admit`.
+        // The maker stays private and has two callers, `admit` and `admit_path`.
         let maker_line = format!("\n    fn {maker_name}(\n");
         assert_eq!(code.matches(&maker_line).count(), 1);
-        assert_eq!(code.matches(&maker_name).count(), 2);
-        let admit_at = code.find("fn admit(").unwrap();
-        let admit_body = &code[admit_at..][..code[admit_at..].find("\n    }\n").unwrap()];
-        assert!(admit_body.contains(&format!("Self::{maker_name}(")));
+        assert_eq!(code.matches(&maker_name).count(), 3);
+        for name in ["admit", "admit_path"] {
+            let at = code.find(&format!("fn {name}(")).unwrap();
+            let body = &code[at..][..code[at..].find("\n    }\n").unwrap()];
+            assert!(
+                body.contains(&format!("Self::{maker_name}(")),
+                "{name} must call the maker"
+            );
+        }
         // No `mut self`, `&mut self` or `&mut Self`: nothing changes a made value.
         let impl_at = code.find(&impl_head).unwrap();
         let impl_block = &code[impl_at..][..code[impl_at..].find("\n}\n").unwrap()];
         assert!(!impl_block.contains("mut"), "{impl_block}");
-        for accessor in ["admit", "key", "path", "authority"] {
+        for accessor in ["admit", "admit_path", "key", "path", "authority"] {
             assert!(impl_block.contains(&format!("pub fn {accessor}(")));
         }
         for accessor in ["checksum", "signer_did"] {
@@ -1287,6 +1311,18 @@ mod tests {
             "a Self literal outside the maker"
         );
     }
+    #[cfg(unix)]
+    #[test]
+    fn admit_path_refuses_a_mismatched_file_name() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("not-chain-provider");
+        std::fs::write(&path, b"x").unwrap();
+        let err = AdmittedProvider::admit_path(temp.path(), "chain-provider", &path)
+            .err()
+            .expect("refused");
+        assert!(err.to_string().contains("refused by name"), "{err}");
+    }
+
     #[cfg(unix)]
     /// R7 VALIDATE: a manifest that `validate()` refuses is not admitted.
     #[test]

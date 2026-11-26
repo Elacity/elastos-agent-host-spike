@@ -1164,6 +1164,36 @@ async fn musl_release_helpers_start_under_the_fence() {
     let _ = renamed_uri;
     bridge.shutdown().await.unwrap();
 
+    let chain = elastos_runtime::provider::ProviderBridge::spawn_path_allow(
+        "chain-provider",
+        &authority(),
+        &pinned(&chain_bin, &data),
+        &data,
+        elastos_runtime::provider::BridgeProviderConfig {
+            base_path: data.display().to_string(),
+            extra: serde_json::json!({
+                "networks": [{
+                    "id": "dns-probe",
+                    "display_name": "DNS Probe",
+                    "kind": "evm_json_rpc",
+                    "chain_id": 1,
+                    "native_symbol": "ETH",
+                    "provider": "probe",
+                    "mainnet": false,
+                    "explorer_url": null,
+                    "rpc_url": "https://musl-fence.invalid/rpc"
+                }]
+            }),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap_or_else(|err| panic!("musl chain init failed: {err}"));
+    let listed = exchange(chain.bridge(), serde_json::json!({"op": "networks"})).await;
+    assert_eq!(
+        listed["status"], "ok",
+        "musl chain networks after start: {listed}"
+    );
     let resolv = std::fs::read_to_string("/etc/resolv.conf").unwrap_or_default();
     let loopback_nameserver = resolv.lines().any(|line| {
         let mut parts = line.split_whitespace();
@@ -1175,31 +1205,6 @@ async fn musl_release_helpers_start_under_the_fence() {
             "musl fence: this machine has no loopback nameserver, so the chain DNS leg is not run"
         );
     } else {
-        let chain = elastos_runtime::provider::ProviderBridge::spawn_path_allow(
-            "chain-provider",
-            &authority(),
-            &pinned(&chain_bin, &data),
-            &data,
-            elastos_runtime::provider::BridgeProviderConfig {
-                base_path: data.display().to_string(),
-                extra: serde_json::json!({
-                    "networks": [{
-                        "id": "dns-probe",
-                        "display_name": "DNS Probe",
-                        "kind": "evm_json_rpc",
-                        "chain_id": 1,
-                        "native_symbol": "ETH",
-                        "provider": "probe",
-                        "mainnet": false,
-                        "explorer_url": null,
-                        "rpc_url": "https://musl-fence.invalid/rpc"
-                    }]
-                }),
-                ..Default::default()
-            },
-        )
-        .await
-        .unwrap_or_else(|err| panic!("musl chain init failed: {err}"));
         let lookup = exchange(
             chain.bridge(),
             serde_json::json!({"op": "status", "network": "dns-probe"}),
@@ -1217,8 +1222,8 @@ async fn musl_release_helpers_start_under_the_fence() {
             again["status"], "ok",
             "chain stayed up after the lookup: {again}"
         );
-        chain.bridge().shutdown().await.unwrap();
     }
+    chain.bridge().shutdown().await.unwrap();
     recovery_kit_round_trip(&object_bin).await;
     eprintln!("musl helper fence: started");
 }

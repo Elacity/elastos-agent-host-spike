@@ -55,4 +55,6 @@
 # +18: round 30 gives landlock_plan, HEAD and AdmittedRights::admits the path_allow cfg,
 # so an unsupported Unix builds under -D warnings (+27), and the forked child closes
 # descriptors from a list sorted before fork (-11). Measured 26 Nov 2026.
-15261
+# +2: round 31 sets the launch fd in with_launch_fd and verifies once at spawn.
+# Measured 26 Nov 2026.
+15263

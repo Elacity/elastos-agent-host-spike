@@ -121,16 +121,17 @@ pub(super) fn start(
     // A test may replace the opened directory after its identity is in the plan.
     apply_pre_fork_storage_swap(storage.path);
     let _hold_verified = verified;
-    LAUNCH_FD.with(|slot| slot.set(_hold_verified.fd()));
-    launch(
-        &prepared,
-        executable,
-        args,
-        NORMAL_TEST_HOOK,
-        stdin_read,
-        stdout_write,
-        None,
-    )
+    with_launch_fd(_hold_verified.fd(), || {
+        launch(
+            &prepared,
+            executable,
+            args,
+            NORMAL_TEST_HOOK,
+            stdin_read,
+            stdout_write,
+            None,
+        )
+    })
 }
 
 /// Start a child whose Landlock plan and seccomp filter are already prepared.
@@ -286,16 +287,16 @@ fn launch(
     stdout_write: Option<i32>,
     data_dir: Option<&CStr>,
 ) -> Result<libc::pid_t, LaunchError> {
-    // The census reads this call. A launch that already holds the verified
-    // descriptor uses that descriptor for the rule and for exec.
-    let verified_owned = executable
-        .verify_at_spawn()
-        .map_err(LaunchError::BeforeFork)?;
+    // One verify: with_launch_fd already checked a staged descriptor.
     let staged = LAUNCH_FD.with(|slot| slot.replace(-1));
+    let held;
     let executable_fd = if staged >= 0 {
         staged
     } else {
-        verified_owned.fd()
+        held = executable
+            .verify_at_spawn()
+            .map_err(LaunchError::BeforeFork)?;
+        held.fd()
     };
     let path = CString::new(executable.path().as_os_str().as_bytes())
         .map_err(|_| LaunchError::BeforeFork("provider executable path contains NUL".into()))?;

@@ -581,6 +581,39 @@ async fn spawn_allow_listed_provider(
     Ok(Arc::clone(confined.bridge()))
 }
 
+async fn restart_object_helper_for_roots(
+    registry: &provider::ProviderRegistry,
+    data_dir: &Path,
+    key: &[u8; 32],
+    kick: tokio::sync::mpsc::UnboundedSender<()>,
+) {
+    let (Ok(config), Ok(Some(path))) = (
+        object_provider_bridge_config(data_dir, key),
+        binaries::resolve_verified_native_provider_binary_with_data_dir(
+            data_dir,
+            "object-provider",
+        ),
+    ) else {
+        return;
+    };
+    let checked = checked_native_provider_with_data_dir(data_dir, &path);
+    let component = "object-provider";
+    let Ok(bridge) = spawn_allow_listed_provider(component, &checked, data_dir, config).await
+    else {
+        return;
+    };
+    let provider: Arc<dyn provider::Provider> =
+        Arc::new(provider::CapsuleProvider::with_scheme(bridge, "object"));
+    let _ = registry.unregister_sub_provider("object").await;
+    if registry
+        .register_sub_provider("object", provider)
+        .await
+        .is_ok()
+    {
+        elastos_server::library::remember_object_helper(data_dir, kick);
+    }
+}
+
 /// Windows fences are P2-11, parked. This arm keeps `ProviderBridge::spawn`,
 /// the call Home used before the Unix fence. On Windows that spawn refuses
 /// before a process (`bridge_windows`). Home itself does not start on Windows
@@ -920,15 +953,18 @@ pub(crate) async fn register_chain_provider_plane(
         anyhow::bail!("protected-content chain configuration names no protected_content_network");
     }
     let generic_config = chain_provider_bridge_config_without_protected_network(&runtime_issuer);
-    // Admit against the signed release of the Home this chain plane serves.
+    // Admit the exact binary this plane was given against the Home it serves.
     // The chain process starts inside its own path allow-list.
-    let authority = binaries::AdmittedProvider::admit(data_dir, "chain-provider")
+    let authority = binaries::AdmittedProvider::admit_path(data_dir, "chain-provider", binary_path)
         .map_err(|err| anyhow::anyhow!("failed to admit chain-provider: {err}"))?
         .ok_or_else(|| anyhow::anyhow!("failed to admit chain-provider: no signed authority"))?;
+    let checked = authority
+        .checked_executable(data_dir)
+        .map_err(|err| anyhow::anyhow!("failed to admit chain-provider: {err}"))?;
     let confined = provider::ProviderBridge::spawn_path_allow(
         "chain-provider",
         authority.authority(),
-        &checked_native_provider_with_data_dir(data_dir, binary_path),
+        &checked,
         data_dir,
         generic_config,
     )
@@ -1333,6 +1369,22 @@ async fn setup_server_infrastructure_impl(
                                 "Failed to register elastos://object sub-provider: {}",
                                 e
                             );
+                        } else {
+                            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+                            elastos_server::library::remember_object_helper(&data_dir, tx.clone());
+                            let (registry, key, dir) =
+                                (Arc::clone(&provider_registry), device_key.clone(), data_dir.clone());
+                            tokio::spawn(async move {
+                                while rx.recv().await.is_some() {
+                                    restart_object_helper_for_roots(
+                                        &registry,
+                                        &dir,
+                                        &key,
+                                        tx.clone(),
+                                    )
+                                    .await;
+                                }
+                            });
                         }
                         tracing::info!("object-provider capsule from {}", path.display());
                     }

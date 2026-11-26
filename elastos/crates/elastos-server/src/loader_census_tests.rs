@@ -1210,8 +1210,13 @@ fn native_provider_spawn_routes_keep_the_checked_executable() {
         ),
         (
             "elastos-runtime/src/provider/failure_record.rs",
+            "start",
+            "with_launch_fd(_hold_verified.fd(), ||",
+        ),
+        (
+            "elastos-runtime/src/provider/failure_record.rs",
             "launch",
-            "verify_at_spawn()\n        .map_err(LaunchError::BeforeFork)",
+            ".verify_at_spawn()\n            .map_err(LaunchError::BeforeFork)",
         ),
         (
             "elastos-runtime/src/provider/failure_record.rs",
@@ -1248,7 +1253,22 @@ fn native_provider_spawn_routes_keep_the_checked_executable() {
         (
             "elastos-server/src/server_infra.rs",
             "register_chain_provider_plane",
-            "checked_native_provider_with_data_dir(data_dir, binary_path)",
+            "admit_path(data_dir, \"chain-provider\", binary_path)",
+        ),
+        (
+            "elastos-server/src/server_infra.rs",
+            "register_chain_provider_plane",
+            "checked_executable(data_dir)",
+        ),
+        (
+            "elastos-server/src/setup.rs",
+            "write_installed_manifest",
+            "after_capsule_install_saved(data_dir)",
+        ),
+        (
+            "elastos-server/src/setup.rs",
+            "ensure_capsule_component_for_home_launch",
+            "after_capsule_install_saved(data_dir)",
         ),
         (
             "elastos-server/src/protected_content_runtime.rs",

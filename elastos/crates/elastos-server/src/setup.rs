@@ -1804,6 +1804,7 @@ pub(crate) async fn ensure_capsule_component_for_home_launch(
         .await?;
     }
 
+    crate::library::after_capsule_install_saved(data_dir);
     Ok(CapsuleComponentEnsure {
         name: name.to_string(),
         status: "materialized".to_string(),
@@ -3483,6 +3484,7 @@ pub fn write_installed_manifest(
     fs::create_dir_all(data_dir)?;
     let manifest_bytes = serde_json::to_vec_pretty(&installed_manifest)?;
     atomic_write_file(&data_dir.join("components.json"), &manifest_bytes)?;
+    crate::library::after_capsule_install_saved(data_dir);
     Ok(stamped)
 }
 
