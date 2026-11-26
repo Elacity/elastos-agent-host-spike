@@ -2984,10 +2984,13 @@ mod tests {
         let registry = infrastructure.provider_registry.clone();
         let ask = |request: serde_json::Value| {
             let registry = registry.clone();
+            let data_dir = data_dir.clone();
             async move {
-                registry.send_raw("object", &request).await.unwrap_or_else(
+                let mut reply = registry.send_raw("object", &request).await.unwrap_or_else(
                     |error| serde_json::json!({"status": "error", "message": error.to_string()}),
-                )
+                );
+                elastos_server::library::fill_fenced_library_fields(&data_dir, &mut reply);
+                reply
             }
         };
         // Before anyone signs up, only the device principal exists.
