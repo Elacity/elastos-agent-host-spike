@@ -6440,13 +6440,29 @@ pub(crate) async fn open_runtime_custody_viewer(
         runtime_session_binding,
     };
     if let Some(bytes) = replay_wallet_request.as_deref() {
-        let (_, rights) = runtime_release_wallet_request(
+        let rights = match runtime_release_wallet_request(
             &buy,
             prepared.recipient_identity(),
             &wallet_invocation,
             Some(bytes),
             now,
-        )?;
+        ) {
+            Ok((_, rights)) => rights,
+            Err(error) => {
+                // Like every other failed resume: clear the pending open, so
+                // the next open starts fresh.
+                let _ = settle_runtime_custody_viewer_cleanup(
+                    data_dir,
+                    registry.clone(),
+                    &listing,
+                    &input.principal_id,
+                    mint_id,
+                    open_pending.clone(),
+                )
+                .await;
+                return Err(error);
+            }
+        };
         if !custody_release_round_fits(
             now,
             rights.issued_at(),
