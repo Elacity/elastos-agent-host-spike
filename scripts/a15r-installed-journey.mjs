@@ -1186,25 +1186,29 @@ function planCards(summary) {
   ));
 }
 
-// What the restart has to close, read just before it: a `stopping` row with
-// no later `ok`, or a step still approved or dispatching. Normal `.requested`
-// rows are not unclosed work. After the restart that state is closed: the
-// stop has its `ok` row, or every such step has left approved and dispatching.
-export function restartHistory(before, after, stoppingSession) {
-  const stoppedOk = (chain) => chain.some((event) => (
+// What the restart has to close, read just before it: the held `stopping`
+// session with no `ok` row, and the held step still `dispatching`. After the
+// restart the stop has exactly one `ok` row, and the step is `unresolved`
+// with exactly one signed `agent_plan.dispatch.unresolved` row.
+export function restartHistory(before, after, stoppingSession, heldRequest) {
+  const oks = (chain) => chain.filter((event) => (
     event.event_type === "agent.stopped" && event.result === "ok" && event.session_id === stoppingSession
-  ));
-  const inFlight = (record) => record.status === "approved" || record.status === "dispatching";
-  const stoppingOpen = Boolean(stoppingSession) && !stoppedOk(before.chain);
-  const unresolved = before.records.filter(inFlight).map((record) => record.request_id);
-  const unclosed = stoppingOpen ? "stopping" : (unresolved.length > 0 ? "unresolved" : "");
-  const closed = unclosed === "stopping"
-    ? stoppedOk(after.chain)
-    : unresolved.length > 0 && unresolved.every((id) => {
-      const record = after.records.find((item) => item.request_id === id);
-      return Boolean(record) && !inFlight(record);
-    });
-  return { unclosed, unresolved, closed };
+  )).length;
+  const status = (side) => side.records.find((item) => item.request_id === heldRequest)?.status || "";
+  const lost = after.chain.filter((event) => (
+    event.event_type === "agent_plan.dispatch.unresolved" && event.challenge_id === heldRequest
+  )).length;
+  const stopping = {
+    open: Boolean(stoppingSession) && oks(before.chain) === 0,
+    closed: oks(after.chain) === 1,
+  };
+  const step = {
+    open: Boolean(heldRequest) && status(before) === "dispatching",
+    closed: status(after) === "unresolved" && lost === 1,
+    after: status(after),
+    rows: lost,
+  };
+  return { stopping, step, closed: stopping.open && stopping.closed && step.open && step.closed };
 }
 
 export function planeSameProcess(pid, gatewayPid, listenerOwned, pidAlive, mode) {
@@ -1280,6 +1284,21 @@ function homePids() {
     .filter((row) => executableInsideHome(row.exe, home))
     .map((row) => row.pid);
   return { ok: true, pids };
+}
+
+// This Home's localhost provider processes. Freezing them holds a write open.
+function providerPids() {
+  const listed = homeExecutables();
+  if (!listed.ok) return [];
+  return listed.rows
+    .filter((row) => executableInsideHome(row.exe, home) && path.basename(row.exe) === "localhost-provider")
+    .map((row) => row.pid);
+}
+
+function signalAll(pids, signal) {
+  for (const pid of pids) {
+    try { process.kill(pid, signal); } catch { /* already gone */ }
+  }
 }
 
 async function signalHomePids(pids) {
@@ -1384,7 +1403,8 @@ function coveredByUnitRow() {
     source_commit: process.env.A15R_SOURCE_COMMIT || "",
     result: passed ? "pass" : "fail",
     output,
-    "mid-step stop covered by a unit row, not installed": mid,
+    "mid-step stop also run on the installed Home": "stop_after_the_note_lands, home_restart_history",
+    "host-call panic on the installed Home": "not run: a release build has no panic switch",
   };
 }
 
@@ -1985,9 +2005,10 @@ async function main() {
     && JSON.stringify(interestingFiles()) === filesBeforeReplay;
   keep("replay_zero", replayClean, { status: replay.status, body: replay.text.slice(0, 240) });
 
-  // Step two is agent B's step. Stop B once, while that step is approved or
-  // dispatching and B's note is not on disk. Freeze the gateway for that
-  // look, queue Stop, then let it run. There is no second Stop.
+  // Step two is agent B's step. Its write is held open: this Home's
+  // localhost provider is frozen before the approve, so the step reaches
+  // `dispatching` and stays there with its effect in flight. Stop B once
+  // then, and hold both across the restart. The gateway is not frozen.
   let cardB = null;
   const cardBDeadline = Date.now() + 90000;
   while (Date.now() < cardBDeadline && !cardB) {
@@ -2022,126 +2043,67 @@ async function main() {
     }
   }
   let stopDuringStep = null;
-  let runnerStoppedTooLate = false;
   let stopObserved = cardB ? (approveB ? "" : `no step-up for B: ${stepUpBError}`) : "no plan card for agent B";
-  let frozenLook = "";
-  let approvedB = null;
+  let heldLook = "";
   const noteB = path.join(data, rootSuffix(state.rootB), "Documents", "note.txt");
-  if (approveB) {
-    const approvedPromise = call("POST", "/api/apps/inbox/actions", state.inboxToken, approveB);
-    const gatewayPid = fs.existsSync(pidFile) ? Number(String(fs.readFileSync(pidFile, "utf8")).trim()) : 0;
-    const inflightDeadline = Date.now() + 20000;
-    let inflight = "";
-    while (Date.now() < inflightDeadline) {
-      const record = inspectRecords().find((item) => item.request_id === requestB);
-      const noteThere = fs.existsSync(noteB);
-      const status = record?.status || "";
-      if ((status === "approved" || status === "dispatching") && !noteThere) {
-        inflight = status;
+  const frozenProviders = approveB ? providerPids() : [];
+  if (approveB && frozenProviders.length === 0) stopObserved = "no localhost provider process for this Home";
+  if (approveB && frozenProviders.length > 0) {
+    signalAll(frozenProviders, "SIGSTOP");
+    state.frozenProviders = frozenProviders;
+    // The approve answers when the effect returns, which is after the restart.
+    call("POST", "/api/apps/inbox/actions", state.inboxToken, approveB).catch(() => null);
+    const heldDeadline = Date.now() + 20000;
+    while (Date.now() < heldDeadline) {
+      const status = inspectRecords().find((item) => item.request_id === requestB)?.status || "";
+      if (status === "dispatching" && !fs.existsSync(noteB)) {
+        heldLook = status;
         break;
       }
-      if (noteThere || status === "completed" || status === "denied" || status === "unknown") break;
-      await sleep(5);
+      if (["completed", "denied", "unknown", "failed", "stale"].includes(status)) break;
+      await sleep(20);
     }
-    let frozen = false;
-    if (inflight && gatewayPid > 0) {
-      try {
-        process.kill(gatewayPid, "SIGSTOP");
-        frozen = true;
-        const record = inspectRecords().find((item) => item.request_id === requestB);
-        const noteThere = fs.existsSync(noteB);
-        const status = record?.status || "";
-        if ((status === "approved" || status === "dispatching") && !noteThere) {
-          frozenLook = status;
-        } else {
-          stopObserved = `frozen saw ${status} note=${noteThere}`;
-          inflight = "";
-        }
-      } catch (error) {
-        frozen = false;
-        stopObserved = `SIGSTOP failed: ${error.message || error}`;
-      }
-    }
-    let stopPromise = null;
-    try {
-      if (inflight) {
-        stopPromise = call("POST", "/api/apps/system/agents/stop", state.systemToken, {
-          agent_id: state.agentB,
-        });
-        await sleep(30);
-      }
-    } finally {
-      if (frozen) {
-        try {
-          process.kill(gatewayPid, "SIGCONT");
-        } catch {
-          // The gateway has to leave the stop. A failed continue is recorded below.
-        }
-        frozen = false;
-      }
-    }
-    if (stopPromise) {
-      stopDuringStep = await stopPromise;
-      if (stopDuringStep.status === 409 && String(stopDuringStep.text || "").includes("agent_no_session")) {
-        runnerStoppedTooLate = true;
-        stopObserved = "the runner stopped too late";
-      }
+    if (heldLook) {
+      stopDuringStep = await call("POST", "/api/apps/system/agents/stop", state.systemToken, {
+        agent_id: state.agentB,
+      });
     } else {
-      const record = inspectRecords().find((item) => item.request_id === requestB);
-      const noteThere = fs.existsSync(noteB);
-      if (noteThere || record?.status === "completed") {
-        runnerStoppedTooLate = true;
-        stopObserved = "the runner stopped too late";
-      } else if (!stopObserved) {
-        stopObserved = `no in-flight step; status=${record?.status || "missing"} note=${noteThere}`;
-      }
+      const status = inspectRecords().find((item) => item.request_id === requestB)?.status || "missing";
+      stopObserved = `the step did not stay dispatching; status=${status} note=${fs.existsSync(noteB)}`;
+      signalAll(frozenProviders, "SIGCONT");
+      state.frozenProviders = [];
     }
-    approvedB = await approvedPromise;
   }
-  let settledB = null;
-  const settleBDeadline = Date.now() + 30000;
-  while (requestB && Date.now() < settleBDeadline) {
-    settledB = inspectRecords().find((record) => record.request_id === requestB) || null;
-    if (settledB && !["pending", "approved", "dispatching"].includes(settledB.status)) break;
-    await sleep(300);
-  }
-  const stepOutcome = settledB
-    ? `${settledB.status}${settledB.result?.status ? `/${settledB.result.status}` : ""}`
-    : "";
+  const heldNow = inspectRecords().find((record) => record.request_id === requestB)?.status || "";
   const stopRows = auditEvents().filter((event) => (
     event.event_type === "agent.stopped" && event.session_id === state.launchB?.session_id
   ));
-  const namedStop = stopRows.find((event) => (
-    event.result === "ok" || event.result === "failed" || event.result === "stopping"
-  ));
+  const namedStop = stopRows.find((event) => event.result === "stopping");
   const stopDetail = {
     request_id: requestB,
-    approve: approvedB?.status || 0,
     http: stopDuringStep?.status || 0,
-    frozen: frozenLook,
-    step_outcome: stepOutcome,
+    held: heldLook,
+    status_after_stop: heldNow,
+    note: fs.existsSync(noteB),
     rows: stopRows.map((event) => event.result),
   };
-  if (runnerStoppedTooLate || (!stopDuringStep && stopObserved)) {
-    mark("stop_after_the_note_lands", "fail", { ...stopDetail, body: stopObserved || "the runner stopped too late" });
-  } else if (
-    frozenLook
-    && (stopDuringStep?.status === 200 || stopDuringStep?.status === 202)
+  if (
+    heldLook === "dispatching"
+    && stopDuringStep?.status === 202
     && namedStop
-    && stepOutcome
+    && heldNow === "dispatching"
+    && !stopDetail.note
   ) {
-    pass("stop_after_the_note_lands", {
-      ...stopDetail,
-      session_id: namedStop.session_id,
-      stop_result: namedStop.result,
-    });
+    pass("stop_after_the_note_lands", { ...stopDetail, session_id: namedStop.session_id, stop_result: namedStop.result });
   } else {
     mark("stop_after_the_note_lands", "fail", {
       ...stopDetail,
       body: stopObserved || String(stopDuringStep?.text || "").slice(0, 240),
     });
   }
-  state.stoppingSession = namedStop?.result === "stopping" ? namedStop.session_id : "";
+  state.stoppingSession = namedStop ? namedStop.session_id : "";
+  state.heldRequest = heldNow === "dispatching" ? requestB : "";
+  state.noteB = noteB;
 
   // The runner wrote the owner's note as plain bytes so the write check can
   // hash it. The gateway refuses to start while that file sits in a protected
@@ -2150,7 +2112,53 @@ async function main() {
     try { fs.unlinkSync(ownerDocPath); } catch { /* already gone */ }
   }
 
-  // Agents off needs a live run. B was stopped above, so this is A's run,
+  const beforeRestart = { chain: auditEvents(), records: inspectRecords() };
+  try {
+    await stopServe();
+    state.frozenProviders = [];
+    await startServe();
+    const relaunched = await launchApp(state.homeToken, "inbox");
+    if (relaunched.token) state.inboxToken = relaunched.token;
+    const system = await launchApp(state.homeToken, "system");
+    if (system.token) state.systemToken = system.token;
+    const recordBeforeRestart = JSON.stringify(inspectRecords());
+    const auditsBeforeRestart = JSON.stringify(auditEvents().map((event) => event.event_type));
+    const filesBeforeRestart = JSON.stringify(interestingFiles());
+    const restart = state.approveBody
+      ? await call("POST", "/api/apps/inbox/actions", state.inboxToken, state.approveBody)
+      : { status: 0, text: "no approve body" };
+    const restartClean = restart.status !== 200 && restart.status !== 404
+      && JSON.stringify(inspectRecords()) === recordBeforeRestart
+      && JSON.stringify(auditEvents().map((event) => event.event_type)) === auditsBeforeRestart
+      && JSON.stringify(interestingFiles()) === filesBeforeRestart;
+    keep("restart_zero", restartClean, { status: restart.status, body: restart.text.slice(0, 240) });
+    // Startup settles the held step; a list load settles the held stop.
+    await call("GET", "/api/apps/system/agents", state.systemToken);
+    const chain = auditEvents();
+    const finished = chain.some((event) => String(event.event_type).includes("completed") && event.result === "ok");
+    const history = restartHistory(
+      beforeRestart,
+      { chain, records: inspectRecords() },
+      state.stoppingSession,
+      state.heldRequest,
+    );
+    const noteWritten = Boolean(state.noteB) && fs.existsSync(state.noteB);
+    const detail = {
+      ...history,
+      session_id: state.stoppingSession || "",
+      request_id: state.heldRequest || "",
+      note_written: noteWritten,
+      finished,
+      replay: restart.status,
+    };
+    if (restartClean && finished && history.closed && !noteWritten) pass("home_restart_history", detail);
+    else mark("home_restart_history", "fail", detail);
+  } catch (error) {
+    if (state.frozenProviders?.length) signalAll(state.frozenProviders, "SIGCONT");
+    mark("restart_zero", "fail", String(error.message || error));
+  }
+
+  // Agents off needs a live run, after the restart. B was stopped above, so this is A's run,
   // started again when its first run has ended.
   let liveRun = liveSessions(await capsules(), [state.launchA])[0] || null;
   if (!liveRun) {
@@ -2195,37 +2203,6 @@ async function main() {
       body: again.text.slice(0, 180),
       stopped: Boolean(stoppedLive),
     });
-  }
-
-  const beforeRestart = { chain: auditEvents(), records: inspectRecords() };
-  try {
-    await stopServe();
-    await startServe();
-    const relaunched = await launchApp(state.homeToken, "inbox");
-    if (relaunched.token) state.inboxToken = relaunched.token;
-    const recordBeforeRestart = JSON.stringify(inspectRecords());
-    const auditsBeforeRestart = JSON.stringify(auditEvents().map((event) => event.event_type));
-    const filesBeforeRestart = JSON.stringify(interestingFiles());
-    const restart = state.approveBody
-      ? await call("POST", "/api/apps/inbox/actions", state.inboxToken, state.approveBody)
-      : { status: 0, text: "no approve body" };
-    const restartClean = restart.status !== 200 && restart.status !== 404
-      && JSON.stringify(inspectRecords()) === recordBeforeRestart
-      && JSON.stringify(auditEvents().map((event) => event.event_type)) === auditsBeforeRestart
-      && JSON.stringify(interestingFiles()) === filesBeforeRestart;
-    keep("restart_zero", restartClean, { status: restart.status, body: restart.text.slice(0, 240) });
-    const chain = auditEvents();
-    const finished = chain.some((event) => String(event.event_type).includes("completed") && event.result === "ok");
-    const history = restartHistory(
-      beforeRestart,
-      { chain, records: inspectRecords() },
-      state.stoppingSession,
-    );
-    const detail = { ...history, session_id: state.stoppingSession || "", finished, replay: restart.status };
-    if (restartClean && finished && history.unclosed && history.closed) pass("home_restart_history", detail);
-    else mark("home_restart_history", "fail", detail);
-  } catch (error) {
-    mark("restart_zero", "fail", String(error.message || error));
   }
 
   const guestAgain = await launchApp(state.guestToken, "system");

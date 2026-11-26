@@ -206,33 +206,33 @@ test("a plane is the gateway process and its coordinates stay owner-only", () =>
   assert.equal(planeSameProcess(4, 4, true, true, 0o644), false);
 });
 
-test("the restart row needs a real unclosed state, not a requested row", () => {
+test("the restart row needs a held stop and a held dispatching step, each settled once", () => {
   const requested = { event_type: "agent.start.requested", result: "ok", session_id: "" };
   const stopping = { event_type: "agent.stopped", result: "stopping", session_id: "s1" };
   const ok = { event_type: "agent.stopped", result: "ok", session_id: "s1" };
-  const done = { request_id: "r1", status: "completed" };
-  const normal = restartHistory(
-    { chain: [requested], records: [done] },
-    { chain: [requested], records: [done] },
-    "",
-  );
-  assert.equal(normal.unclosed, "");
-  assert.equal(normal.closed, false);
-  const open = restartHistory({ chain: [stopping], records: [] }, { chain: [stopping, ok], records: [] }, "s1");
-  assert.deepEqual(open, { unclosed: "stopping", unresolved: [], closed: true });
-  const early = restartHistory({ chain: [stopping, ok], records: [] }, { chain: [stopping, ok], records: [] }, "s1");
-  assert.equal(early.unclosed, "", "a stop confirmed before the restart is not unclosed");
-  const unconfirmed = restartHistory({ chain: [stopping], records: [] }, { chain: [stopping], records: [] }, "s1");
-  assert.equal(unconfirmed.closed, false);
+  const lost = { event_type: "agent_plan.dispatch.unresolved", result: "unresolved", challenge_id: "r2" };
   const flying = { request_id: "r2", status: "dispatching" };
-  const settled = restartHistory(
-    { chain: [], records: [flying] },
-    { chain: [], records: [{ request_id: "r2", status: "unknown" }] },
+  const unresolved = { request_id: "r2", status: "unresolved" };
+  const before = { chain: [requested, stopping], records: [flying] };
+  const both = restartHistory(before, { chain: [stopping, ok, lost], records: [unresolved] }, "s1", "r2");
+  assert.equal(both.closed, true);
+  assert.equal(restartHistory(
+    { chain: [requested], records: [{ request_id: "r1", status: "completed" }] },
+    { chain: [requested], records: [{ request_id: "r1", status: "completed" }] },
     "",
-  );
-  assert.deepEqual(settled, { unclosed: "unresolved", unresolved: ["r2"], closed: true });
-  const still = restartHistory({ chain: [], records: [flying] }, { chain: [], records: [flying] }, "");
-  assert.equal(still.closed, false);
+    "",
+  ).closed, false, "nothing held is not a restart proof");
+  const early = restartHistory({ chain: [stopping, ok], records: [flying] }, { chain: [stopping, ok, lost], records: [unresolved] }, "s1", "r2");
+  assert.equal(early.stopping.open, false, "a stop confirmed before the restart was not held");
+  assert.equal(early.closed, false);
+  const twice = restartHistory(before, { chain: [stopping, ok, ok, lost], records: [unresolved] }, "s1", "r2");
+  assert.equal(twice.stopping.closed, false, "two ok rows are not one");
+  const approved = restartHistory({ chain: [stopping], records: [{ request_id: "r2", status: "approved" }] }, { chain: [stopping, ok, lost], records: [unresolved] }, "s1", "r2");
+  assert.equal(approved.step.open, false, "an approved step is not a held dispatch");
+  const unknown = restartHistory(before, { chain: [stopping, ok, lost], records: [{ request_id: "r2", status: "unknown" }] }, "s1", "r2");
+  assert.equal(unknown.step.closed, false, "the held step settles as unresolved");
+  const unsigned = restartHistory(before, { chain: [stopping, ok], records: [unresolved] }, "s1", "r2");
+  assert.equal(unsigned.step.closed, false, "the unresolved step has its signed row");
 });
 
 test("each root stays in its own grant, including the planted cross-read", () => {
