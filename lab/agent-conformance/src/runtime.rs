@@ -113,7 +113,11 @@ pub fn unchanged_before_launch(program: &Path) -> Result<(), &'static str> {
     let Some(given) = std::env::var_os(RUNTIME_BINARY) else {
         return Ok(());
     };
-    if program != Path::new(&given) {
+    // Compare the resolved paths, not the path strings. A launch through a
+    // symlink to the same file is still the given Runtime and is hashed again.
+    // A hard link is not covered: its path stays different, so this check
+    // skips the re-hash. A path that cannot be resolved is compared as given.
+    if !same_runtime_file(program, Path::new(&given)) {
         return Ok(());
     }
     let first = runtime_under_test()?;
@@ -192,6 +196,16 @@ fn build_native(package: &str, name: &str) -> Result<BinaryUnderTest, String> {
     Ok(BinaryUnderTest { binary, sha256 })
 }
 
+/// True when `program` and `given` name one file after resolving symlinks.
+/// A hard link is not covered: those paths stay different, so this is false.
+/// When either path cannot be resolved, the two paths are compared as given.
+fn same_runtime_file(program: &Path, given: &Path) -> bool {
+    match (std::fs::canonicalize(program), std::fs::canonicalize(given)) {
+        (Ok(program_path), Ok(given_path)) => program_path == given_path,
+        _ => program == given,
+    }
+}
+
 /// Identify a binary that was given, not built. It is hashed where it is and
 /// never copied or changed, and nothing is printed.
 fn given_native(binary: &Path, name: &str) -> Result<BinaryUnderTest, String> {
@@ -239,7 +253,7 @@ pub fn sha256_file(path: &Path) -> Result<String, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{given_native, runtime_under_test, RUNTIME_BINARY};
+    use super::{given_native, runtime_under_test, unchanged_before_launch, RUNTIME_BINARY};
     use crate::harness::ThrowawayHome;
     use crate::identity::{sha256, Observation, PREFIX};
     use std::path::{Path, PathBuf};
@@ -361,6 +375,61 @@ mod tests {
         assert_eq!(
             given_native(&home.root().join("absent"), "elastos").unwrap_err(),
             "given elastos binary is not a file"
+        );
+        home.finish().unwrap();
+    }
+
+    /// A launch of the given Runtime through a symlink is still hashed again.
+    /// The raw path strings differ, so a string compare would skip the re-hash.
+    #[test]
+    fn unchanged_before_launch_rehashes_through_a_symlink() {
+        const LINK: &str = "AGENT_CONFORMANCE_TEST_RUNTIME_LINK";
+        if std::env::var_os(SECOND).is_some() {
+            let given = std::env::var_os(RUNTIME_BINARY).map(PathBuf::from).unwrap();
+            let link = std::env::var_os(LINK).map(PathBuf::from).unwrap();
+            let first = runtime_under_test().unwrap();
+            assert_eq!(first.sha256, sha256(b"given runtime"));
+            assert!(
+                unchanged_before_launch(&link).is_ok(),
+                "the symlink still names the bytes first hashed"
+            );
+            std::fs::write(&given, b"replaced runtime").unwrap();
+            let refused = unchanged_before_launch(&link).unwrap_err();
+            assert!(
+                refused.contains("changed"),
+                "a replaced file reached through the symlink was launched: {refused}"
+            );
+            let other = given.with_file_name("other-binary");
+            std::fs::write(&other, b"other").unwrap();
+            assert!(
+                unchanged_before_launch(&other).is_ok(),
+                "a different file is not the given Runtime"
+            );
+            return;
+        }
+        let home = ThrowawayHome::new().unwrap();
+        let given = home.root().join("given-elastos");
+        std::fs::write(&given, b"given runtime").unwrap();
+        let link = home.root().join("given-elastos-link");
+        std::os::unix::fs::symlink(&given, &link).unwrap();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "runtime::tests::unchanged_before_launch_rehashes_through_a_symlink",
+                "--exact",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env(RUNTIME_BINARY, &given)
+            .env(LINK, &link)
+            .env(SECOND, "1")
+            .env("PATH", home.temp())
+            .output()
+            .unwrap();
+        let printed = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success() && printed.contains("test result: ok. 1 passed"),
+            "{printed:?} {:?}",
+            String::from_utf8_lossy(&output.stderr)
         );
         home.finish().unwrap();
     }

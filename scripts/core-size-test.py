@@ -415,6 +415,9 @@ class CheckTest(unittest.TestCase):
         self.write(12, budget=10)
         self.assertEqual(self.run_check()[0], 1)
         self.assertFalse(self.summary.exists())
+        # setUp forces enforce. The unset default in core-size.py must still fail this over-budget tree.
+        os.environ.pop("CORE_BUDGET_MODE", None)
+        self.assertEqual(self.run_check()[0], 1)
         for mode in ("advisery", ""):
             os.environ["CORE_BUDGET_MODE"] = mode
             errors = io.StringIO()

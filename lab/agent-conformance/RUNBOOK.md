@@ -285,8 +285,15 @@ and symlink targets. A report-build failure stops before suite execution and
 retains its build output; the command cannot issue a receipt without its writer.
 
 `review_binding (A14)` passes only when `AGENT_CONFORMANCE_REVIEWS` names a
-JSON list of `{reviewer, verdict, commit}` entries, at least one, each with
-verdict `pass` and the exact commit the receipt's `repository` names, and the
+JSON list of `{reviewer, verdict, commit}` entries, at least two, from two
+different reviewer families. A family is one row of a closed table. The
+name is cut at the first character that is not a letter, then lower-cased.
+It matches a row when that stem equals a name in the row or starts with one,
+so `GeminiNeon` is gemini, and `claude` and `claude_opus` are claude. The
+rows are grok; gemini, neon and carbon; deepseek; claude, opus, sonnet and
+haiku; codex and gpt; glm; kimi. A name that matches no row is refused by
+that name. Each entry
+has verdict `pass` and the exact commit the receipt's `repository` names, and the
 tree is clean at every check: before the suite, after it, and when the report
 is written. `run.sh` performs the first two checks and passes their result to
 the report; a dirty answer at either one leaves this row FAIL with
@@ -300,12 +307,14 @@ folder inside it, leaves the row FAIL with
 `reviews file is inside the repository`. An untracked file there also makes the
 tree dirty; a tracked or ignored one does not, which is why the place itself is
 checked. The receipt records
-`reviews`, `review_status` (`bound` or `unbound`) and `review_failures`. An
+`reviews`, `review_status` (`bound` or `unbound`), `review_failures` and
+`review_binding_scope` (`review_binding asks for two different reviewer families.`). An
 unreadable or malformed reviews file fails the command; an unbound review
 leaves this row FAIL without changing `command_success`, so CI still reports
-unreviewed candidates. A14 needs every A14 row to pass. The report checks only
-that each review names this commit; who reviewed, and whether two model
-families did, stays with the reviewer list.
+unreviewed candidates. A14 needs every A14 row to pass. One passing review, or
+two from the same family, leaves this row FAIL with
+`reviews name one reviewer family`. An unknown reviewer name fails with
+`unknown reviewer` and that name.
 
 **A14 threat model.** The code at the reviewed commit — the suite, its tests,
 `run.sh` and the report — is trusted, because each review names that exact
@@ -564,8 +573,11 @@ Ready before typing it:
   folder at `~/Library/Application Support/elastos` (on Linux
   `~/.local/share/elastos`). `AGENT_CONFORMANCE_INSTALLED_BINARY` and
   `AGENT_CONFORMANCE_INSTALLED_DATA` name other places;
-- a reviews file outside the repository: a JSON list of
-  `{"reviewer": "...", "verdict": "pass", "commit": "<the 40-character commit checked out>"}`;
+- a reviews file outside the repository: a JSON list of at least two
+  `{"reviewer": "...", "verdict": "pass", "commit": "<the 40-character commit checked out>"}`
+  entries from two different reviewer families (the closed table in the
+  review_binding paragraph: the name is cut at the first non-letter and
+  matched in lower case, and a family name may be a prefix of that stem);
 - this checkout at that commit with nothing changed or untracked;
 - everything `run.sh` needs: cached dependencies, the pinned Rust toolchain
   with its `wasm32-unknown-unknown` target, `sha256sum` or `shasum`, the build
@@ -579,7 +591,8 @@ prints every A14 row with its reasons through `report --a14 <receipt>`, using
 the reporter copy it verified and keeps outside every path the suite was
 given; this command reads that result and runs no reporter of its own. It
 copies the receipt folder to
-`${ELASTOS_DEMO_RECEIPTS:-$HOME/elastos-demo-receipts}/<UTC time>/` with its
+`${ELASTOS_DEMO_RECEIPTS:-$HOME/elastos-demo-receipts}/kept.XXXXXX`, the
+directory `mktemp -d` makes for this run, with its
 own output as `demo-output.log`, and prints that path. It exits 0 only when
 the suite passed and every A14 row reads PASS; the receipt folder is kept
 either way. The receipt is written to its own folder, made after the suite
@@ -597,7 +610,7 @@ What each A14 row means:
 | Row | PASS means |
 | --- | --- |
 | `versions_receipt` | the receipt names the commit, the Runtime and provider hashes and every launched probe the rows needed |
-| `review_binding` | every review in the file passed and names the commit checked out, on a clean tree, and the file is outside the repository |
+| `review_binding` | every review in the file passed and names the commit checked out, on a clean tree, the file is outside the repository, and the reviews name two different reviewer families |
 | `staged_bundle` | the receipt names the lab CID of each bundle the suite staged and launched |
 | `installed_runtime` | the installed binary and `components.json` have the hashes its `release.json` names, `release-head.json` names that `release.json`, and the release names this repository commit; its records are read, its data folder did not run |
 | `installed_runtime_ran` | the suite was told a named binary whose canonical path is the installed binary, and the Runtime identity it recorded names that path with the installed binary's SHA-256; `run.sh` hashed the report it built before the suite, hashed it again after the suite and its liveness check, refused a change, and ran a copy of the verified bytes; it made the record after that, hashed the installed binary, launched it once and saw it answer, and hashed it again; both hashes match the installed record, and exactly one record names the installed path; nothing shows the bytes the operating system then executed |
@@ -609,8 +622,7 @@ What the receipt does not prove:
   staged from this checkout, as are the localhost provider
   (`localhost_provider_sha256`) and the probe. The installed data folder is
   read for the hash chain and is not what the suite runs on;
-- that the reviews are independent or by whom: the row checks only the commit
-  and the verdict each review states;
+- that the reviews carry a signature: the row checks the commit, the verdict, and that two reviewer families passed. A family comes from the closed table: the name is cut at the first non-letter, lower-cased, and matched, including when a family name is a prefix of that stem. A name that matches nothing is refused by that name;
 - that the rows came from the reviewed tree: the tree is checked clean before
   the suite, after it, and when the report is written; a change made and undone
   between two checks is not seen;

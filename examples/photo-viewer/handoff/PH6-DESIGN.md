@@ -5,8 +5,10 @@ stand-in will take a content closure CID, check its signed package and pinned
 viewer, bind its images to one test run, and run the photo core through the kit.
 The Photos page and the Runtime seam stay outside this work.
 
-**Required label:** “This test code stands in for the Runtime's launch by CID,
-which does not exist yet.” Use that sentence in each new stand-in source file,
+**Required label:** “This stand-in is not the Runtime start by CID
+(Runtime::start_by_bundle in elastos/crates/elastos-server/src/runtime.rs;
+POST /api/launch/open in elastos/crates/elastos-server/src/api/routes.rs).”
+Use that sentence in each new stand-in source file,
 each stand-in test's doc comment, and the stand-in falsifier file. Add it beside
 the stand-in extension in an existing file. Reports call the result a **PH6
 stand-in result**. Running the existing ComponentProvider proves component
@@ -66,7 +68,7 @@ in a usable fixture:
   "schema": "elastos.capsule/v1",
   "name": "stand-in-photo-set",
   "version": "0.1.0",
-  "description": "This test code stands in for the Runtime's launch by CID, which does not exist yet.",
+  "description": "This stand-in is not the Runtime start by CID (Runtime::start_by_bundle in elastos/crates/elastos-server/src/runtime.rs; POST /api/launch/open in elastos/crates/elastos-server/src/api/routes.rs).",
   "role": "content",
   "type": "data",
   "entrypoint": "images/01.png",

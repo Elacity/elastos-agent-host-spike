@@ -38,7 +38,7 @@ pub struct Loaded {
     pub path: PathBuf,
     pub entries: Vec<Entry>,
     pub manifest: Value,
-    /// This test code stands in for the Runtime's launch by CID, which does not exist yet.
+    /// This stand-in is not the Runtime start by CID (Runtime::start_by_bundle in elastos/crates/elastos-server/src/runtime.rs; POST /api/launch/open in elastos/crates/elastos-server/src/api/routes.rs).
     /// The same bytes that were hashed, keyed by closure entry path.
     pub bytes: BTreeMap<String, Vec<u8>>,
 }
@@ -168,7 +168,7 @@ pub fn admit(
 pub fn load(store: &Path, cid: &str) -> Result<Loaded, Refusal> {
     check_cid_form(cid)?;
     let path = store.join(cid);
-    // This test code stands in for the Runtime's launch by CID, which does not exist yet.
+    // This stand-in is not the Runtime start by CID (Runtime::start_by_bundle in elastos/crates/elastos-server/src/runtime.rs; POST /api/launch/open in elastos/crates/elastos-server/src/api/routes.rs).
     if let Err(err) = std::fs::symlink_metadata(&path) {
         if err.kind() == std::io::ErrorKind::NotFound {
             return Err(Refusal::StagedMissing {
@@ -200,7 +200,7 @@ pub fn load(store: &Path, cid: &str) -> Result<Loaded, Refusal> {
     })
 }
 
-/// This test code stands in for the Runtime's launch by CID, which does not exist yet.
+/// This stand-in is not the Runtime start by CID (Runtime::start_by_bundle in elastos/crates/elastos-server/src/runtime.rs; POST /api/launch/open in elastos/crates/elastos-server/src/api/routes.rs).
 /// Re-admit staged content with its detached claim and the current policy.
 pub fn admit_staged_for_stand_in(
     loaded: &Loaded,
@@ -218,14 +218,14 @@ pub fn admit_staged_for_stand_in(
     admit(&loaded.path, claim, policy, installed, store, now)
 }
 
-/// This test code stands in for the Runtime's launch by CID, which does not exist yet.
+/// This stand-in is not the Runtime start by CID (Runtime::start_by_bundle in elastos/crates/elastos-server/src/runtime.rs; POST /api/launch/open in elastos/crates/elastos-server/src/api/routes.rs).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StandInDependencies {
     pub viewer: Admitted,
     pub core: Admitted,
 }
 
-/// This test code stands in for the Runtime's launch by CID, which does not exist yet.
+/// This stand-in is not the Runtime start by CID (Runtime::start_by_bundle in elastos/crates/elastos-server/src/runtime.rs; POST /api/launch/open in elastos/crates/elastos-server/src/api/routes.rs).
 /// Resolve and re-admit the pinned viewer and core before any launch.
 #[allow(clippy::too_many_arguments)]
 pub fn select_stand_in_dependencies(
@@ -287,7 +287,7 @@ pub fn select_stand_in_dependencies(
     Ok(StandInDependencies { viewer, core })
 }
 
-// This test code stands in for the Runtime's launch by CID, which does not exist yet.
+// This stand-in is not the Runtime start by CID (Runtime::start_by_bundle in elastos/crates/elastos-server/src/runtime.rs; POST /api/launch/open in elastos/crates/elastos-server/src/api/routes.rs).
 fn stand_in_selection_holds(
     resolved_cid: &str,
     selected_cid: &str,
@@ -309,12 +309,12 @@ fn stand_in_selection_holds(
     Ok(())
 }
 
-// This test code stands in for the Runtime's launch by CID, which does not exist yet.
+// This stand-in is not the Runtime start by CID (Runtime::start_by_bundle in elastos/crates/elastos-server/src/runtime.rs; POST /api/launch/open in elastos/crates/elastos-server/src/api/routes.rs).
 // Compile the kit's URI owner directly: this slice adds no dependency or copied rule.
 #[path = "../../../capsule-kit/guest/src/uri.rs"]
 mod stand_in_uri;
 
-/// This test code stands in for the Runtime's launch by CID, which does not exist yet.
+/// This stand-in is not the Runtime start by CID (Runtime::start_by_bundle in elastos/crates/elastos-server/src/runtime.rs; POST /api/launch/open in elastos/crates/elastos-server/src/api/routes.rs).
 /// Bind image members to the bytes already checked by `load`. Admission and
 /// execution remain separate steps for the caller.
 pub fn bind_content_stand_in(loaded: &Loaded) -> Result<BTreeMap<String, Vec<u8>>, Refusal> {
@@ -345,7 +345,7 @@ pub fn bind_content_stand_in(loaded: &Loaded) -> Result<BTreeMap<String, Vec<u8>
     Ok(objects)
 }
 
-/// This test code stands in for the Runtime's launch by CID, which does not exist yet.
+/// This stand-in is not the Runtime start by CID (Runtime::start_by_bundle in elastos/crates/elastos-server/src/runtime.rs; POST /api/launch/open in elastos/crates/elastos-server/src/api/routes.rs).
 /// Optional closure identity for diagnostics. A bare manifest has no closure
 /// CID; callers with a packed/loaded closure pass `(&manifest, cid.as_str())`.
 /// This context supplies neither admission nor execution permission.
@@ -369,7 +369,7 @@ impl<'a> From<(&'a Value, &'a str)> for StandInResolveManifest<'a> {
     }
 }
 
-/// This test code stands in for the Runtime's launch by CID, which does not exist yet.
+/// This stand-in is not the Runtime start by CID (Runtime::start_by_bundle in elastos/crates/elastos-server/src/runtime.rs; POST /api/launch/open in elastos/crates/elastos-server/src/api/routes.rs).
 /// Validate the passive photo profile and normalize its viewer to one capsule
 /// requirement. `paths` is the planned or loaded listing, when available.
 /// Before packing, the diagnostic identity is `unpacked`.
@@ -462,7 +462,7 @@ pub fn resolve_requires<'a>(
 ) -> Result<Vec<Installed>, Refusal> {
     let source = source.into();
     let manifest = source.manifest;
-    // This test code stands in for the Runtime's launch by CID, which does not exist yet.
+    // This stand-in is not the Runtime start by CID (Runtime::start_by_bundle in elastos/crates/elastos-server/src/runtime.rs; POST /api/launch/open in elastos/crates/elastos-server/src/api/routes.rs).
     let requires = if manifest["role"] == "content" {
         vec![validate_content_stand_in(manifest, source.cid, &[])?]
     } else {

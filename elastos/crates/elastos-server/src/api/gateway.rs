@@ -121,6 +121,12 @@ mod gateway_origin;
 mod gateway_passkey_step_up;
 #[path = "gateway_provider_proxy.rs"]
 mod gateway_provider_proxy;
+#[cfg(all(test, unix))]
+#[path = "gateway_provider_proxy_tests/hosted_gate.rs"]
+mod hosted_gate;
+pub(crate) use gateway_provider_proxy::{
+    hosted_charge_still_approved, HOSTED_AGENT_RUN_REFUSED, HOSTED_AGENT_RUN_SENTENCE,
+};
 #[path = "gateway_room.rs"]
 mod gateway_room;
 #[path = "gateway_server.rs"]
@@ -133,6 +139,9 @@ mod gateway_transaction_effects;
 mod gateway_wallet;
 #[path = "gateway_wallet_adapter.rs"]
 mod gateway_wallet_adapter;
+#[cfg(test)]
+#[path = "gateway_provider_proxy_tests/http_hosted.rs"]
+pub(crate) mod http_hosted_agent;
 use gateway_agents::*;
 #[cfg(unix)]
 #[cfg(test)]

@@ -4,7 +4,7 @@
 #   test-source-gate.sh           runs every section
 #   test-source-gate.sh SECTION   runs one section (CI names one per step):
 #                                 product-data, prepush, product-ui, release,
-#                                 redteam
+#                                 redteam, audit, trusted
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -63,10 +63,30 @@ product_ui() {
   node --test scripts/gba-launch-page.test.mjs
 }
 
+audit() {
+  # An ignored advisory whose re-review date has passed fails here and names
+  # that advisory. The check reads elastos/.cargo/audit.toml and does not fetch.
+  python3 -I scripts/audit-re-review.py
+  python3 -I scripts/audit-re-review-test.py
+}
+
+trusted() {
+  python3 -I scripts/trusted-code-test.py
+  # trusted-code.py names a missing file, library, or program on stdout, then
+  # exits 1. Show that text. A passing run stays quiet.
+  local output status=0
+  output="$(python3 -I scripts/trusted-code.py)" || status=$?
+  if (( status != 0 )); then
+    printf '%s\n' "$output" >&2
+    return "$status"
+  fi
+}
+
 release() {
   node --test scripts/ci-model-package.test.mjs scripts/ci-installed-home-failure.test.mjs
   python3 scripts/ci-release-policy-test.py
   python3 scripts/ci-installed-app-paths-test.py
+  python3 scripts/ci-archive-viewer-paths-test.py
   python3 scripts/ci-download-cache-test.py
   python3 scripts/components-release-integrity-check.py --self-test
   python3 scripts/publish-platform-artifacts-test.py
@@ -91,6 +111,8 @@ case "${1:-all}" in
   product-ui) product_ui ;;
   release) release ;;
   redteam) redteam ;;
-  all) product_data; prepush; product_ui; release; redteam ;;
-  *) echo "usage: $0 [product-data|prepush|product-ui|release|redteam]" >&2; exit 2 ;;
+  audit) audit ;;
+  trusted) trusted ;;
+  all) product_data; prepush; product_ui; release; redteam; audit; trusted ;;
+  *) echo "usage: $0 [product-data|prepush|product-ui|release|redteam|audit|trusted]" >&2; exit 2 ;;
 esac
