@@ -71,6 +71,9 @@ pub(crate) struct FuelBucket {
     pub(crate) window_ticks: u64,
     event_wait: GuestWait,
     sleep_wait: GuestWait,
+    /// Store fuel right after a host wait armed the deadline. A tick with
+    /// no burn since that arm is host or scheduler time, not guest time.
+    pub(crate) host_arm: Option<u64>,
     /// Refill below one fuel unit, kept across wakes.
     remainder: u64,
     /// `get_fuel` or `set_fuel` failed. The run ends with this name.
@@ -92,12 +95,23 @@ impl FuelBucket {
             window_ticks: 0,
             event_wait: GuestWait::default(),
             sleep_wait: GuestWait::default(),
+            host_arm: None,
             remainder: 0,
             fault: None,
             clock_ms: 0,
             #[cfg(test)]
             wall_origin: None,
         }
+    }
+
+    /// Record the loan after a host wait. The next unburned tick is not guest time.
+    pub(crate) fn arm_after_host(&mut self, fuel: u64) {
+        self.host_arm = Some(fuel);
+    }
+
+    /// True when the deadline fired with no guest burn since [`Self::arm_after_host`].
+    pub(crate) fn take_host_arm_if_unburned(&mut self, remaining: u64) -> bool {
+        matches!(self.host_arm.take(), Some(armed) if remaining >= armed)
     }
 
     /// Charge `lent - remaining`, refill, and lend again. `None` means the
@@ -391,6 +405,26 @@ mod tests {
         bucket.window_ticks = 9;
         bucket.wake_from_park();
         assert_eq!(bucket.window_ticks, 9, "an executing guest keeps its ticks");
+    }
+
+    #[test]
+    fn an_unburned_arm_after_a_host_wait_is_not_guest_time() {
+        let mut bucket = FuelBucket::full(10_000, Instant::now());
+        bucket.window_ticks = 9;
+        bucket.arm_after_host(10_000);
+        assert!(
+            bucket.take_host_arm_if_unburned(10_000),
+            "no burn since the arm is not a guest tick"
+        );
+        assert!(bucket.host_arm.is_none());
+        assert_eq!(bucket.window_ticks, 9);
+
+        bucket.arm_after_host(10_000);
+        assert!(
+            !bucket.take_host_arm_if_unburned(9_000),
+            "a burn since the arm is guest time"
+        );
+        assert!(bucket.host_arm.is_none());
     }
 
     #[test]

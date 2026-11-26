@@ -205,6 +205,10 @@ struct ComponentActivation {
     pending_read: Arc<AtomicBool>,
     #[cfg(test)]
     test_wall_clock: bool,
+    /// After a host wait arms the deadline, sleep this many ms before the
+    /// guest runs. Proves an unburned tick is not charged.
+    #[cfg(test)]
+    host_deadline_tail_ms: Arc<std::sync::atomic::AtomicU64>,
     /// Grants this activation's guest already holds. `capabilities.request`
     /// on the v1 seam and a successful v2 read record them. Present reads
     /// the record and does not ask for a new grant.
@@ -338,6 +342,9 @@ struct ComponentState {
     /// Present pauses here while it still holds the book lock.
     #[cfg(test)]
     present_gate: Option<Arc<TestGate>>,
+    /// See [`ComponentActivation::host_deadline_tail_ms`].
+    #[cfg(test)]
+    host_deadline_tail_ms: Arc<std::sync::atomic::AtomicU64>,
 }
 
 /// The host's copy of one presented frame. The principal is the caller the
@@ -934,6 +941,8 @@ impl ComponentProvider {
                 pending_read: Arc::new(AtomicBool::new(false)),
                 #[cfg(test)]
                 test_wall_clock: false,
+                #[cfg(test)]
+                host_deadline_tail_ms: Arc::new(std::sync::atomic::AtomicU64::new(0)),
                 grants: Arc::new(Mutex::new(crate::providers::bus2_ui::GrantBook::default())),
             },
         );
@@ -1002,6 +1011,8 @@ impl ComponentProvider {
             in_clock_sleep: instance.in_clock_sleep.clone(),
             #[cfg(test)]
             present_gate: instance.present_gate.clone(),
+            #[cfg(test)]
+            host_deadline_tail_ms: instance.host_deadline_tail_ms.clone(),
             ..ComponentState::new(hostcall, handle.id.0.clone(), principal_id)
         };
         let (engine, component) = (instance.engine.clone(), instance.component.clone());
@@ -1487,6 +1498,7 @@ impl ComponentProvider {
             if cancel_requested.load(Ordering::Acquire) {
                 return Ok(UpdateDeadline::Interrupt);
             }
+            let remaining = context.get_fuel().ok();
             let Some(bucket) = context.data().fuel_bucket.clone() else {
                 return Ok(UpdateDeadline::Continue(1));
             };
@@ -1494,10 +1506,20 @@ impl ComponentProvider {
             if bucket.fault.is_some() {
                 return Ok(UpdateDeadline::Interrupt);
             }
-            // This callback runs only while the guest itself executes. An
-            // unawaited sleep or read is not a park: clear it and count the
-            // tick. `FuelBucket::wake_from_park` is the one refill, and only
-            // while `parked` is still set because the guest never ran.
+            // A parked guest does not spend a tick. An arm after a host wait
+            // with no guest burn is host or scheduler time on a slow machine,
+            // not guest running time: skip it. `wake_from_park` is the one
+            // refill, and only while `parked` is still set.
+            if bucket.parked {
+                return Ok(UpdateDeadline::Continue(1));
+            }
+            if let Some(left) = remaining {
+                if bucket.take_host_arm_if_unburned(left) {
+                    return Ok(UpdateDeadline::Continue(1));
+                }
+            } else {
+                bucket.host_arm = None;
+            }
             bucket.parked = false;
             bucket.note_guest_ran();
             let used = bucket.window_ticks.saturating_add(1);
@@ -2000,9 +2022,24 @@ fn charge_access(access: &mut impl wasmtime::AsContextMut<Data = ComponentState>
 fn release_access(access: &mut impl wasmtime::AsContextMut<Data = ComponentState>) {
     if let Some(bucket) = access.as_context().data().fuel_bucket.clone() {
         close_wait_loan(&bucket, access);
+        if let Ok(fuel) = read_fuel(access) {
+            bucket.lock().expect("fuel").arm_after_host(fuel);
+        }
     }
-    // The host call's wall time is not guest execution.
+    // Host and scheduler time after this arm is not guest time: the epoch
+    // callback skips a tick with no burn since the arm.
     access.as_context_mut().set_epoch_deadline(1);
+    #[cfg(test)]
+    {
+        let ms = access
+            .as_context()
+            .data()
+            .host_deadline_tail_ms
+            .load(Ordering::Acquire);
+        if ms > 0 {
+            std::thread::sleep(Duration::from_millis(ms));
+        }
+    }
 }
 
 /// The guard clears `open` if the future is dropped before it resumes.
@@ -2492,6 +2529,8 @@ impl ComponentState {
             async_hostcall: None,
             #[cfg(test)]
             present_gate: None,
+            #[cfg(test)]
+            host_deadline_tail_ms: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         }
     }
 
@@ -8138,6 +8177,50 @@ mod tests {
         assert!(
             elapsed >= Duration::from_millis(200),
             "ten presents of two 12 ms waits finished in {elapsed:?}"
+        );
+    }
+
+    /// Host work after the deadline arm (scheduler delay on a slow machine)
+    /// is not guest time: a short tick budget still lives beside a pending
+    /// events read and several slow invokes.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_host_tail_after_deadline_arm_does_not_cut_a_pending_guest() {
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let seen = calls.clone();
+        let provider = ComponentProvider::new();
+        provider.set_bus_hostcall_async(Arc::new(move |_line, _capsule, _principal| {
+            let seen = seen.clone();
+            Box::pin(async move {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+                seen.fetch_add(1, Ordering::Release);
+                Ok("{}".to_string())
+            })
+        }));
+        let bytes = wat::parse_str(
+            include_str!("../../../../tests/fixtures/components/v2-invoke-loop.wat")
+                .replace("(i32.const 2000)", "(i32.const 6)"),
+        )
+        .unwrap();
+        let handle = load_v2_fixture(&provider, bytes).await;
+        provider
+            .testing_hold_grant(&handle.id, "g", "localhost://Local/note.txt", "read")
+            .await;
+        let pending = {
+            let mut entries = provider.instances.write().await;
+            let guest = entries.get_mut(&handle.id).unwrap();
+            guest.test_max_ticks = 3;
+            guest.host_deadline_tail_ms.store(40, Ordering::Release);
+            guest.pending_read.clone()
+        };
+        provider.start(&handle).await.expect("the invoker starts");
+        let ending = tokio::time::timeout(Duration::from_secs(8), v2_ending(&provider, &handle))
+            .await
+            .expect("six invokes with a host tail did not finish");
+        assert_eq!(ending, "returned", "{ending}");
+        assert_eq!(calls.load(Ordering::Acquire), 6, "host calls");
+        assert!(
+            pending.load(Ordering::Acquire),
+            "the events read must still be pending"
         );
     }
 
