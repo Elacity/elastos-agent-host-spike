@@ -33,6 +33,7 @@ use elastos_protected_content_contracts::{
     RuntimeSessionBindingV1, SignedCustodyCommitteeAuthorizationV1, SignedCustodyEpochV1,
     SignedCustodyPoolV1, SignedRuntimeReleaseOperationV1, SignedTerminalReceiptV1,
     TerminalReceiptIssuerKey, TerminalReceiptStatementV1, WalletSignedRightsRequestV1,
+    MAX_RECIPIENT_KEY_AUTHORIZATION_LIFETIME_SECS,
 };
 use elastos_protected_content_provider_contracts::{
     CencFmp4MediaIdentityV1, DecryptProviderRequestOpV1, DecryptProviderRequestV1,
@@ -6152,13 +6153,12 @@ fn viewer_open_now() -> u64 {
 
 /// The wall-clock reading of one later decision inside a viewer open.
 ///
-/// The open keeps its single reading for its own expiry decisions, release
-/// window, operation assembly, resume and record stamps. The decisions that
-/// verify a provider-stamped artifact — the availability receipt (stamped when
-/// the fresh `ensure` finishes), each release coordinator response, the
-/// terminal receipt's contributions and the session-open request — take their
-/// own reading when they run instead, and clamp it at the open's reading so a
-/// backward step never verifies against an earlier moment.
+/// The prepared recipient and the rights request keep the open's reading. The
+/// release window is a later reading, taken after the wallet returns, so the
+/// preamble does not spend the contribution budget. Decisions that verify a
+/// provider-stamped artifact take their own reading when they run, and clamp
+/// it at the open's reading so a backward step never verifies against an
+/// earlier moment.
 fn viewer_decision_now() -> u64 {
     #[cfg(test)]
     {
@@ -6179,12 +6179,8 @@ pub(crate) async fn open_runtime_custody_viewer(
         acquire_runtime_custody_viewer_lifecycle_guard(data_dir, &input.principal_id, mint_id)
             .await;
     // One wall-clock reading per open, taken after the lifecycle lock is
-    // acquired. Every availability, expiry, release, operation, coordinator,
-    // resume and receipt consumer below uses this value, so a wall-clock step
-    // inside the operation cannot split two readings that are compared with
-    // each other, and a record that expires while this open waits for the
-    // lock is judged by the later reading rather than the one it saw on
-    // arrival.
+    // acquired. The prepared recipient and the rights request use it. The
+    // release window is a later reading, taken once the wallet has returned.
     let now = viewer_open_now();
     let purchase = load_runtime_custody_purchase(data_dir, &input.principal_id, mint_id)?
         .ok_or_else(|| anyhow::anyhow!(RUNTIME_CUSTODY_OPEN_DENIED_MESSAGE))?;
@@ -6353,7 +6349,8 @@ pub(crate) async fn open_runtime_custody_viewer(
                 audit_request_id,
                 runtime_issuer,
                 now.saturating_sub(5),
-                now + 60,
+                now.saturating_sub(5)
+                    .saturating_add(MAX_RECIPIENT_KEY_AUTHORIZATION_LIFETIME_SECS),
             )
             .await
             {
@@ -6473,6 +6470,9 @@ pub(crate) async fn open_runtime_custody_viewer(
             anyhow::bail!("Runtime custody rights policy is unavailable");
         }
     };
+    // The 50 s contribution budget starts here, after availability, media,
+    // recipient prepare and the wallet. It is not a longer timeout.
+    let release_now = viewer_decision_now().max(now);
     let release_request = match KeyReleaseRequestV1::new(
         signed_rights.request().binding().clone(),
         signed_rights
@@ -6481,8 +6481,8 @@ pub(crate) async fn open_runtime_custody_viewer(
             .map_err(release_unavailable!())?,
         RightsActionV1::View,
         prepared.recipient_identity().clone(),
-        now.saturating_sub(5),
-        now + 55,
+        release_now.saturating_sub(5),
+        release_now + 55,
         ReplayNonce16::new(audit_nonce_bytes(audit_request_id)),
     ) {
         Ok(request) => request,
@@ -6547,10 +6547,10 @@ pub(crate) async fn open_runtime_custody_viewer(
             evidence_request,
             custody_epoch: composition.signed_epoch.clone(),
             audit_request_id,
-            issued_at: now.saturating_sub(3),
-            expires_at: now + 50,
+            issued_at: release_now.saturating_sub(3),
+            expires_at: release_now + 50,
         },
-        now,
+        release_now,
     ) {
         Ok(operation) => operation,
         Err(_) => {
@@ -6592,7 +6592,7 @@ pub(crate) async fn open_runtime_custody_viewer(
             &release_wallet_request,
             &release_wallet_response,
             operation.clone(),
-            now,
+            release_now,
         )
         .await
     {
@@ -6609,7 +6609,7 @@ pub(crate) async fn open_runtime_custody_viewer(
                 ?reason,
                 "runtime custody open: release nonterminal, resuming exact operation"
             );
-            match coordinator.resume_exact(operation_hash, now).await {
+            match coordinator.resume_exact(operation_hash, release_now).await {
                 Ok(RuntimeReleaseCoordinatorOutcome::Terminal(
                     RuntimeReleaseTerminalResult::ContributionsReady {
                         signed_node_contributions,
@@ -6651,7 +6651,7 @@ pub(crate) async fn open_runtime_custody_viewer(
         &operation,
         &contributions,
         &composition.signed_epoch,
-        now,
+        release_now,
         viewer_decision_now,
     ) {
         Ok(receipt) => receipt,
@@ -6687,7 +6687,7 @@ pub(crate) async fn open_runtime_custody_viewer(
     // The session-open request carries the provider-stamped contributions and
     // the terminal receipt, so this decision verifies them against its own
     // reading, never earlier than the open's.
-    let session_now_unix_seconds = now.max(viewer_decision_now());
+    let session_now_unix_seconds = release_now.max(viewer_decision_now());
     let session = match open_viewer_session(
         &decrypt,
         &RuntimeOpenViewerSessionInput {

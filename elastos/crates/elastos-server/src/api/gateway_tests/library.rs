@@ -11449,12 +11449,11 @@ mod route_17_two_person_purchases {
         );
     }
 
-    /// A steady clock advances 6 s between the open's reading and the
-    /// availability receipt, which is stamped when the fresh `ensure`
-    /// finishes. The open's own windows still derive from the open's reading,
-    /// while availability verification takes its own later reading, so the
-    /// open completes. Feeding availability the open's reading again makes
-    /// this row fail closed on the 5 s future-skew allowance.
+    /// A steady clock advances 6 s between the open's reading and every later
+    /// reading. The release window starts at the post-wallet reading, so the
+    /// session expires at that reading plus the unchanged 50 s. Availability
+    /// still verifies on its own later reading: feeding it the open's reading
+    /// again fails closed on the 5 s future-skew allowance.
     #[cfg(unix)]
     #[tokio::test]
     async fn route_17_open_availability_reads_the_clock_when_it_verifies() {
@@ -11466,47 +11465,44 @@ mod route_17_two_person_purchases {
         let first = fixture.p_open_clock.expect("armed open clock");
 
         assert_eq!(fixture.p_open["status"], "ok", "{}", fixture.p_open);
-        // The viewer window is still the open's own decision: its reading plus
-        // the unchanged 50 s operation window.
+        // Later reading is 6 s after the open, and the session keeps the 50 s
+        // release window measured from that later reading.
         assert_eq!(
             fixture.p_open["data"]["expires_at"].as_u64(),
-            Some(first.saturating_add(50)),
-            "the viewer window must derive from the open's single reading"
+            Some(first.saturating_add(56)),
+            "the viewer window must derive from the release reading"
         );
         assert!(fixture.p_open["data"]["viewer_session_handle"].is_string());
-        // One open reading and one reading per later decision: availability,
-        // two rights responses, one replay-set check, two contributions, one
-        // reconcile, the terminal receipt and the session open.
+        // One open reading, one release-window reading, and one reading per
+        // later decision: availability, two rights responses, one replay-set
+        // check, two contributions, one reconcile, the terminal receipt and
+        // the session open.
         assert_eq!(
-            fixture.p_open_reads, 10,
+            fixture.p_open_reads, 11,
             "the open must read once and each later decision must read once"
         );
     }
 
-    /// A steady clock advances 12 s between the open's reading and the
-    /// provider decisions, which are stamped while the release is in flight.
-    /// Response validation takes its own reading at validation time, so the
-    /// open completes although every provider stamp is 12 s ahead of the
-    /// operation's reading. Feeding response validation the open's reading
-    /// again makes this row fail closed on the 5 s future-skew allowance.
+    /// The open's reading is 55 s behind the reading that starts the release
+    /// window. A window anchored at the open is already spent (it lasts 50 s)
+    /// and the open returns no contributions. Starting the same 50 s window
+    /// at the later reading lets the open complete, and the session expires
+    /// at that reading plus 50 s.
     #[cfg(unix)]
     #[tokio::test]
     async fn route_17_open_release_response_reads_the_clock_when_it_validates() {
         let _guard = protected_content_gateway_mock_test_guard().lock().await;
-        let fixture = two_person_purchase_fixture(Some((12, 12))).await;
+        let fixture = two_person_purchase_fixture(Some((55, 55))).await;
         let first = fixture.p_open_clock.expect("armed open clock");
 
         assert_eq!(fixture.p_open["status"], "ok", "{}", fixture.p_open);
-        // The open's own decisions keep its single reading: record expiry,
-        // the release request and operation assembly use `first`, so the
-        // session still expires at `first + 50`.
         assert_eq!(
             fixture.p_open["data"]["expires_at"].as_u64(),
-            Some(first.saturating_add(50)),
-            "the viewer window must derive from the open's single reading"
+            Some(first.saturating_add(105)),
+            "the viewer window must derive from the release reading"
         );
         assert_eq!(
-            fixture.p_open_reads, 10,
+            fixture.p_open_reads, 11,
             "the open must read once and each later decision must read once"
         );
     }
@@ -11527,10 +11523,10 @@ mod route_17_two_person_purchases {
         assert_eq!(
             fixture.p_open["data"]["expires_at"].as_u64(),
             Some(first.saturating_add(50)),
-            "the viewer window must derive from the open's single reading"
+            "a backward step must not move the release window earlier than the open"
         );
         assert_eq!(
-            fixture.p_open_reads, 10,
+            fixture.p_open_reads, 11,
             "every decision must read once even when the step is backward"
         );
     }
