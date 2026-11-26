@@ -65,26 +65,6 @@ fn managed_runtime_trust_root() -> &'static str {
 fn columns() -> Vec<TrustColumn> {
     vec![
         TrustColumn {
-            file: "elastos-runtime/src/capsule/manager.rs",
-            function: "launch_internal",
-            call: "compute.load",
-            class: "n/a",
-            trust_root: "none",
-            verified_when: "never",
-            evidence: ["comput", "e.load"].concat(),
-            os_path: "",
-        },
-        TrustColumn {
-            file: "elastos-runtime/src/capsule/manager.rs",
-            function: "launch_internal",
-            call: "compute.start",
-            class: "n/a",
-            trust_root: "none",
-            verified_when: "never",
-            evidence: ["comput", "e.start"].concat(),
-            os_path: "",
-        },
-        TrustColumn {
             file: "elastos-runtime/src/provider/failure_record.rs",
             function: "launch",
             call: "libc::fexecve",
@@ -1364,62 +1344,38 @@ fn callers_in(
     found
 }
 
-/// CapsuleManager launch, shell bootstrap, and fetched-capsule preparation.
-/// None of these checks bundle CID, publisher DID, or a dependency.
-fn legacy_launcher_functions() -> [&'static str; 6] {
+/// Names that reach the legacy launchers. Those items are `#[cfg(test)]`.
+fn legacy_launcher_names() -> [&'static str; 6] {
     [
-        "launch_local",
-        "launch_from_cid",
-        "launch_internal",
+        "CapsuleIoBridge",
+        "CapsuleManager",
+        "ElastosRuntime",
+        "RequestHandler",
+        "ShellManager",
         "prepare_fetched_capsule",
-        "ShellBootstrap",
-        "bootstrap",
     ]
-}
-
-/// Calls inside the dead cluster. `production_callers` records the enclosing
-/// function, so a second call in one of these functions does not add a row.
-fn legacy_launcher_runtime_callers() -> BTreeSet<(String, String, String)> {
-    [
-        "bootstrap elastos-runtime/src/bootstrap/runtime_builder.rs start",
-        "launch_from_cid elastos-runtime/src/handler/request_handler.rs handle_launch_capsule",
-        "launch_internal elastos-runtime/src/capsule/manager.rs launch_from_cid",
-        "launch_internal elastos-runtime/src/capsule/manager.rs launch_local",
-        "launch_local elastos-runtime/src/bootstrap/shell.rs launch_local_shell",
-        "prepare_fetched_capsule elastos-runtime/src/handler/request_handler.rs handle_launch_capsule",
-        "ShellBootstrap elastos-runtime/src/bootstrap/runtime_builder.rs fmt",
-        "ShellBootstrap elastos-runtime/src/bootstrap/runtime_builder.rs start",
-    ]
-    .into_iter()
-    .map(|row| {
-        let mut parts = row.splitn(3, ' ');
-        (
-            parts.next().unwrap().to_string(),
-            parts.next().unwrap().to_string(),
-            parts.next().unwrap().to_string(),
-        )
-    })
-    .collect()
 }
 
 fn assert_legacy_launchers_unreachable(sources: &BTreeMap<String, String>) {
-    let mut runtime = BTreeSet::new();
-    for function in legacy_launcher_functions() {
-        let server = production_callers(sources, function);
-        assert!(
-            server.is_empty(),
-            "production callers changed for legacy launcher {function}: {server:?}"
-        );
-        for (file, caller) in callers_in(sources, function, |file| {
-            file.starts_with("elastos-runtime/src/")
-        }) {
-            runtime.insert((function.to_string(), file, caller));
+    let mut hits = BTreeSet::new();
+    for (file, text) in sources {
+        let code = source::code_only(text);
+        let bytes = code.as_bytes();
+        for name in legacy_launcher_names() {
+            for (at, _) in code.match_indices(name) {
+                let ident = |byte: u8| byte.is_ascii_alphanumeric() || byte == b'_';
+                let left = at == 0 || !ident(bytes[at - 1]);
+                let end = at + name.len();
+                let right = end >= bytes.len() || !ident(bytes[end]);
+                if left && right {
+                    hits.insert((file.clone(), name.to_string()));
+                }
+            }
         }
     }
-    assert_eq!(
-        runtime,
-        legacy_launcher_runtime_callers(),
-        "legacy launcher callers changed"
+    assert!(
+        hits.is_empty(),
+        "legacy launcher reachable from production code: {hits:?}"
     );
 }
 
@@ -1742,20 +1698,21 @@ fn legacy_launchers_have_no_production_caller() {
 #[test]
 fn planted_legacy_launcher_caller_turns_the_row_red() {
     let clean = source::production_sources();
-    for function in legacy_launcher_functions() {
+    let file = "elastos-server/src/server_infra.rs";
+    let plants = [
+        "fn planted() { elastos_runtime::capsule::prepare_fetched_capsule(); }\n",
+        "use elastos_runtime::capsule::prepare_fetched_capsule as prep;\nfn planted() { prep(); }\n",
+        "fn planted() { let _f = elastos_runtime::capsule::CapsuleManager::launch_local; }\n",
+        "fn planted() { let _b = elastos_runtime::bootstrap::ElastosRuntime::build; }\n",
+        "static PLANTED: fn() = elastos_runtime::bootstrap::ShellManager::bootstrap;\n",
+    ];
+    for plant in plants {
         let mut sources = clean.clone();
-        let file = "elastos-server/src/server_infra.rs";
-        sources
-            .get_mut(file)
-            .unwrap()
-            .push_str(&format!("\nfn planted_caller() {{ {function}(); }}\n"));
+        sources.get_mut(file).unwrap().push_str(plant);
         let refused = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             assert_legacy_launchers_unreachable(&sources);
         }));
-        assert!(
-            refused.is_err(),
-            "planted production caller of {function} stayed green"
-        );
+        assert!(refused.is_err(), "planted caller stayed green: {plant}");
     }
 }
 
@@ -1780,8 +1737,8 @@ fn trust_column_counts_and_chokepoint_queue() {
         })
         .count();
     println!("loader trust rows={} classes={classes:?} roots={roots:?} verified_when={times:?} to_gate={to_gate}", columns.len());
-    assert_eq!(columns.len(), 105);
-    assert_eq!(classes.get("n/a"), Some(&56));
+    assert_eq!(columns.len(), 103);
+    assert_eq!(classes.get("n/a"), Some(&54));
     assert_eq!(classes.get("os-tool"), Some(&2));
     assert_eq!(classes.get("other"), Some(&37));
     assert_eq!(classes.get("own-binary"), Some(&5));
@@ -1791,12 +1748,12 @@ fn trust_column_counts_and_chokepoint_queue() {
     assert_eq!(roots.get("publisher-did-signature"), Some(&2));
     #[cfg(not(windows))]
     {
-        assert_eq!(roots.get("none"), Some(&51));
+        assert_eq!(roots.get("none"), Some(&49));
         assert_eq!(roots.get("release-signature"), Some(&29));
     }
     #[cfg(windows)]
     {
-        assert_eq!(roots.get("none"), Some(&56));
+        assert_eq!(roots.get("none"), Some(&54));
         assert_eq!(roots.get("release-signature"), Some(&24));
     }
     assert_eq!(
@@ -1814,7 +1771,7 @@ fn trust_column_counts_and_chokepoint_queue() {
     }
     assert_eq!(times.get("at-install-only"), Some(&7));
     assert_eq!(times.get("at-stage-and-start"), Some(&9));
-    assert_eq!(times.get("never"), Some(&51));
+    assert_eq!(times.get("never"), Some(&49));
     assert_eq!(to_gate, 31);
 }
 

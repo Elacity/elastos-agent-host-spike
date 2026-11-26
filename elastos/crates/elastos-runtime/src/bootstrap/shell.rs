@@ -6,11 +6,16 @@
 //! - Can grant/revoke capabilities
 //! - Acts as the user's interface to the runtime
 use std::path::PathBuf;
+#[cfg(test)]
 use std::sync::Arc;
 
+#[cfg(test)]
 use crate::capsule::{CapsuleId, CapsuleManager};
+#[cfg(test)]
 use crate::content::ContentFetcher;
+#[cfg(test)]
 use crate::handler::{CapsuleIoBridge, RequestHandler};
+#[cfg(test)]
 use crate::messaging::MessageChannel;
 use crate::primitives::audit::TrustLevel;
 
@@ -61,6 +66,7 @@ impl ShellConfig {
 }
 
 /// Shell manager handles the shell capsule lifecycle
+#[cfg(test)]
 pub struct ShellManager {
     /// The shell capsule ID (once launched)
     shell_id: Option<CapsuleId>,
@@ -68,6 +74,7 @@ pub struct ShellManager {
     config: ShellConfig,
 }
 
+#[cfg(test)]
 impl ShellManager {
     /// Create a new shell manager
     pub fn new(config: ShellConfig, _fetcher: Arc<dyn ContentFetcher>) -> Self {
