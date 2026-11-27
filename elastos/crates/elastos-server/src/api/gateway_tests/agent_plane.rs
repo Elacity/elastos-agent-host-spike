@@ -3656,6 +3656,56 @@ async fn a_crash_after_the_signed_ok_settle_signs_the_stop_once_after_restart() 
     assert!(crate::agents::owed_stop_rows(&home.data).is_empty());
 }
 
+/// The owed `stopping` row was never signed. The `ok` stop is signed, then
+/// the process dies before that owed row is cleared. Two real starts leave
+/// exactly one `ok` and no later `stopping` row for that session.
+#[tokio::test]
+async fn a_restart_leaves_one_ok_and_no_stopping_row_after_a_landed_stop() {
+    let home = Home::open();
+    let (owner, _) = admins(&home, "landed-restart");
+    let session = "session-landed-restart";
+    let stopping = audit_row(
+        &owner.principal_id,
+        Some(session),
+        "agent.stopped",
+        "stopping",
+        json!({ "agent_id": "agent-landed-restart" }).to_string(),
+    );
+    crate::agents::note_stop_rows(&home.data, std::slice::from_ref(&stopping)).unwrap();
+    let ok = audit_row(
+        &owner.principal_id,
+        Some(session),
+        "agent.stopped",
+        "ok",
+        json!({ "agent_id": "agent-landed-restart" }).to_string(),
+    );
+    super::seams::arm_grant_kind(&home.data, "after-signed-stop");
+    let crashed = crate::agent_record_audit::append_agent_row(&home.data, ok);
+    assert!(
+        crashed.is_err(),
+        "the crash after the signed ok did not fire"
+    );
+    let before = stopped_rows(&home.data);
+    assert_eq!(before.len(), 1, "{before:?}");
+    assert_eq!(before[0].result, "ok");
+    for _ in 0..2 {
+        let gateway = Gateway::start(&home.data).await;
+        gateway.shutdown().await;
+    }
+    let rows = stopped_rows(&home.data);
+    let for_session: Vec<_> = rows
+        .iter()
+        .filter(|row| row.session_id.as_deref() == Some(session))
+        .collect();
+    assert_eq!(for_session.len(), 1, "{rows:?}");
+    assert_eq!(for_session[0].result, "ok", "{rows:?}");
+    assert!(
+        rows.iter().all(|row| row.result != "stopping"),
+        "restart signed stopping after ok: {rows:?}"
+    );
+    assert!(crate::agents::owed_stop_rows(&home.data).is_empty());
+}
+
 async fn register_live(home: &Home, session: &str, agent: &str) {
     crate::api::agent_plane::plane_runtime(&home.data)
         .expect("plane")

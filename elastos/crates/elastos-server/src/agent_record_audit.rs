@@ -145,14 +145,26 @@ fn mark_confirm(data_dir: &Path, session: &str) -> anyhow::Result<()> {
     crate::agents::note_stop_rows(data_dir, std::slice::from_ref(&row))
 }
 
-/// At start, an owed row the kept chain lacks is signed once. Then the kept
-/// stop rows fold over the owed list in order: a signed later row settles an
-/// owed stop, and a signed open stop the file lost is owed again. A trimmed
-/// chain that no longer reaches an owed row's time does not sign it again.
+/// At start, an owed row the kept chain lacks is signed once. An owed
+/// `stopping` row is not signed when that principal and session already have
+/// an `ok` or `failed` stop in the kept chain, or the confirm mark has passed
+/// the anchor. That owed row is dropped. The kept stop rows then fold over
+/// what remains: a signed later row settles an owed stop, and a signed open
+/// stop the file lost is owed again. A trimmed chain that no longer reaches
+/// an owed row's time does not sign it again.
 pub(crate) fn reconcile_owed_stops(data_dir: &Path) -> anyhow::Result<()> {
     let state = crate::auth::load_auth_state(data_dir)?;
     let oldest = state.audit.first().map(|event| event.occurred_at);
+    let mut clear = Vec::new();
     for owed in crate::agents::owed_stop_rows(data_dir) {
+        if stopping_already_landed(&state, &owed) {
+            if !landed_stop_kept(&state, &owed) {
+                let mut row = owed.clone();
+                row.result = "ok".to_string();
+                clear.push(row);
+            }
+            continue;
+        }
         let reached = state.audit_chain_anchor.is_none()
             || oldest.is_some_and(|oldest| oldest < owed.occurred_at);
         let present = state
@@ -163,8 +175,31 @@ pub(crate) fn reconcile_owed_stops(data_dir: &Path) -> anyhow::Result<()> {
             crate::auth::append_audit_event(data_dir, owed)?;
         }
     }
-    let signed = crate::auth::load_auth_state(data_dir)?.audit;
+    let mut signed = crate::auth::load_auth_state(data_dir)?.audit;
+    signed.extend(clear);
     crate::agents::note_stop_rows(data_dir, &signed)
+}
+
+/// The owed row is the open `stopping` record, and the stop for this
+/// principal and session has already landed.
+fn stopping_already_landed(state: &crate::auth::AuthState, owed: &RuntimeAuditEventV1) -> bool {
+    owed.result == "stopping" && (landed_stop_kept(state, owed) || rolled_off_confirm(state, owed))
+}
+
+fn landed_stop_kept(state: &crate::auth::AuthState, owed: &RuntimeAuditEventV1) -> bool {
+    let Some(session) = owed.session_id.as_deref() else {
+        return false;
+    };
+    state.audit.iter().any(|row| {
+        row.event_type == "agent.stopped"
+            && matches!(row.result.as_str(), "ok" | "failed")
+            && row.session_id.as_deref() == Some(session)
+            && row.principal_id == owed.principal_id
+    })
+}
+
+fn rolled_off_confirm(state: &crate::auth::AuthState, owed: &RuntimeAuditEventV1) -> bool {
+    confirm_marked_at(owed).is_some_and(|at| chain_rolled_off(state, at))
 }
 
 /// Sessions whose latest `agent.stopped` row is still `stopping`.

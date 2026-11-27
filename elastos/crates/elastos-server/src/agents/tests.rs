@@ -2663,6 +2663,112 @@ fn a_crash_before_the_signed_settle_owes_the_stop_again() {
     );
 }
 
+/// The `ok` stop is signed and the process dies before the owed `stopping`
+/// row is cleared. Restart signs no later `stopping` row for that session.
+#[test]
+fn a_restart_does_not_sign_stopping_after_a_landed_ok() {
+    let home = Home::new();
+    let stopping = stop_plant(&home, "landed-open", "agent.stopped", "stopping");
+    crate::agents::note_stop_rows(home.path(), std::slice::from_ref(&stopping)).unwrap();
+    let ok = stop_plant(&home, "landed-ok", "agent.stopped", "ok");
+    crate::api::gateway::seams::arm_grant_kind(home.path(), "after-signed-stop");
+    let crashed = crate::agent_record_audit::append_agent_row(home.path(), ok);
+    assert!(
+        crashed.is_err(),
+        "the crash after the signed ok did not fire"
+    );
+    assert_eq!(signed_rows(&home, "ok"), 1);
+    assert_eq!(signed_rows(&home, "stopping"), 0);
+    assert!(
+        crate::agents::owed_stop_rows(home.path())
+            .iter()
+            .any(|row| row.result == "stopping"),
+        "the owed stop was cleared before the crash"
+    );
+    for _ in 0..2 {
+        crate::agent_record_audit::reconcile_owed_stops(home.path()).unwrap();
+        crate::agent_record_audit::confirm_stopping_rows(home.path(), |_| true).unwrap();
+    }
+    assert_eq!(signed_rows(&home, "ok"), 1, "restart appended another ok");
+    assert_eq!(
+        signed_rows(&home, "stopping"),
+        0,
+        "restart signed stopping after ok"
+    );
+    assert!(crate::agents::owed_stop_rows(home.path()).is_empty());
+}
+
+/// The landed `ok` has rolled off the anchor. Reconcile drops the owed
+/// `stopping` row and does not sign it.
+#[test]
+fn a_reconcile_drops_a_stopping_row_whose_ok_rolled_off() {
+    let home = Home::new();
+    let stopping = stop_plant(&home, "rolled-open", "agent.stopped", "stopping");
+    crate::agents::note_stop_rows(home.path(), std::slice::from_ref(&stopping)).unwrap();
+    let ok = stop_plant(&home, "rolled-ok", "agent.stopped", "ok");
+    crate::api::gateway::seams::arm_grant_kind(home.path(), "after-signed-stop");
+    assert!(crate::agent_record_audit::append_agent_row(home.path(), ok).is_err());
+    for index in 0..600 {
+        crate::auth::append_audit_event(
+            home.path(),
+            RuntimeAuditEventV1 {
+                schema: RuntimeAuditEventV1::SCHEMA.to_string(),
+                event_id: format!("audit:pad:{index}"),
+                event_type: "audit.pad".to_string(),
+                principal_id: Some(home.owner.principal_id.clone()),
+                proof_binding_id: None,
+                session_id: None,
+                challenge_id: None,
+                capsule_id: None,
+                result: "ok".to_string(),
+                reason: "pad".to_string(),
+                occurred_at: crate::auth::now_ts(),
+                signer_did: None,
+                signature: None,
+            },
+        )
+        .unwrap();
+    }
+    let state = crate::auth::load_auth_state(home.path()).unwrap();
+    assert!(state.audit_chain_anchor.is_some(), "the chain did not roll");
+    assert_eq!(
+        signed_rows(&home, "ok"),
+        0,
+        "the pad did not roll the ok off"
+    );
+    crate::agent_record_audit::reconcile_owed_stops(home.path()).unwrap();
+    assert_eq!(
+        signed_rows(&home, "stopping"),
+        0,
+        "reconcile signed stopping after the rolled-off ok"
+    );
+    assert!(
+        crate::agents::owed_stop_rows(home.path()).is_empty(),
+        "reconcile left the owed stop"
+    );
+}
+
+/// A `failed` stop is already in the kept chain. Reconcile does not sign the
+/// owed `stopping` row after it.
+#[test]
+fn a_reconcile_drops_a_stopping_row_after_a_landed_failed() {
+    let home = Home::new();
+    let stopping = stop_plant(&home, "failed-open", "agent.stopped", "stopping");
+    crate::agents::note_stop_rows(home.path(), std::slice::from_ref(&stopping)).unwrap();
+    let failed = stop_plant(&home, "failed-landed", "agent.stopped", "failed");
+    crate::auth::append_audit_event(home.path(), failed).unwrap();
+    crate::agent_record_audit::reconcile_owed_stops(home.path()).unwrap();
+    assert_eq!(signed_rows(&home, "failed"), 1);
+    assert_eq!(
+        signed_rows(&home, "stopping"),
+        0,
+        "reconcile signed stopping after failed"
+    );
+    assert!(crate::agents::owed_stop_rows(home.path())
+        .iter()
+        .all(|row| row.result != "stopping"));
+}
+
 #[test]
 fn rename_changes_display_name_only() {
     let home = Home::new();
