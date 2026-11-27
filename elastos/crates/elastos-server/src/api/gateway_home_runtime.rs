@@ -926,7 +926,7 @@ async fn stop_held_plane(
         .as_ref()
         .is_none_or(|response| response.status() == StatusCode::NOT_FOUND);
     if task_ended && missed {
-        let remembered = panic_ended_for(data_dir, agent_id, session_id);
+        let remembered = panic_ended_for(data_dir, agent_id, session_id).await;
         if !remembered.stopped.is_empty() || !remembered.stopping.is_empty() {
             return Ok(remembered);
         }
@@ -938,21 +938,23 @@ async fn stop_held_plane(
     stop_answer(answer.ok_or(gone)?).await
 }
 
-fn panic_ended_for(
+async fn panic_ended_for(
     data_dir: &FsPath,
     agent_id: &str,
     session_id: Option<&str>,
 ) -> RuntimeAgentStop {
     let runtime = crate::api::agent_plane::plane_runtime(data_dir);
-    let guests = crate::api::agent_plane::ended_guests(data_dir)
-        .into_iter()
-        .map(|mut guest| {
-            if let Some(runtime) = runtime.as_ref() {
-                guest.effect_inflight = runtime.plan_effect_inflight(&guest.session_id);
-            }
-            guest
-        })
-        .collect();
+    let mut guests = crate::api::agent_plane::ended_guests(data_dir);
+    if let Some(runtime) = runtime.as_ref() {
+        for guest in &mut guests {
+            guest.effect_inflight = runtime.plan_effect_inflight(&guest.session_id);
+            let seen = runtime.get_capsule(&guest.session_id).await;
+            (guest.status, guest.ended) = match seen {
+                Some(info) => (info.status, info.ended_at.is_some()),
+                None => (crate::runtime::CAPSULE_STOPPED.to_string(), true),
+            };
+        }
+    }
     runtime_stop_from_guests(agent_id, session_id, guests)
 }
 

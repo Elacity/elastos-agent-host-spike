@@ -217,6 +217,7 @@ mod off {
                 Some(json!({ "agent_id": &agent_id, "step_up_token": "step-up" })),
             ),
             (STOP, Some(json!({ "agent_id": &agent_id }))),
+            (STOP, Some(json!({ "agent_id": "agent-host" }))),
         ];
         for (path, body) in routes {
             assert_eq!(
@@ -1298,6 +1299,12 @@ mod on {
             body(json!({"agent_id": "a", "display_name": "Helper 2"})),
         );
         assert_eq!(answer(renamed.await).await, not_the_home);
+        let stopped = agents_stop(
+            state(),
+            headers.clone(),
+            body(json!({"agent_id": "agent-host"})),
+        );
+        assert_eq!(answer(stopped.await).await, not_the_home);
         assert_eq!(std::fs::read(agent_file(&home.data)).unwrap(), written);
     }
 

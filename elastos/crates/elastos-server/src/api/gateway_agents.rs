@@ -1726,6 +1726,12 @@ pub(in crate::api) async fn stop_agents_after_admin_lost(
     }
 }
 
+fn valid_stop_id(body: &Bytes) -> Option<String> {
+    let request = serde_json::from_slice::<AgentStopRequest>(body).ok()?;
+    crate::auth::validate_agent_id(&request.agent_id).ok()?;
+    Some(request.agent_id)
+}
+
 /// Owner check, then ask the Runtime to stop the live row whose principal is
 /// this agent. The request carries the agent id and no capsule name. The
 /// requested row is appended before the Runtime is asked, so a crash or a
@@ -1740,25 +1746,18 @@ async fn stop_agent(
     headers: &HeaderMap,
     body: &Bytes,
 ) -> anyhow::Result<AgentStopResponse> {
-    let targeted = serde_json::from_slice::<AgentStopRequest>(body)
-        .ok()
-        .map(|request| request.agent_id);
-    if let Some(agent_id) = targeted.as_deref() {
-        if let Err(reason) = crate::auth::validate_agent_id(agent_id) {
-            return Err(Refused(reason.to_string()).into());
-        }
-    }
     let caller = match owner_may_stop(state, headers, None) {
         Ok(owner) => owner,
         Err(error) => {
+            let targeted = valid_stop_id(body);
             record_caller_denial(state, headers, "agent.stop.denied", targeted.as_deref());
             return Err(error);
         }
     };
-    let request = match targeted {
-        Some(agent_id) => AgentStopRequest { agent_id },
-        None => agents_request(body)?,
-    };
+    let request: AgentStopRequest = agents_request(body)?;
+    if let Err(reason) = crate::auth::validate_agent_id(&request.agent_id) {
+        return Err(Refused(reason.to_string()).into());
+    }
     let owner = match owner_may_stop(state, headers, Some(&request.agent_id)) {
         Ok(owner) => owner,
         Err(error) => {

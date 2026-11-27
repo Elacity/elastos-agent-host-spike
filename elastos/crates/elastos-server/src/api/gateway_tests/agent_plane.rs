@@ -3594,6 +3594,62 @@ async fn stop_refuses_an_invalid_agent_id_before_a_denial_row() {
     gateway.shutdown().await;
 }
 
+#[tokio::test]
+async fn a_guest_malformed_stop_is_forbidden_and_names_no_id() {
+    let (home, _dir) = live_home();
+    let gateway = Gateway::start(&home.data).await;
+    let guest = super::passkey_authority_with_name_role_credential(
+        &home.data,
+        Some("Guest"),
+        crate::auth::RuntimePrincipalRole::Guest,
+        "r26-stop-guest",
+    );
+    let ids = [
+        "agent-host".to_string(),
+        format!("agent:v2:{}", "a".repeat(4_096)),
+    ];
+    for agent_id in &ids {
+        let (status, body) = post_json(
+            &gateway.addr,
+            &guest.system_token,
+            "/api/apps/system/agents/stop",
+            &json!({ "agent_id": agent_id }).to_string(),
+        )
+        .await;
+        assert_eq!(status, 403, "{body}");
+        assert!(body.contains("admin passkey required"), "{body}");
+        assert!(!body.contains("invalid agent id"), "{body}");
+        assert!(!body.contains(agent_id), "{body}");
+    }
+    let state = crate::auth::load_auth_state(&home.data).unwrap();
+    let denials: Vec<_> = state
+        .audit
+        .iter()
+        .filter(|event| {
+            event.event_type == "agent.stop.denied"
+                && event.principal_id.as_deref() == Some(guest.principal_id.as_str())
+        })
+        .collect();
+    assert_eq!(denials.len(), ids.len(), "{denials:?}");
+    for denial in denials {
+        let reason: Value = serde_json::from_str(&denial.reason).unwrap();
+        assert_eq!(reason["agent_id"], "");
+        assert!(denial
+            .signature
+            .as_deref()
+            .is_some_and(|sig| !sig.is_empty()));
+    }
+    let stored = std::fs::read(crate::auth::auth_state_path(&home.data).unwrap()).unwrap();
+    let stored = String::from_utf8_lossy(&stored);
+    for agent_id in &ids {
+        assert!(
+            !stored.contains(agent_id),
+            "the malformed agent id was written into auth state"
+        );
+    }
+    gateway.shutdown().await;
+}
+
 fn planted_capsule(id: &str, agent: &str, ended: bool) -> crate::runtime::RunningCapsuleInfo {
     crate::runtime::RunningCapsuleInfo {
         id: id.to_string(),
@@ -4944,6 +5000,88 @@ async fn a_panicked_runtime_signs_the_stop_and_stop_reports_it() {
         stopped_rows(&home.data).len(),
         before,
         "stop signed a second row"
+    );
+    gateway.shutdown().await;
+}
+
+/// The panic watcher runs while the guest is still leaving. After that
+/// guest records its end, Retire finishes and Stop reports the session
+/// stopped. This calls the watcher's own finish, so it does not take the
+/// process-wide panic flag the other panic row uses.
+#[tokio::test]
+async fn a_slow_panic_stop_reports_stopped_after_the_guest_exits() {
+    let (home, dir) = live_home();
+    let agent = home.create_agent("Slow", &sign_probe(&dir));
+    let gateway = Gateway::start(&home.data).await;
+    let runtime = crate::api::agent_plane::plane_runtime(&home.data).expect("runtime");
+    let session = "session-slow-panic";
+    runtime
+        .register_capsule(planted_capsule(session, &agent, false))
+        .await;
+    runtime
+        .insert_agent_session_for_test(crate::runtime::AgentSessionRecord {
+            agent_id: agent.clone(),
+            owner: home.owner.clone(),
+            host_cid: REGISTRY_CID.to_string(),
+            launch_id: "launch-slow-panic".to_string(),
+            session_id: session.to_string(),
+        })
+        .await;
+    runtime.plant_activation_stop_for_test(session);
+    let _limit = runtime.limit_stop_wait_for_test(Duration::ZERO);
+    crate::api::agent_plane::arm_task_fault(&home.data, crate::api::agent_plane::TASK_ENDED);
+    crate::api::gateway::finish_task_ended(&home.data).await;
+    let remembered = crate::api::agent_plane::ended_guests(&home.data)
+        .iter()
+        .any(|guest| guest.session_id == session && !guest.ended);
+    assert!(
+        remembered,
+        "the panic path did not remember a guest still exiting"
+    );
+    let (waiting, waiting_body) = retire_agent(&gateway, &home, &agent).await;
+    assert_eq!(waiting, 409, "{waiting_body}");
+    assert!(
+        waiting_body.contains("stopping") && waiting_body.contains("wait"),
+        "{waiting_body}"
+    );
+    runtime.end_planted_session_for_test(session).await;
+    let exited = runtime.get_capsule(session).await.expect("guest");
+    assert!(
+        exited.ended_at.is_some(),
+        "the guest did not finish exiting"
+    );
+    let (status, body) = retire_agent(&gateway, &home, &agent).await;
+    assert_eq!(status, 200, "{body}");
+    let retired = crate::auth::stored_principal_record(&home.data, &agent)
+        .unwrap()
+        .unwrap();
+    assert!(retired.retired_at.is_some(), "{retired:?}");
+    let (stop, stop_body) = post_json(
+        &gateway.addr,
+        &system_token(&home),
+        "/api/apps/system/agents/stop",
+        &json!({ "agent_id": agent }).to_string(),
+    )
+    .await;
+    assert_eq!(stop, 200, "{stop_body}");
+    let reply: Value = serde_json::from_str(&stop_body).unwrap();
+    let reported = reply["stopped"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .any(|row| row["session_id"] == session && row["status"] == "stopped");
+    assert!(
+        reported,
+        "stop did not report the guest stopped: {stop_body}"
+    );
+    let still_stopping = reply["stopping"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .any(|row| row["session_id"] == session);
+    assert!(
+        !still_stopping,
+        "stop still reports the guest stopping: {stop_body}"
     );
     gateway.shutdown().await;
 }
