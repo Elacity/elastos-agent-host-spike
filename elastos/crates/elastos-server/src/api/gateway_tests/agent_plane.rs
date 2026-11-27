@@ -3319,40 +3319,193 @@ async fn retire_does_not_report_retired_when_the_listener_ended_with_a_live_gues
     .await;
     let runtime = crate::api::agent_plane::plane_runtime(&home.data).expect("runtime still held");
     let still = runtime.live_sessions_for_agent(&agent).await;
-    assert_ne!(
-        status, 200,
-        "retire reported retired; guest still live: {still:?}; {body}"
+    let inflight = runtime.inflight_plan_sessions(&agent);
+    let record = crate::auth::stored_principal_record(&home.data, &agent)
+        .unwrap()
+        .unwrap();
+    if still.is_empty() && inflight.is_empty() {
+        assert_eq!(status, 200, "{body}");
+        assert!(record.retired_at.is_some(), "{record:?}");
+        let signed: Vec<_> = stopped_rows(&home.data)
+            .into_iter()
+            .filter(|row| row.session_id.as_deref() == Some(session.as_str()))
+            .collect();
+        assert_eq!(signed.len(), 1, "{signed:?}");
+        assert_eq!(signed[0].result, "ok", "{signed:?}");
+    } else {
+        assert_ne!(
+            status, 200,
+            "retired while the guest is still active: {body}"
+        );
+        assert!(record.retired_at.is_none(), "{record:?}");
+        assert!(body.contains("wait"), "{body}");
+    }
+    gateway.shutdown().await;
+}
+
+#[tokio::test]
+async fn stop_of_one_agent_leaves_the_other_when_the_listener_is_gone() {
+    let (home, dir) = live_home();
+    let cid = sign_probe(&dir);
+    let agent_a = home.create_agent("A", &cid);
+    let agent_b = home.create_agent("B", &cid);
+    let gateway = Gateway::start(&home.data).await;
+    let session_a = home.launch(&agent_a, &dir).await;
+    let session_b = home.launch(&agent_b, &dir).await;
+    for session in [&session_a, &session_b] {
+        let mut up = false;
+        for _ in 0..50 {
+            if capsule_live(&gateway.agent_url, &gateway.secret, session).await {
+                up = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(up, "{session} was not up");
+    }
+    assert!(crate::api::agent_plane::end_live_listener_for_test(
+        &home.data
+    ));
+    port_closed(&gateway.agent_url).await;
+    let (status, body) = post_json(
+        &gateway.addr,
+        &system_token(&home),
+        "/api/apps/system/agents/stop",
+        &json!({ "agent_id": agent_a }).to_string(),
+    )
+    .await;
+    assert!(status == 200 || status == 202, "{status} {body}");
+    let runtime = crate::api::agent_plane::plane_runtime(&home.data).expect("runtime");
+    let b_live = runtime.live_sessions_for_agent(&agent_b).await;
+    assert!(
+        b_live.iter().any(|id| id == &session_b),
+        "stopping A ended B: {b_live:?} {body}"
     );
+    let b_row = runtime.get_capsule(&session_b).await.expect("B's row");
+    assert!(b_row.ended_at.is_none(), "B ended: {b_row:?}");
+    let signed: Vec<_> = stopped_rows(&home.data)
+        .into_iter()
+        .filter(|row| row.reason.contains(&agent_a))
+        .collect();
+    assert_eq!(signed.len(), 1, "{signed:?}");
+    assert!(
+        signed[0].result == "ok" || signed[0].result == "stopping",
+        "{signed:?}"
+    );
+    assert!(
+        stopped_rows(&home.data)
+            .iter()
+            .all(|row| !row.reason.contains(&agent_b)),
+        "B was signed"
+    );
+    gateway.shutdown().await;
+}
+
+fn planted_capsule(id: &str, agent: &str, ended: bool) -> crate::runtime::RunningCapsuleInfo {
+    crate::runtime::RunningCapsuleInfo {
+        id: id.to_string(),
+        name: HOST.to_string(),
+        status: if ended {
+            crate::runtime::CAPSULE_STOPPED.to_string()
+        } else {
+            crate::runtime::CAPSULE_RUNNING.to_string()
+        },
+        capsule_type: elastos_common::CapsuleType::Wasm,
+        handle: None,
+        session_id: id.to_string(),
+        principal: Some(agent.to_string()),
+        cause: None,
+        ended_at: ended.then(std::time::Instant::now),
+    }
+}
+
+async fn retire_agent(gateway: &Gateway, home: &Home, agent: &str) -> (u16, String) {
+    post_json(
+        &gateway.addr,
+        &system_token(home),
+        "/api/apps/system/agents/retire",
+        &json!({ "agent_id": agent }).to_string(),
+    )
+    .await
+}
+
+#[tokio::test]
+async fn retire_waits_while_a_guest_is_still_stopping() {
+    let (home, dir) = live_home();
+    let agent = home.create_agent("Stopping", &sign_probe(&dir));
+    let gateway = Gateway::start(&home.data).await;
+    let runtime = crate::api::agent_plane::plane_runtime(&home.data).expect("runtime");
+    let session = "session-still-stopping";
+    runtime
+        .register_capsule(planted_capsule(session, &agent, false))
+        .await;
+    runtime.plant_activation_stop_for_test(session);
+    let _limit = runtime.limit_stop_wait_for_test(Duration::ZERO);
+    assert!(crate::api::agent_plane::end_live_listener_for_test(
+        &home.data
+    ));
+    port_closed(&gateway.agent_url).await;
+    let (status, body) = retire_agent(&gateway, &home, &agent).await;
+    assert_eq!(status, 409, "{body}");
+    assert!(body.contains("stopping") && body.contains("wait"), "{body}");
     let record = crate::auth::stored_principal_record(&home.data, &agent)
         .unwrap()
         .unwrap();
     assert!(record.retired_at.is_none(), "{record:?}");
-    let named = body.contains("stopping") || body.contains("unknown");
+    let still = runtime.get_capsule(session).await.expect("guest");
     assert!(
-        still.is_empty() || (named && body.contains(&session)),
-        "guest {still:?} was not stopped or named: {body}"
+        still.ended_at.is_none(),
+        "the stopping guest was treated as ended"
     );
-    let owed = crate::agents::owed_stop_rows(&home.data);
-    assert!(
-        owed.iter().any(|row| {
-            row.result == "stopping" && row.reason.contains(&agent) && row.reason.contains("retire")
-        }),
-        "the owed stop was not recorded: {owed:?}"
-    );
-    if still.is_empty() {
-        let (again, again_body) = post_json(
-            &gateway.addr,
-            &system_token(&home),
-            "/api/apps/system/agents/retire",
-            &json!({ "agent_id": agent }).to_string(),
-        )
+    runtime.end_planted_session_for_test(session).await;
+    let (again, again_body) = retire_agent(&gateway, &home, &agent).await;
+    assert_eq!(again, 200, "{again_body}");
+    let retired = crate::auth::stored_principal_record(&home.data, &agent)
+        .unwrap()
+        .unwrap();
+    assert!(retired.retired_at.is_some(), "{retired:?}");
+    gateway.shutdown().await;
+}
+
+#[tokio::test]
+async fn retire_waits_while_a_plan_effect_is_in_flight() {
+    let (home, dir) = live_home();
+    let agent = home.create_agent("Effect", &sign_probe(&dir));
+    let gateway = Gateway::start(&home.data).await;
+    let runtime = crate::api::agent_plane::plane_runtime(&home.data).expect("runtime");
+    let session = "session-effect-inflight";
+    runtime
+        .register_capsule(planted_capsule(session, &agent, true))
         .await;
-        assert_eq!(again, 200, "{again_body}");
-        let retired = crate::auth::stored_principal_record(&home.data, &agent)
-            .unwrap()
-            .unwrap();
-        assert!(retired.retired_at.is_some(), "{retired:?}");
-    }
+    runtime.bind_plan_instance(session, &agent);
+    let guard = crate::runtime::Runtime::try_enter_plan_effect(
+        &runtime.plan_book(),
+        session,
+        &agent,
+        "effect-1",
+    )
+    .expect("effect");
+    assert!(runtime.live_sessions_for_agent(&agent).await.is_empty());
+    assert!(!runtime.inflight_plan_sessions(&agent).is_empty());
+    assert!(crate::api::agent_plane::end_live_listener_for_test(
+        &home.data
+    ));
+    port_closed(&gateway.agent_url).await;
+    let (status, body) = retire_agent(&gateway, &home, &agent).await;
+    assert_eq!(status, 409, "{body}");
+    assert!(body.contains("stopping") && body.contains("wait"), "{body}");
+    let record = crate::auth::stored_principal_record(&home.data, &agent)
+        .unwrap()
+        .unwrap();
+    assert!(record.retired_at.is_none(), "{record:?}");
+    guard.release();
+    assert!(runtime.inflight_plan_sessions(&agent).is_empty());
+    let (again, again_body) = retire_agent(&gateway, &home, &agent).await;
+    assert_eq!(again, 200, "{again_body}");
+    let retired = crate::auth::stored_principal_record(&home.data, &agent)
+        .unwrap()
+        .unwrap();
+    assert!(retired.retired_at.is_some(), "{retired:?}");
     gateway.shutdown().await;
 }
 

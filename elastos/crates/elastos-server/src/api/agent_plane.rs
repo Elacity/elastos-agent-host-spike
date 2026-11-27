@@ -528,7 +528,7 @@ pub(crate) fn release_dir_for_test(data_dir: &Path) {
 }
 
 /// End the plane's HTTP task and leave the runtime and its guest in place.
-#[cfg(all(test, unix, feature = "prototype-agents"))]
+#[cfg(all(test, unix))]
 pub(crate) fn end_live_listener_for_test(data_dir: &Path) -> bool {
     let homes = homes_lock();
     let Some(plane) = homes.get(data_dir).and_then(|slot| slot.live.as_ref()) else {
@@ -1271,6 +1271,13 @@ mod tests {
     use elastos_runtime::primitives::audit::AuditLog;
     use elastos_runtime::session::{Session, SessionId, SessionType};
     use std::sync::Arc;
+
+    #[cfg(unix)]
+    #[test]
+    fn ending_the_listener_of_an_unknown_home_does_nothing() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        assert!(!super::end_live_listener_for_test(dir.path()));
+    }
 
     #[cfg(unix)]
     #[test]

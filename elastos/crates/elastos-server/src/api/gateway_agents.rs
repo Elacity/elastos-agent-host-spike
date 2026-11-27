@@ -485,7 +485,7 @@ async fn owe_live_stops(
             let Some(agent) = info.principal.as_deref().filter(|id| !id.is_empty()) else {
                 continue;
             };
-            if info.ended_at.is_some()
+            if info.ended_at.is_some() && !runtime.plan_effect_inflight(&info.id)
                 || agent_id.is_some_and(|wanted| wanted != agent)
                 || session_id.is_some_and(|wanted| wanted != info.id)
             {
@@ -1034,7 +1034,10 @@ pub(super) async fn agents_retire(
             &owner.principal.principal_id,
             &request.agent_id,
         )?;
-        let _ended = end_live_agent(&state.data_dir, &request.agent_id).await?;
+        let ended = end_live_agent(&state.data_dir, &request.agent_id).await?;
+        if ended.iter().any(|(_, result)| *result == "stopping") {
+            return Err(Refused("this agent is still stopping; wait".to_string()).into());
+        }
         recorded_plan_close(crate::api::gateway::close_agent_plans(
             &state.data_dir,
             &request.agent_id,

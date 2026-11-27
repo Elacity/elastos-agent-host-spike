@@ -906,40 +906,48 @@ pub(super) async fn stop_runtime_agent_session(
     stop_runtime_agent_rows(data_dir, agent_id, Some(session_id), None).await
 }
 
-/// Stop a guest this process still holds after its listener has ended.
-/// The answer is an error, so Retire does not report that guest retired.
+/// Stop this agent's guests after the listener has ended. Another agent's
+/// guests stay up. The caller owes and signs this result.
 async fn stop_guest_held_without_listener(
     data_dir: &FsPath,
     agent_id: &str,
     session_id: Option<&str>,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<Option<RuntimeAgentStop>> {
     if !crate::api::agent_plane::serves(Some(data_dir)) {
-        return Ok(());
+        return Ok(None);
     }
     let Some(runtime) = crate::api::agent_plane::plane_runtime(data_dir) else {
-        return Ok(());
+        return Ok(None);
     };
     let mut sessions = runtime.live_sessions_for_agent(agent_id).await;
+    for id in runtime.inflight_plan_sessions(agent_id) {
+        if !sessions.iter().any(|held| held == &id) {
+            sessions.push(id);
+        }
+    }
     if let Some(wanted) = session_id {
         sessions.retain(|id| id == wanted);
     }
     if sessions.is_empty() {
-        return Ok(());
+        return Ok(None);
     }
-    let guests = crate::api::agent_plane::end_plane_guests_after_task_panic(data_dir).await;
-    let outcome = runtime_stop_from_guests(agent_id, session_id, guests);
-    if let Some(row) = outcome.stopping.first() {
-        anyhow::bail!("agent stop is not confirmed: stopping {}", row.session_id);
+    let mut guests = Vec::new();
+    for id in sessions {
+        let (status, ended) = match runtime.stop_capsule_with_reason(&id, "owner").await {
+            Ok(Some(row)) => (row.status, row.ended_at.is_some()),
+            Ok(None) => ("stopped".to_string(), true),
+            Err(_) => ("stopping".to_string(), false),
+        };
+        let effect_inflight = runtime.plan_effect_inflight(&id);
+        guests.push(crate::api::agent_plane::EndedGuest {
+            agent_id: agent_id.to_string(),
+            session_id: id,
+            status,
+            ended,
+            effect_inflight,
+        });
     }
-    if let Some(row) = outcome.unknown.first() {
-        anyhow::bail!("agent stop is not confirmed: unknown {}", row.session_id);
-    }
-    let named = outcome
-        .stopped
-        .first()
-        .map(|row| row.session_id.clone())
-        .unwrap_or_else(|| sessions[0].clone());
-    anyhow::bail!("agent stop is not confirmed: stopped {named}")
+    Ok(Some(runtime_stop_from_guests(agent_id, session_id, guests)))
 }
 
 async fn stop_runtime_agent_rows(
@@ -951,11 +959,22 @@ async fn stop_runtime_agent_rows(
     let coords = match live_agent_coords(data_dir).await {
         Ok(coords) => coords,
         Err(error) if error.to_string() == crate::api::agent_plane::TASK_ENDED => {
-            let guests = crate::api::agent_plane::end_plane_guests_after_task_panic(data_dir).await;
-            return Ok(runtime_stop_from_guests(agent_id, session_id, guests));
+            if let Some(outcome) =
+                stop_guest_held_without_listener(data_dir, agent_id, session_id).await?
+            {
+                return Ok(outcome);
+            }
+            return Ok(RuntimeAgentStop {
+                already: Some("ended".to_string()),
+                ..RuntimeAgentStop::default()
+            });
         }
         Err(error) if error.to_string() == "agent runtime is not running" => {
-            stop_guest_held_without_listener(data_dir, agent_id, session_id).await?;
+            if let Some(outcome) =
+                stop_guest_held_without_listener(data_dir, agent_id, session_id).await?
+            {
+                return Ok(outcome);
+            }
             let body = serde_json::to_vec(&RuntimeAgentStopRequest {
                 agent_id,
                 session_id,
