@@ -4246,6 +4246,29 @@ mod tests {
         assert!(matches!(result, Err(BridgeError::ProcessExited)));
     }
 
+    // `cat` holds the writer and exits before the rename. A writer fd in this
+    // process is inherited by any fork, and Linux exec of that inode returns
+    // ETXTBSY until that child reaches exec.
+    #[cfg(unix)]
+    fn write_executable_closed(path: &Path, body: &str) {
+        let staged = path.with_extension("writing");
+        let mut child = std::process::Command::new("/bin/sh")
+            .args(["-c", "cat > \"$1\"", "sh"])
+            .arg(&staged)
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut stdin = child.stdin.take().unwrap();
+        std::io::Write::write_all(&mut stdin, body.as_bytes()).unwrap();
+        drop(stdin);
+        assert!(
+            child.wait().unwrap().success(),
+            "executable fixture write failed"
+        );
+        std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::fs::rename(&staged, path).unwrap();
+    }
+
     #[cfg(unix)]
     fn write_mock_provider_script(
         root: &Path,
@@ -4264,8 +4287,7 @@ mod tests {
             shutdown_response,
             shutdown_exit
         );
-        std::fs::write(&binary, script).unwrap();
-        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o700)).unwrap();
+        write_executable_closed(&binary, &script);
         (binary, pid_file)
     }
 

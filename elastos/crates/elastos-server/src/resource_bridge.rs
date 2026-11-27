@@ -3970,6 +3970,27 @@ pub(crate) mod tests {
     use std::sync::Arc;
     use tokio::sync::Mutex;
 
+    /// `examples/agent-host/bridge-read-content.json` is what `read_content_value`
+    /// returns. The guest decodes that file. A new reply shape fails here.
+    #[test]
+    fn read_content_value_matches_the_agent_host_fixture() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../examples/agent-host/bridge-read-content.json"
+        ))
+        .expect("bridge read fixture");
+        let rows = fixture.as_array().expect("bridge read rows");
+        assert!(!rows.is_empty());
+        for row in rows {
+            let bytes: Vec<u8> = serde_json::from_value(row["bytes"].clone()).expect("bytes");
+            let binary = row["binary"].as_bool().expect("binary");
+            assert_eq!(
+                read_content_value(&bytes, binary),
+                row["content"],
+                "{binary}"
+            );
+        }
+    }
+
     #[test]
     fn a_v2_read_names_every_localhost_root_this_path_does_not_offer() {
         assert_eq!(unoffered_v2_read_root("localhost://Local/a"), None);
