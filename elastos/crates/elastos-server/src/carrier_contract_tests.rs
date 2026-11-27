@@ -556,7 +556,10 @@ fn claimed_did_body() -> String {
 
 #[cfg(unix)]
 fn unknown_did() -> String {
-    elastos_identity::derive_did(&[214; 32]).1
+    // Seed 214 is a live Home in other carrier tests, and mDNS dials it.
+    let mut seed = [0u8; 32];
+    getrandom::getrandom(&mut seed).expect("unknown DID seed");
+    elastos_identity::derive_did(&seed).1
 }
 
 #[cfg(unix)]
@@ -628,7 +631,10 @@ async fn r3_request_reply_responder_unknown_did(carrier: &dyn CarrierUnderTest) 
         .request_reply(&unknown_did(), b"wrong peer")
         .await
         .unwrap_err();
-    assert!(matches!(refused, ProviderError::Unavailable(_)));
+    assert!(
+        matches!(refused, ProviderError::Unavailable(_)),
+        "{refused:?}"
+    );
     assert_eq!(carrier.remote_calls(), calls);
 }
 
@@ -806,7 +812,10 @@ async fn f3_file_request_responder_unknown_did(carrier: &dyn CarrierUnderTest) {
         .request_file(&cid, &unknown_did())
         .await
         .unwrap_err();
-    assert!(matches!(refused, ProviderError::Unavailable(_)));
+    assert!(
+        matches!(refused, ProviderError::Unavailable(_)),
+        "{refused:?}"
+    );
     assert_eq!(carrier.remote_calls(), calls);
 }
 
