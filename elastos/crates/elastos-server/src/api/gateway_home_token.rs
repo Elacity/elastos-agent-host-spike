@@ -318,6 +318,7 @@ fn home_launch_cookie_header(
 type SessionGrant = elastos_runtime::auth::AuthSessionGrantV1;
 
 const DEVICE_GRANT_FILE: &str = "ElastOS/System/device-launch-grant.json";
+#[cfg(unix)]
 const DEVICE_GRANT_MAX_BYTES: u64 = 4096;
 static DEVICE_LAUNCH_GRANT_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
@@ -396,6 +397,19 @@ fn device_grant_is_for(grant: &SessionGrant, principal_id: &str) -> bool {
         && valid_local_authority_id(&grant.grant_id, "grant:local:")
 }
 
+#[cfg(unix)]
+fn lock_device_launch_grant(dir: &std::path::Path) -> anyhow::Result<crate::host_lock::FileLock> {
+    let path = device_launch_grant_path(dir)?;
+    let lock_path = path.with_file_name("device-launch-grant.json.lock");
+    let parent = lock_path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("device grant lock has no folder"))?;
+    crate::auth_state_files::ensure_regular_auth_parent(dir, parent)?;
+    let file = crate::auth_state_files::open_regular_lock_file(&lock_path, "device launch grant")?;
+    crate::host_lock::FileLock::exclusive(file)
+        .map_err(|err| anyhow::anyhow!("failed to lock device launch grant: {err}"))
+}
+
 fn load_or_create_device_launch_grant(
     dir: &std::path::Path,
     principal_id: &str,
@@ -405,6 +419,9 @@ fn load_or_create_device_launch_grant(
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let auth_dir = home_launch_auth_data_dir(dir);
+    // The mutex separates threads in this process. The file lock separates processes.
+    #[cfg(unix)]
+    let _grant_file_lock = lock_device_launch_grant(&auth_dir)?;
     if let Some(stored) = read_device_launch_grant(&auth_dir)? {
         if !device_grant_is_for(&stored, principal_id) {
             return Err(device_grant_reason("foreign"));
@@ -2044,6 +2061,21 @@ mod tests {
         std::sync::Mutex::new(None);
 
     pub(super) fn pause_before_device_grant_create() {
+        if let Ok(dir) = std::env::var("ELASTOS_DEVICE_GRANT_PAUSE") {
+            let dir = std::path::PathBuf::from(dir);
+            std::fs::write(dir.join(format!("entered-{}", std::process::id())), b"1")
+                .expect("device grant pause marker");
+            let release = dir.join("release");
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+            while !release.exists() {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "device grant pause was not released"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            return;
+        }
         if !PAUSE_DEVICE_GRANT_CREATE.with(|flag| flag.replace(false)) {
             return;
         }
@@ -4164,6 +4196,187 @@ mod tests {
         for app in [HOME_CAPSULE_ID, HOME_CLI_SHELL_ID] {
             let token = issue_home_launch_token_with_context(dir.path(), app, &context).unwrap();
             require_carried_home_launch_token(dir.path(), &token, &[app])
+                .unwrap_or_else(|err| panic!("{app} token did not verify: {err}"));
+        }
+    }
+
+    #[cfg(unix)]
+    fn device_grant_expiry_child() {
+        let dir = std::path::PathBuf::from(std::env::var("ELASTOS_DEVICE_GRANT_DIR").unwrap());
+        let now = std::env::var("ELASTOS_DEVICE_GRANT_NOW")
+            .unwrap()
+            .parse()
+            .unwrap();
+        let result =
+            std::path::PathBuf::from(std::env::var("ELASTOS_DEVICE_GRANT_RESULT").unwrap());
+        let started =
+            std::path::PathBuf::from(std::env::var("ELASTOS_DEVICE_GRANT_STARTED").unwrap());
+        let go = std::path::PathBuf::from(std::env::var("ELASTOS_DEVICE_GRANT_GO").unwrap());
+        let app = std::env::var("ELASTOS_DEVICE_GRANT_APP").unwrap();
+        std::fs::write(&started, b"1").unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        while !go.exists() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the parent did not start the expiry callers"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let principal = device_principal(&dir);
+        let grant = load_or_create_device_launch_grant(&dir, &principal, now).unwrap();
+        let root = crate::auth::ResolvedPrincipalRoot::resolve(&dir, &dir, &principal).unwrap();
+        let context =
+            HomeLaunchTokenContext::resolved(root, grant.session_id, None, grant.grant_id.clone());
+        let token = issue_home_launch_token_with_context(&dir, &app, &context).unwrap();
+        std::fs::write(&result, format!("{}\n{token}\n", grant.grant_id)).unwrap();
+    }
+
+    #[cfg(unix)]
+    fn device_grant_entered_count(dir: &std::path::Path) -> usize {
+        std::fs::read_dir(dir)
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_str()
+                    .is_some_and(|name| name.starts_with("entered-"))
+            })
+            .count()
+    }
+
+    #[cfg(unix)]
+    struct DeviceGrantChildren {
+        pause: std::path::PathBuf,
+        children: Vec<std::process::Child>,
+    }
+
+    #[cfg(unix)]
+    impl Drop for DeviceGrantChildren {
+        fn drop(&mut self) {
+            let _ = std::fs::write(self.pause.join("release"), b"1");
+            for child in &mut self.children {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn two_processes_at_grant_expiry_share_one_grant() {
+        if std::env::var_os("ELASTOS_DEVICE_GRANT_CHILD").is_some() {
+            device_grant_expiry_child();
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let pause = tempfile::tempdir().unwrap();
+        let principal = device_principal(dir.path());
+        let now = now_ts();
+        // The auth folder is created once here. Two callers resolving it together
+        // both try to create ElastOS/System/Auth, and one gets "File exists".
+        crate::auth::ResolvedPrincipalRoot::resolve(dir.path(), dir.path(), &principal).unwrap();
+        let seeded = load_or_create_device_launch_grant(dir.path(), &principal, now).unwrap();
+        let auth = home_launch_auth_data_dir(dir.path());
+        let mut stored = read_device_launch_grant(&auth).unwrap().unwrap();
+        stored.expires_at = now;
+        write_device_launch_grant(&auth, &stored).unwrap();
+        let exe = std::env::current_exe().unwrap();
+        let test_name =
+            "api::gateway::gateway_home_token::tests::two_processes_at_grant_expiry_share_one_grant";
+        let mut children = DeviceGrantChildren {
+            pause: pause.path().to_path_buf(),
+            children: Vec::new(),
+        };
+        for (index, app) in [HOME_CAPSULE_ID, HOME_CLI_SHELL_ID].into_iter().enumerate() {
+            let child = std::process::Command::new(&exe)
+                .env("ELASTOS_DEVICE_GRANT_CHILD", "1")
+                .env("ELASTOS_DEVICE_GRANT_PAUSE", pause.path())
+                .env("ELASTOS_DEVICE_GRANT_DIR", dir.path())
+                .env("ELASTOS_DEVICE_GRANT_NOW", now.to_string())
+                .env(
+                    "ELASTOS_DEVICE_GRANT_RESULT",
+                    pause.path().join(format!("result-{index}")),
+                )
+                .env(
+                    "ELASTOS_DEVICE_GRANT_STARTED",
+                    pause.path().join(format!("started-{index}")),
+                )
+                .env("ELASTOS_DEVICE_GRANT_GO", pause.path().join("go"))
+                .env("ELASTOS_DEVICE_GRANT_APP", app)
+                .arg(test_name)
+                .arg("--exact")
+                .arg("--test-threads=1")
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+                .unwrap();
+            children.children.push(child);
+        }
+        let start_deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        while !pause.path().join("started-0").exists() || !pause.path().join("started-1").exists() {
+            assert!(
+                std::time::Instant::now() < start_deadline,
+                "expiry callers did not start"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        std::fs::write(pause.path().join("go"), b"1").unwrap();
+        let watch = std::time::Instant::now();
+        let mut entered;
+        let mut one_since = None;
+        loop {
+            entered = device_grant_entered_count(pause.path());
+            if entered >= 2 {
+                break;
+            }
+            if entered == 1 {
+                let since = one_since.get_or_insert_with(std::time::Instant::now);
+                if since.elapsed() >= std::time::Duration::from_millis(800) {
+                    break;
+                }
+            }
+            assert!(
+                watch.elapsed() < std::time::Duration::from_secs(25),
+                "no process reached device grant create"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        std::fs::write(pause.path().join("release"), b"1").unwrap();
+        let mut outputs = Vec::new();
+        for child in std::mem::take(&mut children.children) {
+            outputs.push(child.wait_with_output().unwrap());
+        }
+        for output in &outputs {
+            assert!(
+                output.status.success(),
+                "expiry caller failed\n{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        let mut ids = Vec::new();
+        let mut tokens = Vec::new();
+        for index in 0..2 {
+            let text =
+                std::fs::read_to_string(pause.path().join(format!("result-{index}"))).unwrap();
+            let mut lines = text.lines();
+            ids.push(lines.next().unwrap().to_string());
+            tokens.push(lines.next().unwrap().to_string());
+        }
+        assert_eq!(ids[0], ids[1], "expiry boundary left two grants: {ids:?}");
+        assert_ne!(ids[0], seeded.grant_id, "the expired grant was reused");
+        let kept = read_device_launch_grant(&auth).unwrap().unwrap();
+        assert_eq!(kept.grant_id, ids[0]);
+        assert_eq!(
+            entered, 1,
+            "both processes created a grant at the expiry boundary"
+        );
+        for (app, token) in [HOME_CAPSULE_ID, HOME_CLI_SHELL_ID]
+            .into_iter()
+            .zip(&tokens)
+        {
+            require_carried_home_launch_token(dir.path(), token, &[app])
                 .unwrap_or_else(|err| panic!("{app} token did not verify: {err}"));
         }
     }
