@@ -218,6 +218,41 @@
       "slice": 3
     },
     {
+      "file": "elastos/crates/elastos-runtime/src/provider/landlock_plan.rs",
+      "name": "custody-provider",
+      "slice": 4
+    },
+    {
+      "file": "elastos/crates/elastos-runtime/src/provider/mod.rs",
+      "name": "custody-provider",
+      "slice": 4
+    },
+    {
+      "file": "elastos/crates/elastos-runtime/src/provider/mod.rs",
+      "name": "protected-content",
+      "slice": 4
+    },
+    {
+      "file": "elastos/crates/elastos-runtime/src/provider/os_entry.rs",
+      "name": "custody-provider",
+      "slice": 4
+    },
+    {
+      "file": "elastos/crates/elastos-runtime/src/provider/os_entry.rs",
+      "name": "protected-content",
+      "slice": 4
+    },
+    {
+      "file": "elastos/crates/elastos-runtime/src/provider/path_allow.rs",
+      "name": "custody-provider",
+      "slice": 4
+    },
+    {
+      "file": "elastos/crates/elastos-runtime/src/provider/path_allow.rs",
+      "name": "protected-content",
+      "slice": 4
+    },
+    {
       "file": "elastos/crates/elastos-runtime/src/provider/registry.rs",
       "name": "literal:protected-content-decrypt",
       "slice": 3
@@ -226,6 +261,16 @@
       "file": "elastos/crates/elastos-runtime/src/provider/registry.rs",
       "name": "protected-content",
       "slice": 3
+    },
+    {
+      "file": "elastos/crates/elastos-runtime/src/provider/rights.rs",
+      "name": "custody-provider",
+      "slice": 4
+    },
+    {
+      "file": "elastos/crates/elastos-runtime/src/provider/rights_table.rs",
+      "name": "custody-provider",
+      "slice": 4
     },
     {
       "file": "elastos/crates/elastos-server/Cargo.toml",
