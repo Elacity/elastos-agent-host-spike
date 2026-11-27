@@ -1239,8 +1239,11 @@ async fn handle_library_webspace_request(
     registry: &ProviderRegistry,
     request: ObjectProviderRequest,
 ) -> anyhow::Result<Value> {
+    let principal_id = request.principal_id().to_string();
+    // A WebSpaces arm does not read a protected localhost object, so it does
+    // not load the data key. A local archive extract below loads the key.
     let authority =
-        crate::object_authority::ObjectAuthorityV1::build(data_dir, request.principal_id())?;
+        crate::object_authority::ObjectAuthorityV1::build_for(data_dir, &principal_id, false)?;
     match request {
         ObjectProviderRequest::List {
             principal_id: _,
@@ -1324,6 +1327,15 @@ async fn handle_library_webspace_request(
             if_revision,
             cancel,
         } => {
+            let keyed;
+            let active = if is_webspace_uri(uri.as_str())
+                && is_webspace_uri(destination_uri.as_str())
+            {
+                &authority
+            } else {
+                keyed = crate::object_authority::ObjectAuthorityV1::build(data_dir, &principal_id)?;
+                &keyed
+            };
             let (source_uri, archive_name, bytes) = if is_webspace_uri(uri.as_str()) {
                 let uri = clean_webspace_uri(&uri)?;
                 let (object, bytes) = webspace_read_bytes(data_dir, registry, &uri).await?;
@@ -1331,10 +1343,10 @@ async fn handle_library_webspace_request(
                 let archive_name = object.name.clone();
                 (uri, archive_name, bytes)
             } else {
-                let target = library_target(data_dir, &authority, &uri)?;
-                check_revision(data_dir, &authority, &target.uri, if_revision.as_deref())?;
+                let target = library_target(data_dir, active, &uri)?;
+                check_revision(data_dir, active, &target.uri, if_revision.as_deref())?;
                 let archive_name = library_archive_name(&target, "selected extraction")?;
-                let bytes = read_library_file_bytes(data_dir, &authority, &target)?;
+                let bytes = read_library_file_bytes(data_dir, active, &target)?;
                 (target.uri.clone(), archive_name, bytes)
             };
             let request = ArchiveExtractRequest {
@@ -1347,11 +1359,11 @@ async fn handle_library_webspace_request(
             };
             if is_webspace_uri(destination_uri.as_str()) {
                 extract_archive_entries_to_webspace_destination(
-                    data_dir, registry, &authority, bytes, request,
+                    data_dir, registry, active, bytes, request,
                 )
                 .await
             } else {
-                extract_archive_entries_to_local_destination(data_dir, &authority, bytes, request)
+                extract_archive_entries_to_local_destination(data_dir, active, bytes, request)
             }
         }
         ObjectProviderRequest::Sync { principal_id, uri } => {
@@ -4108,11 +4120,67 @@ pub(crate) fn refuse_linked_library_object(
     principal_id: &str,
     uri: &str,
 ) -> anyhow::Result<()> {
-    let authority = crate::object_authority::ObjectAuthorityV1::build(data_dir, principal_id)?;
+    let authority =
+        crate::object_authority::ObjectAuthorityV1::build_for(data_dir, principal_id, false)?;
     let target = library_target(data_dir, &authority, uri)?;
     crate::auth::ensure_no_symlink_components(data_dir, &target.path).map_err(|_| {
         anyhow!("This file is a link or is in a linked folder, so it is not viewable in Home.")
     })
+}
+
+#[cfg(test)]
+#[test]
+fn refuse_linked_library_object_does_not_load_the_data_key() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let principal = "person:local:ada";
+    let protection = crate::auth::store_test_principal_root_protection(dir.path(), principal);
+    let key = crate::auth::recovery_archive_key_path(dir.path()).expect("key path");
+    std::fs::remove_file(&key).expect("remove recovery key");
+    let uri = format!("{}/note.txt", protection.localhost_root);
+    refuse_linked_library_object(dir.path(), principal, &uri).expect("keyless link check");
+    let keyed = crate::object_authority::ObjectAuthorityV1::build(dir.path(), principal)
+        .expect_err("a keyed build reads the missing recovery key");
+    assert!(
+        keyed
+            .to_string()
+            .contains(crate::object_authority::RECOVERY_KEY_REFUSAL),
+        "{keyed}"
+    );
+}
+
+#[cfg(test)]
+#[tokio::test]
+async fn webspace_list_does_not_load_the_data_key() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let principal = "person:local:ada";
+    crate::auth::store_test_principal_root_protection(dir.path(), principal);
+    let key = crate::auth::recovery_archive_key_path(dir.path()).expect("key path");
+    std::fs::remove_file(&key).expect("remove recovery key");
+    let registry = ProviderRegistry::new();
+    let result = handle_library_webspace_request(
+        dir.path(),
+        &registry,
+        ObjectProviderRequest::List {
+            principal_id: principal.to_string(),
+            uri: Some("localhost://WebSpaces".to_string()),
+        },
+    )
+    .await;
+    if let Err(err) = result {
+        assert!(
+            !err.to_string()
+                .contains(crate::object_authority::RECOVERY_KEY_REFUSAL),
+            "{err}"
+        );
+    }
+    let keyed = crate::object_authority::ObjectAuthorityV1::build(dir.path(), principal)
+        .expect_err("a keyed build reads the missing recovery key");
+    assert!(
+        keyed
+            .to_string()
+            .contains(crate::object_authority::RECOVERY_KEY_REFUSAL),
+        "{keyed}"
+    );
 }
 
 fn clean_library_uri(localhost_root: &str, uri: &str) -> anyhow::Result<String> {
@@ -9082,9 +9150,10 @@ pub(crate) use crate::protected_content_runtime::ENABLED_CONFIG_KEY as PROTECT_H
 /// Fill `viewer`, `viewers`, and the `protect` capability on library objects
 /// the fenced object helper returned.
 ///
-/// The helper's roots are `Users`, `UsersAI`, and
-/// `ElastOS/SystemServices/Library` (the published-CID index only). The
-/// sign-in folder is outside those roots. The helper does not receive
+/// The helper's roots in this slice still include `ElastOS/System`, `Users`,
+/// `UsersAI`, and `ElastOS/SystemServices/Library` (the published-CID index).
+/// The sign-in folder is inside that `ElastOS/System` grant. Piece 3 removes
+/// `ElastOS/System` from the roots. The helper does not receive
 /// `components.json`, `capsules`, or `config.toml`. The Runtime reads
 /// those three and writes only these fields. Every other `LibraryObject`
 /// field stays the helper's: `schema`, `uri`, `name`, `kind`, `mime`, `size`,

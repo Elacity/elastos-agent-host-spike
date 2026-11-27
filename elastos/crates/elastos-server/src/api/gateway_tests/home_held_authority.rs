@@ -82,8 +82,8 @@ const OPEN_ROWS: &[(&str, &str, &str)] = &[(
 /// Localhost stays open until slice L. Home still passes the raw device key.
 const LOCALHOST_OPEN_REASON: &str = "Home still passes the raw device key to the localhost provider. The row stays open until slice L.";
 
-/// The object helper's roots are Users, UsersAI, and the Library index.
-const OBJECT_ROOT_REASON: &str = "The object helper's roots are Users, UsersAI, and the Library index. The sign-in folder is outside those roots. The Runtime passes one per-request envelope.";
+/// Piece 2 still grants ElastOS/System. Piece 3 removes that root.
+const OBJECT_ROOT_REASON: &str = "The object helper's roots still include ElastOS/System, Users, UsersAI, and the Library index. The sign-in folder is inside that ElastOS/System grant until piece 3 removes the root. The Runtime passes one per-request envelope.";
 
 fn rows() -> Vec<HeldRow> {
     vec![

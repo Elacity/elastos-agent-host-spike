@@ -440,6 +440,37 @@ fn model_file_policy(
 
 pub use super::bridge_protocol::{BridgeError, ProviderConfig, ProviderRequest, ProviderResponse};
 
+fn wipe_json_strings(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::String(text) => zeroize::Zeroize::zeroize(text),
+        serde_json::Value::Array(items) => {
+            for item in items {
+                wipe_json_strings(item);
+            }
+        }
+        serde_json::Value::Object(map) => {
+            for item in map.values_mut() {
+                wipe_json_strings(item);
+            }
+        }
+        serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::Number(_) => {}
+    }
+}
+
+trait WipeWireSecrets {
+    fn wipe_wire_secrets(&mut self);
+}
+
+impl WipeWireSecrets for serde_json::Value {
+    fn wipe_wire_secrets(&mut self) {
+        wipe_json_strings(self);
+    }
+}
+
+impl WipeWireSecrets for ProviderRequest {
+    fn wipe_wire_secrets(&mut self) {}
+}
+
 // === ProviderBridge ===
 
 /// Internal I/O state for the bridge
@@ -3102,17 +3133,27 @@ impl ProviderBridge {
         fence: Option<super::dispatch::DispatchFence>,
     ) -> Result<String, BridgeError>
     where
-        T: Serialize + Send + 'static,
+        T: Serialize + Send + 'static + WipeWireSecrets,
     {
         let io = Arc::clone(&self.io);
         #[cfg(target_os = "macos")]
         let bindings = Arc::clone(&self.hosted_run_bindings);
         tokio::spawn(async move {
             // Serialize first so the op can be named in the trace even when
-            // the request is an untyped JSON value.
-            let json = zeroize::Zeroizing::new(
-                serde_json::to_string(&request).map_err(BridgeError::Serde)?,
-            );
+            // the request is an untyped JSON value. Wipe the owned request
+            // immediately after, including when serialization fails, so a
+            // base64 data_key does not stay in that heap copy.
+            let mut request = request;
+            let json = match serde_json::to_string(&request) {
+                Ok(json) => {
+                    request.wipe_wire_secrets();
+                    zeroize::Zeroizing::new(json)
+                }
+                Err(err) => {
+                    request.wipe_wire_secrets();
+                    return Err(BridgeError::Serde(err));
+                }
+            };
             let op = json
                 .split("\"op\":\"")
                 .nth(1)
@@ -3163,6 +3204,7 @@ impl ProviderBridge {
                     .map_err(BridgeError::Io)?;
                 io.writer.write_all(b"\n").await.map_err(BridgeError::Io)?;
                 io.writer.flush().await.map_err(BridgeError::Io)?;
+                drop(json);
                 drop(dispatch_guard);
                 #[cfg(target_os = "macos")]
                 if let Some(run_id) = &dispatch_run {

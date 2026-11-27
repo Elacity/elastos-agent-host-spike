@@ -2992,18 +2992,12 @@ mod tests {
             let registry = registry.clone();
             let data_dir = data_dir.clone();
             async move {
-                let mut request = match elastos_server::object_authority::attach_object_authority(
-                    &data_dir, &request,
-                ) {
-                    Ok(request) => request,
-                    Err(error) => {
-                        return serde_json::json!({"status": "error", "message": error.to_string()});
-                    }
-                };
+                // The registered provider attaches the Runtime envelope.
+                // This probe does not attach one of its own, and it does not
+                // turn an attach failure into a reply before `send_raw`.
                 let mut reply = registry.send_raw("object", &request).await.unwrap_or_else(
                     |error| serde_json::json!({"status": "error", "message": error.to_string()}),
                 );
-                elastos_server::object_authority::wipe_object_authority(&mut request);
                 elastos_server::library::fill_fenced_library_fields(&data_dir, &mut reply);
                 reply
             }
@@ -3013,7 +3007,9 @@ mod tests {
         let device = format!("device:{did}");
         let device_list = ask(serde_json::json!({"op": "list", "principal_id": device})).await;
         let device_roots = ask(serde_json::json!({"op": "roots", "principal_id": device})).await;
-        // This call reads the auth state, so Auth must be ready before the fence.
+        // The Runtime refuses an unknown principal before the helper. Device
+        // list and roots above are the calls that read the sign-in folder
+        // inside the fence, so a helper that cannot read it fails those rows.
         let unknown =
             ask(serde_json::json!({"op": "list", "principal_id": "person:local:missing"})).await;
         let person = elastos_server::auth::upsert_principal_for_binding(
@@ -3190,9 +3186,7 @@ fn main() {
         let mut infrastructure = setup_server_infrastructure()
             .await
             .unwrap_or_else(|error| panic!("Home did not start: {error:#}"));
-        let mut status = serde_json::json!({"op": "status"});
-        status = elastos_server::object_authority::attach_object_authority(&data_dir, &status)
-            .unwrap_or(status);
+        let status = serde_json::json!({"op": "status"});
         let object = match infrastructure
             .provider_registry
             .send_raw("object", &status)
@@ -3204,7 +3198,6 @@ fn main() {
             }
             Err(error) => error.to_string(),
         };
-        elastos_server::object_authority::wipe_object_authority(&mut status);
         let chain = match infrastructure
             .provider_registry
             .send_raw("chain", &serde_json::json!({"op": "status"}))

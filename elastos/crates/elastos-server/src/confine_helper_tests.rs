@@ -1102,8 +1102,10 @@ fn argument_is_object(head: &str) -> bool {
 }
 
 /// Deleting `AttachedRequest::new`, `ObjectAuthorityV1::attach`, or
-/// `attach_object_authority` before an object send turns this red. The
-/// confined registration has to name `AuthorityAttachingProvider` too.
+/// `attach_object_authority` before an object send turns this red.
+/// A `ProviderRegistry` send is covered by `AuthorityAttachingProvider`
+/// instead of a second attach at the call. The confined registration has
+/// to name `AuthorityAttachingProvider` too.
 #[test]
 fn every_object_dispatch_path_carries_the_envelope() {
     let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
@@ -1141,8 +1143,14 @@ fn scan_object_authority(dir: &std::path::Path, misses: &mut Vec<String>) {
             let literal = argument_is_object(head);
             let scheme = head.contains("&scheme") || head.contains("&dispatch.scheme");
             let object_scheme = scheme && window.contains("== \"object\"");
-            let back = start.saturating_sub(2500);
-            if (literal || object_scheme) && !carries_object_authority(&text[back..start]) {
+            let back = text.floor_char_boundary(start.saturating_sub(2500));
+            // A provider-registry send reaches AuthorityAttachingProvider,
+            // which inserts the Runtime envelope. Removing that registration
+            // fails the assertion in `every_object_dispatch_path_carries_the_envelope`.
+            if (literal || object_scheme)
+                && !registry_object_send(&text[..start])
+                && !carries_object_authority(&text[back..start])
+            {
                 let line = text[..start].lines().count();
                 misses.push(format!("{}:{line}", path.display()));
             }
@@ -1155,6 +1163,13 @@ fn carries_object_authority(before: &str) -> bool {
     before.contains("ObjectAuthorityV1::attach")
         || before.contains("AttachedRequest::new")
         || before.contains("attach_object_authority(")
+}
+
+/// `registry.send_raw("object")` and a registry field split across lines.
+/// The registered object provider is `AuthorityAttachingProvider`.
+fn registry_object_send(before: &str) -> bool {
+    let tail = before.trim_end().trim_end_matches('.').trim_end();
+    tail.ends_with("registry")
 }
 
 /// Release musl helpers, started by `spawn_path_allow` on Linux. The CI step
@@ -1370,8 +1385,8 @@ async fn musl_release_helpers_start_under_the_fence() {
     .await
     .unwrap_or_else(|err| panic!("musl object init failed: {err}"));
     assert!(
-        !data.join("ElastOS/System").exists(),
-        "object start does not create the sign-in parent"
+        data.join("ElastOS/System").is_dir(),
+        "piece 2 still grants ElastOS/System, so object start creates the sign-in parent; piece 3 removes that root"
     );
     assert!(
         data.join("ElastOS/SystemServices/Library").is_dir(),
@@ -1674,6 +1689,14 @@ fn with_object_authority(data: &Path, request: serde_json::Value) -> serde_json:
         .unwrap_or_else(|err| panic!("object authority: {err}"))
 }
 
+#[cfg(any(
+    all(not(elastos_unsupported_os_check), target_os = "macos"),
+    all(
+        not(elastos_unsupported_os_check),
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    )
+))]
 async fn exchange_ok(
     data: &Path,
     bridge: &elastos_runtime::provider::ProviderBridge,
@@ -2425,13 +2448,17 @@ fn keyless_ops_attach_without_the_recovery_key() {
     assert!(!key.exists(), "the keyed refusal created the recovery key");
 }
 
+/// Piece 2 still grants `ElastOS/System`. This row checks that grant by the
+/// directory object start creates, and checks that a user-file write still
+/// succeeds. It does not claim the helper is refused under Auth. Piece 3
+/// removes the root and replaces this row with that refusal.
 #[cfg(all(
     not(elastos_unsupported_os_check),
     target_os = "linux",
     any(target_arch = "x86_64", target_arch = "aarch64")
 ))]
 #[tokio::test]
-async fn object_helper_cannot_open_auth_on_linux() {
+async fn object_helper_writes_a_user_file_while_elastos_system_is_granted_on_linux() {
     use base64::Engine;
     let (_hold, data) = helper_data_root();
     let principal = "person:local:ada";
@@ -2441,6 +2468,10 @@ async fn object_helper_cannot_open_auth_on_linux() {
     assert!(auth.join("recovery-archive.key").is_file());
     let (_, did) = elastos_identity::load_or_create_did(&data).unwrap();
     let object = spawn_object(&provider_binary("object-provider"), &data, &did).await;
+    assert!(
+        data.join("ElastOS/System").is_dir(),
+        "piece 2 still grants ElastOS/System, so the sign-in parent stays inside the object helper roots"
+    );
     let uri = format!("{}/open.txt", protection.localhost_root);
     let payload = base64::engine::general_purpose::STANDARD.encode(b"open");
     let wrote = exchange_ok(
@@ -2458,9 +2489,13 @@ async fn object_helper_cannot_open_auth_on_linux() {
     object.bridge().shutdown().await.unwrap();
 }
 
+/// Piece 2 still grants `ElastOS/System`. This row checks that grant by the
+/// directory object start creates, and checks that a user-file write still
+/// succeeds. It does not claim the helper is refused under ElastOS. Piece 3
+/// removes the root and replaces this row with that refusal.
 #[cfg(all(not(elastos_unsupported_os_check), target_os = "macos"))]
 #[tokio::test]
-async fn object_helper_cannot_stat_elastos_on_macos() {
+async fn object_helper_writes_a_user_file_while_elastos_system_is_granted_on_macos() {
     use base64::Engine;
     let (_hold, data) = helper_data_root();
     assert!(
@@ -2471,6 +2506,10 @@ async fn object_helper_cannot_stat_elastos_on_macos() {
     let protection = crate::auth::store_test_principal_root_protection(&data, principal);
     let (_, did) = elastos_identity::load_or_create_did(&data).unwrap();
     let object = spawn_object(&provider_binary("object-provider"), &data, &did).await;
+    assert!(
+        data.join("ElastOS/System").is_dir(),
+        "piece 2 still grants ElastOS/System, so the sign-in parent stays inside the object helper roots"
+    );
     let uri = format!("{}/stat.txt", protection.localhost_root);
     let payload = base64::engine::general_purpose::STANDARD.encode(b"stat");
     let wrote = exchange_ok(

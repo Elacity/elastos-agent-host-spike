@@ -70,4 +70,7 @@
 # RequestHandler, CapsuleIoBridge, prepare_fetched_capsule). Measured 27 Nov 2026.
 # Merge of origin/spike/agent-host 75616ff93 (#1871) into the P2-4 fences. Both notes stay. Measured 27 Nov 2026.
 # +7: round 39 shares one close-range step, which close_except calls. Measured 27 Nov 2026.
-13568
+# +36: the provider bridge wipes the owned request's strings after it serializes
+# a line, and drops that line before it reads the reply, so a base64 data_key
+# does not stay in the bridge copy. Measured 28 Nov 2026.
+13604
