@@ -170,13 +170,23 @@ impl LocalProvider {
             .unwrap_or(false)
     }
 
-    /// An address that is not a file-key envelope still opens with the old
-    /// reader. A plain file and a lookalike fail that read.
+    /// A Public or MyWebSite address that is not a file-key envelope still
+    /// opens with the old reader. A plain file and a lookalike on those
+    /// roots fail that read. A sealed root, including a file migration left
+    /// plain, stays on the sealed reader. A file past the hard limit is
+    /// refused before its body is read.
     fn address_uses_the_old_envelope(path: &str, full_path: &Path) -> io::Result<bool> {
-        if parse_localhost_uri(path).is_none() {
+        if parse_localhost_uri(path).is_none() || !plain_root_path(path) {
             return Ok(false);
         }
         let mut file = fs::File::open(full_path)?;
+        let len = file.metadata()?.len();
+        if len > localhost_provider::SEALED_READ_HARD_LIMIT {
+            return Err(io::Error::new(
+                io::ErrorKind::FileTooLarge,
+                format!("{path} is larger than this process can read. Move it out of the folder."),
+            ));
+        }
         let mut header = [0u8; 64];
         let read = file.read(&mut header)?;
         Ok(!localhost_provider::header_is_file_key_envelope(
@@ -395,7 +405,6 @@ impl LocalProvider {
     }
 
     /// Read file contents
-    #[rustfmt::skip]
     pub fn read_file(
         &self,
         path: &str,
@@ -487,9 +496,18 @@ impl LocalProvider {
         Ok(buffer)
     }
 
-    #[rustfmt::skip]
     fn seal(&self, key: &[u8; 32], plain: &[u8]) -> io::Result<Vec<u8>> {
-        if self.config.extra.get("file_key").and_then(serde_json::Value::as_bool) == Some(true) { encrypt_file_key_bytes(key, plain) } else { encrypt_bytes(key, plain) }
+        if self
+            .config
+            .extra
+            .get("file_key")
+            .and_then(serde_json::Value::as_bool)
+            == Some(true)
+        {
+            encrypt_file_key_bytes(key, plain)
+        } else {
+            encrypt_bytes(key, plain)
+        }
     }
 
     /// Write file contents
@@ -2944,5 +2962,60 @@ mod tests {
         assert_eq!(v2_b64(&provider, path), want);
         assert_eq!(v2_b64(&provider, address), want);
         row("Public lookalike stays plain for v2");
+    }
+
+    #[test]
+    fn a_plain_users_address_is_read_and_appended() {
+        let dir = setup_test_dir();
+        fs::create_dir_all(dir.path().join("Users")).unwrap();
+        let plain = b"hello-plain";
+        fs::write(dir.path().join("Users/plain.txt"), plain).unwrap();
+        let provider = make_encrypted_provider(&dir);
+        let address = "localhost://Users/plain.txt";
+        assert_eq!(
+            provider.read_file(address, "token", None, None).unwrap(),
+            plain
+        );
+        assert_eq!(fs::read(dir.path().join("Users/plain.txt")).unwrap(), plain);
+        provider
+            .write_file(address, "token", b"-more", true)
+            .unwrap();
+        assert_eq!(
+            provider.read_file(address, "token", None, None).unwrap(),
+            b"hello-plain-more"
+        );
+    }
+
+    #[test]
+    fn a_huge_plain_address_is_refused_before_its_body_is_read() {
+        let dir = setup_test_dir();
+        let provider = make_encrypted_provider(&dir);
+        let sentence = "is larger than this process can read. Move it out of the folder.";
+        for (root, address) in [
+            ("Users", "localhost://Users/huge.bin"),
+            ("Public", "localhost://Public/huge.bin"),
+        ] {
+            let path = dir.path().join(root).join("huge.bin");
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(&path, b"not-loaded").unwrap();
+            fs::OpenOptions::new()
+                .write(true)
+                .open(&path)
+                .unwrap()
+                .set_len(localhost_provider::SEALED_READ_HARD_LIMIT + 1)
+                .unwrap();
+            let _ = localhost_provider::take_sealed_read_bytes();
+            let err = provider
+                .read_file(address, "token", None, None)
+                .unwrap_err();
+            let text = err.to_string();
+            assert_eq!(err.kind(), io::ErrorKind::FileTooLarge);
+            assert!(text.contains(address), "{text}");
+            assert!(text.contains(sentence), "{text}");
+            assert!(
+                localhost_provider::take_sealed_read_bytes() <= 64,
+                "{root} loaded the body"
+            );
+        }
     }
 }
