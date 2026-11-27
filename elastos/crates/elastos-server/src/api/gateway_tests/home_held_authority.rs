@@ -86,21 +86,26 @@ const OPEN_ROWS: &[(&str, &str, &str)] = &[
     ),
 ];
 
-/// Unix passes the file key and the child is still unconfined. Slice C closes it.
+/// Unix is closed: the field is the file key and the fence keeps the device key file shut.
+/// The Windows field is still the device key, so that arm stays open.
 const LOCALHOST_OPEN_REASON: &str = concat!(
-    "On Unix the localhost encryption field is the HKDF file key ",
-    "`elastos-localhost-file-v1`, not the raw device key. ",
-    "On Windows this slice does not rewrite files, ",
-    "and that same localhost field is the device key. ",
-    "The object provider config does not carry the device key. ",
-    "The localhost child is unconfined and `base_path` is the data directory, ",
-    "so it can open `identity/device.key`. ",
-    "The object process has that same file-read. ",
-    "The row stays open until slice C.",
+    "On Unix the encryption field is the HKDF file key ",
+    "`elastos-localhost-file-v1`, not the raw device key, ",
+    "and the child starts only through spawn_path_allow, ",
+    "so it cannot open `identity/device.key`. ",
+    "`localhost_provider_config_omits_device_key` and ",
+    "`localhost_object_and_chain_cannot_open_device_key` prove that Unix close. ",
+    "On Windows the field is still the device key. ",
+    "The Windows start refuses before a process exists. ",
+    "That arm stays open until P2-11.",
 );
 
 /// The object helper's allowed root still contains the owner's recovery archive key.
-const OBJECT_ROOT_OPEN_REASON: &str = "The object helper's allowed root contains the folder where the owner's recovery archive key lives. The row closes when that key moves out of the helper's root or the key step (slice L) lands.";
+const OBJECT_ROOT_OPEN_REASON: &str = concat!(
+    "The object helper's allowed root contains the folder ",
+    "where the owner's recovery archive key lives. ",
+    "The row closes when that key moves out of the helper's root.",
+);
 
 fn rows() -> Vec<HeldRow> {
     vec![
@@ -2051,9 +2056,10 @@ fn open_rows_are_an_explicit_list() {
 }
 
 /// Localhost, object, and chain start through the path allow-list. Home derives
-/// the chain issuer itself. The localhost device-key hand-off stays open.
-/// The object helper's allowed root stays open: that root contains the folder
-/// where the owner's recovery archive key lives.
+/// the chain issuer itself. On Unix the localhost field is the file key and the
+/// child cannot open the device key. The Windows field is still the device key,
+/// so that arm stays open. The object helper's allowed root stays open: that
+/// root contains the folder where the owner's recovery archive key lives.
 #[test]
 fn localhost_object_and_chain_start_on_the_path_allow_list() {
     let raw = sources()
