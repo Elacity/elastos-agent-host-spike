@@ -67,7 +67,7 @@ export const names = [
   "install_with_hashes_key_deleted", "u4_unknown_agent_refused", "u4_second_start_refused",
   "card_step_up_approve_one_write_one_receipt", "owner_denial_signed_row",
   "stop_while_an_ask_waits", "agents_off_during_run",
-  "home_restart_history",
+  "home_restart_history", "page_inbox_deny", "installed_page_proof",
 ];
 
 // Create only. The full journey's names stay the list above.
@@ -109,6 +109,7 @@ const state = {
   card: null,
   requestId: "",
   approveBody: null,
+  pageDenied: false,
 };
 
 function clip(value) {
@@ -1154,6 +1155,7 @@ function resourceOf(body) {
 
 async function approveGrants(deadlineMs) {
   const deadline = Date.now() + deadlineMs;
+  let satisfiedAt = 0;
   while (Date.now() < deadline) {
     const summary = await inbox();
     let acted = false;
@@ -1162,16 +1164,38 @@ async function approveGrants(deadlineMs) {
       if (!action.startsWith("capability-approve-request:")) continue;
       const resource = resourceOf(entry.body);
       if (resource.startsWith("elastos://inspect/submit_agent_plan")) continue;
+      if (!state.pageDenied && String(entry.body || "").includes("read access")) {
+        const denyId = action.replace("capability-approve-request:", "capability-deny-request:");
+        const reply = await pageInboxPost(denyId, "page_inbox_deny");
+        state.pageDenied = reply.status === 200;
+        state.grants.push({
+          resource, status: reply.status, body: entry.body, result: reply.text.slice(0, 180), via: "page-deny",
+        });
+        if (!state.pageDenied) {
+          halt("page_inbox_deny", { status: reply.status, body: reply.text.slice(0, 240) });
+        }
+        pass("page_inbox_deny", { status: reply.status, resource });
+        acted = true;
+        continue;
+      }
       const reply = await call("POST", "/api/apps/inbox/actions", state.inboxToken, { action_id: action });
       state.grants.push({ resource, status: reply.status, body: entry.body, result: reply.text.slice(0, 180) });
       acted = true;
     }
     const files = interestingFiles();
     if (grantWaitSatisfied(files, [state.rootA, state.rootB], state.grants) && !acted) {
+      if (!satisfiedAt) satisfiedAt = Date.now();
+      if (!state.pageDenied && Date.now() - satisfiedAt < 20000) {
+        await sleep(500);
+        continue;
+      }
+      if (!state.pageDenied) halt("page_inbox_deny", "the Inbox showed no read grant to deny");
       return "ready";
     }
+    if (acted) satisfiedAt = 0;
     await sleep(500);
   }
+  if (!state.pageDenied) halt("page_inbox_deny", "the Inbox showed no read grant to deny");
   return "timeout";
 }
 
@@ -1620,17 +1644,14 @@ async function main() {
     halt("u3_agent_activated", { status: activatedA.status, body: activatedA.text.slice(0, 300) });
   }
   pass("u3_agent_activated", state.agentA);
-  const startedA = await (async () => {
-    const step = await stepUp(state.systemToken, "agent.start", { agent_id: state.agentA });
-    return call("POST", "/api/apps/system/agents/launch", state.systemToken, {
-      agent_id: state.agentA, step_up_token: step,
-    });
-  })();
+  const startedA = await pageAgentAction(
+    state.agentA, "Start", "/api/apps/system/agents/launch", "u3_agent_started",
+  );
   state.launchA = startedA.json;
   if (startedA.status !== 200 || !startedA.json?.session_id) {
     halt("u3_agent_started", { status: startedA.status, body: startedA.text.slice(0, 400) });
   }
-  pass("u3_agent_started", { session_id: startedA.json.session_id, status: startedA.json.status });
+  pass("u3_agent_started", { session_id: startedA.json.session_id, status: startedA.json.status, via: "page" });
 
   const createdB = await call("POST", "/api/apps/system/agents/create", state.systemToken, {
     display_name: "Agent B", agent_host: "agent-host", request_id: "a15r-s9b-agent-b",
@@ -1644,12 +1665,9 @@ async function main() {
     agent_id: state.agentB, active: true,
   });
   if (activatedB.status !== 200) halt("u4_both_running", activatedB.text.slice(0, 240));
-  const startedB = await (async () => {
-    const step = await stepUp(state.systemToken, "agent.start", { agent_id: state.agentB });
-    return call("POST", "/api/apps/system/agents/launch", state.systemToken, {
-      agent_id: state.agentB, step_up_token: step,
-    });
-  })();
+  const startedB = await pageAgentAction(
+    state.agentB, "Start", "/api/apps/system/agents/launch", "u4_both_running",
+  );
   state.launchB = startedB.json;
   const rows = agentRows();
   const rowA = rows.find((row) => row.id === state.agentA);
@@ -1859,21 +1877,16 @@ async function main() {
     mark(name, ok ? "pass" : "fail", detail);
     return ok;
   };
+  // Step one is agent A's own step. The Inbox page approves it, passkey and
+  // all, and it lands with no Stop in its way. Stop races a second step,
+  // agent B's, after this step's rows.
   try {
-    const approvedStep = await stepUp(state.inboxToken, "agent_plan.approve", { request_id: state.requestId });
-    state.approveBody = {
-      action_id: state.card.action_id,
-      request_binding: state.card.request_binding,
-      step_up_token: approvedStep,
-    };
+    const approved = await pageInboxPost(state.card.action_id, "step_up_approve", 120000);
+    state.approveBody = approved.body;
+    keep("step_up_approve", approved.status === 200 && Boolean(state.approveBody), approved.text.slice(0, 300));
   } catch (error) {
-    mark("step_up_approve", "fail", String(error.message || error));
-  }
-  // Step one is agent A's own step. It is approved and lands with no Stop in
-  // its way. Stop races a second step, agent B's, after this step's rows.
-  if (state.approveBody) {
-    const approved = await call("POST", "/api/apps/inbox/actions", state.inboxToken, state.approveBody);
-    keep("step_up_approve", approved.status === 200, approved.text.slice(0, 300));
+    if (!marks.get("step_up_approve")) mark("step_up_approve", "fail", String(error.message || error));
+    throw error;
   }
   let settled = null;
   const settleDeadline = Date.now() + 30000;
@@ -2125,7 +2138,9 @@ async function main() {
     if (!askB) await sleep(500);
   }
   const waitingLive = runB ? liveSessions(await capsules(), [{ session_id: runB }]).length === 1 : false;
-  const stopWaiting = askB && waitingLive ? await stopAgent(state.agentB) : null;
+  const stopWaiting = askB && waitingLive
+    ? await pageAgentAction(state.agentB, "Stop", "/api/apps/system/agents/stop", "stop_while_an_ask_waits")
+    : null;
   const askLeft = askB
     ? asksOfB(await inbox()).some((entry) => entry.action_ref?.action_id === askB.action_ref?.action_id)
     : true;
@@ -2178,25 +2193,33 @@ async function main() {
   } catch (error) {
     again = { status: 0, text: String(error.message || error) };
   }
-  const stoppedLive = liveRun
-    ? auditEvents().find((event) => (
+  const stopRows = liveRun
+    ? auditEvents().filter((event) => (
       event.event_type === "agent.stopped" && event.session_id === liveRun.session_id
     ))
-    : null;
-  if (liveBeforeOff.length === 1 && off.status === 200 && again.status !== 200 && again.text.includes("not turned on") && stoppedLive) {
+    : [];
+  const stoppedLive = stopRows.length ? stopRows[stopRows.length - 1] : null;
+  const stillLive = (await capsules()).json?.capsules?.filter((row) => (
+    row.status === "starting" || row.status === "running"
+  )) || [];
+  const stopOk = stopRows.length > 0 && stopRows.every((event) => event.result !== "failed");
+  if (liveBeforeOff.length === 1 && off.status === 200 && again.status !== 200 && again.text.includes("not turned on") && stopOk && stillLive.length === 0) {
     pass("agents_off_during_run", {
       off: off.status,
       session_id: stoppedLive.session_id,
       result: stoppedLive.result,
+      live_after: 0,
       start: again.status,
     });
   } else {
     mark("agents_off_during_run", "fail", {
       live: liveBeforeOff.length,
+      live_after: stillLive.length,
       off: off.status,
       start: again.status,
       body: again.text.slice(0, 180),
       stopped: Boolean(stoppedLive),
+      result: stoppedLive?.result || "",
     });
   }
 
@@ -2211,6 +2234,7 @@ async function main() {
   }
   else mark("owner_denial_signed_row", "fail", { status: guestStop.status, denial });
 
+  await proveInstalledPage();
 }
 
 function loadInstall() {
@@ -2465,13 +2489,22 @@ async function shotAgents(name) {
   }
 }
 
-async function openOwnerSystem() {
+async function openOwnerSystem(failName = "u3_home_asks", fresh = false) {
   const shell = shellFrame();
+  const existing = shell.locator('[data-target="system"] iframe.window-frame');
+  if (!fresh && await existing.count()) {
+    const open = systemFrame();
+    const openTab = open.locator('.settings-sidebar-item[data-settings="agents"]');
+    if (await openTab.isVisible().catch(() => false)) {
+      await openTab.click();
+      return open;
+    }
+  }
   const menu = shell.locator("#toolbar-home");
   try {
     await menu.waitFor({ state: "visible", timeout: 60000 });
   } catch {
-    halt("u3_home_asks", productFault("ElastOS menu #toolbar-home"));
+    halt(failName, productFault("ElastOS menu #toolbar-home"));
   }
   const later = shell.locator("#setup-sheet-later");
   if (await later.isVisible().catch(() => false)) await later.click();
@@ -2480,14 +2513,14 @@ async function openOwnerSystem() {
   try {
     await systemItem.waitFor({ state: "visible", timeout: 15000 });
   } catch {
-    halt("u3_home_asks", productFault("System Settings #identity-menu-system"));
+    halt(failName, productFault("System Settings #identity-menu-system"));
   }
   await systemItem.click();
   const iframe = shell.locator('[data-target="system"] iframe.window-frame');
   try {
     await iframe.waitFor({ state: "attached", timeout: 30000 });
   } catch {
-    halt("u3_home_asks", productFault("System window"));
+    halt(failName, productFault("System window"));
   }
   const deadline = Date.now() + 20000;
   let token = "";
@@ -2495,20 +2528,130 @@ async function openOwnerSystem() {
     token = await readSystemFrameToken();
     if (!token) await sleep(200);
   }
-  if (!token) halt("u3_home_asks", productFault("System launch token in the page frame"));
+  if (!token) halt(failName, productFault("System launch token in the page frame"));
   const system = systemFrame();
   const locked = system.locator("#system-locked");
   if (await locked.isVisible().catch(() => false)) {
-    halt("u3_home_asks", productFault("System page (it says Open from Home)"));
+    halt(failName, productFault("System page (it says Open from Home)"));
   }
   const agentsTab = system.locator('.settings-sidebar-item[data-settings="agents"]');
   try {
     await agentsTab.waitFor({ state: "visible", timeout: 30000 });
   } catch {
-    halt("u3_home_asks", productFault("Agents section"));
+    halt(failName, productFault("Agents section"));
   }
   await agentsTab.click();
   return system;
+}
+
+async function reopenSystem(failName) {
+  const shell = shellFrame();
+  const closer = shell.locator("[data-target='system'] [data-action='close']");
+  if (await closer.count()) {
+    await closer.first().click().catch(() => {});
+    await shell.locator("[data-target='system']").waitFor({ state: "detached", timeout: 8000 }).catch(() => {});
+  }
+  return openOwnerSystem(failName, true);
+}
+
+function inboxFrame() {
+  return shellFrame().frameLocator("#inbox-rail-frame");
+}
+
+async function openInboxRail(failName) {
+  const shell = shellFrame();
+  const button = shell.locator("#toolbar-inbox");
+  try {
+    await button.waitFor({ state: "visible", timeout: 20000 });
+  } catch (error) {
+    halt(failName, productFault(`Inbox #toolbar-inbox (${error.message})`));
+  }
+  const already = (await button.getAttribute("aria-expanded")) === "true";
+  if (!already) await button.click();
+  const frame = shell.locator("#inbox-rail-frame");
+  try {
+    await frame.waitFor({ state: "visible", timeout: 20000 });
+  } catch (error) {
+    halt(failName, productFault(`Inbox rail (${error.message})`));
+  }
+  if (already) {
+    const refresh = shell.locator("#inbox-rail-refresh");
+    if (await refresh.isVisible().catch(() => false)) await refresh.click();
+  }
+  return inboxFrame();
+}
+
+async function pageInboxPost(actionId, failName, timeout = 60000) {
+  const inbox = await openInboxRail(failName);
+  const button = inbox.locator(`[data-action-id="${actionId}"]`);
+  try {
+    await button.first().waitFor({ state: "visible", timeout: 90000 });
+  } catch (error) {
+    halt(failName, `${actionId} was not on the Inbox page: ${error.message}`);
+  }
+  const pending = adminPage.waitForResponse((response) => (
+    response.request().method() === "POST"
+    && response.url().includes("/api/apps/inbox/actions")
+    && (response.request().postData() || "").includes(actionId)
+  ), { timeout });
+  await button.first().click();
+  const response = await pending;
+  let body = null;
+  try { body = JSON.parse(response.request().postData() || ""); } catch { body = null; }
+  const result = await readBrowserResponse(response);
+  return { ...result, body };
+}
+
+async function pageAgentAction(agentId, label, pathSuffix, failName) {
+  const system = label === "Stop" ? await reopenSystem(failName) : await openOwnerSystem(failName);
+  const row = system.locator(".pc2-card-row").filter({
+    has: system.locator(`[data-agent-id="${agentId}"]`),
+  });
+  const button = row.getByRole("button", { name: label, exact: true });
+  try {
+    await button.waitFor({ state: "visible", timeout: 45000 });
+  } catch (error) {
+    const banner = await system.locator("#agents-status").innerText().catch(() => "");
+    halt(failName, `${label} was not shown: ${error.message} ${banner.slice(0, 180)}`);
+  }
+  const pending = adminPage.waitForResponse((response) => (
+    response.request().method() === "POST" && response.url().includes(pathSuffix)
+  ), { timeout: 120000 });
+  await button.click();
+  try {
+    return await readBrowserResponse(await pending);
+  } catch (error) {
+    const banner = await system.locator("#agents-status").innerText().catch(() => "");
+    halt(failName, `${label} did not answer: ${error.message} ${banner.slice(0, 180)}`);
+  }
+}
+
+async function proveInstalledPage() {
+  pageProof = pageFolderProof(root, data);
+  const carrier = noteCarrier();
+  const did = runtimeIdentityDid();
+  let verified = { ok: false, reason: "auth state missing", creates: [] };
+  try {
+    verified = verifyInstalledAudit(readJson(authStatePath()), did);
+  } catch (error) {
+    verified = { ok: false, reason: String(error.message || error), creates: [] };
+  }
+  const creates = Array.isArray(verified.creates) ? verified.creates : [];
+  const both = verified.ok && creates.includes(state.agentA) && creates.includes(state.agentB);
+  if (!pageProof?.ok || !carrier.ok || !both) {
+    mark("installed_page_proof", "fail", {
+      audit: verified.reason || "",
+      pages: pageProof?.ok ? pageProof.pages : pageProof,
+      carrier: carrier.reason || "",
+      creates: creates.length,
+    });
+    return;
+  }
+  pass("installed_page_proof", {
+    creates: creates.length,
+    pages: pageProof.pages,
+    carrier: CARRIER_MODE,
+  });
 }
 
 async function pagePost(pathSuffix) {
