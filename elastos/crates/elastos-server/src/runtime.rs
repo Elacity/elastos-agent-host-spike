@@ -10010,9 +10010,9 @@ pub(crate) mod tests {
         assert_eq!(cause, "stopped: owner", "{id}");
     }
 
-    /// Starts and stops overlap. The watcher is not paused after the outcome.
-    /// Every end is `stopped: owner`. A ticket dropped before commit releases
-    /// the wait.
+    /// 4 starts overlap, 4 stops overlap, and each stop races its own watcher.
+    /// The watcher is not paused after the outcome. Every end is
+    /// `stopped: owner`. A ticket dropped before commit releases the wait.
     #[cfg(unix)]
     #[tokio::test]
     async fn overlapping_owner_stops_record_stopped_owner() {
