@@ -65,24 +65,6 @@ fn rows() -> Vec<Row> {
     let confined_spawn = ["ProviderBridge::spawn", "_confined"].concat();
     vec![
         row(
-            "elastos-runtime/src/capsule/manager.rs",
-            "launch_internal",
-            "compute.load",
-            "legacy module; component refused",
-            "none",
-            "P2-8",
-            1,
-        ),
-        row(
-            "elastos-runtime/src/capsule/manager.rs",
-            "launch_internal",
-            "compute.start",
-            "legacy module; component refused",
-            "none",
-            "P2-8",
-            1,
-        ),
-        row(
             "elastos-runtime/src/provider/bridge.rs",
             "spawn_command",
             "spawn()",

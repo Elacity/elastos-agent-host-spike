@@ -105,13 +105,6 @@ const OBJECT_ROOT_OPEN_REASON: &str = "The object helper's allowed root contains
 fn rows() -> Vec<HeldRow> {
     vec![
     row(
-        "elastos-runtime/src/bootstrap/runtime_builder.rs",
-        "build",
-        "CapabilityManager::load_or_generate",
-        1,
-        mark("runtime-own", "capability signer", "Runtime", "Runtime startup loads its capability signer"),
-    ),
-    row(
         "elastos-runtime/src/capability/manager.rs",
         "rotate_signing_key",
         "SigningKey::generate",
@@ -152,13 +145,6 @@ fn rows() -> Vec<HeldRow> {
         "SigningKey::from_bytes",
         1,
         mark("runtime-own", "capability signing key", "Runtime", "Runtime reads its stored capability signing key"),
-    ),
-    row(
-        "elastos-runtime/src/handler/request_handler.rs",
-        "handle_grant_capability",
-        "capability_manager.grant",
-        1,
-        mark("runtime-own", "capsule capability", "capsule", "The request handler grants a capsule capability"),
     ),
     row(
         "elastos-runtime/src/provider/path_allow.rs",

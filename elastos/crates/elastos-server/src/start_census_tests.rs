@@ -305,20 +305,6 @@ fn places() -> Vec<Place> {
             1,
             "update version probe; outside capsule start",
         ),
-        place(
-            "elastos-runtime/src/capsule/manager.rs",
-            "launch_internal",
-            label_of("compute", &load),
-            1,
-            "caller's trust level (shell bootstrap or LaunchCapsule request)",
-        ),
-        place(
-            "elastos-runtime/src/capsule/manager.rs",
-            "launch_internal",
-            label_of("compute", &start),
-            1,
-            "caller's trust level (shell bootstrap or LaunchCapsule request)",
-        ),
         // The load moved into load_microvm_capsule, which checks the entrypoint first.
         place(
             "elastos-server/src/serve_cmd.rs",

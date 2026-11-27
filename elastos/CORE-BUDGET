@@ -66,4 +66,7 @@
 # lives. last_errno reads errno through std (-2). Measured 26 Nov 2026.
 # +4: round 36 names the failed child's pid in the two launch errors the operator sees.
 # Measured 27 Nov 2026.
-15273
+# -1712: legacy launchers are cfg(test) (CapsuleManager, ShellManager, ElastosRuntime,
+# RequestHandler, CapsuleIoBridge, prepare_fetched_capsule). Measured 27 Nov 2026.
+# Merge of origin/spike/agent-host 75616ff93 (#1871) into the P2-4 fences. Both notes stay. Measured 27 Nov 2026.
+13561
