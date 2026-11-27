@@ -1155,7 +1155,6 @@ function resourceOf(body) {
 
 async function approveGrants(deadlineMs) {
   const deadline = Date.now() + deadlineMs;
-  let satisfiedAt = 0;
   while (Date.now() < deadline) {
     const summary = await inbox();
     let acted = false;
@@ -1164,38 +1163,14 @@ async function approveGrants(deadlineMs) {
       if (!action.startsWith("capability-approve-request:")) continue;
       const resource = resourceOf(entry.body);
       if (resource.startsWith("elastos://inspect/submit_agent_plan")) continue;
-      if (!state.pageDenied && String(entry.body || "").includes("read access")) {
-        const denyId = action.replace("capability-approve-request:", "capability-deny-request:");
-        const reply = await pageInboxPost(denyId, "page_inbox_deny");
-        state.pageDenied = reply.status === 200;
-        state.grants.push({
-          resource, status: reply.status, body: entry.body, result: reply.text.slice(0, 180), via: "page-deny",
-        });
-        if (!state.pageDenied) {
-          halt("page_inbox_deny", { status: reply.status, body: reply.text.slice(0, 240) });
-        }
-        pass("page_inbox_deny", { status: reply.status, resource });
-        acted = true;
-        continue;
-      }
       const reply = await call("POST", "/api/apps/inbox/actions", state.inboxToken, { action_id: action });
       state.grants.push({ resource, status: reply.status, body: entry.body, result: reply.text.slice(0, 180) });
       acted = true;
     }
     const files = interestingFiles();
-    if (grantWaitSatisfied(files, [state.rootA, state.rootB], state.grants) && !acted) {
-      if (!satisfiedAt) satisfiedAt = Date.now();
-      if (!state.pageDenied && Date.now() - satisfiedAt < 20000) {
-        await sleep(500);
-        continue;
-      }
-      if (!state.pageDenied) halt("page_inbox_deny", "the Inbox showed no read grant to deny");
-      return "ready";
-    }
-    if (acted) satisfiedAt = 0;
+    if (grantWaitSatisfied(files, [state.rootA, state.rootB], state.grants) && !acted) return "ready";
     await sleep(500);
   }
-  if (!state.pageDenied) halt("page_inbox_deny", "the Inbox showed no read grant to deny");
   return "timeout";
 }
 
@@ -2132,10 +2107,28 @@ async function main() {
       && (body.includes(state.agentB) || resourceOf(body).startsWith(state.rootB));
   });
   let askB = null;
-  const askDeadline = Date.now() + 60000;
+  let deniedAsk = "";
+  const askDeadline = Date.now() + 120000;
   while (runB && !askB && Date.now() < askDeadline) {
-    askB = asksOfB(await inbox())[0] || null;
+    const asks = asksOfB(await inbox());
+    const open = asks.find((entry) => entry.action_ref?.action_id !== deniedAsk) || null;
+    if (!state.pageDenied && open) {
+      const action = open.action_ref.action_id;
+      const denyId = action.replace("capability-approve-request:", "capability-deny-request:");
+      const reply = await pageInboxPost(denyId, "page_inbox_deny");
+      state.pageDenied = reply.status === 200;
+      if (!state.pageDenied) {
+        halt("page_inbox_deny", { status: reply.status, body: reply.text.slice(0, 240) });
+      }
+      pass("page_inbox_deny", { status: reply.status, resource: resourceOf(open.body) });
+      deniedAsk = action;
+      continue;
+    }
+    askB = open;
     if (!askB) await sleep(500);
+  }
+  if (runB && !state.pageDenied) {
+    halt("page_inbox_deny", "the Inbox showed no waiting grant to deny");
   }
   const waitingLive = runB ? liveSessions(await capsules(), [{ session_id: runB }]).length === 1 : false;
   const stopWaiting = askB && waitingLive
