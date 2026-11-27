@@ -1208,12 +1208,63 @@ export function restartHistory(before, after, heldRequest, heldSession) {
   return { step, closed: step.open && step.closed };
 }
 
-export function planeSameProcess(pid, gatewayPid, listenerOwned, pidAlive, mode) {
+export function planeSameProcess(pid, gatewayPid, listenerOwned, pidAlive, mode, coordsCurrent) {
   return pid > 0
     && pid === gatewayPid
     && listenerOwned === true
     && pidAlive === true
-    && (mode & 0o777) === 0o600;
+    && (mode & 0o777) === 0o600
+    && coordsCurrent === true;
+}
+
+// `ps -o etime=` is `[[dd-]hh:]mm:ss`. A stale coordinates file is older than
+// the gateway that now owns the pid.
+export function processElapsedMs(text) {
+  const match = String(text || "").trim().match(/^(?:(\d+)-)?(?:(\d+):)?(\d+):(\d+)$/);
+  if (!match) return null;
+  const days = Number(match[1] || 0);
+  const hours = Number(match[2] || 0);
+  const minutes = Number(match[3]);
+  const seconds = Number(match[4]);
+  return (((days * 24 + hours) * 60 + minutes) * 60 + seconds) * 1000;
+}
+
+export function coordsCurrent(coordsMtimeMs, gatewayStartMs) {
+  if (!Number.isFinite(coordsMtimeMs) || !Number.isFinite(gatewayStartMs) || gatewayStartMs <= 0) {
+    return false;
+  }
+  return coordsMtimeMs + 2000 >= gatewayStartMs;
+}
+
+function coordsMtimeMs(planeCoords) {
+  try {
+    return fs.statSync(planeCoords).mtimeMs;
+  } catch {
+    return NaN;
+  }
+}
+
+function gatewayStartMs(pid) {
+  const id = Number(pid);
+  if (!Number.isInteger(id) || id <= 0) return 0;
+  const result = spawnSync("ps", ["-p", String(id), "-o", "etime="], { encoding: "utf8" });
+  if (result.status !== 0) return 0;
+  const elapsed = processElapsedMs(result.stdout);
+  if (elapsed == null) return 0;
+  return Date.now() - elapsed;
+}
+
+export function ownerStopDenial(events, agentId, attemptedAt) {
+  const wanted = String(agentId || "");
+  const after = Number(attemptedAt);
+  if (!wanted || !Number.isFinite(after)) return false;
+  return (events || []).some((event) => {
+    if (event?.event_type !== "agent.stop.denied" || event?.result !== "denied") return false;
+    if (!signedEvent(event)) return false;
+    if (Number(event.occurred_at) < after) return false;
+    const reason = reasonObject(event);
+    return reason?.agent_id === wanted;
+  });
 }
 
 function alive(pid) {
@@ -1599,18 +1650,19 @@ async function main() {
   }
   const unknownRefused = unknownActivate.status === 409 && unknownActivate.text.includes(noSuchAgent)
     && unknownLaunch.status === 409 && unknownLaunch.text.includes(noSuchAgent);
-  if (!unknownRefused) {
+  if (unknownRefused) {
+    pass("u3_unknown_id_refused", noSuchAgent);
+    pass("u4_unknown_agent_refused", {
+      sentence: noSuchAgent,
+      activate: unknownActivate.status,
+      launch: unknownLaunch.status,
+    });
+  } else {
     halt("u3_unknown_id_refused", {
       activate: { status: unknownActivate.status, body: unknownActivate.text.slice(0, 220) },
       launch: { status: unknownLaunch.status, body: String(unknownLaunch.text).slice(0, 220) },
     });
   }
-  pass("u3_unknown_id_refused", noSuchAgent);
-  pass("u4_unknown_agent_refused", {
-    sentence: noSuchAgent,
-    source_commit: process.env.A15R_SOURCE_COMMIT || "",
-    host: "signed package",
-  });
 
   const activatedA = await call("POST", "/api/apps/system/agents/activate", state.systemToken, {
     agent_id: state.agentA, active: true,
@@ -1927,8 +1979,14 @@ async function main() {
   } catch {
     secretMode = 0;
   }
-  const sameProcess = planeSameProcess(planePid, gatewayPid, ownsListener, alive(planePid), secretMode)
-    && childList.listed === true && childAgents === 0;
+  const sameProcess = planeSameProcess(
+    planePid,
+    gatewayPid,
+    ownsListener,
+    alive(planePid),
+    secretMode,
+    coordsCurrent(coordsMtimeMs(planeCoords), gatewayStartMs(gatewayPid)),
+  ) && childList.listed === true && childAgents === 0;
   if (authorised && receiptOk && marks.get("step_up_approve")?.status === "pass" && sameProcess) {
     pass("card_step_up_approve_one_write_one_receipt", {
       admission_pid: planePid,
@@ -2231,14 +2289,29 @@ async function main() {
 
   const guestAgain = await launchApp(state.guestToken, "system");
   state.guestSystemToken = guestAgain.token;
+  const denialAttemptAt = Math.floor(Date.now() / 1000);
   const guestStop = await call("POST", "/api/apps/system/agents/stop", state.guestSystemToken, {
     agent_id: state.agentA,
   });
-  const denial = auditEvents().some((event) => event.event_type === "agent.stop.denied" && event.result === "denied");
-  if (guestStop.status !== 200 && guestStop.status !== 404 && denial) {
-    pass("owner_denial_signed_row", { status: guestStop.status });
+  let denialChain = { ok: false, reason: "auth state missing" };
+  try {
+    denialChain = verifyInstalledAudit(readJson(authStatePath()), runtimeIdentityDid());
+  } catch (error) {
+    denialChain = { ok: false, reason: String(error.message || error) };
   }
-  else mark("owner_denial_signed_row", "fail", { status: guestStop.status, denial });
+  const denial = denialChain.ok
+    && ownerStopDenial(auditEvents(), state.agentA, denialAttemptAt);
+  if (guestStop.status !== 200 && guestStop.status !== 404 && denial) {
+    pass("owner_denial_signed_row", { status: guestStop.status, agent: state.agentA });
+  }
+  else {
+    mark("owner_denial_signed_row", "fail", {
+      status: guestStop.status,
+      denial,
+      audit: denialChain.reason || "",
+      agent: state.agentA,
+    });
+  }
 
   await proveInstalledPage();
 }

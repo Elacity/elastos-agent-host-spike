@@ -23,7 +23,10 @@ import {
   gatewayHealthOk,
   grantWaitSatisfied,
   rootsStayWithTheirAgent,
+  coordsCurrent,
+  ownerStopDenial,
   planeSameProcess,
+  processElapsedMs,
   restartHistory,
   journalFileInRoot,
   ownerDocumentUnchanged,
@@ -201,10 +204,32 @@ test("grant wait ignores the route row's marker files", () => {
 });
 
 test("a plane is the gateway process and its coordinates stay owner-only", () => {
-  assert.equal(planeSameProcess(4, 4, true, true, 0o600), true);
-  assert.equal(planeSameProcess(4, 5, true, true, 0o600), false);
-  assert.equal(planeSameProcess(4, 4, true, false, 0o600), false);
-  assert.equal(planeSameProcess(4, 4, true, true, 0o644), false);
+  assert.equal(planeSameProcess(4, 4, true, true, 0o600, true), true);
+  assert.equal(planeSameProcess(4, 5, true, true, 0o600, true), false);
+  assert.equal(planeSameProcess(4, 4, true, false, 0o600, true), false);
+  assert.equal(planeSameProcess(4, 4, true, true, 0o644, true), false);
+  assert.equal(planeSameProcess(4, 4, true, true, 0o600, false), false);
+  assert.equal(coordsCurrent(12_000, 10_000), true);
+  assert.equal(coordsCurrent(1_000, 10_000), false);
+  assert.equal(processElapsedMs("01:02"), 62_000);
+  assert.equal(processElapsedMs("01:02:03"), 3_723_000);
+  assert.equal(processElapsedMs("1-01:02:03"), 90_123_000);
+  assert.equal(processElapsedMs("stale"), null);
+});
+
+test("an owner denial names the targeted agent after the attempt", () => {
+  const row = {
+    event_type: "agent.stop.denied",
+    result: "denied",
+    signature: "ab",
+    occurred_at: 50,
+    reason: JSON.stringify({ agent_id: "agent:v2:aa", cause: "not the owner" }),
+  };
+  assert.equal(ownerStopDenial([row], "agent:v2:aa", 50), true);
+  assert.equal(ownerStopDenial([row], "agent:v2:bb", 50), false);
+  assert.equal(ownerStopDenial([row], "agent:v2:aa", 51), false);
+  assert.equal(ownerStopDenial([{ ...row, signature: "" }], "agent:v2:aa", 50), false);
+  assert.equal(ownerStopDenial([{ ...row, occurred_at: 10 }], "agent:v2:aa", 50), false);
 });
 
 test("the restart row needs a held pending step of a live run, closed once by the restart", () => {
