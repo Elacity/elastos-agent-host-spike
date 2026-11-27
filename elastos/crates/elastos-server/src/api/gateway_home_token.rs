@@ -318,6 +318,12 @@ fn home_launch_cookie_header(
 type SessionGrant = elastos_runtime::auth::AuthSessionGrantV1;
 
 const DEVICE_GRANT_FILE: &str = "ElastOS/System/device-launch-grant.json";
+const DEVICE_GRANT_MAX_BYTES: u64 = 4096;
+static DEVICE_LAUNCH_GRANT_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn device_grant_reason(reason: &str) -> anyhow::Error {
+    anyhow::anyhow!("device launch grant {DEVICE_GRANT_FILE} is {reason}")
+}
 
 fn device_launch_grant_path(dir: &std::path::Path) -> anyhow::Result<std::path::PathBuf> {
     elastos_common::localhost::rooted_localhost_fs_path(dir, DEVICE_GRANT_FILE)
@@ -325,11 +331,51 @@ fn device_launch_grant_path(dir: &std::path::Path) -> anyhow::Result<std::path::
 }
 
 fn read_device_launch_grant(dir: &std::path::Path) -> anyhow::Result<Option<SessionGrant>> {
-    match std::fs::read(device_launch_grant_path(dir)?) {
-        Ok(bytes) => Ok(serde_json::from_slice(&bytes).ok()),
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(err) => Err(err.into()),
+    let Some(bytes) = read_device_grant_bytes(&device_launch_grant_path(dir)?)? else {
+        return Ok(None);
+    };
+    serde_json::from_slice(&bytes)
+        .map(Some)
+        .map_err(|_| device_grant_reason("corrupt"))
+}
+
+#[cfg(unix)]
+fn read_device_grant_bytes(path: &std::path::Path) -> anyhow::Result<Option<Vec<u8>>> {
+    use std::io::Read;
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+    let meta = match std::fs::symlink_metadata(path) {
+        Ok(meta) => meta,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(_) => return Err(device_grant_reason("unreadable")),
+    };
+    if meta.file_type().is_symlink() {
+        return Err(device_grant_reason("a symlink"));
     }
+    let uid = unsafe { libc::geteuid() };
+    if !meta.is_file() || meta.uid() != uid {
+        return Err(device_grant_reason("refused"));
+    }
+    if meta.len() > DEVICE_GRANT_MAX_BYTES {
+        return Err(device_grant_reason("oversized"));
+    }
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)
+        .map_err(|_| device_grant_reason("unreadable"))?;
+    let held = file.metadata()?;
+    if !held.is_file() || held.uid() != uid || held.len() > DEVICE_GRANT_MAX_BYTES {
+        return Err(device_grant_reason("refused"));
+    }
+    let mut bytes = Vec::new();
+    file.take(DEVICE_GRANT_MAX_BYTES + 1)
+        .read_to_end(&mut bytes)?;
+    Ok(Some(bytes))
+}
+
+#[cfg(not(unix))]
+fn read_device_grant_bytes(_path: &std::path::Path) -> anyhow::Result<Option<Vec<u8>>> {
+    Err(device_grant_reason("unsupported on this platform"))
 }
 
 fn write_device_launch_grant(dir: &std::path::Path, grant: &SessionGrant) -> anyhow::Result<()> {
@@ -341,24 +387,34 @@ fn write_device_launch_grant(dir: &std::path::Path, grant: &SessionGrant) -> any
     crate::auth_state_files::write_secret_json_atomic(&path, grant)
 }
 
+fn device_grant_is_for(grant: &SessionGrant, principal_id: &str) -> bool {
+    grant.schema == SessionGrant::SCHEMA
+        && grant.principal_id == principal_id
+        && grant.proof_binding_id.is_empty()
+        && grant.apps == [HOME_CAPSULE_ID.to_string(), HOME_CLI_SHELL_ID.to_string()]
+        && valid_local_authority_id(&grant.session_id, "local:")
+        && valid_local_authority_id(&grant.grant_id, "grant:local:")
+}
+
 fn load_or_create_device_launch_grant(
     dir: &std::path::Path,
     principal_id: &str,
     now: u64,
 ) -> anyhow::Result<SessionGrant> {
+    let _held = DEVICE_LAUNCH_GRANT_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let auth_dir = home_launch_auth_data_dir(dir);
     if let Some(stored) = read_device_launch_grant(&auth_dir)? {
-        if stored.schema == SessionGrant::SCHEMA
-            && stored.principal_id == principal_id
-            && stored.proof_binding_id.is_empty()
-            && stored.expires_at > now
-            && stored.apps == [HOME_CAPSULE_ID.to_string(), HOME_CLI_SHELL_ID.to_string()]
-            && valid_local_authority_id(&stored.session_id, "local:")
-            && valid_local_authority_id(&stored.grant_id, "grant:local:")
-        {
+        if !device_grant_is_for(&stored, principal_id) {
+            return Err(device_grant_reason("foreign"));
+        }
+        if stored.expires_at > now {
             return Ok(stored);
         }
     }
+    #[cfg(test)]
+    tests::pause_before_device_grant_create();
     let grant = SessionGrant {
         schema: SessionGrant::SCHEMA.to_string(),
         grant_id: format!("grant:local:{}", uuid_like_token()),
@@ -738,6 +794,7 @@ pub(super) enum GrantLookup {
     NotActive,
     Mismatch,
     Unauthorized,
+    Refused(String),
 }
 
 impl std::fmt::Display for GrantLookup {
@@ -746,6 +803,7 @@ impl std::fmt::Display for GrantLookup {
             GrantLookup::NotActive => "home launch token auth session is not active",
             GrantLookup::Mismatch => "home launch token authority context mismatch",
             GrantLookup::Unauthorized => "auth session grant is not authorized for app",
+            GrantLookup::Refused(reason) => reason.as_str(),
         })
     }
 }
@@ -763,10 +821,11 @@ pub(super) fn grant_bound_expiry(
     let now = now_ts();
     let auth_dir = home_launch_auth_data_dir(data_dir);
     let (proof_matches, grant) = if proof_binding_id.is_none() {
-        let grant = read_device_launch_grant(&auth_dir)
-            .ok()
-            .flatten()
-            .ok_or(GrantLookup::NotActive)?;
+        let grant = match read_device_launch_grant(&auth_dir) {
+            Ok(Some(grant)) => grant,
+            Ok(None) => return Err(GrantLookup::NotActive),
+            Err(err) => return Err(GrantLookup::Refused(err.to_string())),
+        };
         if grant.expires_at <= now || grant.session_id != session_id {
             return Err(GrantLookup::NotActive);
         }
@@ -1973,6 +2032,30 @@ pub(crate) use tests::sign_direct_launch_for_test;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    thread_local! {
+        static PAUSE_DEVICE_GRANT_CREATE: std::cell::Cell<bool> =
+            const { std::cell::Cell::new(false) };
+    }
+
+    static DEVICE_GRANT_ENTERED: std::sync::Mutex<Option<std::sync::mpsc::Sender<()>>> =
+        std::sync::Mutex::new(None);
+    static DEVICE_GRANT_RELEASE: std::sync::Mutex<Option<std::sync::mpsc::Receiver<()>>> =
+        std::sync::Mutex::new(None);
+
+    pub(super) fn pause_before_device_grant_create() {
+        if !PAUSE_DEVICE_GRANT_CREATE.with(|flag| flag.replace(false)) {
+            return;
+        }
+        let sender = DEVICE_GRANT_ENTERED.lock().unwrap().take();
+        if let Some(sender) = sender {
+            let _ = sender.send(());
+        }
+        let receiver = DEVICE_GRANT_RELEASE.lock().unwrap().take();
+        if let Some(receiver) = receiver {
+            let _ = receiver.recv();
+        }
+    }
 
     #[test]
     fn for_test_maps_each_argument_to_its_own_getter() {
@@ -3998,6 +4081,170 @@ mod tests {
             expired.unwrap_err().to_string().contains("not active"),
             "an expired device grant does not mint"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn verify_refuses_a_proofless_token_past_the_grant_expiry() {
+        let dir = tempfile::tempdir().unwrap();
+        let context = local_home_launch_token_context(dir.path()).unwrap();
+        let token =
+            issue_home_launch_token_with_context(dir.path(), HOME_CAPSULE_ID, &context).unwrap();
+        let minted = decode_launch_token(&token).payload.exp;
+        let auth = home_launch_auth_data_dir(dir.path());
+        let mut grant = read_device_launch_grant(&auth).unwrap().unwrap();
+        grant.expires_at = now_ts().saturating_add(30);
+        assert!(
+            minted > grant.expires_at,
+            "the row needs a token past the grant"
+        );
+        write_device_launch_grant(&auth, &grant).unwrap();
+        let err = require_carried_home_launch_token(dir.path(), &token, &[HOME_CAPSULE_ID])
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("home launch token lifetime is invalid"),
+            "{err}"
+        );
+    }
+
+    #[cfg(unix)]
+    fn device_principal(dir: &std::path::Path) -> String {
+        let (_key, did) = elastos_identity::load_or_create_did(dir).unwrap();
+        elastos_runtime::auth::PrincipalId::device_did(&did)
+            .as_str()
+            .to_string()
+    }
+
+    #[cfg(unix)]
+    fn prepared_device_grant_path(dir: &std::path::Path) -> std::path::PathBuf {
+        let path = device_launch_grant_path(&home_launch_auth_data_dir(dir)).unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        path
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn concurrent_device_grant_callers_share_one_grant() {
+        let dir = tempfile::tempdir().unwrap();
+        let principal = device_principal(dir.path());
+        let now = now_ts();
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        *DEVICE_GRANT_ENTERED.lock().unwrap() = Some(entered_tx);
+        *DEVICE_GRANT_RELEASE.lock().unwrap() = Some(release_rx);
+        let dir_a = dir.path().to_path_buf();
+        let dir_b = dir_a.clone();
+        let principal_a = principal.clone();
+        let principal_b = principal.clone();
+        let first = std::thread::spawn(move || {
+            PAUSE_DEVICE_GRANT_CREATE.with(|flag| flag.set(true));
+            load_or_create_device_launch_grant(&dir_a, &principal_a, now).unwrap()
+        });
+        entered_rx
+            .recv()
+            .expect("first caller reaches create while holding the lock");
+        let second = std::thread::spawn(move || {
+            load_or_create_device_launch_grant(&dir_b, &principal_b, now).unwrap()
+        });
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        release_tx.send(()).unwrap();
+        let first = first.join().unwrap();
+        let second = second.join().unwrap();
+        assert_eq!(first.grant_id, second.grant_id);
+        assert_eq!(first.session_id, second.session_id);
+        let stored = read_device_launch_grant(&home_launch_auth_data_dir(dir.path()))
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.grant_id, first.grant_id);
+        let root = crate::auth::ResolvedPrincipalRoot::resolve(dir.path(), dir.path(), &principal)
+            .unwrap();
+        let context =
+            HomeLaunchTokenContext::resolved(root, first.session_id, None, first.grant_id);
+        for app in [HOME_CAPSULE_ID, HOME_CLI_SHELL_ID] {
+            let token = issue_home_launch_token_with_context(dir.path(), app, &context).unwrap();
+            require_carried_home_launch_token(dir.path(), &token, &[app])
+                .unwrap_or_else(|err| panic!("{app} token did not verify: {err}"));
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn device_grant_refuses_a_symlink() {
+        let dir = tempfile::tempdir().unwrap();
+        let principal = device_principal(dir.path());
+        let path = prepared_device_grant_path(dir.path());
+        let target = path.with_file_name("other-grant.json");
+        std::fs::write(&target, b"{}").unwrap();
+        std::os::unix::fs::symlink(&target, &path).unwrap();
+        let err = load_or_create_device_launch_grant(dir.path(), &principal, now_ts())
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains(DEVICE_GRANT_FILE) && err.contains("symlink"),
+            "{err}"
+        );
+        assert!(std::fs::symlink_metadata(&path)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn device_grant_refuses_an_oversized_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let principal = device_principal(dir.path());
+        let path = prepared_device_grant_path(dir.path());
+        let bytes = vec![b'x'; DEVICE_GRANT_MAX_BYTES as usize + 1];
+        std::fs::write(&path, &bytes).unwrap();
+        let err = load_or_create_device_launch_grant(dir.path(), &principal, now_ts())
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains(DEVICE_GRANT_FILE) && err.contains("oversized"),
+            "{err}"
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn device_grant_refuses_corrupt_content() {
+        let dir = tempfile::tempdir().unwrap();
+        let principal = device_principal(dir.path());
+        let path = prepared_device_grant_path(dir.path());
+        std::fs::write(&path, b"{").unwrap();
+        let err = load_or_create_device_launch_grant(dir.path(), &principal, now_ts())
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains(DEVICE_GRANT_FILE) && err.contains("corrupt"),
+            "{err}"
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), b"{");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn device_grant_refuses_a_foreign_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let context = local_home_launch_token_context(dir.path()).unwrap();
+        let auth = home_launch_auth_data_dir(dir.path());
+        let mut grant = read_device_launch_grant(&auth).unwrap().unwrap();
+        let grant_id = grant.grant_id.clone();
+        grant.principal_id = "person:local:foreign".to_string();
+        write_device_launch_grant(&auth, &grant).unwrap();
+        let err = load_or_create_device_launch_grant(dir.path(), context.principal_id(), now_ts())
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains(DEVICE_GRANT_FILE) && err.contains("foreign"),
+            "{err}"
+        );
+        let kept = read_device_launch_grant(&auth).unwrap().unwrap();
+        assert_eq!(kept.principal_id, "person:local:foreign");
+        assert_eq!(kept.grant_id, grant_id);
     }
 
     #[cfg(unix)]
