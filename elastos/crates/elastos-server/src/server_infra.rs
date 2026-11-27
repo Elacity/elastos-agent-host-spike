@@ -1332,17 +1332,21 @@ async fn setup_server_infrastructure_impl(
     };
 
     // A pending file move defers only that move. Roots still start, as they do
-    // when nothing is deferred. A hard refusal still leaves them unmade.
+    // when nothing is deferred, unless the marker is for another Home. Those
+    // five roots stay unmade until the update finishes and the marker is
+    // rewritten. A hard refusal still leaves them unmade.
     let startup_refusal = elastos_server::local_apps::local_apps_refusal(&data_dir);
-    if startup_refusal.is_none()
-        || startup_refusal.as_deref()
-            == Some(crate::localhost_file_migration::LOCALHOST_FILES_PENDING_UPDATE)
-    {
+    let pending_file_move = startup_refusal.as_deref()
+        == Some(crate::localhost_file_migration::LOCALHOST_FILES_PENDING_UPDATE);
+    let mismatched_marker = pending_file_move
+        && crate::localhost_file_migration::localhost_marker_mismatches(&data_dir);
+    if (startup_refusal.is_none() || pending_file_move) && !mismatched_marker {
         ensure_file_backed_roots(&data_dir).ok();
     }
     // A hard refusal left ElastOS unmade, so the check below skips Auth.
-    // A pending file move has created the roots, so Auth starts and the
-    // audit chain is verified.
+    // A pending file move creates the roots, so Auth starts and the audit
+    // chain is verified. A mismatched marker keeps those roots unmade, and
+    // the same check skips Auth until the marker is rewritten.
     elastos_server::gateway_cmd::verify_auth_audit_after_prepare(&data_dir)?;
     elastos_server::protected_content_runtime::log_unresolved_runtime_releases(&data_dir);
     let provider_registry = Arc::new(provider::ProviderRegistry::new());
@@ -3522,6 +3526,183 @@ mod tests {
                 "unknown": unknown,
             })
         );
+    }
+
+    /// A mismatched marker, all five roots absent, and an update that can roll back.
+    /// Startup does not recreate those roots. After the update lock and the active
+    /// request are gone, the next start reaches `localhost_bringup` `Start` and
+    /// rewrites the marker.
+    #[cfg(any(
+        all(target_os = "macos", not(elastos_unsupported_os_check)),
+        all(
+            not(elastos_unsupported_os_check),
+            target_os = "linux",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        )
+    ))]
+    #[test]
+    fn a_mismatched_marker_with_absent_roots_stays_unmade_until_the_update_finishes() {
+        let _guard = LocalAppsGuard::lock();
+        let (scratch, home, xdg, data, localhost) = fence_home_with_localhost_probe();
+        let manifest = serde_json::json!({
+            "external": {"localhost-provider": localhost},
+            "capsules": {},
+            "profiles": {"home": {"components": ["localhost-provider"]}},
+        });
+        fs::write(
+            data.join("components.json"),
+            serde_json::to_vec(&manifest).unwrap(),
+        )
+        .unwrap();
+        sign_test_home(&data);
+        let installed_head = elastos_common::localhost::installation_release_head_path(&data);
+        let installed_release =
+            elastos_common::localhost::installation_release_manifest_path(&data);
+        fs::create_dir_all(installed_head.parent().unwrap()).unwrap();
+        fs::set_permissions(
+            installed_head.parent().unwrap(),
+            fs::Permissions::from_mode(0o700),
+        )
+        .unwrap();
+        fs::write(
+            &installed_head,
+            fs::read(elastos_common::localhost::publisher_release_head_path(
+                &data,
+            ))
+            .unwrap(),
+        )
+        .unwrap();
+        fs::write(
+            &installed_release,
+            fs::read(elastos_common::localhost::publisher_release_manifest_path(
+                &data,
+            ))
+            .unwrap(),
+        )
+        .unwrap();
+        for path in [&installed_head, &installed_release] {
+            fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        for name in ["AppCapsules", "ElastOS", "Local", "Users", "UsersAI"] {
+            let path = data.join(name);
+            if std::fs::symlink_metadata(&path).is_ok() {
+                fs::remove_dir_all(&path).unwrap();
+            }
+        }
+        let device_key = [0x44u8; 32];
+        plant_device_key(&data, &device_key);
+        elastos_identity::load_or_create_device_key(&data).unwrap();
+        let marker = crate::localhost_file_migration::localhost_marker_record(
+            &expected_localhost_file_key(&[0xabu8; 32]),
+        );
+        let marker_path = data.join("identity/localhost-file-key-v1");
+        fs::write(&marker_path, &marker).unwrap();
+        fs::set_permissions(&marker_path, fs::Permissions::from_mode(0o600)).unwrap();
+        use std::os::fd::AsRawFd as _;
+        use std::os::unix::fs::OpenOptionsExt as _;
+        let controller = data.join("update-controller");
+        fs::create_dir_all(&controller).unwrap();
+        fs::set_permissions(&controller, fs::Permissions::from_mode(0o700)).unwrap();
+        let request = controller.join("active-request.json");
+        fs::write(&request, b"{}").unwrap();
+        fs::set_permissions(&request, fs::Permissions::from_mode(0o600)).unwrap();
+        let lock_file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .mode(0o600)
+            .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
+            .open(controller.join("controller.lock"))
+            .unwrap();
+        assert_eq!(
+            unsafe { libc::flock(lock_file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
+            0,
+            "the test could not hold the update controller"
+        );
+        assert!(
+            elastos_server::update_controller::update_can_roll_back(&data),
+            "the planted update cannot roll back"
+        );
+        for name in ["AppCapsules", "ElastOS", "Local", "Users", "UsersAI"] {
+            assert!(
+                std::fs::symlink_metadata(data.join(name)).is_err(),
+                "{name} existed before startup"
+            );
+        }
+        let (stdout, log) = run_fence_home_probe(
+            &scratch,
+            &home,
+            &xdg,
+            &data,
+            "server_infra::tests::mismatched_marker_pending_update_probe",
+        );
+        assert!(
+            stdout.contains("mismatched-marker-pending-update"),
+            "startup did not run: {log}"
+        );
+        for name in ["AppCapsules", "ElastOS", "Local", "Users", "UsersAI"] {
+            assert!(
+                std::fs::symlink_metadata(data.join(name)).is_err(),
+                "{name} was created while the update can still roll back"
+            );
+        }
+        assert_eq!(
+            fs::read(&marker_path).unwrap(),
+            marker,
+            "this start rewrote the mismatched marker"
+        );
+        drop(lock_file);
+        fs::remove_file(&request).unwrap();
+        assert!(
+            !elastos_server::update_controller::update_can_roll_back(&data),
+            "releasing the controller left an update that can roll back"
+        );
+        let key = elastos_identity::load_or_create_device_key(&data).unwrap();
+        match localhost_bringup(&data, &key) {
+            LocalhostBringup::Start(_) => {}
+            LocalhostBringup::Refuse(got) => {
+                panic!("the next start did not rewrite the marker: {got}")
+            }
+        }
+        assert_current_marker(&data, &key);
+    }
+
+    #[cfg(any(
+        all(target_os = "macos", not(elastos_unsupported_os_check)),
+        all(
+            not(elastos_unsupported_os_check),
+            target_os = "linux",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        )
+    ))]
+    #[tokio::test]
+    #[ignore = "child half of a_mismatched_marker_with_absent_roots_stays_unmade_until_the_update_finishes; the parent runs it"]
+    async fn mismatched_marker_pending_update_probe() {
+        rustls::crypto::ring::default_provider()
+            .install_default()
+            .unwrap();
+        tracing_subscriber::fmt()
+            .with_ansi(false)
+            .with_max_level(tracing::Level::INFO)
+            .try_init()
+            .expect("tracing subscriber");
+        let data_dir = crate::sources::default_data_dir();
+        let expected = PathBuf::from(
+            std::env::var_os("ELASTOS_FENCE_HOME_ROOT").expect("ELASTOS_FENCE_HOME_ROOT"),
+        );
+        assert_eq!(data_dir, expected);
+        assert!(
+            elastos_server::update_controller::update_can_roll_back(&data_dir),
+            "startup did not see an update that can roll back"
+        );
+        let mut infrastructure = setup_server_infrastructure()
+            .await
+            .unwrap_or_else(|error| panic!("Home did not start: {error:#}"));
+        if let Some(carrier) = infrastructure.carrier_service.as_mut() {
+            carrier.shutdown().await.unwrap();
+        }
+        drop(infrastructure);
+        println!("{{\"probe\":\"mismatched-marker-pending-update\"}}");
     }
 
     /// The first JSON line a fence Home probe printed.

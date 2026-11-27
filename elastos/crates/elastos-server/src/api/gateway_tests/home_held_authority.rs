@@ -1403,6 +1403,13 @@ fn rows() -> Vec<HeldRow> {
         mark("home-own", "device key", "Home", "Before startup creates the five roots, Home loads this device key and decides the localhost marker"),
     ),
     row(
+        "elastos-server/src/localhost_file_migration.rs",
+        "localhost_marker_mismatches",
+        "load_or_create_device_key",
+        1,
+        mark("home-own", "device key", "Home", "Home reads this device key to see whether a mismatched localhost marker must leave the five roots unmade"),
+    ),
+    row(
         "elastos-server/src/server_infra.rs",
         "register_chain_provider_plane",
         "load_or_create_device_key",

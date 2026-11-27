@@ -1078,6 +1078,37 @@ fn plan_for_this_home(
     }
 }
 
+/// True when `identity/localhost-file-key-v1` names a different file key.
+///
+/// A missing marker, a matching marker, and a marker that is not a v1 record
+/// are false. A pending update must not recreate the five roots while this is
+/// true: the next start rewrites the marker only when those roots are absent.
+#[cfg(unix)]
+pub(crate) fn localhost_marker_mismatches(data_dir: &Path) -> bool {
+    use zeroize::Zeroize;
+    let device_key = match elastos_identity::load_or_create_device_key(data_dir) {
+        Ok(key) => key,
+        Err(_) => return false,
+    };
+    let mut file_key = match localhost_file_key(&device_key) {
+        Ok(key) => key,
+        Err(_) => return false,
+    };
+    let marker = data_dir.join("identity").join(LOCALHOST_MIGRATION_MARKER);
+    let mismatched = matches!(
+        read_marker_plan(&marker, &file_key),
+        Ok(MarkerPlan::Mismatch)
+    );
+    file_key.zeroize();
+    mismatched
+}
+
+#[cfg(not(unix))]
+pub(crate) fn localhost_marker_mismatches(data_dir: &Path) -> bool {
+    let _ = data_dir;
+    false
+}
+
 #[cfg(unix)]
 fn identity_is_directory_or_absent(identity: &Path) -> anyhow::Result<()> {
     match std::fs::symlink_metadata(identity) {
