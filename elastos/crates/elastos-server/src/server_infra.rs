@@ -3319,6 +3319,7 @@ fn main() {
                 addr: addr.to_string(),
                 capsule_dir: None,
                 data_dir: Some(data_dir.clone()),
+                local_apps_dir: Some(data_dir.clone()),
                 tls_config: None,
                 supervisor: None,
                 ready_tx: Some(ready_tx),
