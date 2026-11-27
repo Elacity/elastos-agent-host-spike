@@ -527,7 +527,15 @@ int main(void) {
             prepared.exec_path().exists(),
             "the owner holds the live copy"
         );
-        child.kill().await.unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), child.kill())
+            .await
+            .expect("the provider is killed and reaped within the bound")
+            .unwrap();
+        recover_verified_copies(home.path()).unwrap();
+        assert!(
+            prepared.exec_path().exists(),
+            "the owner keeps the copy lock through the provider's reap"
+        );
         let PreparedExecutable {
             _private_dir,
             _liveness_lock,
@@ -536,8 +544,32 @@ int main(void) {
         // A killed owner leaves a stale directory for the next recovery.
         std::mem::forget(_private_dir);
         drop(_liveness_lock);
+        // A sibling test can fork without exec while the owner holds its
+        // CLOEXEC lock. Wait for the last inherited handle to close before
+        // attempting recovery, even though this provider is already reaped.
+        let lock = std::fs::File::open(exec_path.parent().unwrap().join(COPY_LOCK)).unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+                    break;
+                }
+                let error = std::io::Error::last_os_error();
+                assert_eq!(error.kind(), std::io::ErrorKind::WouldBlock, "{error}");
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("sibling test children release inherited copy locks within the bound");
+        // A concurrent fork can inherit this probe too. Unlock explicitly so
+        // that its inherited handles cannot delay the recovery being tested.
+        assert_eq!(unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_UN) }, 0);
+        drop(lock);
         recover_verified_copies(home.path()).unwrap();
         assert!(!exec_path.exists(), "the reaped provider left a stale copy");
+        assert!(
+            !exec_path.parent().unwrap().exists(),
+            "the stale directory goes"
+        );
     }
 
     #[test]
