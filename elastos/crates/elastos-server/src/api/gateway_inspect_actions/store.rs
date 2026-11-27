@@ -186,6 +186,8 @@ pub(super) fn claim_pending_agent_plan_for_owner(
         record.error = Some(message.to_string());
         record.updated_at = updated_at;
         write_inspect_action_record_unlocked(data_dir, &record)?;
+        crate::resource_bridge::forget_one_agent_plan_authority(&record.request_id);
+        crate::resource_bridge::notify_plan_waiters();
         anyhow::bail!(message);
     }
     // The passkey is spent in `commit` before the approval row. A failed
@@ -267,6 +269,8 @@ pub(super) fn claim_approved_agent_plan_for_dispatch(
         record.error = Some("agent plan binding or gate changed before dispatch".to_string());
         record.updated_at = updated_at;
         write_inspect_action_record_unlocked(data_dir, &record)?;
+        crate::resource_bridge::forget_one_agent_plan_authority(&record.request_id);
+        crate::resource_bridge::notify_plan_waiters();
         return Err(AgentPlanClaimStale.into());
     }
     record.status = "dispatching".to_string();
@@ -1425,5 +1429,133 @@ mod tests {
                 .unwrap()
                 .audit_recorded
         );
+    }
+
+    /// A plan that ends `not_sent` or `stale` answers the agent already waiting
+    /// on it, and that wait drops its permit. The park clock is long, so this
+    /// passes only when the write wakes the wait.
+    #[cfg(unix)]
+    #[test]
+    fn a_not_sent_and_stale_plan_answer_the_waiting_agent_at_once() {
+        let mut misses = Vec::new();
+        for status in ["not_sent", "stale"] {
+            let dir = tempfile::tempdir().unwrap();
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs();
+            let owner = "person:owner";
+            let requester = "agent:requester";
+            let capsule = "capsule:agent-host";
+            let session = "session:agent-1";
+            let created = super::super::submit_pending_agent_plan(
+                dir.path(),
+                owner,
+                requester,
+                capsule,
+                session,
+                &serde_json::json!({
+                    "steps": [{
+                        "scheme": "availability",
+                        "operation": "status",
+                        "request": {}
+                    }]
+                }),
+                now,
+            )
+            .unwrap();
+            let request_id = created["request_id"].as_str().unwrap().to_string();
+            let bridge = crate::resource_bridge::plan_wait_bridge_for_test(
+                dir.path(),
+                requester,
+                capsule,
+                session,
+            );
+            crate::resource_bridge::retain_agent_plan_dispatch_authority(
+                &request_id,
+                owner,
+                &bridge,
+                &created["request"],
+            )
+            .unwrap();
+            assert!(crate::resource_bridge::agent_plan_authority_is_held(
+                &request_id
+            ));
+            crate::api::gateway::seams::set_plan_park_ms(dir.path(), 15_000);
+            let _sentinel = crate::resource_bridge::hold_plan_wait_for_test(dir.path())
+                .expect("sentinel permit");
+            let (tx, rx) = std::sync::mpsc::channel();
+            let home = dir.path().to_path_buf();
+            let parked_id = request_id.clone();
+            let parked_owner = owner.to_string();
+            let parked_requester = requester.to_string();
+            let parked_capsule = capsule.to_string();
+            let parked_session = session.to_string();
+            std::thread::spawn(move || {
+                let answer = crate::resource_bridge::park_agent_plan_result_for_test(
+                    &home,
+                    &parked_id,
+                    &parked_owner,
+                    &parked_requester,
+                    &parked_capsule,
+                    &parked_session,
+                );
+                let _ = tx.send(answer);
+            });
+            let waiting = std::time::Instant::now();
+            while !crate::resource_bridge::plan_park_is_waiting(dir.path()) {
+                assert!(
+                    waiting.elapsed() < std::time::Duration::from_secs(2),
+                    "{status} did not park"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            if status == "not_sent" {
+                super::super::settle_plan_through_dispatch_for_test(
+                    dir.path(),
+                    &request_id,
+                    "not_sent",
+                    serde_json::json!({"status": "not_sent", "code": "claim_audit_error"}),
+                )
+                .unwrap();
+            } else {
+                let mut card = created["request_binding"].clone();
+                card["sha256"] = serde_json::json!("ab".repeat(32));
+                let error = super::claim_pending_agent_plan_for_owner(
+                    dir.path(),
+                    &request_id,
+                    owner,
+                    true,
+                    &card,
+                    now,
+                    |_record, _audit_first| Ok(()),
+                )
+                .expect_err("a changed card leaves the plan stale");
+                assert!(error.to_string().contains("stale"), "{error}");
+            }
+            let answered = rx.recv_timeout(std::time::Duration::from_secs(2));
+            crate::api::gateway::seams::set_plan_park_ms(dir.path(), 0);
+            let Ok(answer) = answered else {
+                misses.push(format!("{status} did not answer the waiting agent at once"));
+                continue;
+            };
+            if answer["result"]["data"]["status"] != status
+                || answer["result"]["data"]["schema"] != "elastos.agent-plan.result/v1"
+            {
+                misses.push(format!("{status} answered {answer}"));
+                continue;
+            }
+            if crate::resource_bridge::plan_waits_block_another_start(dir.path()) {
+                misses.push(format!("{status} did not release the permit"));
+            }
+            if crate::resource_bridge::agent_plan_authority_is_held(&request_id) {
+                misses.push(format!("{status} kept the plan authority"));
+            }
+            match super::super::agent_plan_approval_block(dir.path(), &request_id) {
+                Some(block) if block.contains(status) && block.contains("cannot be approved") => {}
+                other => misses.push(format!("{status} can still be approved: {other:?}")),
+            }
+        }
+        assert!(misses.is_empty(), "{misses:?}");
     }
 }

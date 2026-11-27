@@ -492,6 +492,8 @@ pub(crate) fn agent_plan_approval_block(data_dir: &FsPath, request_id: &str) -> 
         "agent off",
         "stopped",
         "unresolved",
+        "not_sent",
+        "stale",
         "owner demoted",
         "passkey revoked",
     ];
@@ -1189,6 +1191,8 @@ pub(crate) fn agent_plan_result_for_requester(
             | "refused"
             | "unknown"
             | "unresolved"
+            | "not_sent"
+            | "stale"
             | "instance ended"
             | "denied"
             | "expired"

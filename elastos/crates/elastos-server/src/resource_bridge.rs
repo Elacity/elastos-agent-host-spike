@@ -622,6 +622,96 @@ pub(crate) fn hold_plan_wait_for_test(home: &Path) -> Option<PlanWaitHold> {
     try_acquire_plan_wait(home).map(|permit| PlanWaitHold { _permit: permit })
 }
 
+#[cfg(test)]
+fn plan_park_waiting_homes() -> &'static Mutex<HashMap<PathBuf, usize>> {
+    static WAITING: OnceLock<Mutex<HashMap<PathBuf, usize>>> = OnceLock::new();
+    WAITING.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// The park loop is inside its condition wait for this Home.
+#[cfg(test)]
+pub(crate) fn plan_park_is_waiting(home: &Path) -> bool {
+    plan_park_waiting_homes()
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+        .get(home)
+        .copied()
+        .unwrap_or(0)
+        > 0
+}
+
+#[cfg(test)]
+fn set_plan_park_waiting(home: &Path, waiting: bool) {
+    let mut homes = plan_park_waiting_homes()
+        .lock()
+        .unwrap_or_else(|err| err.into_inner());
+    if waiting {
+        *homes.entry(home.to_path_buf()).or_insert(0) += 1;
+        return;
+    }
+    let left = homes.get(home).copied().unwrap_or(0).saturating_sub(1);
+    if left == 0 {
+        homes.remove(home);
+    } else {
+        homes.insert(home.to_path_buf(), left);
+    }
+}
+
+#[cfg(test)]
+fn plan_wait_bridge(
+    data_dir: &Path,
+    requester_id: &str,
+    capsule_id: &str,
+    session_id: &str,
+) -> BridgeContext {
+    let audit_log = Arc::new(elastos_runtime::primitives::audit::AuditLog::new());
+    BridgeContext {
+        provider_registry: Arc::new(ProviderRegistry::new()),
+        capability_manager: Arc::new(CapabilityManager::new(
+            Arc::new(elastos_runtime::capability::CapabilityStore::new()),
+            audit_log.clone(),
+            Arc::new(elastos_runtime::primitives::metrics::MetricsManager::new()),
+        )),
+        pending_store: Arc::new(
+            elastos_runtime::capability::pending::PendingRequestStore::new(audit_log),
+        ),
+        capsule_id: capsule_id.to_string(),
+        session_id: session_id.to_string(),
+        principal_id: Some(requester_id.to_string()),
+        manifest_capabilities: Vec::new(),
+        data_dir: Some(data_dir.to_path_buf()),
+        launch: None,
+        model_token_ceiling: None,
+        model_budget: None,
+        stop: None,
+        plan_book: None,
+    }
+}
+
+/// Park the same way a guest status read does. The caller is the waiting agent.
+#[cfg(test)]
+pub(crate) fn park_agent_plan_result_for_test(
+    data_dir: &Path,
+    request_id: &str,
+    owner_id: &str,
+    requester_id: &str,
+    capsule_id: &str,
+    session_id: &str,
+) -> serde_json::Value {
+    let bridge_ctx = plan_wait_bridge(data_dir, requester_id, capsule_id, session_id);
+    park_for_agent_plan_result(&bridge_ctx, data_dir, request_id, owner_id, requester_id)
+}
+
+#[cfg(test)]
+pub(crate) fn plan_wait_bridge_for_test(
+    data_dir: &Path,
+    requester_id: &str,
+    capsule_id: &str,
+    session_id: &str,
+) -> BridgeContext {
+    plan_wait_bridge(data_dir, requester_id, capsule_id, session_id)
+}
+
 fn plan_park_limit(data_dir: &Path) -> Duration {
     #[cfg(not(test))]
     let _ = data_dir;
@@ -829,9 +919,13 @@ fn park_for_agent_plan_result(
             continue;
         }
         let remaining = deadline.saturating_duration_since(now);
+        #[cfg(test)]
+        set_plan_park_waiting(data_dir, true);
         let (guard, wait) = PLAN_WAIT_CV
             .wait_timeout(waits, remaining)
             .unwrap_or_else(|err| err.into_inner());
+        #[cfg(test)]
+        set_plan_park_waiting(data_dir, false);
         drop(guard);
         if wait.timed_out() {
             return read();
