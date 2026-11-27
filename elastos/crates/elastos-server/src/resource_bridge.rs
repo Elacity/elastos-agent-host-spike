@@ -2171,7 +2171,7 @@ async fn dispatch_admitted_effect(
         {
             return finish_component_invoke(
                 bridge_ctx,
-                &audit_id,
+                audit_id,
                 &dispatch,
                 "error",
                 resource_error_response(
