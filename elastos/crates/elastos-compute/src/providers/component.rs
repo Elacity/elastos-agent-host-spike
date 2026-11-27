@@ -4494,23 +4494,21 @@ mod tests {
         assert_eq!(v2_ending(&provider, &handle).await, "stopped");
     }
 
-    /// The guest reads an event and then burns fuel, while a source keeps
-    /// sending. A delivered event leaves the tick count as it is, so the
-    /// guest still ends on the tick bound.
+    /// `$next` burns Wasm, then reads one event, and repeats. The burn is
+    /// longer than one 10 ms tick and shorter than the six-tick cap, so a
+    /// tick lands while the guest is still in Wasm. The read delivers an
+    /// event in that window. A delivery leaves the tick count as it is, and
+    /// the guest ends on the tick bound.
     ///
     /// Six ticks are 60 ms when the shared ticker is on time. One fuel bucket
     /// is about two seconds of a tight burn, and a late ticker makes those
     /// six ticks take longer than that bucket. The fuel here is many buckets,
-    /// so the execution bound cannot win the race. The sender is its own
-    /// thread: a yield on this runtime can sit longer than one tick, and that
-    /// idle gap parks the guest and clears the ticks this test is counting.
+    /// so the execution bound cannot win the race. The sender and the waiter
+    /// sleep. The guest's burn is the only spinning work.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn v2_a_delivered_event_does_not_clear_the_tick_bound() {
         let provider = ComponentProvider::new();
-        let bytes = v2_variant(&[(
-            "(func (export \"callback\") (param $event i32) (param $handle i32) (param $result i32) (result i32)\n      local.get $event i32.const 2 i32.eq",
-            "(func (export \"callback\") (param $event i32) (param $handle i32) (param $result i32) (result i32)\n      i32.const 0 i32.const 0 i32.const 65536 memory.fill\n      local.get $event i32.const 2 i32.eq",
-        )]);
+        let bytes = tick_bound_guest(wasm_burn_iterations(Duration::from_millis(30)));
         let handle = load_v2_fixture(&provider, bytes).await;
         {
             let mut instances = provider.instances.write().await;
@@ -4526,8 +4524,13 @@ mod tests {
             .get(&handle.id)
             .and_then(|instance| instance.events.clone())
             .expect("the guest is reading events");
+        for _ in 0..8 {
+            sender
+                .send(v2::elastos::bus::types::Event::Message(Vec::new()))
+                .expect("the guest accepts the first events");
+        }
         let source = std::thread::spawn(move || loop {
-            for _ in 0..32 {
+            for _ in 0..8 {
                 if sender
                     .send(v2::elastos::bus::types::Event::Message(Vec::new()))
                     .is_err()
@@ -4535,17 +4538,14 @@ mod tests {
                     return;
                 }
             }
-            let pause = Instant::now() + Duration::from_millis(1);
-            while Instant::now() < pause {
-                std::hint::spin_loop();
-            }
+            std::thread::sleep(Duration::from_millis(1));
         });
-        let ending = tokio::time::timeout(Duration::from_secs(20), async {
+        let ending = tokio::time::timeout(Duration::from_secs(3), async {
             loop {
                 if let Some(ending) = provider.endings.read().await.get(&handle.id).cloned() {
                     return ending;
                 }
-                tokio::task::yield_now().await;
+                tokio::time::sleep(Duration::from_millis(2)).await;
             }
         })
         .await
@@ -4555,6 +4555,79 @@ mod tests {
             ending.contains(ENDING_EPOCH_DEADLINE),
             "a stream of events must still end on the tick bound, got {ending}"
         );
+    }
+
+    /// How many iterations of the `$next` burn take about `burn` on this
+    /// engine. Debug and release run the same Wasm at different speeds, so a
+    /// fixed count is either too short to hold a tick or long enough to hit
+    /// the six-tick cap before a delivery. The sample is the same loop the
+    /// guest runs. Two timed calls follow one warmup, and the count is their
+    /// average.
+    fn wasm_burn_iterations(burn: Duration) -> u32 {
+        const SAMPLE: i32 = 100_000;
+        let engine = ComponentProvider::v2_engine().expect("v2 engine");
+        let bytes = wat::parse_str(
+            r#"(module
+                (func (export "burn") (param $n i32)
+                  (local $i i32)
+                  (loop $again
+                    local.get $i
+                    i32.const 1
+                    i32.add
+                    local.tee $i
+                    local.get $n
+                    i32.ne
+                    br_if $again)))"#,
+        )
+        .expect("burn module");
+        let module = wasmtime::Module::new(&engine, bytes).expect("burn module");
+        let mut store = wasmtime::Store::new(&engine, ());
+        store.set_fuel(4_000_000_000).expect("fuel");
+        store.set_epoch_deadline(1_000_000_000);
+        let instance = wasmtime::Instance::new(&mut store, &module, &[]).expect("burn instance");
+        let burn_fn = instance
+            .get_typed_func::<i32, ()>(&mut store, "burn")
+            .expect("burn");
+        burn_fn.call(&mut store, SAMPLE).expect("warmup");
+        let mut elapsed = Duration::ZERO;
+        for _ in 0..2 {
+            let started = Instant::now();
+            burn_fn.call(&mut store, SAMPLE).expect("sample burn");
+            elapsed += started.elapsed();
+        }
+        let elapsed = (elapsed / 2).max(Duration::from_micros(1));
+        let iterations = (burn.as_secs_f64() / elapsed.as_secs_f64() * f64::from(SAMPLE))
+            .ceil()
+            .clamp(1_000.0, 200_000_000.0);
+        iterations as u32
+    }
+
+    /// The resident `$next`, with a Wasm burn before every read.
+    fn tick_bound_guest(iterations: u32) -> Vec<u8> {
+        let next = format!(
+            "(func $next (result i32)\n      \
+             (local $code i32)\n      \
+             (local $spin i32)\n      \
+             (loop $again\n        \
+             (loop $burn\n          \
+             local.get $spin\n          \
+             i32.const 1\n          \
+             i32.add\n          \
+             local.tee $spin\n          \
+             i32.const {iterations}\n          \
+             i32.ne\n          \
+             br_if $burn)\n        \
+             i32.const 0\n        \
+             local.set $spin\n        \
+             global.get $events i32.const 128 i32.const 1 call $read"
+        );
+        v2_variant(&[(
+            "(func $next (result i32)\n      \
+             (local $code i32)\n      \
+             (loop $again\n        \
+             global.get $events i32.const 128 i32.const 1 call $read",
+            &next,
+        )])
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
