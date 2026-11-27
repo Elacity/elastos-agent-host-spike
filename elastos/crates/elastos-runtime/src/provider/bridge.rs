@@ -3110,15 +3110,15 @@ impl ProviderBridge {
         tokio::spawn(async move {
             // Serialize first so the op can be named in the trace even when
             // the request is an untyped JSON value.
-            let json = serde_json::to_string(&request).map_err(BridgeError::Serde)?;
-            let op = serde_json::from_str::<serde_json::Value>(&json)
-                .ok()
-                .and_then(|value| {
-                    value
-                        .get("op")
-                        .and_then(|op| op.as_str().map(str::to_string))
-                })
-                .unwrap_or_else(|| "?".to_string());
+            let json = zeroize::Zeroizing::new(
+                serde_json::to_string(&request).map_err(BridgeError::Serde)?,
+            );
+            let op = json
+                .split("\"op\":\"")
+                .nth(1)
+                .and_then(|rest| rest.split('"').next())
+                .unwrap_or("?")
+                .to_string();
             let started = std::time::Instant::now();
             // A raw request has no timeout (media preparation and custody
             // rounds legitimately run long) and holds this bridge's I/O

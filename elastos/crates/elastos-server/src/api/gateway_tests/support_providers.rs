@@ -1782,9 +1782,20 @@ impl Provider for MockExternalObjectProvider {
         &self,
         request: &serde_json::Value,
     ) -> Result<serde_json::Value, ProviderError> {
+        let mut request =
+            match crate::object_authority::ObjectAuthorityV1::attach(&self.data_dir, request) {
+                Ok(request) => request,
+                Err(err) => {
+                    return Ok(serde_json::json!({
+                        "status": "error",
+                        "code": "library_error",
+                        "message": err.to_string(),
+                    }))
+                }
+            };
         Ok(crate::library::handle_object_provider_raw_request(
             &self.data_dir,
-            request,
+            &mut request,
         ))
     }
 }

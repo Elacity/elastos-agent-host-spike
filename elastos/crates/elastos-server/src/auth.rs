@@ -42,7 +42,7 @@ use crate::host_lock::FileLock;
 #[cfg(any(unix, test))]
 use crate::auth_state_files::set_secret_file_permissions;
 
-mod envelope_bound;
+pub(crate) mod envelope_bound;
 mod verified_launch_token_signer;
 pub(crate) use verified_launch_token_signer::{
     VerifiedLaunchTokenSigner, HOME_LAUNCH_TOKEN_DOMAIN,
@@ -139,7 +139,7 @@ const AUDIT_CHAIN_ACTIVATION_SCHEMA: &str = "elastos.audit.chain-activation/v2";
 const AUDIT_CHAIN_ACTIVATION_DOMAIN: &str = "elastos.audit.chain-activation.v2";
 const AUDIT_RETENTION_LIMIT: usize = 512;
 const RECOVERY_DESCRIPTOR_SCHEMA: &str = "elastos.principal.root-descriptor/v1";
-const PRINCIPAL_ROOT_OBJECT_SCHEMA: &str = "elastos.principal-root.object/v1";
+pub(crate) const PRINCIPAL_ROOT_OBJECT_SCHEMA: &str = "elastos.principal-root.object/v1";
 pub const PROTECTED_PRINCIPAL_ROOT_OBJECT_NOT_ENCRYPTED: &str =
     "protected principal-root object is not encrypted";
 pub const PROTECTED_PRINCIPAL_ROOT_OBJECT_DAMAGED: &str =
@@ -165,7 +165,7 @@ const MAX_MIGRATION_CLEANUP_RECORDS: usize = 128;
 const MAX_PRINCIPAL_ROOT_INVENTORY_DECLARATIONS: usize = 128;
 pub(crate) const MAX_PRINCIPAL_ROOT_INVENTORY_DEPTH: usize = 16;
 const MAX_MIGRATION_OBJECTS: usize = 64;
-const MAX_MIGRATION_OBJECT_BYTES: u64 = 16 * 1024 * 1024;
+pub(crate) const MAX_MIGRATION_OBJECT_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_MIGRATION_TOTAL_BYTES: u64 = 64 * 1024 * 1024;
 /// Bytes a scan reads beyond each file's 64 KiB head to classify files that
 /// carry no label, in total. The plaintext limit plus one file, so selected
@@ -493,7 +493,7 @@ pub(crate) fn hold_audit_activation_lock_for_test(
     );
 }
 
-fn principal_root_object_mutation_lock(data_dir: &Path) -> &'static Mutex<()> {
+pub(crate) fn principal_root_object_mutation_lock(data_dir: &Path) -> &'static Mutex<()> {
     home_mutex(&PRINCIPAL_ROOT_OBJECT_LOCKS, data_dir)
 }
 
@@ -832,15 +832,15 @@ fn run_verified_auth_state_cache_hit_hook(data_dir: &Path) -> anyhow::Result<()>
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct PrincipalRootObjectEnvelopeV1 {
-    schema: String,
-    principal_id: String,
-    localhost_root: String,
-    data_key_id: String,
-    object_uri: String,
-    cipher: String,
-    nonce: String,
-    ciphertext: String,
+pub(crate) struct PrincipalRootObjectEnvelopeV1 {
+    pub(crate) schema: String,
+    pub(crate) principal_id: String,
+    pub(crate) localhost_root: String,
+    pub(crate) data_key_id: String,
+    pub(crate) object_uri: String,
+    pub(crate) cipher: String,
+    pub(crate) nonce: String,
+    pub(crate) ciphertext: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -1166,7 +1166,7 @@ pub struct AuditChainAnchorV1 {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-struct AuditChainCheckpointV1 {
+pub(crate) struct AuditChainCheckpointV1 {
     head_sequence: u64,
     head_hash: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1177,10 +1177,10 @@ struct AuditChainCheckpointV1 {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-struct AuditChainActivationV2 {
+pub(crate) struct AuditChainActivationV2 {
     schema: String,
-    activated_at: u64,
-    checkpoint: AuditChainCheckpointV1,
+    pub(crate) activated_at: u64,
+    pub(crate) checkpoint: AuditChainCheckpointV1,
     signer_did: String,
     signature: String,
 }
@@ -4804,7 +4804,7 @@ fn mutate_auth_state<T>(
     Ok(value)
 }
 
-fn recovery_archive_key_path(data_dir: &Path) -> anyhow::Result<PathBuf> {
+pub(crate) fn recovery_archive_key_path(data_dir: &Path) -> anyhow::Result<PathBuf> {
     Ok(rooted_localhost_fs_path(data_dir, AUTH_STATE_ROOT)
         .ok_or_else(|| anyhow!("invalid auth state root"))?
         .join(RECOVERY_ARCHIVE_KEY_FILE))
@@ -4838,7 +4838,9 @@ pub fn load_or_create_recovery_archive_key(_data_dir: &Path) -> anyhow::Result<[
     Err(unsupported_on_this_platform())
 }
 
-fn audit_chain_checkpoint(state: &AuthState) -> anyhow::Result<Option<AuditChainCheckpointV1>> {
+pub(crate) fn audit_chain_checkpoint(
+    state: &AuthState,
+) -> anyhow::Result<Option<AuditChainCheckpointV1>> {
     let Some(chain_state) = state.audit_chain_state.as_ref() else {
         return Ok(None);
     };
@@ -4865,7 +4867,7 @@ fn audit_chain_activation_payload(
     }))?)
 }
 
-fn load_audit_chain_activation_unlocked(
+pub(crate) fn load_audit_chain_activation_unlocked(
     data_dir: &Path,
 ) -> anyhow::Result<Option<AuditChainActivationV2>> {
     let path = audit_chain_activation_path(data_dir)?;
@@ -4896,7 +4898,7 @@ fn load_audit_chain_activation_unlocked(
     Ok(Some(activation))
 }
 
-fn with_audit_chain_activation_lock<T>(
+pub(crate) fn with_audit_chain_activation_lock<T>(
     data_dir: &Path,
     operation: impl FnOnce() -> anyhow::Result<T>,
 ) -> anyhow::Result<T> {
@@ -4951,7 +4953,7 @@ fn persist_audit_chain_activation_unlocked(
     Ok(identity_after)
 }
 
-fn validate_checkpoint_progress(
+pub(crate) fn validate_checkpoint_progress(
     current: &AuditChainCheckpointV1,
     next: &AuditChainCheckpointV1,
 ) -> anyhow::Result<bool> {
@@ -5125,7 +5127,7 @@ fn auth_state_requires_audit_chain(state: &AuthState) -> bool {
         || state.guest_registration_enabled
 }
 
-fn load_auth_state_unverified(data_dir: &Path) -> anyhow::Result<Option<AuthState>> {
+pub(crate) fn load_auth_state_unverified(data_dir: &Path) -> anyhow::Result<Option<AuthState>> {
     read_auth_state_bytes(data_dir)?
         .map(|(bytes, _)| parse_auth_state(data_dir, &bytes))
         .transpose()
@@ -7064,7 +7066,7 @@ pub(crate) fn principal_root_object_content_bound(
 /// and `validate_principal_root_object_envelope` refuses that same mismatch
 /// before AES-GCM. An unreadable label is still read whole: an authentic
 /// envelope written in another layout opens.
-fn principal_root_object_label_never_opens(damage: &PrincipalRootObjectDamage) -> bool {
+pub(crate) fn principal_root_object_label_never_opens(damage: &PrincipalRootObjectDamage) -> bool {
     matches!(
         damage,
         PrincipalRootObjectDamage::UnsupportedFormat { .. }
@@ -7076,7 +7078,7 @@ fn principal_root_object_label_never_opens(damage: &PrincipalRootObjectDamage) -
 }
 
 /// Full parse, binding and AES-GCM over an envelope's whole bytes.
-fn decrypt_principal_root_object_envelope_bytes(
+pub(crate) fn decrypt_principal_root_object_envelope_bytes(
     data_key: &[u8; 32],
     expected: &PrincipalRootObjectExpectation<'_>,
     bytes: &[u8],
@@ -7109,7 +7111,7 @@ fn decrypt_principal_root_object_envelope_bytes(
 /// a FIFO swapped in after the walk from blocking the open while the caller
 /// holds its locks (#450 L8); it does not change reads of a regular file.
 #[cfg(unix)]
-fn open_principal_root_object_file(path: &Path) -> anyhow::Result<(File, u64)> {
+pub(crate) fn open_principal_root_object_file(path: &Path) -> anyhow::Result<(File, u64)> {
     let mut options = OpenOptions::new();
     options.read(true);
     #[cfg(unix)]
@@ -7127,13 +7129,14 @@ fn open_principal_root_object_file(path: &Path) -> anyhow::Result<(File, u64)> {
 }
 
 #[cfg(not(unix))]
-fn open_principal_root_object_file(_path: &Path) -> anyhow::Result<(File, u64)> {
+pub(crate) fn open_principal_root_object_file(_path: &Path) -> anyhow::Result<(File, u64)> {
     Err(unsupported_on_this_platform())
 }
 
 /// Lazy protection of a legacy plaintext Library file. Only a file of at
 /// most 16 MiB whose whole bytes are plaintext is encrypted; damaged or
 /// envelope bytes are never wrapped.
+#[cfg(test)]
 pub(crate) fn protect_legacy_plaintext_principal_root_object(
     data_dir: &Path,
     principal_id: &str,
@@ -7274,35 +7277,6 @@ pub(crate) fn write_principal_root_object_resolved(
             create_only: false,
             precondition: None,
             create_owner_only_parent: true,
-            kept_elsewhere: false,
-        },
-    )
-}
-
-pub(crate) fn create_principal_root_object(
-    data_dir: &Path,
-    principal_id: &str,
-    localhost_root: &str,
-    object_uri: &str,
-    path: &Path,
-    plaintext: &[u8],
-) -> anyhow::Result<()> {
-    // Create does not read the existing bytes. Tests still record the write:
-    // this path does not go through `write_principal_root_object`.
-    #[cfg(test)]
-    principal_object_io::record_write(data_dir, path);
-    write_principal_root_object_inner(
-        data_dir,
-        principal_id,
-        localhost_root,
-        object_uri,
-        path,
-        plaintext,
-        PrincipalRootObjectWriteOptions {
-            require_protection: false,
-            create_only: true,
-            precondition: None,
-            create_owner_only_parent: false,
             kept_elsewhere: false,
         },
     )
@@ -9273,7 +9247,7 @@ pub fn now_ts() -> u64 {
         .as_secs()
 }
 
-fn principal_root_data_key_from_protection(
+pub(crate) fn principal_root_data_key_from_protection(
     data_dir: &Path,
     protection: &PrincipalRootProtectionV1,
 ) -> anyhow::Result<[u8; 32]> {
@@ -9385,7 +9359,7 @@ fn validate_principal_root_object_binding_for_kind(
     Ok(())
 }
 
-fn object_uri_is_under_root(localhost_root: &str, object_uri: &str) -> bool {
+pub(crate) fn object_uri_is_under_root(localhost_root: &str, object_uri: &str) -> bool {
     object_uri
         .strip_prefix(localhost_root)
         .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
@@ -9453,7 +9427,7 @@ fn validate_principal_root_object_binding_in_state(
     validate_principal_root_object_binding_for_kind(principal_id, localhost_root, object_uri, kind)
 }
 
-fn validate_principal_root_object_path(
+pub(crate) fn validate_principal_root_object_path(
     data_dir: &Path,
     object_uri: &str,
     path: &Path,
@@ -10132,7 +10106,10 @@ pub(crate) fn principal_root_object_damaged_error(
     anyhow!("{PROTECTED_PRINCIPAL_ROOT_OBJECT_DAMAGED}: {notice}")
 }
 
-fn principal_root_object_changed_error(localhost_root: &str, object_uri: &str) -> anyhow::Error {
+pub(crate) fn principal_root_object_changed_error(
+    localhost_root: &str,
+    object_uri: &str,
+) -> anyhow::Error {
     anyhow!(
         "{} changed while Home was preparing to encrypt it. Nothing was changed; try again.",
         principal_root_home_relative_path(localhost_root, object_uri)
@@ -10149,7 +10126,7 @@ pub(crate) fn principal_root_home_relative_path(localhost_root: &str, object_uri
     )
 }
 
-fn principal_root_disk_folder(data_dir: &Path, object_uri: &str) -> String {
+pub(crate) fn principal_root_disk_folder(data_dir: &Path, object_uri: &str) -> String {
     printable_path(
         rooted_localhost_fs_path(data_dir, object_uri)
             .as_deref()
@@ -10556,7 +10533,10 @@ fn read_principal_root_object_tail(file: &mut File, len: u64) -> std::io::Result
 }
 
 /// Reads the rest of the file after an already-read prefix.
-fn read_principal_root_object_rest(file: &mut File, prefix: Vec<u8>) -> std::io::Result<Vec<u8>> {
+pub(crate) fn read_principal_root_object_rest(
+    file: &mut File,
+    prefix: Vec<u8>,
+) -> std::io::Result<Vec<u8>> {
     use std::io::{Seek, SeekFrom};
     let mut bytes = prefix;
     file.seek(SeekFrom::Start(bytes.len() as u64))?;
@@ -10587,7 +10567,7 @@ fn validate_principal_root_object_envelope(
     Ok(())
 }
 
-fn principal_root_object_aad(envelope: &PrincipalRootObjectEnvelopeV1) -> String {
+pub(crate) fn principal_root_object_aad(envelope: &PrincipalRootObjectEnvelopeV1) -> String {
     format!(
         "{}\n{}\n{}\n{}\n{}\n{}",
         PRINCIPAL_ROOT_OBJECT_AAD_DOMAIN,
@@ -10622,7 +10602,7 @@ fn decrypt_root_descriptor(kit: &RecoveryKitV1, data_key: &[u8]) -> anyhow::Resu
     serde_json::from_slice(&plaintext).map_err(Into::into)
 }
 
-fn encrypt_aes256_gcm_bytes_with_aad(
+pub(crate) fn encrypt_aes256_gcm_bytes_with_aad(
     key: &[u8],
     nonce: &[u8],
     plaintext: &[u8],
@@ -12773,7 +12753,7 @@ fn ensure_auth_owner_only_directory(_path: &Path) -> anyhow::Result<()> {
 }
 
 #[cfg(unix)]
-fn write_owner_only_new_file(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
+pub(crate) fn write_owner_only_new_file(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
     let mut options = OpenOptions::new();
     options.create_new(true).write(true);
     #[cfg(unix)]
@@ -12785,7 +12765,7 @@ fn write_owner_only_new_file(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
 }
 
 #[cfg(not(unix))]
-fn write_owner_only_new_file(_path: &Path, _bytes: &[u8]) -> anyhow::Result<()> {
+pub(crate) fn write_owner_only_new_file(_path: &Path, _bytes: &[u8]) -> anyhow::Result<()> {
     Err(unsupported_on_this_platform())
 }
 

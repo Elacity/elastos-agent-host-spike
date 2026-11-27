@@ -4,6 +4,7 @@
 //! injects the authenticated principal and forwards typed operations to this
 //! provider process.
 
+use elastos_server::Zeroize;
 use serde_json::{json, Value};
 use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
@@ -21,7 +22,7 @@ impl ObjectProviderProcess {
         Self { data_dir: None }
     }
 
-    fn handle(&mut self, request: Value) -> Value {
+    fn handle(&mut self, mut request: Value) -> Value {
         match request.get("op").and_then(Value::as_str) {
             Some("init") => self.init(request.get("config").cloned().unwrap_or(Value::Null)),
             Some("shutdown") => response_ok(json!({
@@ -31,7 +32,7 @@ impl ObjectProviderProcess {
                 let Some(data_dir) = &self.data_dir else {
                     return response_error("not_initialized", "object-provider is not initialized");
                 };
-                elastos_server::library::handle_object_provider_raw_request(data_dir, &request)
+                elastos_server::library::handle_object_provider_raw_request(data_dir, &mut request)
             }
             None => response_error("invalid_request", "provider request missing op"),
         }
@@ -149,23 +150,32 @@ fn main() {
     let stdin = io::stdin();
     let mut stdout = io::stdout();
     let mut provider = ObjectProviderProcess::new();
+    let mut stdin = stdin.lock();
+    let mut line = elastos_server::Zeroizing::new(Vec::new());
 
-    for line in stdin.lock().lines() {
-        let line = match line {
-            Ok(line) => line,
+    loop {
+        line.clear();
+        let read = match stdin.read_until(b'\n', &mut line) {
+            Ok(read) => read,
             Err(err) => {
                 eprintln!("object-provider read error: {err}");
                 break;
             }
         };
-        if line.trim().is_empty() {
+        if read == 0 {
+            break;
+        }
+        if line.iter().all(|byte| byte.is_ascii_whitespace()) {
             continue;
         }
-
-        let request = match serde_json::from_str::<Value>(&line) {
+        let request = match serde_json::from_slice::<Value>(&line) {
             Ok(request) => request,
-            Err(err) => response_error("invalid_request", &err.to_string()),
+            Err(err) => {
+                line.zeroize();
+                response_error("invalid_request", &err.to_string())
+            }
         };
+        line.zeroize();
         let is_shutdown = request.get("op").and_then(Value::as_str) == Some("shutdown");
         let response = provider.handle(request);
         writeln!(stdout, "{}", serde_json::to_string(&response).unwrap()).unwrap();

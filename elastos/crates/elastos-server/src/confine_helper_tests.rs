@@ -149,7 +149,7 @@ async fn localhost_and_object_providers_work_inside_their_fences() {
         bridge
             .send_raw(&request)
             .await
-            .unwrap_or_else(|err| panic!("{request}: {err}"))
+            .unwrap_or_else(|err| panic!("helper request failed: {err}"))
     }
 
     let secret = b"localhost-device-key-secret!!";
@@ -285,30 +285,39 @@ async fn localhost_and_object_providers_work_inside_their_fences() {
     let payload = base64::engine::general_purpose::STANDARD.encode(b"hello-object");
     let object_wrote = exchange(
         &object_bridge,
-        serde_json::json!({
-            "op": "write",
-            "principal_id": principal,
-            "uri": uri,
-            "data": payload
-        }),
+        with_object_authority(
+            &object_data,
+            serde_json::json!({
+                "op": "write",
+                "principal_id": principal,
+                "uri": uri,
+                "data": payload
+            }),
+        ),
     )
     .await;
     assert_eq!(object_wrote["status"], "ok", "{object_wrote}");
     let object_read = exchange(
         &object_bridge,
-        serde_json::json!({"op": "read", "principal_id": principal, "uri": uri}),
+        with_object_authority(
+            &object_data,
+            serde_json::json!({"op": "read", "principal_id": principal, "uri": uri}),
+        ),
     )
     .await;
     assert_eq!(object_read["status"], "ok", "{object_read}");
     assert_eq!(object_read["data"]["data"], payload);
     let folder = exchange(
         &object_bridge,
-        serde_json::json!({
-            "op": "mkdir",
-            "principal_id": principal,
-            "parent_uri": record.localhost_root,
-            "name": "folder"
-        }),
+        with_object_authority(
+            &object_data,
+            serde_json::json!({
+                "op": "mkdir",
+                "principal_id": principal,
+                "parent_uri": record.localhost_root,
+                "name": "folder"
+            }),
+        ),
     )
     .await;
     assert_eq!(folder["status"], "ok", "{folder}");
@@ -316,7 +325,10 @@ async fn localhost_and_object_providers_work_inside_their_fences() {
     for target in [uri.as_str(), folder_uri.as_str()] {
         let trashed = exchange(
             &object_bridge,
-            serde_json::json!({"op": "trash", "principal_id": principal, "uri": target}),
+            with_object_authority(
+                &object_data,
+                serde_json::json!({"op": "trash", "principal_id": principal, "uri": target}),
+            ),
         )
         .await;
         assert_eq!(trashed["status"], "ok", "{target}: {trashed}");
@@ -325,11 +337,14 @@ async fn localhost_and_object_providers_work_inside_their_fences() {
             .unwrap_or_else(|| panic!("trash uri missing: {trashed}"));
         let gone = exchange(
             &object_bridge,
-            serde_json::json!({
-                "op": "delete_permanently",
-                "principal_id": principal,
-                "uri": trash_uri
-            }),
+            with_object_authority(
+                &object_data,
+                serde_json::json!({
+                    "op": "delete_permanently",
+                    "principal_id": principal,
+                    "uri": trash_uri
+                }),
+            ),
         )
         .await;
         assert_eq!(gone["status"], "ok", "{target}: {gone}");
@@ -405,7 +420,7 @@ async fn an_updated_home_reads_existing_files_through_the_fence() {
         bridge
             .send_raw(&request)
             .await
-            .unwrap_or_else(|err| panic!("{request}: {err}"))
+            .unwrap_or_else(|err| panic!("helper request failed: {err}"))
     }
 
     async fn read_localhost(data: &Path) {
@@ -478,11 +493,14 @@ async fn an_updated_home_reads_existing_files_through_the_fence() {
     let object_bridge = object.bridge().clone();
     let object_read = exchange(
         &object_bridge,
-        serde_json::json!({
-            "op": "read",
-            "principal_id": principal,
-            "uri": format!("{}/kept.txt", record.localhost_root)
-        }),
+        with_object_authority(
+            &data,
+            serde_json::json!({
+                "op": "read",
+                "principal_id": principal,
+                "uri": format!("{}/kept.txt", record.localhost_root)
+            }),
+        ),
     )
     .await;
     assert_eq!(object_read["status"], "ok", "{object_read}");
@@ -678,6 +696,7 @@ async fn fresh_data_dir_auth_ready_then_object_roots_answer() {
     let (_, did) = elastos_identity::load_or_create_did(&data).unwrap();
     let object = spawn_object(&provider_binary("object-provider"), &data, &did).await;
     let roots = exchange_ok(
+        &data,
         object.bridge(),
         serde_json::json!({"op": "roots", "principal_id": principal}),
     )
@@ -775,6 +794,7 @@ async fn capsule_install_while_home_runs_writes_under_users_fence() {
     let uri = format!("{root}/Notes/hello.txt");
     let payload = base64::engine::general_purpose::STANDARD.encode(b"hello after install");
     let wrote = exchange_ok(
+        &data,
         bridge,
         serde_json::json!({
             "op": "write",
@@ -790,6 +810,7 @@ async fn capsule_install_while_home_runs_writes_under_users_fence() {
         "write under the new grant must land without restarting the helper"
     );
     let read = exchange_ok(
+        &data,
         bridge,
         serde_json::json!({"op": "read", "principal_id": principal, "uri": uri}),
     )
@@ -808,6 +829,7 @@ async fn capsule_install_while_home_runs_writes_under_users_fence() {
             .join("/")
     );
     let deep = exchange_ok(
+        &data,
         bridge,
         serde_json::json!({
             "op": "mkdir",
@@ -832,6 +854,7 @@ async fn capsule_install_while_home_runs_writes_under_users_fence() {
     crate::api::auth_gateway::verify_configured_principal_roots_ready(&data)
         .unwrap_or_else(|err| panic!("Home did not start: {err:#}"));
     let again = exchange_ok(
+        &data,
         bridge,
         serde_json::json!({
             "op": "write",
@@ -951,11 +974,14 @@ async fn fenced_object_library_list_gets_viewers_from_the_runtime() {
     .unwrap_or_else(|err| panic!("object init failed: {err}"));
     let listed = started
         .bridge()
-        .send_raw(&serde_json::json!({
-            "op": "list",
-            "principal_id": principal,
-            "uri": record.localhost_root
-        }))
+        .send_raw(&with_object_authority(
+            &data,
+            serde_json::json!({
+                "op": "list",
+                "principal_id": principal,
+                "uri": record.localhost_root
+            }),
+        ))
         .await
         .unwrap_or_else(|err| panic!("library list failed: {err}"));
     assert_eq!(listed["status"], "ok", "{listed}");
@@ -1105,8 +1131,9 @@ fn scan_object_authority(dir: &std::path::Path, misses: &mut Vec<String>) {
             continue;
         }
         let text = std::fs::read_to_string(&path).unwrap();
+        let marker = concat!("send_raw", "(");
         let mut from = 0;
-        while let Some(at) = text[from..].find("send_raw(") {
+        while let Some(at) = text[from..].find(marker) {
             let start = from + at;
             let end = text.floor_char_boundary(text.len().min(start + 2400));
             let window = &text[start..end];
@@ -1119,7 +1146,7 @@ fn scan_object_authority(dir: &std::path::Path, misses: &mut Vec<String>) {
                 let line = text[..start].lines().count();
                 misses.push(format!("{}:{line}", path.display()));
             }
-            from = start + "send_raw(".len();
+            from = start + marker.len();
         }
     }
 }
@@ -1173,13 +1200,19 @@ async fn musl_release_helpers_start_under_the_fence() {
     }
 
     async fn exchange(
+        data: &Path,
         bridge: &elastos_runtime::provider::ProviderBridge,
         request: serde_json::Value,
     ) -> serde_json::Value {
+        let request = if request.get("principal_id").is_some() {
+            with_object_authority(data, request)
+        } else {
+            request
+        };
         bridge
             .send_raw(&request)
             .await
-            .unwrap_or_else(|err| panic!("{request}: {err}"))
+            .unwrap_or_else(|err| panic!("helper request failed: {err}"))
     }
 
     let localhost_bin = binary("ELASTOS_MUSL_LOCALHOST");
@@ -1208,6 +1241,7 @@ async fn musl_release_helpers_start_under_the_fence() {
     .await
     .unwrap_or_else(|err| panic!("musl localhost init failed: {err}"));
     let read = exchange(
+        &data,
         localhost.bridge(),
         serde_json::json!({"op": "read", "path": "ElastOS/musl-note.txt"}),
     )
@@ -1264,6 +1298,7 @@ async fn musl_release_helpers_start_under_the_fence() {
         matches[0]
     }
     let warm = exchange(
+        &data,
         localhost.bridge(),
         serde_json::json!({
             "op": "read",
@@ -1278,6 +1313,7 @@ async fn musl_release_helpers_start_under_the_fence() {
     let before = resident_kib(&localhost_bin);
     for _ in 0..8 {
         let got = exchange(
+            &data,
             localhost.bridge(),
             serde_json::json!({
                 "op": "read",
@@ -1297,6 +1333,7 @@ async fn musl_release_helpers_start_under_the_fence() {
     std::fs::create_dir_all(data.join("ElastOS/tree/nested")).unwrap();
     std::fs::write(data.join("ElastOS/tree/nested/leaf.txt"), b"leaf").unwrap();
     let deleted = exchange(
+        &data,
         localhost.bridge(),
         serde_json::json!({
             "op": "delete",
@@ -1333,8 +1370,12 @@ async fn musl_release_helpers_start_under_the_fence() {
     .await
     .unwrap_or_else(|err| panic!("musl object init failed: {err}"));
     assert!(
-        data.join("ElastOS/System").is_dir(),
-        "object start creates ElastOS/System when the Home has none"
+        !data.join("ElastOS/System").exists(),
+        "object start does not create the sign-in parent"
+    );
+    assert!(
+        data.join("ElastOS/SystemServices/Library").is_dir(),
+        "object start creates the Library index"
     );
     let principal = "person:local:ada";
     let record = crate::auth::store_test_human_principal(&data, principal);
@@ -1342,24 +1383,28 @@ async fn musl_release_helpers_start_under_the_fence() {
     let uri = format!("{}/note.txt", record.localhost_root);
     let payload = base64::engine::general_purpose::STANDARD.encode(b"musl-object");
     let wrote = exchange(
+        &data,
         bridge,
         serde_json::json!({"op": "write", "principal_id": principal, "uri": uri, "data": payload}),
     )
     .await;
     assert_eq!(wrote["status"], "ok", "{wrote}");
     let listed = exchange(
+        &data,
         bridge,
         serde_json::json!({"op": "list", "principal_id": principal, "uri": record.localhost_root}),
     )
     .await;
     assert_eq!(listed["status"], "ok", "{listed}");
     let read = exchange(
+        &data,
         bridge,
         serde_json::json!({"op": "read", "principal_id": principal, "uri": uri}),
     )
     .await;
     assert_eq!(read["status"], "ok", "{read}");
     let renamed = exchange(
+        &data,
         bridge,
         serde_json::json!({"op": "rename", "principal_id": principal, "uri": uri, "name": "renamed.txt"}),
     )
@@ -1367,6 +1412,7 @@ async fn musl_release_helpers_start_under_the_fence() {
     assert_eq!(renamed["status"], "ok", "{renamed}");
     let renamed_uri = format!("{}/renamed.txt", record.localhost_root);
     let folder = exchange(
+        &data,
         bridge,
         serde_json::json!({
             "op": "mkdir",
@@ -1379,6 +1425,7 @@ async fn musl_release_helpers_start_under_the_fence() {
     assert_eq!(folder["status"], "ok", "{folder}");
     let child = format!("{}/tree/child.txt", record.localhost_root);
     let child_wrote = exchange(
+        &data,
         bridge,
         serde_json::json!({
             "op": "write",
@@ -1391,6 +1438,7 @@ async fn musl_release_helpers_start_under_the_fence() {
     assert_eq!(child_wrote["status"], "ok", "{child_wrote}");
     let folder_uri = format!("{}/tree", record.localhost_root);
     let trashed = exchange(
+        &data,
         bridge,
         serde_json::json!({"op": "trash", "principal_id": principal, "uri": folder_uri}),
     )
@@ -1400,6 +1448,7 @@ async fn musl_release_helpers_start_under_the_fence() {
         .as_str()
         .unwrap_or_else(|| panic!("trash uri missing: {trashed}"));
     let removed = exchange(
+        &data,
         bridge,
         serde_json::json!({
             "op": "delete_permanently",
@@ -1421,6 +1470,7 @@ async fn musl_release_helpers_start_under_the_fence() {
     let archive_uri = format!("{}/notes.zip", record.localhost_root);
     let archive_data = base64::engine::general_purpose::STANDARD.encode(&zip_bytes);
     let archived = exchange(
+        &data,
         bridge,
         serde_json::json!({
             "op": "write",
@@ -1432,6 +1482,7 @@ async fn musl_release_helpers_start_under_the_fence() {
     .await;
     assert_eq!(archived["status"], "ok", "{archived}");
     let preview = exchange(
+        &data,
         bridge,
         serde_json::json!({
             "op": "archive_preview_entry",
@@ -1470,7 +1521,7 @@ async fn musl_release_helpers_start_under_the_fence() {
     )
     .await
     .unwrap_or_else(|err| panic!("musl chain init failed: {err}"));
-    let listed = exchange(chain.bridge(), serde_json::json!({"op": "networks"})).await;
+    let listed = exchange(&data, chain.bridge(), serde_json::json!({"op": "networks"})).await;
     assert_eq!(
         listed["status"], "ok",
         "musl chain networks after start: {listed}"
@@ -1487,6 +1538,7 @@ async fn musl_release_helpers_start_under_the_fence() {
         );
     } else {
         let lookup = exchange(
+            &data,
             chain.bridge(),
             serde_json::json!({"op": "status", "network": "dns-probe"}),
         )
@@ -1498,7 +1550,7 @@ async fn musl_release_helpers_start_under_the_fence() {
                 && !lookup_text.contains("bad system call"),
             "chain name lookup was refused by the filter: {lookup}"
         );
-        let again = exchange(chain.bridge(), serde_json::json!({"op": "networks"})).await;
+        let again = exchange(&data, chain.bridge(), serde_json::json!({"op": "networks"})).await;
         assert_eq!(
             again["status"], "ok",
             "chain stayed up after the lookup: {again}"
@@ -1617,14 +1669,30 @@ fn auth_record_paths(data: &Path) -> (PathBuf, PathBuf) {
         any(target_arch = "x86_64", target_arch = "aarch64")
     )
 ))]
+fn with_object_authority(data: &Path, request: serde_json::Value) -> serde_json::Value {
+    crate::object_authority::ObjectAuthorityV1::attach(data, &request)
+        .unwrap_or_else(|err| panic!("object authority: {err}"))
+}
+
 async fn exchange_ok(
+    data: &Path,
     bridge: &elastos_runtime::provider::ProviderBridge,
     request: serde_json::Value,
 ) -> serde_json::Value {
+    let request = match crate::object_authority::ObjectAuthorityV1::attach(data, &request) {
+        Ok(request) => request,
+        Err(err) => {
+            return serde_json::json!({
+                "status": "error",
+                "code": "library_error",
+                "message": err.to_string(),
+            })
+        }
+    };
     bridge
         .send_raw(&request)
         .await
-        .unwrap_or_else(|err| panic!("{request}: {err}"))
+        .unwrap_or_else(|err| panic!("object helper request failed: {err}"))
 }
 
 #[cfg(any(
@@ -1797,11 +1865,13 @@ async fn fenced_library_publish_rename_move_share_survive_restart() {
     }
 
     async fn stat(
+        data: &Path,
         bridge: &elastos_runtime::provider::ProviderBridge,
         principal: &str,
         uri: &str,
     ) -> serde_json::Value {
         exchange_ok(
+            data,
             bridge,
             serde_json::json!({
                 "op": "stat",
@@ -1821,6 +1891,7 @@ async fn fenced_library_publish_rename_move_share_survive_restart() {
     ] {
         let uri = format!("{root}/{name}");
         let wrote = exchange_ok(
+            &data,
             bridge,
             serde_json::json!({
                 "op": "write",
@@ -1832,12 +1903,16 @@ async fn fenced_library_publish_rename_move_share_survive_restart() {
         .await;
         assert_eq!(wrote["status"], "ok", "{name}: {wrote}");
         if name == "rename.txt" {
-            assert_eq!(file_mode(&key), 0o644, "the helper does not write Auth");
+            assert_eq!(
+                file_mode(&key),
+                0o600,
+                "the Runtime narrows the recovery key"
+            );
         }
         let published = runtime(&data, &registry, principal, "publish", &uri).await;
         assert_eq!(published["status"], "ok", "{name}: {published}");
         let cid = published["data"]["cid"].as_str().unwrap().to_string();
-        let saw = stat(bridge, principal, &uri).await;
+        let saw = stat(&data, bridge, principal, &uri).await;
         assert_eq!(
             saw["data"]["object"]["publication"]["cid"], cid,
             "{name}: {saw}"
@@ -1849,6 +1924,7 @@ async fn fenced_library_publish_rename_move_share_survive_restart() {
         let (dest, answer) = match op {
             "rename" => {
                 let answer = exchange_ok(
+                    &data,
                     bridge,
                     serde_json::json!({
                         "op": "rename",
@@ -1862,6 +1938,7 @@ async fn fenced_library_publish_rename_move_share_survive_restart() {
             }
             "move" => {
                 let folder = exchange_ok(
+                    &data,
                     bridge,
                     serde_json::json!({
                         "op": "mkdir",
@@ -1873,6 +1950,7 @@ async fn fenced_library_publish_rename_move_share_survive_restart() {
                 .await;
                 assert_eq!(folder["status"], "ok", "{folder}");
                 let answer = exchange_ok(
+                    &data,
                     bridge,
                     serde_json::json!({
                         "op": "move",
@@ -1886,6 +1964,7 @@ async fn fenced_library_publish_rename_move_share_survive_restart() {
             }
             "share" => {
                 let answer = exchange_ok(
+                    &data,
                     bridge,
                     serde_json::json!({
                         "op": "share",
@@ -1920,7 +1999,7 @@ async fn fenced_library_publish_rename_move_share_survive_restart() {
         }
         let withdrawn = runtime(&data, &registry, principal, "unpublish", &dest).await;
         assert_eq!(withdrawn["status"], "ok", "{name}: {withdrawn}");
-        let after = stat(bridge, principal, &dest).await;
+        let after = stat(&data, bridge, principal, &dest).await;
         assert!(
             after["data"]["object"]["publication"].is_null(),
             "{name} still published: {after}"
@@ -1944,7 +2023,7 @@ async fn fenced_library_publish_rename_move_share_survive_restart() {
             !crate::library::cid_is_published_here(&data, cid),
             "withdrawn after restart: {cid}"
         );
-        let saw = stat(again, principal, dest).await;
+        let saw = stat(&data, again, principal, dest).await;
         assert!(
             saw["data"]["object"]["publication"].is_null(),
             "withdrawn file published again: {saw}"
@@ -1979,6 +2058,7 @@ async fn recovery_kit_touch(binary: &Path) {
     let uri = format!("{}/kit.txt", protection.localhost_root);
     let payload = base64::engine::general_purpose::STANDARD.encode(b"kit");
     let wrote = exchange_ok(
+        &data,
         bridge,
         serde_json::json!({
             "op": "write",
@@ -1990,6 +2070,7 @@ async fn recovery_kit_touch(binary: &Path) {
     .await;
     assert_eq!(wrote["status"], "ok", "{wrote}");
     let read = exchange_ok(
+        &data,
         bridge,
         serde_json::json!({"op": "read", "principal_id": principal, "uri": uri}),
     )
@@ -1998,8 +2079,8 @@ async fn recovery_kit_touch(binary: &Path) {
     assert_eq!(read["data"]["data"], payload);
     assert_eq!(
         file_mode(&key),
-        0o644,
-        "the helper does not write the recovery key"
+        0o600,
+        "the Runtime narrows the recovery key"
     );
     assert_eq!(std::fs::read(&key).unwrap().len(), 32);
     bridge.shutdown().await.unwrap();
@@ -2034,12 +2115,14 @@ async fn recovery_kit_round_trip(binary: &Path) {
     let payload = base64::engine::general_purpose::STANDARD.encode(b"protected");
     let note = format!("{root}/note.txt");
     let listed = exchange_ok(
+        &data,
         bridge,
         serde_json::json!({"op": "list", "principal_id": principal, "uri": root}),
     )
     .await;
     assert_eq!(listed["status"], "ok", "{listed}");
     let wrote = exchange_ok(
+        &data,
         bridge,
         serde_json::json!({
             "op": "write",
@@ -2050,9 +2133,14 @@ async fn recovery_kit_round_trip(binary: &Path) {
     )
     .await;
     assert_eq!(wrote["status"], "ok", "{wrote}");
-    assert_eq!(file_mode(&key), 0o644, "the helper does not write Auth");
+    assert_eq!(
+        file_mode(&key),
+        0o600,
+        "the Runtime narrows the recovery key"
+    );
     assert_eq!(std::fs::read(&key).unwrap(), key_before);
     let read = exchange_ok(
+        &data,
         bridge,
         serde_json::json!({"op": "read", "principal_id": principal, "uri": note}),
     )
@@ -2060,6 +2148,7 @@ async fn recovery_kit_round_trip(binary: &Path) {
     assert_eq!(read["status"], "ok", "{read}");
     assert_eq!(read["data"]["data"], payload);
     let renamed = exchange_ok(
+        &data,
         bridge,
         serde_json::json!({
             "op": "rename",
@@ -2072,6 +2161,7 @@ async fn recovery_kit_round_trip(binary: &Path) {
     assert_eq!(renamed["status"], "ok", "{renamed}");
     let renamed_uri = format!("{root}/renamed.txt");
     let trashed = exchange_ok(
+        &data,
         bridge,
         serde_json::json!({"op": "trash", "principal_id": principal, "uri": renamed_uri}),
     )
@@ -2081,6 +2171,7 @@ async fn recovery_kit_round_trip(binary: &Path) {
         .as_str()
         .unwrap_or_else(|| panic!("trash uri missing: {trashed}"));
     let deleted = exchange_ok(
+        &data,
         bridge,
         serde_json::json!({
             "op": "delete_permanently",
@@ -2101,6 +2192,7 @@ async fn recovery_kit_round_trip(binary: &Path) {
     }
     let archive_uri = format!("{root}/notes.zip");
     let archived = exchange_ok(
+        &data,
         bridge,
         serde_json::json!({
             "op": "write",
@@ -2112,6 +2204,7 @@ async fn recovery_kit_round_trip(binary: &Path) {
     .await;
     assert_eq!(archived["status"], "ok", "{archived}");
     let preview = exchange_ok(
+        &data,
         bridge,
         serde_json::json!({
             "op": "archive_preview_entry",
@@ -2124,6 +2217,7 @@ async fn recovery_kit_round_trip(binary: &Path) {
     assert_eq!(preview["status"], "ok", "{preview}");
     let desktop = format!("{root}/Desktop");
     let made = exchange_ok(
+        &data,
         bridge,
         serde_json::json!({
             "op": "mkdir",
@@ -2136,6 +2230,7 @@ async fn recovery_kit_round_trip(binary: &Path) {
     assert_eq!(made["status"], "ok", "{made}");
     let desk = format!("{desktop}/desk.txt");
     let desk_wrote = exchange_ok(
+        &data,
         bridge,
         serde_json::json!({
             "op": "write",
@@ -2147,6 +2242,7 @@ async fn recovery_kit_round_trip(binary: &Path) {
     .await;
     assert_eq!(desk_wrote["status"], "ok", "{desk_wrote}");
     let summary = exchange_ok(
+        &data,
         bridge,
         serde_json::json!({"op": "list", "principal_id": principal, "uri": desktop}),
     )
@@ -2159,6 +2255,7 @@ async fn recovery_kit_round_trip(binary: &Path) {
     std::fs::remove_file(&key).unwrap();
     assert!(!key.exists());
     let missing = exchange_ok(
+        &data,
         bridge,
         serde_json::json!({
             "op": "write",
@@ -2171,13 +2268,14 @@ async fn recovery_kit_round_trip(binary: &Path) {
     let missing_text = missing.to_string();
     assert_ne!(missing["status"], "ok", "{missing}");
     assert!(
-        missing_text.contains(crate::auth_state_files::OBJECT_HELPER_RECOVERY_KEY_REFUSAL),
+        missing_text.contains(crate::object_authority::RECOVERY_KEY_REFUSAL),
         "{missing}"
     );
     assert!(!key.exists(), "the helper created the recovery key");
     std::fs::write(&key, &key_before).unwrap();
     std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o644)).unwrap();
     let created = exchange_ok(
+        &data,
         bridge,
         serde_json::json!({
             "op": "write",
@@ -2188,9 +2286,14 @@ async fn recovery_kit_round_trip(binary: &Path) {
     )
     .await;
     assert_eq!(created["status"], "ok", "{created}");
-    assert_eq!(file_mode(&key), 0o644, "the helper does not write Auth");
+    assert_eq!(
+        file_mode(&key),
+        0o600,
+        "the Runtime narrows the recovery key"
+    );
     assert_eq!(std::fs::read(&key).unwrap(), key_before);
     let created_read = exchange_ok(
+        &data,
         bridge,
         serde_json::json!({
             "op": "read",
@@ -2215,12 +2318,179 @@ async fn recovery_kit_round_trip(binary: &Path) {
     )
 ))]
 #[tokio::test]
-async fn protected_root_with_a_recovery_kit_round_trip() {
+async fn fenced_library_operations_survive_with_authority() {
     recovery_kit_round_trip(&provider_binary("object-provider")).await;
 }
 
-/// The object helper does not repair a sign-in file that is ahead of its
-/// audit record. The two files keep the bytes they had.
+/// The recovery key is missing. The Runtime refuses before it writes to the
+/// helper pipe, and it does not create the key. A key that is already there
+/// is narrowed to 0600 and its bytes stay the same.
+#[cfg(all(
+    not(elastos_unsupported_os_check),
+    any(
+        target_os = "macos",
+        all(
+            target_os = "linux",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        )
+    )
+))]
+#[test]
+fn recovery_key_missing_refuses_before_dispatch() {
+    use std::os::unix::fs::PermissionsExt;
+    let (_hold, data) = helper_data_root();
+    let principal = "person:local:ada";
+    crate::auth::store_test_principal_root_protection(&data, principal);
+    let key = recovery_key_path(&data);
+    let key_bytes = std::fs::read(&key).unwrap();
+    std::fs::remove_file(&key).unwrap();
+    let missing = crate::object_authority::ObjectAuthorityV1::build(&data, principal);
+    let text = missing.unwrap_err().to_string();
+    assert!(
+        text.contains(crate::object_authority::RECOVERY_KEY_REFUSAL),
+        "{text}"
+    );
+    assert!(!key.exists(), "the builder created the recovery key");
+    std::fs::write(&key, &key_bytes).unwrap();
+    std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o644)).unwrap();
+    let authority = crate::object_authority::ObjectAuthorityV1::build(&data, principal)
+        .expect("object authority");
+    assert_eq!(file_mode(&key), 0o600);
+    assert_eq!(std::fs::read(&key).unwrap(), key_bytes);
+    let shown = format!("{authority:?}");
+    let key_hex = key_bytes
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    assert!(shown.contains("[redacted]"), "{shown}");
+    assert!(!shown.contains(&key_hex), "{shown}");
+}
+
+/// Keyless operations do not read the recovery archive key. A missing key
+/// still refuses an operation that opens an object envelope.
+#[cfg(all(
+    not(elastos_unsupported_os_check),
+    any(
+        target_os = "macos",
+        all(
+            target_os = "linux",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        )
+    )
+))]
+#[test]
+fn keyless_ops_attach_without_the_recovery_key() {
+    let (_hold, data) = helper_data_root();
+    let principal = "person:local:ada";
+    crate::auth::store_test_principal_root_protection(&data, principal);
+    let key = recovery_key_path(&data);
+    std::fs::remove_file(&key).unwrap();
+    for op in [
+        "roots",
+        "list_runtime_custody",
+        "import_runtime_custody",
+        "buy",
+        "open_viewer",
+        "read_viewer",
+        "close_viewer",
+    ] {
+        let attached = crate::object_authority::ObjectAuthorityV1::attach(
+            &data,
+            &serde_json::json!({
+                "op": op,
+                "principal_id": principal,
+            }),
+        )
+        .unwrap_or_else(|err| panic!("{op}: {err}"));
+        let envelope = &attached[crate::object_authority::WIRE_FIELD];
+        assert!(envelope["data_key"].is_null(), "{op} attached a data key");
+        assert!(
+            envelope["data_key_id"].is_null(),
+            "{op} attached a data key id"
+        );
+        assert!(!key.exists(), "{op} created the recovery key");
+    }
+    let keyed = crate::object_authority::ObjectAuthorityV1::attach(
+        &data,
+        &serde_json::json!({
+            "op": "list",
+            "principal_id": principal,
+        }),
+    );
+    let text = keyed.unwrap_err().to_string();
+    assert!(
+        text.contains(crate::object_authority::RECOVERY_KEY_REFUSAL),
+        "{text}"
+    );
+    assert!(!key.exists(), "the keyed refusal created the recovery key");
+}
+
+#[cfg(all(
+    not(elastos_unsupported_os_check),
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+#[tokio::test]
+async fn object_helper_cannot_open_auth_on_linux() {
+    use base64::Engine;
+    let (_hold, data) = helper_data_root();
+    let principal = "person:local:ada";
+    let protection = crate::auth::store_test_principal_root_protection(&data, principal);
+    let auth = data.join("ElastOS/System/Auth");
+    assert!(auth.join("auth-state.json").is_file());
+    assert!(auth.join("recovery-archive.key").is_file());
+    let (_, did) = elastos_identity::load_or_create_did(&data).unwrap();
+    let object = spawn_object(&provider_binary("object-provider"), &data, &did).await;
+    let uri = format!("{}/open.txt", protection.localhost_root);
+    let payload = base64::engine::general_purpose::STANDARD.encode(b"open");
+    let wrote = exchange_ok(
+        &data,
+        object.bridge(),
+        serde_json::json!({
+            "op": "write",
+            "principal_id": principal,
+            "uri": uri,
+            "data": payload
+        }),
+    )
+    .await;
+    assert_eq!(wrote["status"], "ok", "{wrote}");
+    object.bridge().shutdown().await.unwrap();
+}
+
+#[cfg(all(not(elastos_unsupported_os_check), target_os = "macos"))]
+#[tokio::test]
+async fn object_helper_cannot_stat_elastos_on_macos() {
+    use base64::Engine;
+    let (_hold, data) = helper_data_root();
+    assert!(
+        data.join("ElastOS").is_dir(),
+        "ElastOS exists before the fence"
+    );
+    let principal = "person:local:ada";
+    let protection = crate::auth::store_test_principal_root_protection(&data, principal);
+    let (_, did) = elastos_identity::load_or_create_did(&data).unwrap();
+    let object = spawn_object(&provider_binary("object-provider"), &data, &did).await;
+    let uri = format!("{}/stat.txt", protection.localhost_root);
+    let payload = base64::engine::general_purpose::STANDARD.encode(b"stat");
+    let wrote = exchange_ok(
+        &data,
+        object.bridge(),
+        serde_json::json!({
+            "op": "write",
+            "principal_id": principal,
+            "uri": uri,
+            "data": payload
+        }),
+    )
+    .await;
+    assert_eq!(wrote["status"], "ok", "{wrote}");
+    object.bridge().shutdown().await.unwrap();
+}
+
+/// A split sign-in record is refused by the Runtime builder. The helper is
+/// not asked, so it does not open the activation lock, and the two files
+/// keep the bytes they had.
 #[cfg(all(
     not(elastos_unsupported_os_check),
     any(
@@ -2232,7 +2502,7 @@ async fn protected_root_with_a_recovery_kit_round_trip() {
     )
 ))]
 #[tokio::test]
-async fn object_helper_leaves_a_split_sign_in_record_unchanged() {
+async fn runtime_builder_refuses_a_split_sign_in_record() {
     let (_hold, data) = helper_data_root();
     let ada = "person:local:ada";
     crate::auth::store_test_human_principal(&data, ada);
@@ -2249,33 +2519,19 @@ async fn object_helper_leaves_a_split_sign_in_record_unchanged() {
     let audit_before = std::fs::read(&audit_path).ok();
     let (_, did) = elastos_identity::load_or_create_did(&data).unwrap();
     let object = spawn_object(&provider_binary("object-provider"), &data, &did).await;
-    let bridge = object.bridge();
-    let answer = exchange_ok(
-        bridge,
-        serde_json::json!({"op": "list", "principal_id": ada}),
-    )
-    .await;
-    let text = answer.to_string();
+    let refused = crate::object_authority::ObjectAuthorityV1::build(&data, ada);
+    let text = refused
+        .as_ref()
+        .err()
+        .map(|err| err.to_string())
+        .unwrap_or_default();
     assert!(
-        text.contains(crate::auth_state_files::OBJECT_HELPER_CHECKPOINT_REFUSAL),
-        "{answer}"
+        refused.is_err(),
+        "the builder accepted a split sign-in record"
     );
-    assert_eq!(answer["status"], "error", "{answer}");
-    let published = exchange_ok(
-        bridge,
-        serde_json::json!({
-            "op": "publish",
-            "principal_id": ada,
-            "uri": "localhost://Users/ada/note.txt",
-        }),
-    )
-    .await;
-    let published_text = published.to_string();
-    assert_eq!(published["status"], "error", "{published}");
     assert!(
-        published_text.contains("Runtime content coordinator")
-            || published_text.contains(crate::auth_state_files::OBJECT_HELPER_CHECKPOINT_REFUSAL),
-        "{published}"
+        text.contains("audit chain"),
+        "the builder did not refuse with the audit sentence: {text}"
     );
     assert_eq!(std::fs::read(&auth_path).unwrap(), auth_before);
     assert_eq!(std::fs::read(&audit_path).ok(), audit_before);
@@ -2283,165 +2539,9 @@ async fn object_helper_leaves_a_split_sign_in_record_unchanged() {
     for entry in std::fs::read_dir(auth_dir).unwrap() {
         let name = entry.unwrap().file_name();
         let name = name.to_string_lossy();
-        assert!(!name.contains(".tmp"), "the refused write left {name}");
+        assert!(!name.contains(".tmp"), "the refused build left {name}");
     }
-    bridge.shutdown().await.unwrap();
-    crate::auth::verify_auth_audit_chain_ready(&data)
-        .unwrap_or_else(|err| panic!("Home did not restart clean: {err:#}"));
-    crate::auth::verify_auth_audit_chain_ready(&data)
-        .unwrap_or_else(|err| panic!("a second Home start did not stay clean: {err:#}"));
-    let (_, did_again) = elastos_identity::load_or_create_did(&data).unwrap();
-    let restarted = spawn_object(&provider_binary("object-provider"), &data, &did_again).await;
-    let again = exchange_ok(
-        restarted.bridge(),
-        serde_json::json!({"op": "list", "principal_id": ada}),
-    )
-    .await;
-    assert_eq!(again["status"], "ok", "{again}");
-    let audit_after = std::fs::read(&audit_path).ok();
-    restarted.bridge().shutdown().await.unwrap();
-    assert_eq!(
-        std::fs::read(&audit_path).ok(),
-        audit_after,
-        "the restarted helper rewrote the checkpoint"
-    );
-}
-
-/// Runtime saves the sign-in record and its audit checkpoint in a loop while
-/// the helper reads. The helper takes Runtime's audit lock, so no read meets
-/// the two files mid-write. Without the lock file the helper locks the Auth
-/// folder and leaves no file behind.
-#[cfg(all(
-    not(elastos_unsupported_os_check),
-    any(
-        target_os = "macos",
-        all(
-            target_os = "linux",
-            any(target_arch = "x86_64", target_arch = "aarch64")
-        )
-    )
-))]
-#[tokio::test]
-async fn object_helper_reads_beside_runtime_saves_are_not_refused() {
-    let (_hold, data) = helper_data_root();
-    let ada = "person:local:ada";
-    crate::auth::store_test_human_principal(&data, ada);
-    let (_, did) = elastos_identity::load_or_create_did(&data).unwrap();
-    let object = spawn_object(&provider_binary("object-provider"), &data, &did).await;
-    let bridge = object.bridge();
-    let saves = 150u64;
-    let saver = std::thread::spawn({
-        let data = data.clone();
-        move || {
-            for index in 0..saves {
-                crate::auth::append_audit_event(
-                    &data,
-                    elastos_runtime::auth::RuntimeAuditEventV1 {
-                        schema: elastos_runtime::auth::RuntimeAuditEventV1::SCHEMA.to_string(),
-                        event_id: format!("audit:helper-race:{index}"),
-                        event_type: "test.audit".to_string(),
-                        principal_id: Some("person:local:ada".to_string()),
-                        proof_binding_id: None,
-                        session_id: Some("session:test".to_string()),
-                        challenge_id: None,
-                        capsule_id: Some("system".to_string()),
-                        result: "allowed".to_string(),
-                        reason: format!("helper race {index}"),
-                        occurred_at: index + 1,
-                        signer_did: None,
-                        signature: None,
-                    },
-                )
-                .unwrap();
-            }
-        }
-    });
-    let mut reads = 0u32;
-    while !saver.is_finished() {
-        let answer = exchange_ok(
-            bridge,
-            serde_json::json!({"op": "list", "principal_id": ada}),
-        )
-        .await;
-        assert_eq!(answer["status"], "ok", "read {reads}: {answer}");
-        reads += 1;
-    }
-    saver.join().unwrap();
-    assert!(reads >= 20, "only {reads} reads ran beside {saves} saves");
-    let lock = data.join("ElastOS/System/Auth/audit-chain-required.json.lock");
-    std::fs::remove_file(&lock).unwrap();
-    let names = |dir: &Path| -> Vec<std::ffi::OsString> {
-        let mut names: Vec<_> = std::fs::read_dir(dir)
-            .unwrap()
-            .map(|entry| entry.unwrap().file_name())
-            .collect();
-        names.sort();
-        names
-    };
-    let users_before = names(&data.join("Users"));
-    let unlocked = exchange_ok(
-        bridge,
-        serde_json::json!({"op": "list", "principal_id": ada}),
-    )
-    .await;
-    assert_eq!(unlocked["status"], "ok", "{unlocked}");
-    assert!(!lock.exists(), "the helper made Runtime's lock file");
-    assert_eq!(names(&data.join("Users")), users_before);
-    bridge.shutdown().await.unwrap();
-    println!("{reads} helper reads beside {saves} Runtime saves; none refused");
-}
-
-/// `device:<did>` uses the DID Runtime passed in. An unknown principal keeps
-/// its own refusal. Neither opens the device key.
-#[cfg(all(
-    not(elastos_unsupported_os_check),
-    any(
-        target_os = "macos",
-        all(
-            target_os = "linux",
-            any(target_arch = "x86_64", target_arch = "aarch64")
-        )
-    )
-))]
-#[tokio::test]
-async fn object_helper_uses_the_runtime_did_and_names_an_unknown_principal() {
-    let (_hold, data) = helper_data_root();
-    crate::auth::store_test_human_principal(&data, "person:local:ada");
-    let key = data.join("identity/device.key");
-    let key_before = std::fs::read(&key).unwrap();
-    let (_, did) = elastos_identity::load_or_create_did(&data).unwrap();
-    let object = spawn_object(&provider_binary("object-provider"), &data, &did).await;
-    let bridge = object.bridge();
-    let device_id = format!("device:{did}");
-    let device = exchange_ok(
-        bridge,
-        serde_json::json!({"op": "list", "principal_id": device_id}),
-    )
-    .await;
-    assert_eq!(device["status"], "ok", "{device}");
-    let uri = device["data"]["uri"].as_str().unwrap_or("");
-    assert!(
-        uri.starts_with("localhost://Users/"),
-        "device root: {device}"
-    );
-    assert_eq!(std::fs::read(&key).unwrap(), key_before);
-    let unknown = exchange_ok(
-        bridge,
-        serde_json::json!({"op": "list", "principal_id": "person:local:missing"}),
-    )
-    .await;
-    let text = unknown.to_string();
-    assert_eq!(unknown["status"], "error", "{unknown}");
-    assert!(
-        text.contains("person:local:missing") && text.contains("has no stored record"),
-        "{unknown}"
-    );
-    assert!(
-        !text.contains("device.key") && !text.contains("Permission denied"),
-        "{unknown}"
-    );
-    assert_eq!(std::fs::read(&key).unwrap(), key_before);
-    bridge.shutdown().await.unwrap();
+    object.bridge().shutdown().await.unwrap();
 }
 
 /// A capsule storage root under `Users/self/<dir>` is a start-walk root. The
@@ -2517,6 +2617,7 @@ async fn fenced_object_refuses_a_capsule_storage_root_at_depth_16() {
     let object = spawn_object(&provider_binary("object-provider"), &data, &did).await;
     let bridge = object.bridge();
     let kept = exchange_ok(
+        &data,
         bridge,
         serde_json::json!({
             "op": "mkdir",
@@ -2537,6 +2638,7 @@ async fn fenced_object_refuses_a_capsule_storage_root_at_depth_16() {
             .join("/")
     );
     let deep = exchange_ok(
+        &data,
         bridge,
         serde_json::json!({
             "op": "mkdir",
@@ -2569,6 +2671,7 @@ async fn fenced_object_refuses_a_capsule_storage_root_at_depth_16() {
     .unwrap();
     home_starts(&data);
     let moved = exchange_ok(
+        &data,
         bridge,
         serde_json::json!({
             "op": "move",
@@ -2592,6 +2695,7 @@ async fn fenced_object_refuses_a_capsule_storage_root_at_depth_16() {
     home_starts(&data);
 
     let copied = exchange_ok(
+        &data,
         bridge,
         serde_json::json!({
             "op": "copy",
@@ -2629,6 +2733,7 @@ async fn fenced_object_refuses_a_capsule_storage_root_at_depth_16() {
     }
     let tar_uri = format!("{notes}/deep.tar");
     let wrote = exchange_ok(
+        &data,
         bridge,
         serde_json::json!({
             "op": "write",
@@ -2640,6 +2745,7 @@ async fn fenced_object_refuses_a_capsule_storage_root_at_depth_16() {
     .await;
     assert_eq!(wrote["status"], "ok", "{wrote}");
     let extracted = exchange_ok(
+        &data,
         bridge,
         serde_json::json!({
             "op": "extract_archive",

@@ -20,7 +20,7 @@ pub(super) fn base64_decoded_upper(len: u64) -> u64 {
 /// Content ceiling of a canonical envelope: the decoded ciphertext with the
 /// 16-byte tag taken off. A head this probe cannot parse keeps the old
 /// three-quarter ceiling, which is still at least the ciphertext.
-pub(super) fn envelope_content_bound(file_len: u64, prefix: &[u8]) -> u64 {
+pub(crate) fn envelope_content_bound(file_len: u64, prefix: &[u8]) -> u64 {
     const TAG_LEN: u64 = 16;
     let CanonicalHeadParse::Complete(head) = parse_canonical_envelope_head(prefix) else {
         return file_len / 4 * 3;

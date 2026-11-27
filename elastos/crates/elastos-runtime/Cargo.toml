@@ -29,6 +29,7 @@ sha2 = "0.10"
 base64 = "0.22"
 hex = "0.4"
 rand = "0.8"
+zeroize = "1"
 
 # Capability tokens
 uuid = { version = "1.0", features = ["v4"] }

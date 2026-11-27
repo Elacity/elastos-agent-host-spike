@@ -3358,7 +3358,16 @@ impl AttachFixture {
     fn library(&self, op: &str, mut body: serde_json::Value) -> serde_json::Value {
         body["op"] = json!(op);
         body["principal_id"] = json!(self.principal_id);
-        crate::library::handle_object_provider_raw_request(self.dir.path(), &body)
+        match crate::object_authority::ObjectAuthorityV1::attach(self.dir.path(), &body) {
+            Ok(mut body) => {
+                crate::library::handle_object_provider_raw_request(self.dir.path(), &mut body)
+            }
+            Err(err) => json!({
+                "status": "error",
+                "code": "library_error",
+                "message": err.to_string(),
+            }),
+        }
     }
 
     fn write(&self, path: &str, bytes: &[u8]) -> String {

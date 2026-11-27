@@ -8,7 +8,14 @@ use super::*;
 fn library(dir: &std::path::Path, op: &str, mut request: Value) -> Value {
     request["op"] = json!(op);
     request["principal_id"] = json!(PERSON);
-    crate::library::handle_object_provider_raw_request(dir, &request)
+    match crate::object_authority::ObjectAuthorityV1::attach(dir, &request) {
+        Ok(mut request) => crate::library::handle_object_provider_raw_request(dir, &mut request),
+        Err(err) => json!({
+            "status": "error",
+            "code": "library_error",
+            "message": err.to_string(),
+        }),
+    }
 }
 
 #[cfg(unix)]

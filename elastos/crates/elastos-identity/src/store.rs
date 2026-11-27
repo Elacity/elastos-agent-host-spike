@@ -435,16 +435,7 @@ pub fn derive_did(secret: &[u8; 32]) -> (ed25519_dalek::SigningKey, String) {
 }
 
 /// Canonical shared device-key path at `{data_dir}/identity/device.key`.
-/// The object helper returns a path it does not use, under a file root, so a
-/// stat is not-found and does not touch `identity/`.
 pub fn device_key_path(data_dir: &Path) -> PathBuf {
-    if object_helper_process() {
-        return data_dir
-            .join("ElastOS")
-            .join("System")
-            .join("Auth")
-            .join(".object-helper-device-key-not-used");
-    }
     data_dir.join("identity").join("device.key")
 }
 

@@ -73,24 +73,17 @@ fn row(
 
 /// Reviewed open sites. A row may be `open` only when it is also named here,
 /// so a new open site cannot land by editing only the row's status.
-const OPEN_ROWS: &[(&str, &str, &str)] = &[
-    (
-        "elastos-server/src/server_infra.rs",
-        "setup_server_infrastructure_impl",
-        "encryption_key: device_key_hex",
-    ),
-    (
-        "elastos-runtime/src/provider/path_allow.rs",
-        "root_specs",
-        "RuntimeProviderId::Object => OBJECT_ROOTS",
-    ),
-];
+const OPEN_ROWS: &[(&str, &str, &str)] = &[(
+    "elastos-server/src/server_infra.rs",
+    "setup_server_infrastructure_impl",
+    "encryption_key: device_key_hex",
+)];
 
 /// Localhost stays open until slice L. Home still passes the raw device key.
 const LOCALHOST_OPEN_REASON: &str = "Home still passes the raw device key to the localhost provider. The row stays open until slice L.";
 
-/// The object helper's allowed root still contains the owner's recovery archive key.
-const OBJECT_ROOT_OPEN_REASON: &str = "The object helper's allowed root contains the folder where the owner's recovery archive key lives. The row closes when that key moves out of the helper's root or the key step (slice L) lands.";
+/// The object helper's roots are Users, UsersAI, and the Library index.
+const OBJECT_ROOT_REASON: &str = "The object helper's roots are Users, UsersAI, and the Library index. The sign-in folder is outside those roots. The Runtime passes one per-request envelope.";
 
 fn rows() -> Vec<HeldRow> {
     vec![
@@ -142,10 +135,10 @@ fn rows() -> Vec<HeldRow> {
         "RuntimeProviderId::Object => OBJECT_ROOTS",
         1,
         mark(
-            "open",
-            "object helper file root",
+            "delegated",
+            "per-request object envelope",
             "object provider",
-            OBJECT_ROOT_OPEN_REASON,
+            OBJECT_ROOT_REASON,
         ),
     ),
     row(
@@ -2040,8 +2033,7 @@ fn open_rows_are_an_explicit_list() {
 
 /// Localhost, object, and chain start through the path allow-list. Home derives
 /// the chain issuer itself. The localhost device-key hand-off stays open.
-/// The object helper's allowed root stays open: that root contains the folder
-/// where the owner's recovery archive key lives.
+/// The object helper's roots are Users, UsersAI, and the Library index.
 #[test]
 fn localhost_object_and_chain_start_on_the_path_allow_list() {
     let raw = sources()
@@ -2124,9 +2116,9 @@ fn localhost_object_and_chain_start_on_the_path_allow_list() {
                 "RuntimeProviderId::Object => OBJECT_ROOTS",
             )
         {
-            assert_eq!(row.status, "open");
+            assert_eq!(row.status, "delegated");
             assert_eq!(row.count, 1);
-            assert_eq!(row.reason, OBJECT_ROOT_OPEN_REASON);
+            assert_eq!(row.reason, OBJECT_ROOT_REASON);
         }
     }
     let roots = sources()

@@ -448,6 +448,45 @@ enum ObjectProviderRequest {
     },
 }
 
+impl ObjectProviderRequest {
+    fn principal_id(&self) -> &str {
+        match self {
+            Self::Roots { principal_id, .. } => principal_id,
+            Self::List { principal_id, .. } => principal_id,
+            Self::Stat { principal_id, .. } => principal_id,
+            Self::Read { principal_id, .. } => principal_id,
+            Self::Download { principal_id, .. } => principal_id,
+            Self::ExtractArchive { principal_id, .. } => principal_id,
+            Self::ArchiveEntries { principal_id, .. } => principal_id,
+            Self::ArchivePreviewEntry { principal_id, .. } => principal_id,
+            Self::ArchiveExtractEntries { principal_id, .. } => principal_id,
+            Self::CompressArchive { principal_id, .. } => principal_id,
+            Self::Write { principal_id, .. } => principal_id,
+            Self::Mkdir { principal_id, .. } => principal_id,
+            Self::Rename { principal_id, .. } => principal_id,
+            Self::Move { principal_id, .. } => principal_id,
+            Self::Copy { principal_id, .. } => principal_id,
+            Self::Trash { principal_id, .. } => principal_id,
+            Self::Restore { principal_id, .. } => principal_id,
+            Self::DeletePermanently { principal_id, .. } => principal_id,
+            Self::EmptyTrash { principal_id, .. } => principal_id,
+            Self::Status { principal_id, .. } => principal_id,
+            Self::Sync { principal_id, .. } => principal_id,
+            Self::Events { principal_id, .. } => principal_id,
+            Self::Publish { principal_id, .. } => principal_id,
+            Self::Unpublish { principal_id, .. } => principal_id,
+            Self::Repair { principal_id, .. } => principal_id,
+            Self::Share { principal_id, .. } => principal_id,
+            Self::SharedAccess { principal_id, .. } => principal_id,
+            Self::ListRuntimeCustody { principal_id, .. } => principal_id,
+            Self::ImportRuntimeCustody { principal_id, .. } => principal_id,
+            Self::Buy { principal_id, .. } => principal_id,
+            Self::OpenViewer { principal_id, .. } => principal_id,
+            Self::ReadViewer { principal_id, .. } => principal_id,
+            Self::CloseViewer { principal_id, .. } => principal_id,
+        }
+    }
+}
 #[derive(Debug, Deserialize)]
 #[serde(tag = "mode", rename_all = "snake_case", deny_unknown_fields)]
 enum LibraryPublishProtectionRequest {
@@ -487,15 +526,23 @@ impl Provider for ObjectProvider {
     }
 
     async fn send_raw(&self, request: &Value) -> Result<Value, ProviderError> {
-        let request = match taken_object_request(request) {
+        let mut request_value = request.clone();
+        let authority = match crate::object_authority::ObjectAuthorityV1::from_request_or_build(
+            &self.data_dir,
+            &mut request_value,
+        ) {
+            Ok(authority) => authority,
+            Err(err) => return Ok(provider_error("library_error", &err.to_string())),
+        };
+        let request = match serde_json::from_value::<ObjectProviderRequest>(request_value) {
             Ok(request) => request,
-            Err(err) => return Ok(err),
+            Err(err) => return Ok(provider_error("invalid_request", &err.to_string())),
         };
 
         let data_dir = self.data_dir.clone();
         let result = match request {
             ObjectProviderRequest::Publish {
-                principal_id,
+                principal_id: _,
                 uri,
                 if_revision,
                 protection,
@@ -509,7 +556,7 @@ impl Provider for ObjectProvider {
                 library_publish(
                     &data_dir,
                     registry,
-                    &principal_id,
+                    &authority,
                     &uri,
                     if_revision.as_deref(),
                     protection,
@@ -518,7 +565,7 @@ impl Provider for ObjectProvider {
                 .await
             }
             ObjectProviderRequest::Unpublish {
-                principal_id,
+                principal_id: _,
                 uri,
                 if_revision,
             } => {
@@ -531,26 +578,30 @@ impl Provider for ObjectProvider {
                 library_unpublish(
                     &data_dir,
                     registry,
-                    &principal_id,
+                    &authority,
                     &uri,
                     if_revision.as_deref(),
                 )
                 .await
             }
-            ObjectProviderRequest::Repair { principal_id, uri } => {
+            ObjectProviderRequest::Repair {
+                principal_id: _,
+                uri,
+            } => {
                 let Some(registry) = self.registry.upgrade() else {
                     return Ok(provider_error(
                         "library_error",
                         "object provider registry unavailable",
                     ));
                 };
-                library_repair(&data_dir, registry, &principal_id, &uri).await
+                library_repair(&data_dir, registry, &authority, &uri).await
             }
             request @ (ObjectProviderRequest::Status { .. }
             | ObjectProviderRequest::Share { .. }
             | ObjectProviderRequest::SharedAccess { .. }) => {
                 handle_library_request_with_protected_content_status(
                     data_dir,
+                    authority,
                     request,
                     self.registry.upgrade(),
                 )
@@ -570,7 +621,7 @@ impl Provider for ObjectProvider {
                 };
                 handle_runtime_custody_library_request(data_dir, registry, request, None).await
             }
-            request => handle_library_request_serialized(data_dir, request).await,
+            request => handle_library_request_serialized(data_dir, authority, request).await,
         };
 
         Ok(match result {
@@ -580,40 +631,50 @@ impl Provider for ObjectProvider {
     }
 }
 
-/// Remove a runtime envelope, then parse the object request. A missing
-/// envelope is still a request. This slice does not read the envelope.
-fn taken_object_request(request: &Value) -> Result<ObjectProviderRequest, Value> {
-    let mut owned = request.clone();
-    crate::object_authority::accept_envelope(&mut owned);
-    serde_json::from_value(owned).map_err(|err| provider_error("invalid_request", &err.to_string()))
-}
-
 /// Handle one raw object provider request inside an isolated provider process.
 ///
 /// The standalone provider owns principal-root object storage and Library event
 /// state. Content publish/unpublish/repair are coordinated by Runtime for now,
 /// because the current stdio provider ABI has no provider-to-provider
 /// invocation channel.
-pub fn handle_object_provider_raw_request(data_dir: &Path, request: &Value) -> Value {
-    let request = match taken_object_request(request) {
+pub fn handle_object_provider_raw_request(data_dir: &Path, request: &mut Value) -> Value {
+    let op = request.get("op").and_then(Value::as_str).unwrap_or("");
+    let coordinator = matches!(
+        op,
+        "publish"
+            | "unpublish"
+            | "repair"
+            | "list_runtime_custody"
+            | "import_runtime_custody"
+            | "buy"
+            | "open_viewer"
+            | "read_viewer"
+            | "close_viewer"
+    );
+    if coordinator {
+        crate::object_authority::wipe_wire_key(request);
+        if let Some(object) = request.as_object_mut() {
+            object.remove(crate::object_authority::WIRE_FIELD);
+        }
+        let request_value = std::mem::take(request);
+        return match serde_json::from_value::<ObjectProviderRequest>(request_value) {
+            Ok(_) => provider_error(
+                "library_error",
+                "library content operation requires Runtime content coordinator",
+            ),
+            Err(err) => provider_error("invalid_request", &err.to_string()),
+        };
+    }
+    let authority = match crate::object_authority::ObjectAuthorityV1::from_request(request) {
+        Ok(authority) => authority,
+        Err(err) => return provider_error("invalid_request", &err.to_string()),
+    };
+    let request_value = std::mem::take(request);
+    let request = match serde_json::from_value::<ObjectProviderRequest>(request_value) {
         Ok(request) => request,
-        Err(err) => return err,
+        Err(err) => return provider_error("invalid_request", &err.to_string()),
     };
-
-    let result = match request {
-        ObjectProviderRequest::Publish { .. }
-        | ObjectProviderRequest::Unpublish { .. }
-        | ObjectProviderRequest::Repair { .. }
-        | ObjectProviderRequest::ListRuntimeCustody { .. }
-        | ObjectProviderRequest::ImportRuntimeCustody { .. }
-        | ObjectProviderRequest::Buy { .. }
-        | ObjectProviderRequest::OpenViewer { .. }
-        | ObjectProviderRequest::ReadViewer { .. }
-        | ObjectProviderRequest::CloseViewer { .. } => Err(anyhow!(
-            "library content operation requires Runtime content coordinator"
-        )),
-        request => handle_library_request(data_dir, request),
-    };
+    let result = dispatch_library_request(data_dir, &authority, request);
 
     match result {
         Ok(data) => provider_ok(data),
@@ -629,8 +690,9 @@ pub fn handle_library_upload_bytes(
     if_revision: Option<&str>,
     bytes: &[u8],
 ) -> anyhow::Result<Value> {
+    let authority = crate::object_authority::ObjectAuthorityV1::build(data_dir, principal_id)?;
     let object =
-        write_library_file_bytes(data_dir, principal_id, uri, mime, if_revision, false, bytes)?;
+        write_library_file_bytes(data_dir, &authority, uri, mime, if_revision, false, bytes)?;
     Ok(provider_ok(json!({
         "object": object,
         "transport": "raw-body",
@@ -703,12 +765,12 @@ impl LibraryArchiveFormat {
 
 pub(crate) fn handle_library_download_bytes_with_format(
     data_dir: &Path,
-    principal_id: &str,
+    authority: &crate::object_authority::ObjectAuthorityV1,
     uri: &str,
     archive_format: LibraryArchiveFormat,
 ) -> anyhow::Result<LibraryDownloadBytes> {
     let (object, filename, bytes) =
-        library_download_object(data_dir, principal_id, uri, archive_format)?;
+        library_download_object(data_dir, authority, uri, archive_format)?;
     Ok(LibraryDownloadBytes {
         filename,
         mime: object.mime,
@@ -718,12 +780,11 @@ pub(crate) fn handle_library_download_bytes_with_format(
 
 pub(crate) fn handle_library_download_selection_bytes_with_format(
     data_dir: &Path,
-    principal_id: &str,
+    authority: &crate::object_authority::ObjectAuthorityV1,
     uris: &[String],
     archive_format: LibraryArchiveFormat,
 ) -> anyhow::Result<LibraryDownloadBytes> {
-    let (filename, bytes) =
-        archive_library_selection(data_dir, principal_id, uris, archive_format)?;
+    let (filename, bytes) = archive_library_selection(data_dir, authority, uris, archive_format)?;
     Ok(LibraryDownloadBytes {
         filename,
         mime: archive_format.mime().to_string(),
@@ -741,7 +802,8 @@ pub(crate) async fn handle_library_download_bytes_runtime(
     if is_webspace_uri(uri) {
         return webspace_download_bytes(data_dir, &registry, uri).await;
     }
-    handle_library_download_bytes_with_format(data_dir, principal_id, uri, archive_format)
+    let authority = crate::object_authority::ObjectAuthorityV1::build(data_dir, principal_id)?;
+    handle_library_download_bytes_with_format(data_dir, &authority, uri, archive_format)
 }
 
 pub(crate) async fn handle_library_download_selection_bytes_runtime(
@@ -753,12 +815,8 @@ pub(crate) async fn handle_library_download_selection_bytes_runtime(
     if uris.iter().any(|uri| is_webspace_uri(uri)) {
         bail!("Spaces selections cannot be archived from Library yet");
     }
-    handle_library_download_selection_bytes_with_format(
-        data_dir,
-        principal_id,
-        uris,
-        archive_format,
-    )
+    let authority = crate::object_authority::ObjectAuthorityV1::build(data_dir, principal_id)?;
+    handle_library_download_selection_bytes_with_format(data_dir, &authority, uris, archive_format)
 }
 
 /// Handle one Library request with Runtime coordination available.
@@ -782,9 +840,17 @@ pub(crate) async fn handle_object_provider_runtime_request_with_gateway(
         &crate::api::gateway::RuntimeWalletAuthority,
     )>,
 ) -> Value {
-    let request = match taken_object_request(request) {
+    let load_key = crate::object_authority::operation_needs_data_key(
+        request.get("op").and_then(Value::as_str).unwrap_or(""),
+    );
+    let mut request_value = request.clone();
+    crate::object_authority::wipe_wire_key(&mut request_value);
+    if let Some(object) = request_value.as_object_mut() {
+        object.remove(crate::object_authority::WIRE_FIELD);
+    }
+    let request = match serde_json::from_value::<ObjectProviderRequest>(request_value) {
         Ok(request) => request,
-        Err(err) => return err,
+        Err(err) => return provider_error("invalid_request", &err.to_string()),
     };
 
     let data_dir = data_dir.to_path_buf();
@@ -795,10 +861,18 @@ pub(crate) async fn handle_object_provider_runtime_request_with_gateway(
             Err(err) => provider_error_from("library_error", &err),
         };
     }
+    let authority = match crate::object_authority::ObjectAuthorityV1::build_for(
+        &data_dir,
+        request.principal_id(),
+        load_key,
+    ) {
+        Ok(authority) => authority,
+        Err(err) => return provider_error("library_error", &err.to_string()),
+    };
 
     let result = match request {
         ObjectProviderRequest::Publish {
-            principal_id,
+            principal_id: _,
             uri,
             if_revision,
             protection,
@@ -806,7 +880,7 @@ pub(crate) async fn handle_object_provider_runtime_request_with_gateway(
             library_publish(
                 &data_dir,
                 registry,
-                &principal_id,
+                &authority,
                 &uri,
                 if_revision.as_deref(),
                 protection,
@@ -815,22 +889,23 @@ pub(crate) async fn handle_object_provider_runtime_request_with_gateway(
             .await
         }
         ObjectProviderRequest::Unpublish {
-            principal_id,
+            principal_id: _,
             uri,
             if_revision,
         } => {
             library_unpublish(
                 &data_dir,
                 registry,
-                &principal_id,
+                &authority,
                 &uri,
                 if_revision.as_deref(),
             )
             .await
         }
-        ObjectProviderRequest::Repair { principal_id, uri } => {
-            library_repair(&data_dir, registry, &principal_id, &uri).await
-        }
+        ObjectProviderRequest::Repair {
+            principal_id: _,
+            uri,
+        } => library_repair(&data_dir, registry, &authority, &uri).await,
         request @ (ObjectProviderRequest::ListRuntimeCustody { .. }
         | ObjectProviderRequest::ImportRuntimeCustody { .. }
         | ObjectProviderRequest::Buy { .. }
@@ -843,10 +918,15 @@ pub(crate) async fn handle_object_provider_runtime_request_with_gateway(
         request @ (ObjectProviderRequest::Status { .. }
         | ObjectProviderRequest::Share { .. }
         | ObjectProviderRequest::SharedAccess { .. }) => {
-            handle_library_request_with_protected_content_status(data_dir, request, Some(registry))
-                .await
+            handle_library_request_with_protected_content_status(
+                data_dir,
+                authority,
+                request,
+                Some(registry),
+            )
+            .await
         }
-        request => handle_library_request_serialized(data_dir, request).await,
+        request => handle_library_request_serialized(data_dir, authority, request).await,
     };
 
     match result {
@@ -860,6 +940,7 @@ pub(crate) async fn handle_object_provider_runtime_request_with_gateway(
 /// writes a record for a file that moved meanwhile.
 async fn handle_library_request_serialized(
     data_dir: PathBuf,
+    authority: crate::object_authority::ObjectAuthorityV1,
     request: ObjectProviderRequest,
 ) -> anyhow::Result<Value> {
     let touches_records = matches!(
@@ -875,7 +956,7 @@ async fn handle_library_request_serialized(
         true => Some(PUBLICATIONS.lock().await),
         false => None,
     };
-    tokio::task::spawn_blocking(move || handle_library_request(&data_dir, request))
+    tokio::task::spawn_blocking(move || dispatch_library_request(&data_dir, &authority, request))
         .await
         .map_err(|err| anyhow!("object provider task failed: {err}"))
         .and_then(|result| result)
@@ -883,14 +964,17 @@ async fn handle_library_request_serialized(
 
 async fn handle_library_request_with_protected_content_status(
     data_dir: PathBuf,
+    authority: crate::object_authority::ObjectAuthorityV1,
     request: ObjectProviderRequest,
     registry: Option<Arc<ProviderRegistry>>,
 ) -> anyhow::Result<Value> {
     let request_is_shared_access = matches!(request, ObjectProviderRequest::SharedAccess { .. });
-    let mut data = tokio::task::spawn_blocking(move || handle_library_request(&data_dir, request))
-        .await
-        .map_err(|err| anyhow!("object provider task failed: {err}"))
-        .and_then(|result| result)?;
+    let mut data = tokio::task::spawn_blocking(move || {
+        dispatch_library_request(&data_dir, &authority, request)
+    })
+    .await
+    .map_err(|err| anyhow!("object provider task failed: {err}"))
+    .and_then(|result| result)?;
     if let Some(registry) = registry {
         if request_is_shared_access {
             attach_protected_content_open_chain(&registry, &mut data).await?;
@@ -1155,8 +1239,13 @@ async fn handle_library_webspace_request(
     registry: &ProviderRegistry,
     request: ObjectProviderRequest,
 ) -> anyhow::Result<Value> {
+    let authority =
+        crate::object_authority::ObjectAuthorityV1::build(data_dir, request.principal_id())?;
     match request {
-        ObjectProviderRequest::List { principal_id, uri } => {
+        ObjectProviderRequest::List {
+            principal_id: _,
+            uri,
+        } => {
             let uri = clean_webspace_uri(uri.as_deref().unwrap_or("localhost://WebSpaces"))?;
             webspace_try_refresh_index_from_adapter(data_dir, registry, &uri).await?;
             let data = webspace_provider_data(
@@ -1176,7 +1265,7 @@ async fn handle_library_webspace_request(
                 .map(|entry| webspace_entry_object(data_dir, &uri, entry))
                 .collect::<anyhow::Result<Vec<_>>>()?;
             if uri == "localhost://WebSpaces" {
-                objects.push(localhost_space_pointer_object(data_dir, &principal_id)?);
+                objects.push(localhost_space_pointer_object(data_dir, &authority)?);
                 sort_spaces_root_objects(&mut objects);
             }
             let object = webspace_stat_object(data_dir, registry, &uri).await?;
@@ -1227,7 +1316,7 @@ async fn handle_library_webspace_request(
             )
         }
         ObjectProviderRequest::ArchiveExtractEntries {
-            principal_id,
+            principal_id: _,
             uri,
             destination_uri,
             entries,
@@ -1242,10 +1331,10 @@ async fn handle_library_webspace_request(
                 let archive_name = object.name.clone();
                 (uri, archive_name, bytes)
             } else {
-                let target = library_target(data_dir, &principal_id, &uri)?;
-                check_revision(data_dir, &principal_id, &target.uri, if_revision.as_deref())?;
+                let target = library_target(data_dir, &authority, &uri)?;
+                check_revision(data_dir, &authority, &target.uri, if_revision.as_deref())?;
                 let archive_name = library_archive_name(&target, "selected extraction")?;
-                let bytes = read_library_file_bytes(data_dir, &principal_id, &target)?;
+                let bytes = read_library_file_bytes(data_dir, &authority, &target)?;
                 (target.uri.clone(), archive_name, bytes)
             };
             let request = ArchiveExtractRequest {
@@ -1258,20 +1347,11 @@ async fn handle_library_webspace_request(
             };
             if is_webspace_uri(destination_uri.as_str()) {
                 extract_archive_entries_to_webspace_destination(
-                    data_dir,
-                    registry,
-                    &principal_id,
-                    bytes,
-                    request,
+                    data_dir, registry, &authority, bytes, request,
                 )
                 .await
             } else {
-                extract_archive_entries_to_local_destination(
-                    data_dir,
-                    &principal_id,
-                    bytes,
-                    request,
-                )
+                extract_archive_entries_to_local_destination(data_dir, &authority, bytes, request)
             }
         }
         ObjectProviderRequest::Sync { principal_id, uri } => {
@@ -1331,19 +1411,30 @@ async fn handle_library_webspace_request(
     }
 }
 
+#[cfg(test)]
 fn handle_library_request(
     data_dir: &Path,
     request: ObjectProviderRequest,
 ) -> anyhow::Result<Value> {
+    let authority =
+        crate::object_authority::ObjectAuthorityV1::build(data_dir, request.principal_id())?;
+    dispatch_library_request(data_dir, &authority, request)
+}
+
+fn dispatch_library_request(
+    data_dir: &Path,
+    authority: &crate::object_authority::ObjectAuthorityV1,
+    request: ObjectProviderRequest,
+) -> anyhow::Result<Value> {
     match request {
-        ObjectProviderRequest::Roots { principal_id } => {
-            Ok(json!({ "roots": library_roots(data_dir, &principal_id)? }))
+        ObjectProviderRequest::Roots { principal_id: _ } => {
+            Ok(json!({ "roots": library_roots(data_dir,authority)? }))
         }
-        ObjectProviderRequest::List { principal_id, uri } => {
-            let root =
-                crate::auth::ResolvedPrincipalRoot::resolve(data_dir, data_dir, &principal_id)?
-                    .localhost_root()
-                    .to_string();
+        ObjectProviderRequest::List {
+            principal_id: _,
+            uri,
+        } => {
+            let root = authority.require_local_root()?.to_string();
             let uri = uri.unwrap_or_else(|| root.clone());
             let target = library_target_from_root(data_dir, &root, &uri)
                 .with_context(|| format!("Library list at {uri}"))?;
@@ -1364,10 +1455,7 @@ fn handle_library_request(
                 }
                 let child_uri = format!("{}/{}", target.uri.trim_end_matches('/'), name);
                 objects.push(library_object_from_root(
-                    data_dir,
-                    &principal_id,
-                    &root,
-                    &child_uri,
+                    data_dir, authority, &root, &child_uri,
                 )?);
             }
             objects.sort_by(|a, b| {
@@ -1377,28 +1465,31 @@ fn handle_library_request(
             });
             Ok(json!({ "uri": target.uri, "objects": objects }))
         }
-        ObjectProviderRequest::Stat { principal_id, uri } => {
-            Ok(json!({ "object": library_object(data_dir, &principal_id, &uri)? }))
-        }
-        ObjectProviderRequest::Read { principal_id, uri } => {
-            let target = library_target(data_dir, &principal_id, &uri)?;
+        ObjectProviderRequest::Stat {
+            principal_id: _,
+            uri,
+        } => Ok(json!({ "object": library_object(data_dir,authority, &uri)? })),
+        ObjectProviderRequest::Read {
+            principal_id: _,
+            uri,
+        } => {
+            let target = library_target(data_dir, authority, &uri)?;
             if !target.path.is_file() {
                 bail!("library read target must be a file");
             }
-            let bytes = read_library_file_bytes(data_dir, &principal_id, &target)?;
+            let bytes = read_library_file_bytes(data_dir, authority, &target)?;
             Ok(json!({
-                "object": library_object(data_dir, &principal_id, &target.uri)?,
+                "object": library_object(data_dir,authority, &target.uri)?,
                 "encoding": "base64",
                 "data": base64::engine::general_purpose::STANDARD.encode(bytes),
             }))
         }
-        ObjectProviderRequest::Download { principal_id, uri } => {
-            let (object, filename, bytes) = library_download_object(
-                data_dir,
-                &principal_id,
-                &uri,
-                LibraryArchiveFormat::TarGz,
-            )?;
+        ObjectProviderRequest::Download {
+            principal_id: _,
+            uri,
+        } => {
+            let (object, filename, bytes) =
+                library_download_object(data_dir, authority, &uri, LibraryArchiveFormat::TarGz)?;
             Ok(json!({
                 "object": object,
                 "encoding": "base64",
@@ -1407,17 +1498,17 @@ fn handle_library_request(
             }))
         }
         ObjectProviderRequest::ExtractArchive {
-            principal_id,
+            principal_id: _,
             uri,
             if_revision,
         } => {
-            let target = library_target(data_dir, &principal_id, &uri)?;
-            check_revision(data_dir, &principal_id, &target.uri, if_revision.as_deref())?;
-            let extracted_uri = extract_library_archive(data_dir, &principal_id, &target)?;
-            let object = library_object(data_dir, &principal_id, &extracted_uri)?;
+            let target = library_target(data_dir, authority, &uri)?;
+            check_revision(data_dir, authority, &target.uri, if_revision.as_deref())?;
+            let extracted_uri = extract_library_archive(data_dir, authority, &target)?;
+            let object = library_object(data_dir, authority, &extracted_uri)?;
             append_library_event(
                 data_dir,
-                &principal_id,
+                authority,
                 "extract_archive",
                 &extracted_uri,
                 json!({
@@ -1430,22 +1521,25 @@ fn handle_library_request(
                 "source_uri": target.uri,
             }))
         }
-        ObjectProviderRequest::ArchiveEntries { principal_id, uri } => {
-            let target = library_target(data_dir, &principal_id, &uri)?;
-            Ok(library_archive_entries(data_dir, &principal_id, &target)?)
+        ObjectProviderRequest::ArchiveEntries {
+            principal_id: _,
+            uri,
+        } => {
+            let target = library_target(data_dir, authority, &uri)?;
+            Ok(library_archive_entries(data_dir, authority, &target)?)
         }
         ObjectProviderRequest::ArchivePreviewEntry {
-            principal_id,
+            principal_id: _,
             uri,
             entry,
             if_revision,
         } => {
-            let target = library_target(data_dir, &principal_id, &uri)?;
-            check_revision(data_dir, &principal_id, &target.uri, if_revision.as_deref())?;
-            archive_preview_entry(data_dir, &principal_id, &target, &entry)
+            let target = library_target(data_dir, authority, &uri)?;
+            check_revision(data_dir, authority, &target.uri, if_revision.as_deref())?;
+            archive_preview_entry(data_dir, authority, &target, &entry)
         }
         ObjectProviderRequest::ArchiveExtractEntries {
-            principal_id,
+            principal_id: _,
             uri,
             destination_uri,
             entries,
@@ -1453,11 +1547,11 @@ fn handle_library_request(
             if_revision,
             cancel,
         } => {
-            let target = library_target(data_dir, &principal_id, &uri)?;
-            check_revision(data_dir, &principal_id, &target.uri, if_revision.as_deref())?;
+            let target = library_target(data_dir, authority, &uri)?;
+            check_revision(data_dir, authority, &target.uri, if_revision.as_deref())?;
             extract_library_archive_entries(
                 data_dir,
-                &principal_id,
+                authority,
                 &target,
                 &destination_uri,
                 &entries,
@@ -1466,14 +1560,14 @@ fn handle_library_request(
             )
         }
         ObjectProviderRequest::CompressArchive {
-            principal_id,
+            principal_id: _,
             uri,
             uris,
             if_revision,
         } => {
             let object = compress_library_archive(
                 data_dir,
-                &principal_id,
+                authority,
                 uri.as_deref(),
                 &uris,
                 if_revision.as_deref(),
@@ -1481,7 +1575,7 @@ fn handle_library_request(
             Ok(json!({ "object": object }))
         }
         ObjectProviderRequest::Write {
-            principal_id,
+            principal_id: _,
             uri,
             data,
             mime,
@@ -1491,13 +1585,13 @@ fn handle_library_request(
             let bytes = base64::engine::general_purpose::STANDARD
                 .decode(data.trim())
                 .context("library write data must be base64")?;
-            let target = library_target(data_dir, &principal_id, &uri)?;
+            let target = library_target(data_dir, authority, &uri)?;
             if is_trash_uri(&target.localhost_root, &target.uri) {
                 bail!("library Trash accepts objects only through delete");
             }
             let object = write_library_file_bytes(
                 data_dir,
-                &principal_id,
+                authority,
                 &target.uri,
                 mime.as_deref(),
                 if_revision.as_deref(),
@@ -1507,11 +1601,11 @@ fn handle_library_request(
             Ok(json!({ "object": object }))
         }
         ObjectProviderRequest::Mkdir {
-            principal_id,
+            principal_id: _,
             parent_uri,
             name,
         } => {
-            let parent = library_target(data_dir, &principal_id, &parent_uri)?;
+            let parent = library_target(data_dir, authority, &parent_uri)?;
             if parent.path.exists() && !parent.path.is_dir() {
                 bail!("library mkdir parent must be a directory");
             }
@@ -1519,13 +1613,13 @@ fn handle_library_request(
                 bail!("library Trash accepts objects only through delete");
             }
             let child_uri = child_uri(&parent.uri, &name)?;
-            let child = library_target(data_dir, &principal_id, &child_uri)?;
+            let child = library_target(data_dir, authority, &child_uri)?;
             StartWalkRule::new(data_dir, &child.localhost_root).folder(&child.uri)?;
             fs::create_dir_all(&child.path)?;
-            let object = library_object(data_dir, &principal_id, &child.uri)?;
+            let object = library_object(data_dir, authority, &child.uri)?;
             append_library_event(
                 data_dir,
-                &principal_id,
+                authority,
                 "mkdir",
                 &child.uri,
                 json!({
@@ -1535,13 +1629,13 @@ fn handle_library_request(
             Ok(json!({ "object": object }))
         }
         ObjectProviderRequest::Rename {
-            principal_id,
+            principal_id: _,
             uri,
             name,
             if_revision,
         } => {
-            let target = library_target(data_dir, &principal_id, &uri)?;
-            check_revision(data_dir, &principal_id, &target.uri, if_revision.as_deref())?;
+            let target = library_target(data_dir, authority, &uri)?;
+            check_revision(data_dir, authority, &target.uri, if_revision.as_deref())?;
             if is_trash_uri(&target.localhost_root, &target.uri) {
                 bail!("library Trash objects can be restored or deleted permanently");
             }
@@ -1551,11 +1645,11 @@ fn handle_library_request(
                 .map(|(parent, _)| parent)
                 .ok_or_else(|| anyhow!("library rename target has no parent"))?;
             let new_uri = child_uri(parent_uri, &name)?;
-            move_library_object(data_dir, &principal_id, &target.uri, &new_uri)?;
-            let object = library_object(data_dir, &principal_id, &new_uri)?;
+            move_library_object(data_dir, authority, &target.uri, &new_uri)?;
+            let object = library_object(data_dir, authority, &new_uri)?;
             append_library_event(
                 data_dir,
-                &principal_id,
+                authority,
                 "rename",
                 &new_uri,
                 json!({
@@ -1566,14 +1660,14 @@ fn handle_library_request(
             Ok(json!({ "object": object }))
         }
         ObjectProviderRequest::Move {
-            principal_id,
+            principal_id: _,
             uri,
             target_parent_uri,
             if_revision,
         } => {
-            let target = library_target(data_dir, &principal_id, &uri)?;
-            check_revision(data_dir, &principal_id, &target.uri, if_revision.as_deref())?;
-            let parent = library_target(data_dir, &principal_id, &target_parent_uri)?;
+            let target = library_target(data_dir, authority, &uri)?;
+            check_revision(data_dir, authority, &target.uri, if_revision.as_deref())?;
+            let parent = library_target(data_dir, authority, &target_parent_uri)?;
             if parent.path.exists() && !parent.path.is_dir() {
                 bail!("library move target parent must be a directory");
             }
@@ -1591,12 +1685,12 @@ fn handle_library_request(
                 .next()
                 .filter(|name| !name.is_empty())
                 .ok_or_else(|| anyhow!("library move target has no name"))?;
-            let new_uri = unique_child_uri(data_dir, &principal_id, &parent.uri, name)?;
-            move_library_object(data_dir, &principal_id, &target.uri, &new_uri)?;
-            let object = library_object(data_dir, &principal_id, &new_uri)?;
+            let new_uri = unique_child_uri(data_dir, authority, &parent.uri, name)?;
+            move_library_object(data_dir, authority, &target.uri, &new_uri)?;
+            let object = library_object(data_dir, authority, &new_uri)?;
             append_library_event(
                 data_dir,
-                &principal_id,
+                authority,
                 "move",
                 &new_uri,
                 json!({
@@ -1608,14 +1702,14 @@ fn handle_library_request(
             Ok(json!({ "object": object }))
         }
         ObjectProviderRequest::Copy {
-            principal_id,
+            principal_id: _,
             uri,
             target_parent_uri,
             if_revision,
         } => {
-            let target = library_target(data_dir, &principal_id, &uri)?;
-            check_revision(data_dir, &principal_id, &target.uri, if_revision.as_deref())?;
-            let parent = library_target(data_dir, &principal_id, &target_parent_uri)?;
+            let target = library_target(data_dir, authority, &uri)?;
+            check_revision(data_dir, authority, &target.uri, if_revision.as_deref())?;
+            let parent = library_target(data_dir, authority, &target_parent_uri)?;
             if parent.path.exists() && !parent.path.is_dir() {
                 bail!("library copy target parent must be a directory");
             }
@@ -1633,12 +1727,12 @@ fn handle_library_request(
                 .next()
                 .filter(|name| !name.is_empty())
                 .ok_or_else(|| anyhow!("library copy target has no name"))?;
-            let new_uri = unique_child_uri(data_dir, &principal_id, &parent.uri, name)?;
-            copy_library_object(data_dir, &principal_id, &target.uri, &new_uri)?;
-            let object = library_object(data_dir, &principal_id, &new_uri)?;
+            let new_uri = unique_child_uri(data_dir, authority, &parent.uri, name)?;
+            copy_library_object(data_dir, authority, &target.uri, &new_uri)?;
+            let object = library_object(data_dir, authority, &new_uri)?;
             append_library_event(
                 data_dir,
-                &principal_id,
+                authority,
                 "copy",
                 &new_uri,
                 json!({
@@ -1650,19 +1744,19 @@ fn handle_library_request(
             Ok(json!({ "object": object }))
         }
         ObjectProviderRequest::Trash {
-            principal_id,
+            principal_id: _,
             uri,
             if_revision,
         } => {
-            let target = library_target(data_dir, &principal_id, &uri)?;
-            check_revision(data_dir, &principal_id, &target.uri, if_revision.as_deref())?;
+            let target = library_target(data_dir, authority, &uri)?;
+            check_revision(data_dir, authority, &target.uri, if_revision.as_deref())?;
             if is_trash_uri(&target.localhost_root, &target.uri) {
                 bail!("library object is already in Trash");
             }
             if is_runtime_private_uri(&target.localhost_root, &target.uri) {
                 bail!("runtime-private Library objects cannot be moved to Trash");
             }
-            refuse_deleting_published(data_dir, &principal_id, &target.uri)?;
+            refuse_deleting_published(data_dir, authority, &target.uri)?;
             let name = target
                 .uri
                 .rsplit('/')
@@ -1670,11 +1764,11 @@ fn handle_library_request(
                 .filter(|name| !name.is_empty())
                 .ok_or_else(|| anyhow!("library trash target has no name"))?;
             let trash_root = format!("{}/.Trash", target.localhost_root);
-            let trash_uri = unique_child_uri(data_dir, &principal_id, &trash_root, name)?;
-            move_library_object(data_dir, &principal_id, &target.uri, &trash_uri)?;
+            let trash_uri = unique_child_uri(data_dir, authority, &trash_root, name)?;
+            move_library_object(data_dir, authority, &target.uri, &trash_uri)?;
             write_trash_record(
                 data_dir,
-                &principal_id,
+                authority,
                 &LibraryTrashRecord {
                     schema: LIBRARY_TRASH_RECORD_SCHEMA.to_string(),
                     trash_uri: trash_uri.clone(),
@@ -1683,10 +1777,10 @@ fn handle_library_request(
                     trashed_at: now_ts(),
                 },
             )?;
-            let object = library_object(data_dir, &principal_id, &trash_uri)?;
+            let object = library_object(data_dir, authority, &trash_uri)?;
             append_library_event(
                 data_dir,
-                &principal_id,
+                authority,
                 "trash",
                 &trash_uri,
                 json!({
@@ -1700,17 +1794,17 @@ fn handle_library_request(
             }))
         }
         ObjectProviderRequest::Restore {
-            principal_id,
+            principal_id: _,
             uri,
             target_uri,
             if_revision,
         } => {
-            let target = library_target(data_dir, &principal_id, &uri)?;
+            let target = library_target(data_dir, authority, &uri)?;
             if !is_trash_child_uri(&target.localhost_root, &target.uri) {
                 bail!("library restore target must be in Trash");
             }
-            check_revision(data_dir, &principal_id, &target.uri, if_revision.as_deref())?;
-            let trash_record = read_trash_record(data_dir, &principal_id, &target.uri).ok();
+            check_revision(data_dir, authority, &target.uri, if_revision.as_deref())?;
+            let trash_record = read_trash_record(data_dir, authority, &target.uri).ok();
             let restore_uri = target_uri
                 .as_deref()
                 .filter(|uri| !uri.trim().is_empty())
@@ -1720,21 +1814,21 @@ fn handle_library_request(
                 .unwrap_or_else(|| {
                     restore_uri_from_trash_record(
                         data_dir,
-                        &principal_id,
+                        authority,
                         &target,
                         trash_record.as_ref(),
                     )
                 })?;
-            let restore_target = library_target(data_dir, &principal_id, &restore_uri)?;
+            let restore_target = library_target(data_dir, authority, &restore_uri)?;
             if is_trash_uri(&restore_target.localhost_root, &restore_target.uri) {
                 bail!("library restore target cannot be inside Trash");
             }
-            move_library_object(data_dir, &principal_id, &target.uri, &restore_target.uri)?;
-            remove_trash_record(data_dir, &principal_id, &target.uri)?;
-            let object = library_object(data_dir, &principal_id, &restore_target.uri)?;
+            move_library_object(data_dir, authority, &target.uri, &restore_target.uri)?;
+            remove_trash_record(data_dir, authority, &target.uri)?;
+            let object = library_object(data_dir, authority, &restore_target.uri)?;
             append_library_event(
                 data_dir,
-                &principal_id,
+                authority,
                 "restore",
                 &restore_target.uri,
                 json!({
@@ -1746,25 +1840,25 @@ fn handle_library_request(
             Ok(json!({ "object": object }))
         }
         ObjectProviderRequest::DeletePermanently {
-            principal_id,
+            principal_id: _,
             uri,
             if_revision,
         } => {
-            let target = library_target(data_dir, &principal_id, &uri)?;
+            let target = library_target(data_dir, authority, &uri)?;
             if !is_trash_child_uri(&target.localhost_root, &target.uri) {
                 bail!("library delete_permanently target must be in Trash");
             }
-            check_revision(data_dir, &principal_id, &target.uri, if_revision.as_deref())?;
-            refuse_deleting_published(data_dir, &principal_id, &target.uri)?;
+            check_revision(data_dir, authority, &target.uri, if_revision.as_deref())?;
+            refuse_deleting_published(data_dir, authority, &target.uri)?;
             if target.path.is_dir() {
                 fs::remove_dir_all(&target.path)?;
             } else {
                 fs::remove_file(&target.path)?;
             }
-            remove_trash_record(data_dir, &principal_id, &target.uri)?;
+            remove_trash_record(data_dir, authority, &target.uri)?;
             append_library_event(
                 data_dir,
-                &principal_id,
+                authority,
                 "delete_permanently",
                 &target.uri,
                 json!({}),
@@ -1772,14 +1866,11 @@ fn handle_library_request(
             Ok(json!({ "deleted_uri": target.uri }))
         }
         ObjectProviderRequest::EmptyTrash { principal_id } => {
-            let root =
-                crate::auth::ResolvedPrincipalRoot::resolve(data_dir, data_dir, &principal_id)?
-                    .localhost_root()
-                    .to_string();
+            let root = authority.require_local_root()?.to_string();
             let trash_root = format!("{root}/.Trash");
             let target = library_target_from_root(data_dir, &root, &trash_root)
                 .with_context(|| format!("Library empty Trash at {trash_root}"))?;
-            refuse_deleting_published_with_root(data_dir, &principal_id, &root, &target.uri)?;
+            refuse_deleting_published_with_root(data_dir, authority, &root, &target.uri)?;
             let mut deleted_uris = Vec::new();
             if target.path.exists() {
                 if !target.path.is_dir() {
@@ -1804,7 +1895,7 @@ fn handle_library_request(
             let deleted_count = deleted_uris.len();
             append_library_event_with_root(
                 data_dir,
-                &principal_id,
+                authority,
                 &root,
                 "empty_trash",
                 &target.uri,
@@ -1815,9 +1906,12 @@ fn handle_library_request(
             )?;
             Ok(json!({ "deleted_count": deleted_count }))
         }
-        ObjectProviderRequest::Status { principal_id, uri } => {
-            let object = library_object(data_dir, &principal_id, &uri)?;
-            let record = read_publish_record(data_dir, &principal_id, &uri).ok();
+        ObjectProviderRequest::Status {
+            principal_id: _,
+            uri,
+        } => {
+            let object = library_object(data_dir, authority, &uri)?;
+            let record = read_publish_record(data_dir, authority, &uri).ok();
             Ok(json!({
                 "object": object,
                 "published": record,
@@ -1828,23 +1922,23 @@ fn handle_library_request(
             bail!("library sync is only supported for Spaces objects")
         }
         ObjectProviderRequest::Events {
-            principal_id,
+            principal_id: _,
             uri,
             since,
             limit,
         } => Ok(json!({
             "schema": "elastos.library.events/v1",
-            "events": library_events(data_dir, &principal_id, uri.as_deref(), since, limit)?,
+            "events": library_events(data_dir,authority, uri.as_deref(), since, limit)?,
         })),
         ObjectProviderRequest::Share {
-            principal_id,
+            principal_id: _,
             uri,
             recipients,
             policy,
             key_release_policy,
         } => {
-            let object = library_object(data_dir, &principal_id, &uri)?;
-            let mut record = read_publish_record(data_dir, &principal_id, &uri)
+            let object = library_object(data_dir, authority, &uri)?;
+            let mut record = read_publish_record(data_dir, authority, &uri)
                 .context("library share requires a published object")?;
             if !record_is_published(&record) {
                 bail!("library share requires an actively published object");
@@ -1875,10 +1969,10 @@ fn handle_library_request(
                     )
                 })
                 .collect();
-            write_publish_record(data_dir, &principal_id, &record)?;
+            write_publish_record(data_dir, authority, &record)?;
             append_library_event(
                 data_dir,
-                &principal_id,
+                authority,
                 "share",
                 &uri,
                 json!({
@@ -1892,7 +1986,7 @@ fn handle_library_request(
             )?;
             Ok(json!({
                 "schema": "elastos.library.share/v1",
-                "object": library_object(data_dir, &principal_id, &uri)?,
+                "object": library_object(data_dir,authority, &uri)?,
                 "uri": format!("elastos://{}", record.cid),
                 "cid": record.cid,
                 "policy": record.share_policy,
@@ -1907,13 +2001,13 @@ fn handle_library_request(
             }))
         }
         ObjectProviderRequest::SharedAccess {
-            principal_id,
+            principal_id: _,
             uri,
             recipient,
             recipient_proof,
         } => {
-            let object = library_object(data_dir, &principal_id, &uri)?;
-            let record = read_publish_record(data_dir, &principal_id, &uri)
+            let object = library_object(data_dir, authority, &uri)?;
+            let record = read_publish_record(data_dir, authority, &uri)
                 .context("library shared_access requires a published object")?;
             if !record_is_published(&record) || record.shared_at.is_none() {
                 bail!("library shared_access requires an actively shared object");
@@ -1927,7 +2021,7 @@ fn handle_library_request(
                 Err(err) => {
                     append_library_event(
                         data_dir,
-                        &principal_id,
+                        authority,
                         "shared_access",
                         &uri,
                         json!({
@@ -1943,7 +2037,7 @@ fn handle_library_request(
             };
             append_library_event(
                 data_dir,
-                &principal_id,
+                authority,
                 "shared_access",
                 &uri,
                 json!({
@@ -2102,7 +2196,7 @@ async fn handle_runtime_custody_library_request(
 async fn library_publish(
     data_dir: &Path,
     registry: Arc<ProviderRegistry>,
-    principal_id: &str,
+    object_authority: &crate::object_authority::ObjectAuthorityV1,
     uri: &str,
     if_revision: Option<&str>,
     protection: Option<LibraryPublishProtectionRequest>,
@@ -2111,16 +2205,17 @@ async fn library_publish(
         &crate::api::gateway::RuntimeWalletAuthority,
     )>,
 ) -> anyhow::Result<Value> {
-    let target = library_target(data_dir, principal_id, uri)?;
+    let principal_id = object_authority.principal_id();
+    let target = library_target(data_dir, object_authority, uri)?;
     if let Some(protection) = protection {
-        check_revision(data_dir, principal_id, &target.uri, if_revision)?;
+        check_revision(data_dir, object_authority, &target.uri, if_revision)?;
         anyhow::ensure!(
             crate::protected_content_runtime::protected_content_enabled(data_dir),
             "protected content is not available in this release"
         );
         let loaded =
             validate_runtime_custody_publish_input(data_dir, principal_id, &target, protection)?;
-        let source_storage = published_source_storage(data_dir, principal_id, &target)?.to_string();
+        let source_storage = published_source_storage(object_authority)?.to_string();
         let Some((state, authority)) = gateway_authority else {
             anyhow::bail!(
                 "Runtime custody creator mint requires verified gateway Wallet authority"
@@ -2169,11 +2264,11 @@ async fn library_publish(
             publication_id: None,
             size_bytes: None,
         };
-        write_publish_record(data_dir, principal_id, &record)?;
-        let object = library_object(data_dir, principal_id, &target.uri)?;
+        write_publish_record(data_dir, object_authority, &record)?;
+        let object = library_object(data_dir, object_authority, &target.uri)?;
         append_library_event(
             data_dir,
-            principal_id,
+            object_authority,
             "publish",
             &target.uri,
             json!({
@@ -2197,7 +2292,7 @@ async fn library_publish(
         }));
     }
     Ok(
-        publish_plain_library_file(data_dir, &registry, principal_id, &target, if_revision)
+        publish_plain_library_file(data_dir, &registry, object_authority, &target, if_revision)
             .await?
             .data,
     )
@@ -2243,7 +2338,7 @@ static PUBLICATIONS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 async fn publish_library_uri_locked(
     data_dir: &Path,
     registry: &ProviderRegistry,
-    principal_id: &str,
+    authority: &crate::object_authority::ObjectAuthorityV1,
     uri: &str,
     if_revision: Option<&str>,
     publication_id: Option<String>,
@@ -2254,11 +2349,11 @@ async fn publish_library_uri_locked(
             PUBLISH_NOT_ALLOWED_HERE,
         ));
     }
-    let target = library_target(data_dir, principal_id, uri)?;
+    let target = library_target(data_dir, authority, uri)?;
     publish_plain_locked(
         data_dir,
         registry,
-        principal_id,
+        authority,
         &target,
         if_revision,
         publication_id,
@@ -2269,23 +2364,24 @@ async fn publish_library_uri_locked(
 async fn publish_plain_library_file(
     data_dir: &Path,
     registry: &ProviderRegistry,
-    principal_id: &str,
+    authority: &crate::object_authority::ObjectAuthorityV1,
     target: &LibraryTarget,
     if_revision: Option<&str>,
 ) -> anyhow::Result<LibraryFilePublication> {
     let _serialized = PUBLICATIONS.lock().await;
-    publish_plain_locked(data_dir, registry, principal_id, target, if_revision, None).await
+    publish_plain_locked(data_dir, registry, authority, target, if_revision, None).await
 }
 
 async fn publish_plain_locked(
     data_dir: &Path,
     registry: &ProviderRegistry,
-    principal_id: &str,
+    authority: &crate::object_authority::ObjectAuthorityV1,
     target: &LibraryTarget,
     if_revision: Option<&str>,
     publication_id: Option<String>,
 ) -> anyhow::Result<LibraryFilePublication> {
-    let (bytes, revision) = read_publish_source(data_dir, principal_id, target, if_revision)?;
+    let principal_id = authority.principal_id();
+    let (bytes, revision) = read_publish_source(data_dir, authority, target, if_revision)?;
     let name = target
         .uri
         .rsplit('/')
@@ -2294,7 +2390,7 @@ async fn publish_plain_locked(
         .unwrap_or("object.bin")
         .to_string();
     let size_bytes = bytes.len() as u64;
-    if let Some(record) = read_publish_record(data_dir, principal_id, &target.uri)
+    if let Some(record) = read_publish_record(data_dir, authority, &target.uri)
         .ok()
         .filter(record_is_published)
     {
@@ -2310,7 +2406,7 @@ async fn publish_plain_locked(
                 PUBLISH_CHANGED_SINCE_PUBLISH,
             ));
         }
-        let object = library_object(data_dir, principal_id, &target.uri)?;
+        let object = library_object(data_dir, authority, &target.uri)?;
         return Ok(LibraryFilePublication {
             data: publication_response(&record, object),
             publication_id: record_publication_id(&record),
@@ -2367,7 +2463,7 @@ async fn publish_plain_locked(
         .get("availability")
         .cloned()
         .unwrap_or_else(|| json!({"status": "unknown"}));
-    let content_security = published_content_security(data_dir, principal_id, target)?;
+    let content_security = published_content_security(authority, target)?;
     let record = LibraryPublishRecord {
         schema: "elastos.library.publish-record/v1".to_string(),
         object_uri: target.uri.clone(),
@@ -2385,11 +2481,11 @@ async fn publish_plain_locked(
         publication_id: Some(publication_id.clone()),
         size_bytes: Some(size_bytes),
     };
-    write_publish_record(data_dir, principal_id, &record)?;
-    let object = library_object(data_dir, principal_id, &target.uri)?;
+    write_publish_record(data_dir, authority, &record)?;
+    let object = library_object(data_dir, authority, &target.uri)?;
     append_library_event(
         data_dir,
-        principal_id,
+        authority,
         "publish",
         &target.uri,
         json!({
@@ -2435,7 +2531,7 @@ fn is_publishable_place(localhost_root: &str, uri: &str) -> bool {
 /// before any oversized read, and when its revision is stale.
 fn read_publish_source(
     data_dir: &Path,
-    principal_id: &str,
+    authority: &crate::object_authority::ObjectAuthorityV1,
     target: &LibraryTarget,
     if_revision: Option<&str>,
 ) -> anyhow::Result<(Vec<u8>, String)> {
@@ -2476,7 +2572,7 @@ fn read_publish_source(
             "This file is too large to publish.",
         ));
     }
-    let bytes = read_library_file_bytes(data_dir, principal_id, target)?;
+    let bytes = read_library_file_bytes(data_dir, authority, target)?;
     let revision = format!("rev:{}", hex::encode(Sha256::digest(&bytes)));
     if if_revision.is_some_and(|expected| !expected.trim().is_empty() && expected != revision) {
         return Err(library_refusal(
@@ -2521,20 +2617,16 @@ fn remove_runtime_file(data_dir: &Path, uri: &str) -> anyhow::Result<()> {
 
 fn write_runtime_json(
     data_dir: &Path,
-    principal_id: &str,
+    authority: &crate::object_authority::ObjectAuthorityV1,
     uri: &str,
     value: &impl Serialize,
 ) -> anyhow::Result<()> {
-    let root = crate::auth::ResolvedPrincipalRoot::resolve(data_dir, data_dir, principal_id)?
-        .localhost_root()
-        .to_string();
-    write_runtime_json_with_root(data_dir, principal_id, &root, uri, value)
+    write_runtime_json_with_root(data_dir, authority, uri, value)
 }
 
 fn write_runtime_json_with_root(
     data_dir: &Path,
-    principal_id: &str,
-    root: &str,
+    authority: &crate::object_authority::ObjectAuthorityV1,
     uri: &str,
     value: &impl Serialize,
 ) -> anyhow::Result<()> {
@@ -2543,44 +2635,41 @@ fn write_runtime_json_with_root(
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
-    crate::auth::write_principal_root_object(
-        data_dir,
-        principal_id,
-        root,
-        uri,
+    crate::object_authority::write_principal_root_object_with_authority(
+        authority,
         &path,
+        uri,
+        data_dir,
         &serde_json::to_vec_pretty(value)?,
+        false,
     )
 }
 
 fn read_runtime_json<T: serde::de::DeserializeOwned>(
     data_dir: &Path,
-    principal_id: &str,
+    authority: &crate::object_authority::ObjectAuthorityV1,
     uri: &str,
 ) -> anyhow::Result<T> {
-    let root = crate::auth::ResolvedPrincipalRoot::resolve(data_dir, data_dir, principal_id)?
-        .localhost_root()
-        .to_string();
-    read_runtime_json_with_root(data_dir, principal_id, &root, uri)
+    read_runtime_json_with_root(data_dir, authority, uri)
 }
 
 fn read_runtime_json_with_root<T: serde::de::DeserializeOwned>(
     data_dir: &Path,
-    principal_id: &str,
-    root: &str,
+    authority: &crate::object_authority::ObjectAuthorityV1,
     uri: &str,
 ) -> anyhow::Result<T> {
     let path =
         rooted_localhost_fs_path(data_dir, uri).ok_or_else(|| anyhow!("invalid Library path"))?;
-    let bytes = crate::auth::read_principal_root_object(data_dir, principal_id, root, uri, &path)?;
+    let bytes = crate::object_authority::read_principal_root_object_with_authority(
+        authority, &path, uri, data_dir,
+    )?;
     Ok(serde_json::from_slice(&bytes)?)
 }
 
 /// Every readable `.json` entry of one Runtime Library folder.
 fn read_runtime_json_dir<T: serde::de::DeserializeOwned>(
     data_dir: &Path,
-    principal_id: &str,
-    root: &str,
+    authority: &crate::object_authority::ObjectAuthorityV1,
     dir_uri: &str,
 ) -> Vec<T> {
     let Some(dir) = rooted_localhost_fs_path(data_dir, dir_uri) else {
@@ -2596,40 +2685,44 @@ fn read_runtime_json_dir<T: serde::de::DeserializeOwned>(
         .map(|entry| entry.file_name().to_string_lossy().to_string())
         .filter(|name| name.ends_with(".json"))
         .filter_map(|name| {
-            read_runtime_json_with_root(data_dir, principal_id, root, &format!("{dir_uri}/{name}"))
-                .ok()
+            read_runtime_json_with_root(data_dir, authority, &format!("{dir_uri}/{name}")).ok()
         })
         .collect()
 }
 
 /// Every publish record of this person, active or not.
-fn publish_records(data_dir: &Path, principal_id: &str) -> Vec<LibraryPublishRecord> {
-    let root = match crate::auth::ResolvedPrincipalRoot::resolve(data_dir, data_dir, principal_id) {
-        Ok(root) => root.localhost_root().to_string(),
+fn publish_records(
+    data_dir: &Path,
+    authority: &crate::object_authority::ObjectAuthorityV1,
+) -> Vec<LibraryPublishRecord> {
+    let root = match authority.require_local_root() {
+        Ok(root) => root.to_string(),
         Err(error) => {
             tracing::warn!(%error, "library: skipping unresolved publish-record principal");
             return Vec::new();
         }
     };
-    publish_records_with_root(data_dir, principal_id, &root)
+    publish_records_with_root(data_dir, authority, &root)
 }
 
 fn publish_records_with_root(
     data_dir: &Path,
-    principal_id: &str,
+    authority: &crate::object_authority::ObjectAuthorityV1,
     root: &str,
 ) -> Vec<LibraryPublishRecord> {
     read_runtime_json_dir::<LibraryPublishRecord>(
         data_dir,
-        principal_id,
-        root,
+        authority,
         &format!("{root}/{LIBRARY_RUNTIME_DIR}/Published"),
     )
 }
 
 /// Every plain (not protected) publish record of this person, active or not.
-fn plain_publish_records(data_dir: &Path, principal_id: &str) -> Vec<LibraryPublishRecord> {
-    publish_records(data_dir, principal_id)
+fn plain_publish_records(
+    data_dir: &Path,
+    authority: &crate::object_authority::ObjectAuthorityV1,
+) -> Vec<LibraryPublishRecord> {
+    publish_records(data_dir, authority)
         .into_iter()
         .filter(|record| !record_is_runtime_custody(record))
         .collect()
@@ -2637,10 +2730,10 @@ fn plain_publish_records(data_dir: &Path, principal_id: &str) -> Vec<LibraryPubl
 
 fn plain_publish_records_with_root(
     data_dir: &Path,
-    principal_id: &str,
+    authority: &crate::object_authority::ObjectAuthorityV1,
     root: &str,
 ) -> Vec<LibraryPublishRecord> {
-    publish_records_with_root(data_dir, principal_id, root)
+    publish_records_with_root(data_dir, authority, root)
         .into_iter()
         .filter(|record| !record_is_runtime_custody(record))
         .collect()
@@ -2665,13 +2758,10 @@ struct ChatAttachBinding {
 }
 
 fn chat_attach_binding_uri(
-    data_dir: &Path,
-    principal_id: &str,
+    authority: &crate::object_authority::ObjectAuthorityV1,
     request_id: &str,
 ) -> anyhow::Result<String> {
-    let root = crate::auth::ResolvedPrincipalRoot::resolve(data_dir, data_dir, principal_id)?
-        .localhost_root()
-        .to_string();
+    let root = authority.require_local_root()?.to_string();
     let digest = hex::encode(Sha256::digest(request_id.as_bytes()));
     Ok(format!(
         "{root}/{LIBRARY_RUNTIME_DIR}/ChatAttach/{digest}.json"
@@ -2697,10 +2787,11 @@ pub(crate) async fn chat_attach_publication(
     if_revision: Option<&str>,
     check_send_allowed: impl FnOnce() -> anyhow::Result<()>,
 ) -> anyhow::Result<LibraryFilePublication> {
+    let authority = crate::object_authority::ObjectAuthorityV1::build(data_dir, principal_id)?;
     let _serialized = PUBLICATIONS.lock().await;
     let uri = uri.trim();
-    let binding_uri = chat_attach_binding_uri(data_dir, principal_id, request_id)?;
-    let saved = read_runtime_json::<ChatAttachBinding>(data_dir, principal_id, &binding_uri).ok();
+    let binding_uri = chat_attach_binding_uri(&authority, request_id)?;
+    let saved = read_runtime_json::<ChatAttachBinding>(data_dir, &authority, &binding_uri).ok();
     if let Some(mut binding) = saved {
         if binding.uri != uri || binding.if_revision.as_deref() != if_revision {
             return Err(library_refusal(
@@ -2708,14 +2799,14 @@ pub(crate) async fn chat_attach_publication(
                 "This request was already used for another file.",
             ));
         }
-        let by_id = plain_publish_records(data_dir, principal_id)
+        let by_id = plain_publish_records(data_dir, &authority)
             .into_iter()
             .find(|record| record_publication_id(record) == binding.publication_id);
         // Interrupted after reusing the file's existing publication, before
         // its id was saved here: that publication is the one for this file
         // and revision, withdrawn since this request began or still active.
         let reused = || {
-            read_publish_record(data_dir, principal_id, &binding.uri)
+            read_publish_record(data_dir, &authority, &binding.uri)
                 .ok()
                 .filter(|record| !record_is_runtime_custody(record))
                 .filter(|record| {
@@ -2737,9 +2828,9 @@ pub(crate) async fn chat_attach_publication(
                         .name
                         .or_else(|| binding.uri.rsplit('/').next().map(str::to_string));
                     binding.size_bytes = binding.size_bytes.or(record.size_bytes);
-                    write_runtime_json(data_dir, principal_id, &binding_uri, &binding)?;
+                    write_runtime_json(data_dir, &authority, &binding_uri, &binding)?;
                 }
-                let object = library_object(data_dir, principal_id, &record.object_uri)?;
+                let object = library_object(data_dir, &authority, &record.object_uri)?;
                 return Ok(LibraryFilePublication {
                     data: publication_response(&record, object),
                     name: binding.name.unwrap_or_default(),
@@ -2764,11 +2855,11 @@ pub(crate) async fn chat_attach_publication(
         name: None,
         size_bytes: None,
     };
-    write_runtime_json(data_dir, principal_id, &binding_uri, &binding)?;
+    write_runtime_json(data_dir, &authority, &binding_uri, &binding)?;
     let publication = match publish_library_uri_locked(
         data_dir,
         registry,
-        principal_id,
+        &authority,
         uri,
         if_revision,
         Some(binding.publication_id.clone()),
@@ -2779,7 +2870,7 @@ pub(crate) async fn chat_attach_publication(
         Err(err) => {
             // A record this request wrote keeps its binding; otherwise
             // nothing was published and nothing stays bound to this id.
-            let recorded = plain_publish_records(data_dir, principal_id)
+            let recorded = plain_publish_records(data_dir, &authority)
                 .iter()
                 .any(|record| record_publication_id(record) == binding.publication_id);
             if !recorded {
@@ -2793,7 +2884,7 @@ pub(crate) async fn chat_attach_publication(
     binding.publication_id = publication.publication_id.clone();
     binding.name = Some(publication.name.clone());
     binding.size_bytes = Some(publication.size_bytes);
-    write_runtime_json(data_dir, principal_id, &binding_uri, &binding)?;
+    write_runtime_json(data_dir, &authority, &binding_uri, &binding)?;
     Ok(publication)
 }
 
@@ -2859,14 +2950,15 @@ pub(crate) fn find_library_refusal(error: &anyhow::Error) -> Option<&LibraryRefu
 async fn library_unpublish(
     data_dir: &Path,
     registry: Arc<ProviderRegistry>,
-    principal_id: &str,
+    authority: &crate::object_authority::ObjectAuthorityV1,
     uri: &str,
     if_revision: Option<&str>,
 ) -> anyhow::Result<Value> {
+    let principal_id = authority.principal_id();
     let _serialized = PUBLICATIONS.lock().await;
-    let target = library_target(data_dir, principal_id, uri)?;
-    check_revision(data_dir, principal_id, &target.uri, if_revision)?;
-    let mut record = read_publish_record(data_dir, principal_id, &target.uri)
+    let target = library_target(data_dir, authority, uri)?;
+    check_revision(data_dir, authority, &target.uri, if_revision)?;
+    let mut record = read_publish_record(data_dir, authority, &target.uri)
         .context("library unpublish requires a published object")?;
     if !record_is_published(&record) {
         bail!("library object is not actively published");
@@ -2919,11 +3011,11 @@ async fn library_unpublish(
         .get("availability")
         .cloned()
         .unwrap_or_else(|| json!({"status": "local_unpinned"}));
-    write_publish_record(data_dir, principal_id, &record)?;
-    let object = library_object(data_dir, principal_id, &target.uri)?;
+    write_publish_record(data_dir, authority, &record)?;
+    let object = library_object(data_dir, authority, &target.uri)?;
     append_library_event(
         data_dir,
-        principal_id,
+        authority,
         "unpublish",
         &target.uri,
         json!({
@@ -2945,12 +3037,13 @@ async fn library_unpublish(
 async fn library_repair(
     data_dir: &Path,
     registry: Arc<ProviderRegistry>,
-    principal_id: &str,
+    authority: &crate::object_authority::ObjectAuthorityV1,
     uri: &str,
 ) -> anyhow::Result<Value> {
+    let principal_id = authority.principal_id();
     let _serialized = PUBLICATIONS.lock().await;
-    let target = library_target(data_dir, principal_id, uri)?;
-    let mut record = read_publish_record(data_dir, principal_id, &target.uri)
+    let target = library_target(data_dir, authority, uri)?;
+    let mut record = read_publish_record(data_dir, authority, &target.uri)
         .context("library repair requires a published object")?;
     let mut request = json!({
         "op": "repair",
@@ -2987,11 +3080,11 @@ async fn library_repair(
         .get("availability")
         .cloned()
         .unwrap_or_else(|| json!({"status": "unknown"}));
-    write_publish_record(data_dir, principal_id, &record)?;
-    let object = library_object(data_dir, principal_id, &target.uri)?;
+    write_publish_record(data_dir, authority, &record)?;
+    let object = library_object(data_dir, authority, &target.uri)?;
     append_library_event(
         data_dir,
-        principal_id,
+        authority,
         "repair",
         &target.uri,
         json!({
@@ -3799,11 +3892,9 @@ fn webspace_stat_to_object(
 
 fn localhost_space_pointer_object(
     data_dir: &Path,
-    principal_id: &str,
+    authority: &crate::object_authority::ObjectAuthorityV1,
 ) -> anyhow::Result<LibraryObject> {
-    let uri = crate::auth::ResolvedPrincipalRoot::resolve(data_dir, data_dir, principal_id)?
-        .localhost_root()
-        .to_string();
+    let uri = authority.require_local_root()?.to_string();
     let target = library_target_from_root(data_dir, &uri, &uri)?;
     let metadata = fs::metadata(&target.path).ok();
     let modified_at = metadata
@@ -3982,16 +4073,12 @@ fn inferred_webspace_target_uri(uri: &str) -> Option<String> {
     }
 }
 
-fn library_target(data_dir: &Path, principal_id: &str, uri: &str) -> anyhow::Result<LibraryTarget> {
-    let localhost_root =
-        crate::auth::ResolvedPrincipalRoot::resolve(data_dir, data_dir, principal_id)?
-            .localhost_root()
-            .to_string();
-    crate::auth_state_files::refuse_object_helper_recovery_key_create(
-        data_dir,
-        principal_id,
-        &localhost_root,
-    )?;
+fn library_target(
+    data_dir: &Path,
+    authority: &crate::object_authority::ObjectAuthorityV1,
+    uri: &str,
+) -> anyhow::Result<LibraryTarget> {
+    let localhost_root = authority.require_local_root()?.to_string();
     library_target_from_root(data_dir, &localhost_root, uri)
 }
 
@@ -4021,7 +4108,8 @@ pub(crate) fn refuse_linked_library_object(
     principal_id: &str,
     uri: &str,
 ) -> anyhow::Result<()> {
-    let target = library_target(data_dir, principal_id, uri)?;
+    let authority = crate::object_authority::ObjectAuthorityV1::build(data_dir, principal_id)?;
+    let target = library_target(data_dir, &authority, uri)?;
     crate::auth::ensure_no_symlink_components(data_dir, &target.path).map_err(|_| {
         anyhow!("This file is a link or is in a linked folder, so it is not viewable in Home.")
     })
@@ -4227,16 +4315,18 @@ fn library_request_touches_webspace(request: &ObjectProviderRequest) -> bool {
     }
 }
 
-fn library_object(data_dir: &Path, principal_id: &str, uri: &str) -> anyhow::Result<LibraryObject> {
-    let root = crate::auth::ResolvedPrincipalRoot::resolve(data_dir, data_dir, principal_id)?
-        .localhost_root()
-        .to_string();
-    library_object_from_root(data_dir, principal_id, &root, uri)
+fn library_object(
+    data_dir: &Path,
+    authority: &crate::object_authority::ObjectAuthorityV1,
+    uri: &str,
+) -> anyhow::Result<LibraryObject> {
+    let root = authority.require_local_root()?.to_string();
+    library_object_from_root(data_dir, authority, &root, uri)
 }
 
 fn library_object_from_root(
     data_dir: &Path,
-    principal_id: &str,
+    authority: &crate::object_authority::ObjectAuthorityV1,
     localhost_root: &str,
     uri: &str,
 ) -> anyhow::Result<LibraryObject> {
@@ -4246,7 +4336,7 @@ fn library_object_from_root(
     let metadata = match fs::metadata(&target.path) {
         Ok(metadata) => Some(metadata),
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-            if library_roots(data_dir, principal_id)?
+            if library_roots(data_dir, authority)?
                 .iter()
                 .any(|root| root.uri == target.uri)
             {
@@ -4282,7 +4372,7 @@ fn library_object_from_root(
     let (size, revision, content_cid) = if is_dir {
         (0, directory_revision(&target.path, &target.uri)?, None)
     } else {
-        match read_library_file_bytes(data_dir, principal_id, &target) {
+        match read_library_file_bytes(data_dir, authority, &target) {
             Ok(bytes) => {
                 let revision = format!("rev:{}", hex::encode(Sha256::digest(&bytes)));
                 let content_cid = raw_sha256_cid(&bytes)?;
@@ -4299,7 +4389,7 @@ fn library_object_from_root(
             Err(err) => return Err(err),
         }
     };
-    let record = read_publish_record(data_dir, principal_id, &target.uri).ok();
+    let record = read_publish_record(data_dir, authority, &target.uri).ok();
     let active_record = record.as_ref().filter(|record| record_is_published(record));
     let published_cid = active_record.map(|record| record.cid.clone());
     let is_trash_root = is_trash_root_uri(&target.localhost_root, &target.uri);
@@ -4394,7 +4484,7 @@ fn library_object_from_root(
         local_metadata["protected_content"] = protected_content;
     }
     if in_trash && !is_trash_root {
-        if let Ok(record) = read_trash_record(data_dir, principal_id, &target.uri) {
+        if let Ok(record) = read_trash_record(data_dir, authority, &target.uri) {
             local_metadata["trash"] = json!({
                 "schema": LIBRARY_TRASH_RECORD_SCHEMA,
                 "trash_uri": record.trash_uri,
@@ -4542,19 +4632,18 @@ fn blocked_object_projection(
 
 fn read_library_file_bytes(
     data_dir: &Path,
-    principal_id: &str,
+    authority: &crate::object_authority::ObjectAuthorityV1,
     target: &LibraryTarget,
 ) -> anyhow::Result<Vec<u8>> {
-    match crate::auth::read_principal_root_object(
-        data_dir,
-        principal_id,
-        &target.localhost_root,
-        &target.uri,
+    match crate::object_authority::read_principal_root_object_with_authority(
+        authority,
         &target.path,
+        &target.uri,
+        data_dir,
     ) {
         Ok(bytes) => Ok(bytes),
         Err(err) if is_unencrypted_principal_root_object(&err) => {
-            protect_legacy_plaintext_library_file(data_dir, principal_id, target)
+            protect_legacy_plaintext_library_file(data_dir, authority, target)
         }
         Err(err) => Err(err),
     }
@@ -4562,42 +4651,41 @@ fn read_library_file_bytes(
 
 fn write_library_file_bytes(
     data_dir: &Path,
-    principal_id: &str,
+    authority: &crate::object_authority::ObjectAuthorityV1,
     uri: &str,
     _mime: Option<&str>,
     if_revision: Option<&str>,
     create_only: bool,
     bytes: &[u8],
 ) -> anyhow::Result<LibraryObject> {
-    let target = library_target(data_dir, principal_id, uri)?;
+    let target = library_target(data_dir, authority, uri)?;
     if is_trash_uri(&target.localhost_root, &target.uri) {
         bail!("library Trash accepts objects only through delete");
     }
     if create_only && if_revision.is_some_and(|value| !value.trim().is_empty()) {
         bail!("library create-only write does not accept if_revision");
     }
-    check_revision(data_dir, principal_id, &target.uri, if_revision)?;
+    check_revision(data_dir, authority, &target.uri, if_revision)?;
     StartWalkRule::new(data_dir, &target.localhost_root).file(&target.uri)?;
     if let Some(parent) = target.path.parent() {
         fs::create_dir_all(parent)?;
     }
     let write = if create_only {
-        crate::auth::create_principal_root_object(
-            data_dir,
-            principal_id,
-            &target.localhost_root,
-            &target.uri,
+        crate::object_authority::create_principal_root_object_with_authority(
+            authority,
             &target.path,
+            &target.uri,
+            data_dir,
             bytes,
         )
     } else {
-        crate::auth::write_principal_root_object(
-            data_dir,
-            principal_id,
-            &target.localhost_root,
-            &target.uri,
+        crate::object_authority::write_principal_root_object_with_authority(
+            authority,
             &target.path,
+            &target.uri,
+            data_dir,
             bytes,
+            false,
         )
     };
     match write {
@@ -4612,10 +4700,10 @@ fn write_library_file_bytes(
         }
         Err(err) => return Err(err),
     }
-    let object = library_object(data_dir, principal_id, &target.uri)?;
+    let object = library_object(data_dir, authority, &target.uri)?;
     append_library_event(
         data_dir,
-        principal_id,
+        authority,
         "write",
         &target.uri,
         json!({
@@ -4627,21 +4715,21 @@ fn write_library_file_bytes(
 
 fn library_download_object(
     data_dir: &Path,
-    principal_id: &str,
+    authority: &crate::object_authority::ObjectAuthorityV1,
     uri: &str,
     archive_format: LibraryArchiveFormat,
 ) -> anyhow::Result<(LibraryObject, String, Vec<u8>)> {
-    let target = library_target(data_dir, principal_id, uri)?;
-    let object = library_object(data_dir, principal_id, &target.uri)?;
+    let target = library_target(data_dir, authority, uri)?;
+    let object = library_object(data_dir, authority, &target.uri)?;
     if target.path.is_file() {
-        let bytes = read_library_file_bytes(data_dir, principal_id, &target)?;
+        let bytes = read_library_file_bytes(data_dir, authority, &target)?;
         let filename = object.name.clone();
         return Ok((object, filename, bytes));
     }
     if !target.path.is_dir() {
         bail!("library download target must be a file or directory");
     }
-    let bytes = archive_library_directory(data_dir, principal_id, &target, archive_format)?;
+    let bytes = archive_library_directory(data_dir, authority, &target, archive_format)?;
     let filename = format!(
         "{}.{}",
         safe_archive_name(&object.name),
@@ -4655,7 +4743,7 @@ fn library_download_object(
 
 fn compress_library_archive(
     data_dir: &Path,
-    principal_id: &str,
+    authority: &crate::object_authority::ObjectAuthorityV1,
     uri: Option<&str>,
     uris: &[String],
     if_revision: Option<&str>,
@@ -4667,20 +4755,19 @@ fn compress_library_archive(
         if if_revision.is_some() {
             bail!("library selected compress_archive does not accept if_revision");
         }
-        let (parent_uri, targets) =
-            library_selection_archive_targets(data_dir, principal_id, uris)?;
+        let (parent_uri, targets) = library_selection_archive_targets(data_dir, authority, uris)?;
         ensure_library_archive_budget(
             data_dir,
-            principal_id,
+            authority,
             &targets,
             LibraryArchiveBudget::Compress,
         )?;
-        let bytes = archive_library_selection_zip(data_dir, principal_id, &targets)?;
+        let bytes = archive_library_selection_zip(data_dir, authority, &targets)?;
         let filename = library_selection_archive_filename(&parent_uri, LibraryArchiveFormat::Zip);
-        let archive_uri = unique_child_uri(data_dir, principal_id, &parent_uri, &filename)?;
+        let archive_uri = unique_child_uri(data_dir, authority, &parent_uri, &filename)?;
         let object = write_library_file_bytes(
             data_dir,
-            principal_id,
+            authority,
             &archive_uri,
             Some(LibraryArchiveFormat::Zip.mime()),
             None,
@@ -4689,7 +4776,7 @@ fn compress_library_archive(
         )?;
         append_library_event(
             data_dir,
-            principal_id,
+            authority,
             "compress_archive",
             &archive_uri,
             json!({
@@ -4701,7 +4788,7 @@ fn compress_library_archive(
     }
 
     let uri = uri.ok_or_else(|| anyhow!("library compress_archive requires uri or uris"))?;
-    let target = library_target(data_dir, principal_id, uri)?;
+    let target = library_target(data_dir, authority, uri)?;
     if target.uri == target.localhost_root {
         bail!("library root compress is not supported; use Recovery Kit for full backups");
     }
@@ -4714,11 +4801,11 @@ fn compress_library_archive(
     // Before the revision check, which reads the whole object.
     ensure_library_archive_budget(
         data_dir,
-        principal_id,
+        authority,
         std::slice::from_ref(&target),
         LibraryArchiveBudget::Compress,
     )?;
-    check_revision(data_dir, principal_id, &target.uri, if_revision)?;
+    check_revision(data_dir, authority, &target.uri, if_revision)?;
     let parent_uri = target
         .uri
         .rsplit_once('/')
@@ -4731,11 +4818,11 @@ fn compress_library_archive(
         .filter(|name| !name.is_empty())
         .unwrap_or("Library");
     let filename = format!("{}.zip", safe_archive_name(name));
-    let bytes = archive_library_single_zip(data_dir, principal_id, &target)?;
-    let archive_uri = unique_child_uri(data_dir, principal_id, &parent_uri, &filename)?;
+    let bytes = archive_library_single_zip(data_dir, authority, &target)?;
+    let archive_uri = unique_child_uri(data_dir, authority, &parent_uri, &filename)?;
     let object = write_library_file_bytes(
         data_dir,
-        principal_id,
+        authority,
         &archive_uri,
         Some(LibraryArchiveFormat::Zip.mime()),
         None,
@@ -4744,7 +4831,7 @@ fn compress_library_archive(
     )?;
     append_library_event(
         data_dir,
-        principal_id,
+        authority,
         "compress_archive",
         &archive_uri,
         json!({
@@ -4757,21 +4844,20 @@ fn compress_library_archive(
 
 fn protect_legacy_plaintext_library_file(
     data_dir: &Path,
-    principal_id: &str,
+    authority: &crate::object_authority::ObjectAuthorityV1,
     target: &LibraryTarget,
 ) -> anyhow::Result<Vec<u8>> {
-    crate::auth::protect_legacy_plaintext_principal_root_object(
-        data_dir,
-        principal_id,
-        &target.localhost_root,
-        &target.uri,
+    crate::object_authority::protect_legacy_plaintext_with_authority(
+        authority,
         &target.path,
+        &target.uri,
+        data_dir,
     )
 }
 
 fn archive_library_directory(
     data_dir: &Path,
-    principal_id: &str,
+    authority: &crate::object_authority::ObjectAuthorityV1,
     target: &LibraryTarget,
     archive_format: LibraryArchiveFormat,
 ) -> anyhow::Result<Vec<u8>> {
@@ -4783,15 +4869,15 @@ fn archive_library_directory(
     }
     ensure_library_archive_budget(
         data_dir,
-        principal_id,
+        authority,
         std::slice::from_ref(target),
         LibraryArchiveBudget::Download,
     )?;
     match archive_format {
         LibraryArchiveFormat::TarGz => {
-            archive_library_directory_tar_gz(data_dir, principal_id, target)
+            archive_library_directory_tar_gz(data_dir, authority, target)
         }
-        LibraryArchiveFormat::Zip => archive_library_directory_zip(data_dir, principal_id, target),
+        LibraryArchiveFormat::Zip => archive_library_directory_zip(data_dir, authority, target),
     }
 }
 
@@ -4845,28 +4931,16 @@ impl std::error::Error for LibraryArchiveTooLarge {}
 /// judged from its head and tail (`principal_root_object_content_bound`).
 fn ensure_library_archive_budget(
     data_dir: &Path,
-    principal_id: &str,
+    authority: &crate::object_authority::ObjectAuthorityV1,
     targets: &[LibraryTarget],
     budget: LibraryArchiveBudget,
 ) -> anyhow::Result<()> {
-    let Some(localhost_root) = targets.first().map(|target| target.localhost_root.as_str()) else {
+    if targets.is_empty() {
         return Ok(());
-    };
-    let protection =
-        crate::auth::load_principal_root_protection(data_dir, principal_id, localhost_root)?;
-    let data_key_id = protection
-        .as_ref()
-        .map(|protection| protection.data_key_id.as_str());
+    }
     let (mut total, mut largest) = (0u64, 0u64);
     for target in targets {
-        add_library_archive_source_bytes(
-            data_dir,
-            principal_id,
-            data_key_id,
-            target,
-            &mut total,
-            &mut largest,
-        )?;
+        add_library_archive_source_bytes(data_dir, authority, target, &mut total, &mut largest)?;
     }
     if !budget.admits(total, largest) {
         return Err(LibraryArchiveTooLarge(budget).into());
@@ -4876,20 +4950,17 @@ fn ensure_library_archive_budget(
 
 fn add_library_archive_source_bytes(
     data_dir: &Path,
-    principal_id: &str,
-    data_key_id: Option<&str>,
+    authority: &crate::object_authority::ObjectAuthorityV1,
     target: &LibraryTarget,
     total: &mut u64,
     largest: &mut u64,
 ) -> anyhow::Result<()> {
     if !fs::metadata(&target.path)?.is_dir() {
-        let content = crate::auth::principal_root_object_content_bound(
-            data_dir,
-            principal_id,
-            &target.localhost_root,
-            &target.uri,
+        let content = crate::object_authority::principal_root_object_content_bound_with_authority(
+            authority,
             &target.path,
-            data_key_id,
+            &target.uri,
+            data_dir,
         )?;
         *total = total.saturating_add(content);
         *largest = (*largest).max(content);
@@ -4897,22 +4968,15 @@ fn add_library_archive_source_bytes(
     }
     for entry in fs::read_dir(&target.path)? {
         let name = entry?.file_name().to_string_lossy().to_string();
-        let child = library_target(data_dir, principal_id, &format!("{}/{}", target.uri, name))?;
-        add_library_archive_source_bytes(
-            data_dir,
-            principal_id,
-            data_key_id,
-            &child,
-            total,
-            largest,
-        )?;
+        let child = library_target(data_dir, authority, &format!("{}/{}", target.uri, name))?;
+        add_library_archive_source_bytes(data_dir, authority, &child, total, largest)?;
     }
     Ok(())
 }
 
 fn archive_library_directory_tar_gz(
     data_dir: &Path,
-    principal_id: &str,
+    authority: &crate::object_authority::ObjectAuthorityV1,
     target: &LibraryTarget,
 ) -> anyhow::Result<Vec<u8>> {
     let encoder = GzEncoder::new(Vec::new(), Compression::default());
@@ -4925,7 +4989,7 @@ fn archive_library_directory_tar_gz(
             .filter(|name| !name.is_empty())
             .unwrap_or("Library"),
     ));
-    append_library_archive_entry(&mut builder, data_dir, principal_id, target, &archive_root)?;
+    append_library_archive_entry(&mut builder, data_dir, authority, target, &archive_root)?;
     let encoder = builder.into_inner()?;
     let bytes = encoder.finish()?;
     Ok(bytes)
@@ -4933,7 +4997,7 @@ fn archive_library_directory_tar_gz(
 
 fn archive_library_directory_zip(
     data_dir: &Path,
-    principal_id: &str,
+    authority: &crate::object_authority::ObjectAuthorityV1,
     target: &LibraryTarget,
 ) -> anyhow::Result<Vec<u8>> {
     let mut writer = ZipWriter::new(Cursor::new(Vec::new()));
@@ -4945,30 +5009,28 @@ fn archive_library_directory_zip(
             .filter(|name| !name.is_empty())
             .unwrap_or("Library"),
     ));
-    append_library_zip_entry(&mut writer, data_dir, principal_id, target, &archive_root)?;
+    append_library_zip_entry(&mut writer, data_dir, authority, target, &archive_root)?;
     Ok(writer.finish()?.into_inner())
 }
 
 fn archive_library_selection(
     data_dir: &Path,
-    principal_id: &str,
+    authority: &crate::object_authority::ObjectAuthorityV1,
     uris: &[String],
     archive_format: LibraryArchiveFormat,
 ) -> anyhow::Result<(String, Vec<u8>)> {
-    let (parent_uri, targets) = library_selection_archive_targets(data_dir, principal_id, uris)?;
+    let (parent_uri, targets) = library_selection_archive_targets(data_dir, authority, uris)?;
     ensure_library_archive_budget(
         data_dir,
-        principal_id,
+        authority,
         &targets,
         LibraryArchiveBudget::Download,
     )?;
     let bytes = match archive_format {
         LibraryArchiveFormat::TarGz => {
-            archive_library_selection_tar_gz(data_dir, principal_id, &targets)?
+            archive_library_selection_tar_gz(data_dir, authority, &targets)?
         }
-        LibraryArchiveFormat::Zip => {
-            archive_library_selection_zip(data_dir, principal_id, &targets)?
-        }
+        LibraryArchiveFormat::Zip => archive_library_selection_zip(data_dir, authority, &targets)?,
     };
     Ok((
         library_selection_archive_filename(&parent_uri, archive_format),
@@ -4978,7 +5040,7 @@ fn archive_library_selection(
 
 fn library_selection_archive_targets(
     data_dir: &Path,
-    principal_id: &str,
+    authority: &crate::object_authority::ObjectAuthorityV1,
     uris: &[String],
 ) -> anyhow::Result<(String, Vec<LibraryTarget>)> {
     if uris.len() < 2 {
@@ -4988,7 +5050,7 @@ fn library_selection_archive_targets(
     let mut parent_uri: Option<String> = None;
     let mut targets = Vec::new();
     for uri in uris {
-        let target = library_target(data_dir, principal_id, uri)?;
+        let target = library_target(data_dir, authority, uri)?;
         if !seen.insert(target.uri.clone()) {
             continue;
         }
@@ -5040,7 +5102,7 @@ fn library_selection_archive_filename(
 
 fn archive_library_selection_tar_gz(
     data_dir: &Path,
-    principal_id: &str,
+    authority: &crate::object_authority::ObjectAuthorityV1,
     targets: &[LibraryTarget],
 ) -> anyhow::Result<Vec<u8>> {
     let encoder = GzEncoder::new(Vec::new(), Compression::default());
@@ -5055,7 +5117,7 @@ fn archive_library_selection_tar_gz(
         append_library_archive_entry(
             &mut builder,
             data_dir,
-            principal_id,
+            authority,
             target,
             &PathBuf::from(safe_archive_name(name)),
         )?;
@@ -5066,7 +5128,7 @@ fn archive_library_selection_tar_gz(
 
 fn archive_library_selection_zip(
     data_dir: &Path,
-    principal_id: &str,
+    authority: &crate::object_authority::ObjectAuthorityV1,
     targets: &[LibraryTarget],
 ) -> anyhow::Result<Vec<u8>> {
     let mut writer = ZipWriter::new(Cursor::new(Vec::new()));
@@ -5080,7 +5142,7 @@ fn archive_library_selection_zip(
         append_library_zip_entry(
             &mut writer,
             data_dir,
-            principal_id,
+            authority,
             target,
             &PathBuf::from(safe_archive_name(name)),
         )?;
@@ -5090,7 +5152,7 @@ fn archive_library_selection_zip(
 
 fn archive_library_single_zip(
     data_dir: &Path,
-    principal_id: &str,
+    authority: &crate::object_authority::ObjectAuthorityV1,
     target: &LibraryTarget,
 ) -> anyhow::Result<Vec<u8>> {
     let mut writer = ZipWriter::new(Cursor::new(Vec::new()));
@@ -5103,7 +5165,7 @@ fn archive_library_single_zip(
     append_library_zip_entry(
         &mut writer,
         data_dir,
-        principal_id,
+        authority,
         target,
         &PathBuf::from(safe_archive_name(name)),
     )?;
@@ -5112,7 +5174,7 @@ fn archive_library_single_zip(
 
 fn library_archive_entries(
     data_dir: &Path,
-    principal_id: &str,
+    authority: &crate::object_authority::ObjectAuthorityV1,
     target: &LibraryTarget,
 ) -> anyhow::Result<Value> {
     if !target.path.is_file() {
@@ -5125,9 +5187,9 @@ fn library_archive_entries(
     if !is_extractable_archive_name(&name) {
         bail!("library archive listing only supports .tar, .tar.gz, .tgz, and .zip archives");
     }
-    let bytes = read_library_file_bytes(data_dir, principal_id, target)?;
+    let bytes = read_library_file_bytes(data_dir, authority, target)?;
     archive_entries_for_object(
-        library_object(data_dir, principal_id, &target.uri)?,
+        library_object(data_dir, authority, &target.uri)?,
         &target.uri,
         &name,
         bytes,
@@ -5136,7 +5198,7 @@ fn library_archive_entries(
 
 fn archive_preview_entry(
     data_dir: &Path,
-    principal_id: &str,
+    authority: &crate::object_authority::ObjectAuthorityV1,
     target: &LibraryTarget,
     entry: &str,
 ) -> anyhow::Result<Value> {
@@ -5150,10 +5212,10 @@ fn archive_preview_entry(
     if !is_extractable_archive_name(&name) {
         bail!("library archive preview only supports .tar, .tar.gz, .tgz, and .zip archives");
     }
-    let bytes = read_library_file_bytes(data_dir, principal_id, target)?;
+    let bytes = read_library_file_bytes(data_dir, authority, target)?;
     archive_preview_entry_for_object(
         data_dir,
-        library_object(data_dir, principal_id, &target.uri)?,
+        library_object(data_dir, authority, &target.uri)?,
         &target.uri,
         &name,
         bytes,
@@ -5768,7 +5830,7 @@ struct ArchiveExtractResponseInput<'a> {
 
 fn extract_library_archive_entries(
     data_dir: &Path,
-    principal_id: &str,
+    authority: &crate::object_authority::ObjectAuthorityV1,
     target: &LibraryTarget,
     destination_uri: &str,
     entries: &[String],
@@ -5787,7 +5849,7 @@ fn extract_library_archive_entries(
             "library archive selected extraction only supports .tar, .tar.gz, .tgz, and .zip archives"
         );
     }
-    let bytes = read_library_file_bytes(data_dir, principal_id, target)?;
+    let bytes = read_library_file_bytes(data_dir, authority, target)?;
     let request = ArchiveExtractRequest {
         source_uri: &target.uri,
         archive_name: &name,
@@ -5796,12 +5858,12 @@ fn extract_library_archive_entries(
         conflict_policy,
         cancel,
     };
-    extract_archive_entries_to_local_destination(data_dir, principal_id, bytes, request)
+    extract_archive_entries_to_local_destination(data_dir, authority, bytes, request)
 }
 
 fn extract_archive_entries_to_local_destination(
     data_dir: &Path,
-    principal_id: &str,
+    authority: &crate::object_authority::ObjectAuthorityV1,
     bytes: Vec<u8>,
     request: ArchiveExtractRequest<'_>,
 ) -> anyhow::Result<Value> {
@@ -5810,7 +5872,7 @@ fn extract_archive_entries_to_local_destination(
             "library archive selected extraction only supports .tar, .tar.gz, .tgz, and .zip archives"
         );
     }
-    let destination = library_target(data_dir, principal_id, request.destination_uri)?;
+    let destination = library_target(data_dir, authority, request.destination_uri)?;
     if destination.path.exists() && !destination.path.is_dir() {
         bail!("library archive selected extraction destination must be a directory");
     }
@@ -5818,7 +5880,7 @@ fn extract_archive_entries_to_local_destination(
     let selected_entries = selected_archive_entries(request.entries)?;
     let mut outcome = ArchiveExtractOutcome::new(selected_entries);
     if request.cancel {
-        let destination_object = library_object(data_dir, principal_id, &destination.uri)?;
+        let destination_object = library_object(data_dir, authority, &destination.uri)?;
         return Ok(archive_extract_entries_response(
             ArchiveExtractResponseInput {
                 destination_object,
@@ -5845,7 +5907,7 @@ fn extract_archive_entries_to_local_destination(
         &mut |write, outcome| {
             apply_selected_archive_write_to_local(
                 data_dir,
-                principal_id,
+                authority,
                 &destination,
                 &rule,
                 write,
@@ -5860,7 +5922,7 @@ fn extract_archive_entries_to_local_destination(
     } else {
         "completed_with_blocked_entries"
     };
-    let destination_object = library_object(data_dir, principal_id, &destination.uri)?;
+    let destination_object = library_object(data_dir, authority, &destination.uri)?;
     let response = archive_extract_entries_response(ArchiveExtractResponseInput {
         destination_object,
         source_uri: request.source_uri,
@@ -5873,7 +5935,7 @@ fn extract_archive_entries_to_local_destination(
     });
     append_library_event(
         data_dir,
-        principal_id,
+        authority,
         "archive_extract_entries",
         &destination.uri,
         json!({
@@ -6086,7 +6148,7 @@ fn read_selected_zip_entries(
 /// is listed as blocked, with its path, and nothing is written for it.
 fn apply_selected_archive_write_to_local(
     data_dir: &Path,
-    principal_id: &str,
+    authority: &crate::object_authority::ObjectAuthorityV1,
     destination: &LibraryTarget,
     rule: &StartWalkRule,
     write: ArchiveExtractWrite,
@@ -6112,7 +6174,7 @@ fn apply_selected_archive_write_to_local(
     }
     match write {
         ArchiveExtractWrite::Directory { path } => {
-            create_selected_archive_directory(data_dir, principal_id, destination, &path)?;
+            create_selected_archive_directory(data_dir, authority, destination, &path)?;
             outcome.written.push(json!({
                 "path": path,
                 "uri": uri,
@@ -6122,7 +6184,7 @@ fn apply_selected_archive_write_to_local(
         ArchiveExtractWrite::File { path, bytes } => {
             write_selected_archive_file(
                 data_dir,
-                principal_id,
+                authority,
                 destination,
                 &path,
                 &bytes,
@@ -6137,7 +6199,7 @@ fn apply_selected_archive_write_to_local(
 async fn extract_archive_entries_to_webspace_destination(
     data_dir: &Path,
     registry: &ProviderRegistry,
-    principal_id: &str,
+    authority: &crate::object_authority::ObjectAuthorityV1,
     bytes: Vec<u8>,
     request: ArchiveExtractRequest<'_>,
 ) -> anyhow::Result<Value> {
@@ -6213,7 +6275,7 @@ async fn extract_archive_entries_to_webspace_destination(
     });
     append_library_event(
         data_dir,
-        principal_id,
+        authority,
         "archive_extract_entries",
         &destination_uri,
         json!({
@@ -6333,19 +6395,19 @@ async fn ensure_webspace_archive_parent_dirs(
 
 fn create_selected_archive_directory(
     data_dir: &Path,
-    principal_id: &str,
+    authority: &crate::object_authority::ObjectAuthorityV1,
     destination: &LibraryTarget,
     normalized_path: &str,
 ) -> anyhow::Result<()> {
     let uri = archive_entry_uri(&destination.uri, Path::new(normalized_path))?;
-    let target = library_target(data_dir, principal_id, &uri)?;
+    let target = library_target(data_dir, authority, &uri)?;
     fs::create_dir_all(&target.path)?;
     Ok(())
 }
 
 fn write_selected_archive_file(
     data_dir: &Path,
-    principal_id: &str,
+    authority: &crate::object_authority::ObjectAuthorityV1,
     destination: &LibraryTarget,
     normalized_path: &str,
     bytes: &[u8],
@@ -6355,7 +6417,7 @@ fn write_selected_archive_file(
     let candidate_uri = archive_entry_uri(&destination.uri, Path::new(normalized_path))?;
     let target_uri = selected_archive_conflict_uri(
         data_dir,
-        principal_id,
+        authority,
         &candidate_uri,
         normalized_path,
         policy,
@@ -6364,17 +6426,17 @@ fn write_selected_archive_file(
     let Some(target_uri) = target_uri else {
         return Ok(());
     };
-    let target = library_target(data_dir, principal_id, &target_uri)?;
+    let target = library_target(data_dir, authority, &target_uri)?;
     if let Some(parent) = target.path.parent() {
         fs::create_dir_all(parent)?;
     }
-    crate::auth::write_principal_root_object(
-        data_dir,
-        principal_id,
-        &target.localhost_root,
-        &target.uri,
+    crate::object_authority::write_principal_root_object_with_authority(
+        authority,
         &target.path,
+        &target.uri,
+        data_dir,
         bytes,
+        false,
     )?;
     outcome.written.push(json!({
         "path": normalized_path,
@@ -6387,13 +6449,13 @@ fn write_selected_archive_file(
 
 fn selected_archive_conflict_uri(
     data_dir: &Path,
-    principal_id: &str,
+    authority: &crate::object_authority::ObjectAuthorityV1,
     candidate_uri: &str,
     normalized_path: &str,
     policy: ArchiveConflictPolicy,
     outcome: &mut ArchiveExtractOutcome,
 ) -> anyhow::Result<Option<String>> {
-    let target = library_target(data_dir, principal_id, candidate_uri)?;
+    let target = library_target(data_dir, authority, candidate_uri)?;
     if !target.path.exists() {
         return Ok(Some(candidate_uri.to_string()));
     }
@@ -6418,7 +6480,7 @@ fn selected_archive_conflict_uri(
             let (parent_uri, name) = candidate_uri
                 .rsplit_once('/')
                 .ok_or_else(|| anyhow!("archive selected extraction target has no parent"))?;
-            unique_child_uri(data_dir, principal_id, parent_uri, name).map(Some)
+            unique_child_uri(data_dir, authority, parent_uri, name).map(Some)
         }
     }
 }
@@ -6470,7 +6532,7 @@ fn archive_extract_entries_response(input: ArchiveExtractResponseInput<'_>) -> V
 
 fn extract_library_archive(
     data_dir: &Path,
-    principal_id: &str,
+    authority: &crate::object_authority::ObjectAuthorityV1,
     target: &LibraryTarget,
 ) -> anyhow::Result<String> {
     if !target.path.is_file() {
@@ -6494,17 +6556,17 @@ fn extract_library_archive(
         .map(|(parent, _)| parent)
         .ok_or_else(|| anyhow!("library archive extraction target has no parent"))?;
     let destination_name = archive_extract_folder_name(name);
-    let destination_uri = unique_child_uri(data_dir, principal_id, parent_uri, &destination_name)?;
-    let destination = library_target(data_dir, principal_id, &destination_uri)?;
+    let destination_uri = unique_child_uri(data_dir, authority, parent_uri, &destination_name)?;
+    let destination = library_target(data_dir, authority, &destination_uri)?;
     let rule = StartWalkRule::new(data_dir, &destination.localhost_root);
     rule.folder(&destination.uri)?;
 
-    let bytes = read_library_file_bytes(data_dir, principal_id, target)?;
+    let bytes = read_library_file_bytes(data_dir, authority, target)?;
     let archive_display =
         crate::auth::principal_root_home_relative_path(&destination.localhost_root, &target.uri);
     let archive = WholeArchiveExtract {
         data_dir,
-        principal_id,
+        authority,
         archive: &archive_display,
         destination: &destination,
         rule: &rule,
@@ -6567,7 +6629,7 @@ thread_local! {
 /// or the archive.
 struct WholeArchiveExtract<'a> {
     data_dir: &'a Path,
-    principal_id: &'a str,
+    authority: &'a crate::object_authority::ObjectAuthorityV1,
     /// Printable, for refusals.
     archive: &'a str,
     destination: &'a LibraryTarget,
@@ -6662,13 +6724,13 @@ impl WholeArchiveExtract<'_> {
                 if let Some(parent) = entry_target.path.parent() {
                     fs::create_dir_all(parent)?;
                 }
-                crate::auth::write_principal_root_object(
-                    self.data_dir,
-                    self.principal_id,
-                    &entry_target.localhost_root,
-                    &entry_target.uri,
+                crate::object_authority::write_principal_root_object_with_authority(
+                    self.authority,
                     &entry_target.path,
+                    &entry_target.uri,
+                    self.data_dir,
                     &entry_bytes,
+                    false,
                 )?;
             }
         }
@@ -6694,7 +6756,7 @@ impl WholeArchiveExtract<'_> {
                 bail!("library archive extraction rejects non-file archive entries")
             }
         }
-        library_target(self.data_dir, self.principal_id, &entry_uri).map(Some)
+        library_target(self.data_dir, self.authority, &entry_uri).map(Some)
     }
 }
 
@@ -7079,7 +7141,7 @@ fn archive_extract_folder_name(name: &str) -> String {
 fn append_library_archive_entry(
     builder: &mut tar::Builder<GzEncoder<Vec<u8>>>,
     data_dir: &Path,
-    principal_id: &str,
+    authority: &crate::object_authority::ObjectAuthorityV1,
     target: &LibraryTarget,
     archive_path: &Path,
 ) -> anyhow::Result<()> {
@@ -7090,19 +7152,19 @@ fn append_library_archive_entry(
             let entry = entry?;
             let name = entry.file_name().to_string_lossy().to_string();
             let child_uri = format!("{}/{}", target.uri, name);
-            let child_target = library_target(data_dir, principal_id, &child_uri)?;
+            let child_target = library_target(data_dir, authority, &child_uri)?;
             let child_archive_path = archive_path.join(safe_archive_name(&name));
             append_library_archive_entry(
                 builder,
                 data_dir,
-                principal_id,
+                authority,
                 &child_target,
                 &child_archive_path,
             )?;
         }
         return Ok(());
     }
-    let bytes = read_library_file_bytes(data_dir, principal_id, target)?;
+    let bytes = read_library_file_bytes(data_dir, authority, target)?;
     let mut header = tar::Header::new_gnu();
     header.set_size(bytes.len() as u64);
     header.set_mode(0o644);
@@ -7118,7 +7180,7 @@ fn append_library_archive_entry(
 fn append_library_zip_entry(
     writer: &mut ZipWriter<Cursor<Vec<u8>>>,
     data_dir: &Path,
-    principal_id: &str,
+    authority: &crate::object_authority::ObjectAuthorityV1,
     target: &LibraryTarget,
     archive_path: &Path,
 ) -> anyhow::Result<()> {
@@ -7131,19 +7193,19 @@ fn append_library_zip_entry(
             let entry = entry?;
             let name = entry.file_name().to_string_lossy().to_string();
             let child_uri = format!("{}/{}", target.uri, name);
-            let child_target = library_target(data_dir, principal_id, &child_uri)?;
+            let child_target = library_target(data_dir, authority, &child_uri)?;
             let child_archive_path = archive_path.join(safe_archive_name(&name));
             append_library_zip_entry(
                 writer,
                 data_dir,
-                principal_id,
+                authority,
                 &child_target,
                 &child_archive_path,
             )?;
         }
         return Ok(());
     }
-    let bytes = read_library_file_bytes(data_dir, principal_id, target)?;
+    let bytes = read_library_file_bytes(data_dir, authority, target)?;
     let options = zip_file_options_for_entry(archive_path, bytes.len());
     writer.start_file(zip_archive_entry_name(archive_path, false)?, options)?;
     writer.write_all(&bytes)?;
@@ -7490,13 +7552,9 @@ async fn protected_content_provider_runtime_status(
 }
 
 fn published_source_storage(
-    data_dir: &Path,
-    principal_id: &str,
-    target: &LibraryTarget,
+    authority: &crate::object_authority::ObjectAuthorityV1,
 ) -> anyhow::Result<&'static str> {
-    if crate::auth::load_principal_root_protection(data_dir, principal_id, &target.localhost_root)?
-        .is_some()
-    {
+    if authority.is_protected() {
         Ok("protected_principal_root")
     } else {
         Ok("plain_localhost_root")
@@ -7524,14 +7582,13 @@ fn runtime_custody_library_identity_metadata(record: &LibraryPublishRecord) -> O
 }
 
 fn published_content_security(
-    data_dir: &Path,
-    principal_id: &str,
+    authority: &crate::object_authority::ObjectAuthorityV1,
     target: &LibraryTarget,
 ) -> anyhow::Result<Value> {
     Ok(json!({
         "schema": "elastos.library.published-content-security/v1",
         "object_uri": target.uri,
-        "source_storage": published_source_storage(data_dir, principal_id, target)?,
+        "source_storage": published_source_storage(authority)?,
         "published_payload": "plain_content",
         "key_release_required": false,
         "status": "not_required_for_plain_published_content",
@@ -7933,10 +7990,11 @@ fn shared_access_open_contract(
     })
 }
 
-fn library_roots(data_dir: &Path, principal_id: &str) -> anyhow::Result<Vec<LibraryRoot>> {
-    let root = crate::auth::ResolvedPrincipalRoot::resolve(data_dir, data_dir, principal_id)?
-        .localhost_root()
-        .to_string();
+fn library_roots(
+    data_dir: &Path,
+    authority: &crate::object_authority::ObjectAuthorityV1,
+) -> anyhow::Result<Vec<LibraryRoot>> {
+    let root = authority.require_local_root()?.to_string();
     let mut roots: Vec<_> = [
         ("home", "Home", root.clone(), "principal-root"),
         ("desktop", "Desktop", format!("{root}/Desktop"), "directory"),
@@ -7972,7 +8030,7 @@ fn library_roots(data_dir: &Path, principal_id: &str) -> anyhow::Result<Vec<Libr
         // The Public place says whether it holds items, so Library can list
         // it only while it does.
         let metadata = (id == "public").then(|| {
-            let (empty, item_count) = root_item_state(data_dir, principal_id, &uri);
+            let (empty, item_count) = root_item_state(data_dir, authority, &uri);
             json!({
                 "schema": "elastos.library.public-root/v1",
                 "empty": empty,
@@ -7990,7 +8048,7 @@ fn library_roots(data_dir: &Path, principal_id: &str) -> anyhow::Result<Vec<Libr
     })
     .collect();
     let trash_uri = format!("{root}/.Trash");
-    let (empty, item_count) = root_item_state(data_dir, principal_id, &trash_uri);
+    let (empty, item_count) = root_item_state(data_dir, authority, &trash_uri);
     roots.push(LibraryRoot {
         schema: LIBRARY_ROOT_SCHEMA,
         id: "trash",
@@ -8006,8 +8064,12 @@ fn library_roots(data_dir: &Path, principal_id: &str) -> anyhow::Result<Vec<Libr
     Ok(roots)
 }
 
-fn root_item_state(data_dir: &Path, principal_id: &str, uri: &str) -> (bool, usize) {
-    let Ok(target) = library_target(data_dir, principal_id, uri) else {
+fn root_item_state(
+    data_dir: &Path,
+    authority: &crate::object_authority::ObjectAuthorityV1,
+    uri: &str,
+) -> (bool, usize) {
+    let Ok(target) = library_target(data_dir, authority, uri) else {
         return (true, 0);
     };
     let Ok(entries) = fs::read_dir(&target.path) else {
@@ -8019,12 +8081,12 @@ fn root_item_state(data_dir: &Path, principal_id: &str, uri: &str) -> (bool, usi
 
 fn move_library_object(
     data_dir: &Path,
-    principal_id: &str,
+    authority: &crate::object_authority::ObjectAuthorityV1,
     from_uri: &str,
     to_uri: &str,
 ) -> anyhow::Result<()> {
-    let from = library_target(data_dir, principal_id, from_uri)?;
-    let to = library_target(data_dir, principal_id, to_uri)?;
+    let from = library_target(data_dir, authority, from_uri)?;
+    let to = library_target(data_dir, authority, to_uri)?;
     if !from.path.exists() {
         bail!("library source object not found");
     }
@@ -8034,21 +8096,21 @@ fn move_library_object(
     let rule = StartWalkRule::new(data_dir, &to.localhost_root);
     rule.tree(&from.path, &to.uri)?;
     if from.path.is_dir() {
-        move_library_directory(data_dir, principal_id, &rule, &from, &to)?;
+        move_library_directory(data_dir, authority, &rule, &from, &to)?;
     } else {
-        move_library_file(data_dir, principal_id, &rule, &from, &to)?;
+        move_library_file(data_dir, authority, &rule, &from, &to)?;
     }
     Ok(())
 }
 
 fn copy_library_object(
     data_dir: &Path,
-    principal_id: &str,
+    authority: &crate::object_authority::ObjectAuthorityV1,
     from_uri: &str,
     to_uri: &str,
 ) -> anyhow::Result<()> {
-    let from = library_target(data_dir, principal_id, from_uri)?;
-    let to = library_target(data_dir, principal_id, to_uri)?;
+    let from = library_target(data_dir, authority, from_uri)?;
+    let to = library_target(data_dir, authority, to_uri)?;
     if !from.path.exists() {
         bail!("library source object not found");
     }
@@ -8058,9 +8120,9 @@ fn copy_library_object(
     let rule = StartWalkRule::new(data_dir, &to.localhost_root);
     rule.tree(&from.path, &to.uri)?;
     if from.path.is_dir() {
-        copy_library_directory(data_dir, principal_id, &rule, &from, &to)?;
+        copy_library_directory(data_dir, authority, &rule, &from, &to)?;
     } else {
-        copy_library_file(data_dir, principal_id, &rule, &from, &to)?;
+        copy_library_file(data_dir, authority, &rule, &from, &to)?;
     }
     Ok(())
 }
@@ -8070,7 +8132,7 @@ fn copy_library_object(
 /// deeper than Home starts with (#449).
 fn copy_library_directory(
     data_dir: &Path,
-    principal_id: &str,
+    authority: &crate::object_authority::ObjectAuthorityV1,
     rule: &StartWalkRule,
     from: &LibraryTarget,
     to: &LibraryTarget,
@@ -8082,12 +8144,12 @@ fn copy_library_directory(
         let name = entry.file_name().to_string_lossy().to_string();
         let child_from_uri = format!("{}/{}", from.uri, name);
         let child_to_uri = format!("{}/{}", to.uri, name);
-        let child_from = library_target(data_dir, principal_id, &child_from_uri)?;
-        let child_to = library_target(data_dir, principal_id, &child_to_uri)?;
+        let child_from = library_target(data_dir, authority, &child_from_uri)?;
+        let child_to = library_target(data_dir, authority, &child_to_uri)?;
         if child_from.path.is_dir() {
-            copy_library_directory(data_dir, principal_id, rule, &child_from, &child_to)?;
+            copy_library_directory(data_dir, authority, rule, &child_from, &child_to)?;
         } else {
-            copy_library_file(data_dir, principal_id, rule, &child_from, &child_to)?;
+            copy_library_file(data_dir, authority, rule, &child_from, &child_to)?;
         }
     }
     Ok(())
@@ -8095,30 +8157,25 @@ fn copy_library_directory(
 
 fn copy_library_file(
     data_dir: &Path,
-    principal_id: &str,
+    authority: &crate::object_authority::ObjectAuthorityV1,
     rule: &StartWalkRule,
     from: &LibraryTarget,
     to: &LibraryTarget,
 ) -> anyhow::Result<()> {
     rule.file(&to.uri)?;
-    let bytes = read_library_file_bytes(data_dir, principal_id, from)?;
+    let bytes = read_library_file_bytes(data_dir, authority, from)?;
     if let Some(parent) = to.path.parent() {
         fs::create_dir_all(parent)?;
     }
-    crate::auth::write_principal_root_object(
-        data_dir,
-        principal_id,
-        &to.localhost_root,
-        &to.uri,
-        &to.path,
-        &bytes,
+    crate::object_authority::write_principal_root_object_with_authority(
+        authority, &to.path, &to.uri, data_dir, &bytes, false,
     )?;
     Ok(())
 }
 
 fn move_library_directory(
     data_dir: &Path,
-    principal_id: &str,
+    authority: &crate::object_authority::ObjectAuthorityV1,
     rule: &StartWalkRule,
     from: &LibraryTarget,
     to: &LibraryTarget,
@@ -8130,12 +8187,12 @@ fn move_library_directory(
         let name = entry.file_name().to_string_lossy().to_string();
         let child_from_uri = format!("{}/{}", from.uri, name);
         let child_to_uri = format!("{}/{}", to.uri, name);
-        let child_from = library_target(data_dir, principal_id, &child_from_uri)?;
-        let child_to = library_target(data_dir, principal_id, &child_to_uri)?;
+        let child_from = library_target(data_dir, authority, &child_from_uri)?;
+        let child_to = library_target(data_dir, authority, &child_to_uri)?;
         if child_from.path.is_dir() {
-            move_library_directory(data_dir, principal_id, rule, &child_from, &child_to)?;
+            move_library_directory(data_dir, authority, rule, &child_from, &child_to)?;
         } else {
-            move_library_file(data_dir, principal_id, rule, &child_from, &child_to)?;
+            move_library_file(data_dir, authority, rule, &child_from, &child_to)?;
         }
     }
     fs::remove_dir(&from.path)?;
@@ -8144,38 +8201,33 @@ fn move_library_directory(
 
 fn move_library_file(
     data_dir: &Path,
-    principal_id: &str,
+    authority: &crate::object_authority::ObjectAuthorityV1,
     rule: &StartWalkRule,
     from: &LibraryTarget,
     to: &LibraryTarget,
 ) -> anyhow::Result<()> {
     rule.file(&to.uri)?;
-    let bytes = read_library_file_bytes(data_dir, principal_id, from)?;
+    let bytes = read_library_file_bytes(data_dir, authority, from)?;
     if let Some(parent) = to.path.parent() {
         fs::create_dir_all(parent)?;
     }
-    crate::auth::write_principal_root_object(
-        data_dir,
-        principal_id,
-        &to.localhost_root,
-        &to.uri,
-        &to.path,
-        &bytes,
+    crate::object_authority::write_principal_root_object_with_authority(
+        authority, &to.path, &to.uri, data_dir, &bytes, false,
     )?;
     fs::remove_file(&from.path)?;
-    move_publish_record(data_dir, principal_id, &from.uri, &to.uri)
+    move_publish_record(data_dir, authority, &from.uri, &to.uri)
 }
 
 fn check_revision(
     data_dir: &Path,
-    principal_id: &str,
+    authority: &crate::object_authority::ObjectAuthorityV1,
     uri: &str,
     expected: Option<&str>,
 ) -> anyhow::Result<()> {
     let Some(expected) = expected.filter(|value| !value.trim().is_empty()) else {
         return Ok(());
     };
-    let object = library_object(data_dir, principal_id, uri)?;
+    let object = library_object(data_dir, authority, uri)?;
     if object.revision != expected {
         bail!("library object revision precondition failed");
     }
@@ -8189,12 +8241,12 @@ fn child_uri(parent_uri: &str, name: &str) -> anyhow::Result<String> {
 
 fn unique_child_uri(
     data_dir: &Path,
-    principal_id: &str,
+    authority: &crate::object_authority::ObjectAuthorityV1,
     parent_uri: &str,
     name: &str,
 ) -> anyhow::Result<String> {
     let mut candidate = child_uri(parent_uri, name)?;
-    if !library_target(data_dir, principal_id, &candidate)?
+    if !library_target(data_dir, authority, &candidate)?
         .path
         .exists()
     {
@@ -8214,7 +8266,7 @@ fn unique_child_uri(
             format!("{stem} ({suffix}).{ext}")
         };
         candidate = child_uri(parent_uri, &fallback)?;
-        if !library_target(data_dir, principal_id, &candidate)?
+        if !library_target(data_dir, authority, &candidate)?
             .path
             .exists()
         {
@@ -8260,7 +8312,7 @@ fn is_trash_child_uri(localhost_root: &str, uri: &str) -> bool {
 
 fn restore_uri_from_trash_record(
     data_dir: &Path,
-    principal_id: &str,
+    authority: &crate::object_authority::ObjectAuthorityV1,
     trash_target: &LibraryTarget,
     trash_record: Option<&LibraryTrashRecord>,
 ) -> anyhow::Result<String> {
@@ -8273,7 +8325,7 @@ fn restore_uri_from_trash_record(
         .next()
         .filter(|name| !name.is_empty())
         .unwrap_or(record.original_name.as_str());
-    unique_child_uri(data_dir, principal_id, parent_uri, name)
+    unique_child_uri(data_dir, authority, parent_uri, name)
 }
 
 fn trash_record_uri(localhost_root: &str, trash_uri: &str) -> String {
@@ -8283,33 +8335,28 @@ fn trash_record_uri(localhost_root: &str, trash_uri: &str) -> String {
 
 fn read_trash_record(
     data_dir: &Path,
-    principal_id: &str,
+    authority: &crate::object_authority::ObjectAuthorityV1,
     trash_uri: &str,
 ) -> anyhow::Result<LibraryTrashRecord> {
-    let root = crate::auth::ResolvedPrincipalRoot::resolve(data_dir, data_dir, principal_id)?
-        .localhost_root()
-        .to_string();
+    let root = authority.require_local_root()?.to_string();
     let record_uri = trash_record_uri(&root, trash_uri);
     let record_path = rooted_localhost_fs_path(data_dir, &record_uri)
         .ok_or_else(|| anyhow!("invalid library Trash record path"))?;
-    let bytes = crate::auth::read_principal_root_object(
-        data_dir,
-        principal_id,
-        &root,
-        &record_uri,
+    let bytes = crate::object_authority::read_principal_root_object_with_authority(
+        authority,
         &record_path,
+        &record_uri,
+        data_dir,
     )?;
     Ok(serde_json::from_slice(&bytes)?)
 }
 
 fn write_trash_record(
     data_dir: &Path,
-    principal_id: &str,
+    authority: &crate::object_authority::ObjectAuthorityV1,
     record: &LibraryTrashRecord,
 ) -> anyhow::Result<()> {
-    let root = crate::auth::ResolvedPrincipalRoot::resolve(data_dir, data_dir, principal_id)?
-        .localhost_root()
-        .to_string();
+    let root = authority.require_local_root()?.to_string();
     let record_uri = trash_record_uri(&root, &record.trash_uri);
     let record_path = rooted_localhost_fs_path(data_dir, &record_uri)
         .ok_or_else(|| anyhow!("invalid library Trash record path"))?;
@@ -8317,20 +8364,23 @@ fn write_trash_record(
         fs::create_dir_all(parent)?;
     }
     let bytes = serde_json::to_vec_pretty(record)?;
-    crate::auth::write_principal_root_object(
-        data_dir,
-        principal_id,
-        &root,
-        &record_uri,
+    crate::object_authority::write_principal_root_object_with_authority(
+        authority,
         &record_path,
+        &record_uri,
+        data_dir,
         &bytes,
+        false,
     )
 }
 
-fn remove_trash_record(data_dir: &Path, principal_id: &str, trash_uri: &str) -> anyhow::Result<()> {
-    let root = crate::auth::ResolvedPrincipalRoot::resolve(data_dir, data_dir, principal_id)?
-        .localhost_root()
-        .to_string();
+fn remove_trash_record(
+    data_dir: &Path,
+    authority: &crate::object_authority::ObjectAuthorityV1,
+    trash_uri: &str,
+) -> anyhow::Result<()> {
+    let principal_id = authority.principal_id();
+    let root = authority.require_local_root()?.to_string();
     remove_trash_record_with_root(data_dir, principal_id, &root, trash_uri)
 }
 
@@ -8360,41 +8410,32 @@ fn publish_record_uri(localhost_root: &str, object_uri: &str) -> String {
 
 fn read_publish_record(
     data_dir: &Path,
-    principal_id: &str,
+    authority: &crate::object_authority::ObjectAuthorityV1,
     object_uri: &str,
 ) -> anyhow::Result<LibraryPublishRecord> {
-    let root = crate::auth::ResolvedPrincipalRoot::resolve(data_dir, data_dir, principal_id)?
-        .localhost_root()
-        .to_string();
-    read_runtime_json_with_root(
-        data_dir,
-        principal_id,
-        &root,
-        &publish_record_uri(&root, object_uri),
-    )
+    let root = authority.require_local_root()?.to_string();
+    read_runtime_json_with_root(data_dir, authority, &publish_record_uri(&root, object_uri))
 }
 
 fn write_publish_record(
     data_dir: &Path,
-    principal_id: &str,
+    authority: &crate::object_authority::ObjectAuthorityV1,
     record: &LibraryPublishRecord,
 ) -> anyhow::Result<()> {
+    let principal_id = authority.principal_id();
     // No public Library operation calls this for an unstored principal;
     // each one resolves first, so this order is not what decides serving
     // for that principal. A publication that ends leaves the index before
     // its record changes, and one that starts joins it after, so a crash
     // in between serves less, never more.
-    let root = crate::auth::ResolvedPrincipalRoot::resolve(data_dir, data_dir, principal_id)?
-        .localhost_root()
-        .to_string();
+    let root = authority.require_local_root()?.to_string();
     let active = record_is_published(record);
     if !active {
         set_published_index_entry(data_dir, principal_id, record, false)?;
     }
     write_runtime_json_with_root(
         data_dir,
-        principal_id,
-        &root,
+        authority,
         &publish_record_uri(&root, &record.object_uri),
         record,
     )?;
@@ -8564,13 +8605,20 @@ pub(crate) fn cid_is_published_here(data_dir: &Path, cid: &str) -> bool {
 #[cfg(unix)]
 #[cfg(test)]
 pub(crate) fn withdraw_as_alpha25_for_test(data_dir: &Path, principal_id: &str, object_uri: &str) {
-    let mut record = read_publish_record(data_dir, principal_id, object_uri).unwrap();
+    let mut record = read_publish_record(
+        data_dir,
+        &crate::object_authority::ObjectAuthorityV1::build(data_dir, principal_id)
+            .expect("object authority"),
+        object_uri,
+    )
+    .unwrap();
     record.publication_id = None;
     record.unpublished_at = Some(record.published_at + 1);
     let root = crate::auth::principal_localhost_root(principal_id);
     write_runtime_json(
         data_dir,
-        principal_id,
+        &crate::object_authority::ObjectAuthorityV1::build(data_dir, principal_id)
+            .expect("object authority"),
         &publish_record_uri(&root, object_uri),
         &record,
     )
@@ -8590,7 +8638,15 @@ pub fn reconcile_published_cids(data_dir: &Path) {
         .collect();
     let mut publications = std::collections::BTreeMap::new();
     for principal in &principals {
-        for record in publish_records(data_dir, principal) {
+        let Ok(authority) = crate::object_authority::ObjectAuthorityV1::build(data_dir, principal)
+        else {
+            tracing::warn!(
+                principal,
+                "library: skipping unresolved publish-record principal"
+            );
+            continue;
+        };
+        for record in publish_records(data_dir, &authority) {
             if record_is_published(&record) {
                 publications.insert(
                     published_index_key(principal, &record),
@@ -8651,12 +8707,10 @@ pub(crate) fn withdraw_cid_for_test(data_dir: &Path, cid: &str) {
 
 fn remove_publish_record(
     data_dir: &Path,
-    principal_id: &str,
+    authority: &crate::object_authority::ObjectAuthorityV1,
     object_uri: &str,
 ) -> anyhow::Result<()> {
-    let root = crate::auth::ResolvedPrincipalRoot::resolve(data_dir, data_dir, principal_id)?
-        .localhost_root()
-        .to_string();
+    let root = authority.require_local_root()?.to_string();
     remove_runtime_file(data_dir, &publish_record_uri(&root, object_uri))
 }
 
@@ -8667,11 +8721,12 @@ fn remove_publish_record(
 /// only inside that write. A crash in between leaves one record or none.
 fn move_publish_record(
     data_dir: &Path,
-    principal_id: &str,
+    authority: &crate::object_authority::ObjectAuthorityV1,
     from_uri: &str,
     to_uri: &str,
 ) -> anyhow::Result<()> {
-    let Ok(mut record) = read_publish_record(data_dir, principal_id, from_uri) else {
+    let principal_id = authority.principal_id();
+    let Ok(mut record) = read_publish_record(data_dir, authority, from_uri) else {
         return Ok(());
     };
     if record_is_runtime_custody(&record) {
@@ -8680,13 +8735,13 @@ fn move_publish_record(
     if record_is_published(&record) {
         set_published_index_entry(data_dir, principal_id, &record, false)?;
     }
-    remove_publish_record(data_dir, principal_id, from_uri)?;
+    remove_publish_record(data_dir, authority, from_uri)?;
     stop_before_new_publish_record()?;
     record.object_uri = to_uri.to_string();
     if let Some(object_uri) = record.content_security.get_mut("object_uri") {
         *object_uri = Value::String(to_uri.to_string());
     }
-    write_publish_record(data_dir, principal_id, &record)
+    write_publish_record(data_dir, authority, &record)
 }
 
 #[cfg(test)]
@@ -8737,19 +8792,23 @@ fn stop_before_publish_index() -> anyhow::Result<()> {
 
 /// Refuses to delete `uri` (a file, or a folder and everything in it) while it
 /// holds an active plain publication: Unpublish withdraws it first.
-fn refuse_deleting_published(data_dir: &Path, principal_id: &str, uri: &str) -> anyhow::Result<()> {
-    refuse_published_records(uri, &plain_publish_records(data_dir, principal_id))
+fn refuse_deleting_published(
+    data_dir: &Path,
+    authority: &crate::object_authority::ObjectAuthorityV1,
+    uri: &str,
+) -> anyhow::Result<()> {
+    refuse_published_records(uri, &plain_publish_records(data_dir, authority))
 }
 
 fn refuse_deleting_published_with_root(
     data_dir: &Path,
-    principal_id: &str,
+    authority: &crate::object_authority::ObjectAuthorityV1,
     root: &str,
     uri: &str,
 ) -> anyhow::Result<()> {
     refuse_published_records(
         uri,
-        &plain_publish_records_with_root(data_dir, principal_id, root),
+        &plain_publish_records_with_root(data_dir, authority, root),
     )
 }
 
@@ -8777,19 +8836,17 @@ fn refuse_published_records(uri: &str, records: &[LibraryPublishRecord]) -> anyh
 
 fn library_events(
     data_dir: &Path,
-    principal_id: &str,
+    authority: &crate::object_authority::ObjectAuthorityV1,
     uri_filter: Option<&str>,
     since: Option<u64>,
     limit: Option<usize>,
 ) -> anyhow::Result<Vec<LibraryEvent>> {
-    let root = crate::auth::ResolvedPrincipalRoot::resolve(data_dir, data_dir, principal_id)?
-        .localhost_root()
-        .to_string();
+    let root = authority.require_local_root()?.to_string();
     let uri_filter = uri_filter
         .map(|uri| clean_library_uri(&root, uri))
         .transpose()?;
     let limit = limit.unwrap_or(64).clamp(1, MAX_LIBRARY_EVENTS);
-    let mut events = read_library_events_with_root(data_dir, principal_id, &root)?;
+    let mut events = read_library_events_with_root(data_dir, authority, &root)?;
     events.retain(|event| {
         since.map(|since| event.at > since).unwrap_or(true)
             && uri_filter
@@ -8806,26 +8863,24 @@ fn library_events(
 
 fn append_library_event(
     data_dir: &Path,
-    principal_id: &str,
+    authority: &crate::object_authority::ObjectAuthorityV1,
     op: &str,
     uri: &str,
     details: Value,
 ) -> anyhow::Result<LibraryEvent> {
-    let root = crate::auth::ResolvedPrincipalRoot::resolve(data_dir, data_dir, principal_id)?
-        .localhost_root()
-        .to_string();
-    append_library_event_with_root(data_dir, principal_id, &root, op, uri, details)
+    let root = authority.require_local_root()?.to_string();
+    append_library_event_with_root(data_dir, authority, &root, op, uri, details)
 }
 
 fn append_library_event_with_root(
     data_dir: &Path,
-    principal_id: &str,
+    authority: &crate::object_authority::ObjectAuthorityV1,
     root: &str,
     op: &str,
     uri: &str,
     details: Value,
 ) -> anyhow::Result<LibraryEvent> {
-    let mut events = read_library_events_with_root(data_dir, principal_id, root)?;
+    let mut events = read_library_events_with_root(data_dir, authority, root)?;
     let event = LibraryEvent {
         schema: LIBRARY_EVENT_SCHEMA.to_string(),
         event_id: library_event_id(op, uri, &details),
@@ -8839,14 +8894,14 @@ fn append_library_event_with_root(
         let keep_from = events.len() - MAX_LIBRARY_EVENTS;
         events.drain(0..keep_from);
     }
-    write_library_events_with_root(data_dir, principal_id, root, &events)?;
+    write_library_events_with_root(data_dir, authority, root, &events)?;
     library_event_notifier().notify_waiters();
     Ok(event)
 }
 
 fn read_library_events_with_root(
     data_dir: &Path,
-    principal_id: &str,
+    authority: &crate::object_authority::ObjectAuthorityV1,
     root: &str,
 ) -> anyhow::Result<Vec<LibraryEvent>> {
     let event_uri = library_event_log_uri(root);
@@ -8858,12 +8913,11 @@ fn read_library_events_with_root(
     if !event_path.exists() {
         return Ok(Vec::new());
     }
-    let bytes = crate::auth::read_principal_root_object(
-        data_dir,
-        principal_id,
-        root,
-        &event_uri,
+    let bytes = crate::object_authority::read_principal_root_object_with_authority(
+        authority,
         &event_path,
+        &event_uri,
+        data_dir,
     )?;
     let text = String::from_utf8(bytes).context("library event log must be utf-8 jsonl")?;
     text.lines()
@@ -8874,7 +8928,7 @@ fn read_library_events_with_root(
 
 fn write_library_events_with_root(
     data_dir: &Path,
-    principal_id: &str,
+    authority: &crate::object_authority::ObjectAuthorityV1,
     root: &str,
     events: &[LibraryEvent],
 ) -> anyhow::Result<()> {
@@ -8889,13 +8943,13 @@ fn write_library_events_with_root(
         serde_json::to_writer(&mut bytes, event)?;
         bytes.push(b'\n');
     }
-    crate::auth::write_principal_root_object(
-        data_dir,
-        principal_id,
-        root,
-        &event_uri,
+    crate::object_authority::write_principal_root_object_with_authority(
+        authority,
         &event_path,
+        &event_uri,
+        data_dir,
         &bytes,
+        false,
     )
 }
 
@@ -9028,9 +9082,10 @@ pub(crate) use crate::protected_content_runtime::ENABLED_CONFIG_KEY as PROTECT_H
 /// Fill `viewer`, `viewers`, and the `protect` capability on library objects
 /// the fenced object helper returned.
 ///
-/// The helper's roots are `ElastOS/System`, `Users`, `UsersAI`, and
-/// `ElastOS/SystemServices/Library` (the published-CID index only). It does not
-/// receive `components.json`, `capsules`, or `config.toml`. The Runtime reads
+/// The helper's roots are `Users`, `UsersAI`, and
+/// `ElastOS/SystemServices/Library` (the published-CID index only). The
+/// sign-in folder is outside those roots. The helper does not receive
+/// `components.json`, `capsules`, or `config.toml`. The Runtime reads
 /// those three and writes only these fields. Every other `LibraryObject`
 /// field stays the helper's: `schema`, `uri`, `name`, `kind`, `mime`, `size`,
 /// `created_at`, `modified_at`, `revision`, `thumbnail_uri`, `availability`,
@@ -9407,21 +9462,41 @@ mod tests {
         for writer in ["copy", "move"] {
             let from = library_target(
                 dir.path(),
-                principal_id,
+                &crate::object_authority::ObjectAuthorityV1::build(dir.path(), principal_id)
+                    .expect("object authority"),
                 &format!("{root}/Documents/Source-{writer}"),
             )
             .unwrap();
-            let to =
-                library_target(dir.path(), principal_id, &format!("{parent}/{writer}")).unwrap();
+            let to = library_target(
+                dir.path(),
+                &crate::object_authority::ObjectAuthorityV1::build(dir.path(), principal_id)
+                    .expect("object authority"),
+                &format!("{parent}/{writer}"),
+            )
+            .unwrap();
             fs::create_dir_all(&from.path).unwrap();
             // The empty source lands 15 folders deep: allowed.
             rule.tree(&from.path, &to.uri).unwrap();
             // A folder added now would land 16 deep.
             fs::create_dir(from.path.join("late")).unwrap();
             let result = if writer == "copy" {
-                copy_library_directory(dir.path(), principal_id, &rule, &from, &to)
+                copy_library_directory(
+                    dir.path(),
+                    &crate::object_authority::ObjectAuthorityV1::build(dir.path(), principal_id)
+                        .expect("object authority"),
+                    &rule,
+                    &from,
+                    &to,
+                )
             } else {
-                move_library_directory(dir.path(), principal_id, &rule, &from, &to)
+                move_library_directory(
+                    dir.path(),
+                    &crate::object_authority::ObjectAuthorityV1::build(dir.path(), principal_id)
+                        .expect("object authority"),
+                    &rule,
+                    &from,
+                    &to,
+                )
             };
             let message = result.unwrap_err().to_string();
             assert!(
@@ -9659,7 +9734,8 @@ mod tests {
         let archive_uri = format!("{root}/Documents/Pax.tar");
         write_library_file_bytes(
             dir.path(),
-            principal_id,
+            &crate::object_authority::ObjectAuthorityV1::build(dir.path(), principal_id)
+                .expect("object authority"),
             &archive_uri,
             None,
             None,
@@ -9667,8 +9743,19 @@ mod tests {
             &bytes,
         )
         .unwrap();
-        let target = library_target(dir.path(), principal_id, &archive_uri).unwrap();
-        let whole = extract_library_archive(dir.path(), principal_id, &target);
+        let target = library_target(
+            dir.path(),
+            &crate::object_authority::ObjectAuthorityV1::build(dir.path(), principal_id)
+                .expect("object authority"),
+            &archive_uri,
+        )
+        .unwrap();
+        let whole = extract_library_archive(
+            dir.path(),
+            &crate::object_authority::ObjectAuthorityV1::build(dir.path(), principal_id)
+                .expect("object authority"),
+            &target,
+        );
         assert_eq!(
             whole.unwrap_err().to_string(),
             "Documents/Pax.tar holds a sparse file entry; Library does not open archives like \
@@ -9774,7 +9861,8 @@ mod tests {
         let bytes = writer.finish().unwrap().into_inner();
         write_library_file_bytes(
             dir.path(),
-            principal_id,
+            &crate::object_authority::ObjectAuthorityV1::build(dir.path(), principal_id)
+                .expect("object authority"),
             &archive_uri,
             None,
             None,
@@ -9782,7 +9870,13 @@ mod tests {
             &bytes,
         )
         .unwrap();
-        let target = library_target(dir.path(), principal_id, &archive_uri).unwrap();
+        let target = library_target(
+            dir.path(),
+            &crate::object_authority::ObjectAuthorityV1::build(dir.path(), principal_id)
+                .expect("object authority"),
+            &archive_uri,
+        )
+        .unwrap();
 
         EXTRACT_BEFORE_WRITE_HOOK.with(|hook| {
             *hook.borrow_mut() = Some(Box::new(|destination: &Path| {
@@ -9790,9 +9884,14 @@ mod tests {
                 fs::write(destination.join("ok.txt"), b"theirs").unwrap();
             }));
         });
-        let message = extract_library_archive(dir.path(), principal_id, &target)
-            .unwrap_err()
-            .to_string();
+        let message = extract_library_archive(
+            dir.path(),
+            &crate::object_authority::ObjectAuthorityV1::build(dir.path(), principal_id)
+                .expect("object authority"),
+            &target,
+        )
+        .unwrap_err()
+        .to_string();
         assert_eq!(
             message,
             "Documents/Pack appeared while the archive was being checked, so nothing was \
@@ -9800,7 +9899,8 @@ mod tests {
         );
         let theirs = library_target(
             dir.path(),
-            principal_id,
+            &crate::object_authority::ObjectAuthorityV1::build(dir.path(), principal_id)
+                .expect("object authority"),
             &format!("{root}/Documents/Pack/ok.txt"),
         )
         .unwrap();
@@ -10468,10 +10568,15 @@ mod tests {
             write["message"], "library create-only write does not accept if_revision",
             "{write}"
         );
-        assert!(!library_target(dir.path(), principal_id, &file_uri)
-            .unwrap()
-            .path
-            .exists());
+        assert!(!library_target(
+            dir.path(),
+            &crate::object_authority::ObjectAuthorityV1::build(dir.path(), principal_id)
+                .expect("object authority"),
+            &file_uri
+        )
+        .unwrap()
+        .path
+        .exists());
     }
 
     #[cfg(unix)]
@@ -10647,9 +10752,14 @@ mod publish_tests {
         }
 
         fn path(&self, path: &str) -> PathBuf {
-            library_target(self.dir.path(), self.principal, &self.uri(path))
-                .unwrap()
-                .path
+            library_target(
+                self.dir.path(),
+                &crate::object_authority::ObjectAuthorityV1::build(self.dir.path(), self.principal)
+                    .expect("object authority"),
+                &self.uri(path),
+            )
+            .unwrap()
+            .path
         }
 
         async fn write(&self, path: &str, bytes: &[u8]) -> Value {
@@ -10770,7 +10880,8 @@ mod publish_tests {
         content_security["published_payload"] = json!(RUNTIME_CUSTODY_PUBLISHED_PAYLOAD);
         write_publish_record(
             home.dir.path(),
-            home.principal,
+            &crate::object_authority::ObjectAuthorityV1::build(home.dir.path(), home.principal)
+                .expect("object authority"),
             &LibraryPublishRecord {
                 schema: "elastos.library.publish-record/v1".to_string(),
                 object_uri: uri.clone(),
@@ -10894,7 +11005,8 @@ mod publish_tests {
         let refused = publish_library_uri_locked(
             home.dir.path(),
             &home.registry,
-            home.principal,
+            &crate::object_authority::ObjectAuthorityV1::build(home.dir.path(), home.principal)
+                .expect("object authority"),
             "file:///etc/passwd",
             None,
             None,
@@ -10949,7 +11061,8 @@ mod publish_tests {
             let refused = publish_library_uri_locked(
                 home.dir.path(),
                 &home.registry,
-                home.principal,
+                &crate::object_authority::ObjectAuthorityV1::build(home.dir.path(), home.principal)
+                    .expect("object authority"),
                 &home.uri(hidden),
                 None,
                 None,
@@ -11128,7 +11241,11 @@ mod publish_tests {
         );
         assert_eq!(rename["status"], "ok", "{rename}");
         // Whichever ran first, no publication is left at a missing path.
-        for record in plain_publish_records(home.dir.path(), home.principal) {
+        for record in plain_publish_records(
+            home.dir.path(),
+            &crate::object_authority::ObjectAuthorityV1::build(home.dir.path(), home.principal)
+                .expect("object authority"),
+        ) {
             assert_eq!(record.object_uri, home.uri("Documents/b.txt"), "{publish}");
         }
         if publish["status"] == "ok" {
@@ -11146,10 +11263,13 @@ mod publish_tests {
         home.write("Documents/post.txt", b"post me").await;
         let uri = home.uri("Documents/post.txt");
         let bind = |request_id: &str, publication_id: &str| {
+            let authority =
+                crate::object_authority::ObjectAuthorityV1::build(home.dir.path(), home.principal)
+                    .expect("object authority");
             write_runtime_json(
                 home.dir.path(),
-                home.principal,
-                &chat_attach_binding_uri(home.dir.path(), home.principal, request_id).unwrap(),
+                &authority,
+                &chat_attach_binding_uri(&authority, request_id).unwrap(),
                 &ChatAttachBinding {
                     schema: "elastos.library.chat-attach/v1".to_string(),
                     request_id: request_id.to_string(),
@@ -11181,7 +11301,8 @@ mod publish_tests {
             publish_library_uri_locked(
                 home.dir.path(),
                 &home.registry,
-                home.principal,
+                &crate::object_authority::ObjectAuthorityV1::build(home.dir.path(), home.principal)
+                    .expect("object authority"),
                 &uri,
                 None,
                 Some("intended-id".to_string()),
@@ -11327,28 +11448,95 @@ mod publish_tests {
             }
         }))
         .unwrap();
-        write_publish_record(home.dir.path(), home.principal, &record).unwrap();
+        write_publish_record(
+            home.dir.path(),
+            &crate::object_authority::ObjectAuthorityV1::build(home.dir.path(), home.principal)
+                .expect("object authority"),
+            &record,
+        )
+        .unwrap();
 
         arm_move_gap(1);
-        let stopped = move_publish_record(home.dir.path(), home.principal, &from, &to);
+        let stopped = move_publish_record(
+            home.dir.path(),
+            &crate::object_authority::ObjectAuthorityV1::build(home.dir.path(), home.principal)
+                .expect("object authority"),
+            &from,
+            &to,
+        );
         assert!(stopped.is_err(), "{stopped:?}");
-        assert!(read_publish_record(home.dir.path(), home.principal, &from).is_err());
-        assert!(read_publish_record(home.dir.path(), home.principal, &to).is_err());
+        assert!(read_publish_record(
+            home.dir.path(),
+            &crate::object_authority::ObjectAuthorityV1::build(home.dir.path(), home.principal)
+                .expect("object authority"),
+            &from
+        )
+        .is_err());
+        assert!(read_publish_record(
+            home.dir.path(),
+            &crate::object_authority::ObjectAuthorityV1::build(home.dir.path(), home.principal)
+                .expect("object authority"),
+            &to
+        )
+        .is_err());
         assert!(!cid_is_published_here(home.dir.path(), "cid-move-order"));
 
-        write_publish_record(home.dir.path(), home.principal, &record).unwrap();
+        write_publish_record(
+            home.dir.path(),
+            &crate::object_authority::ObjectAuthorityV1::build(home.dir.path(), home.principal)
+                .expect("object authority"),
+            &record,
+        )
+        .unwrap();
         arm_move_gap(2);
-        let index_stopped = move_publish_record(home.dir.path(), home.principal, &from, &to);
+        let index_stopped = move_publish_record(
+            home.dir.path(),
+            &crate::object_authority::ObjectAuthorityV1::build(home.dir.path(), home.principal)
+                .expect("object authority"),
+            &from,
+            &to,
+        );
         assert!(index_stopped.is_err(), "{index_stopped:?}");
-        assert!(read_publish_record(home.dir.path(), home.principal, &from).is_err());
-        let kept = read_publish_record(home.dir.path(), home.principal, &to).unwrap();
+        assert!(read_publish_record(
+            home.dir.path(),
+            &crate::object_authority::ObjectAuthorityV1::build(home.dir.path(), home.principal)
+                .expect("object authority"),
+            &from
+        )
+        .is_err());
+        let kept = read_publish_record(
+            home.dir.path(),
+            &crate::object_authority::ObjectAuthorityV1::build(home.dir.path(), home.principal)
+                .expect("object authority"),
+            &to,
+        )
+        .unwrap();
         assert_eq!(kept.object_uri, to);
         assert!(record_is_published(&kept));
         assert!(!cid_is_published_here(home.dir.path(), "cid-move-order"));
 
-        move_publish_record(home.dir.path(), home.principal, &to, &later).unwrap();
-        assert!(read_publish_record(home.dir.path(), home.principal, &to).is_err());
-        assert!(read_publish_record(home.dir.path(), home.principal, &later).is_ok());
+        move_publish_record(
+            home.dir.path(),
+            &crate::object_authority::ObjectAuthorityV1::build(home.dir.path(), home.principal)
+                .expect("object authority"),
+            &to,
+            &later,
+        )
+        .unwrap();
+        assert!(read_publish_record(
+            home.dir.path(),
+            &crate::object_authority::ObjectAuthorityV1::build(home.dir.path(), home.principal)
+                .expect("object authority"),
+            &to
+        )
+        .is_err());
+        assert!(read_publish_record(
+            home.dir.path(),
+            &crate::object_authority::ObjectAuthorityV1::build(home.dir.path(), home.principal)
+                .expect("object authority"),
+            &later
+        )
+        .is_ok());
         assert!(cid_is_published_here(home.dir.path(), "cid-move-order"));
     }
 }
@@ -11526,7 +11714,8 @@ mod r5a_tests {
         );
         let events = read_library_events_with_root(
             agent.path(),
-            r4_fixture::AGENT_ID,
+            &crate::object_authority::ObjectAuthorityV1::build(agent.path(), r4_fixture::AGENT_ID)
+                .expect("object authority"),
             r4_fixture::AGENT_ROOT,
         )
         .unwrap();
@@ -11576,7 +11765,8 @@ mod r5a_tests {
         fs::write(&kept_path, b"kept-published").unwrap();
         write_trash_record(
             agent.path(),
-            r4_fixture::AGENT_ID,
+            &crate::object_authority::ObjectAuthorityV1::build(agent.path(), r4_fixture::AGENT_ID)
+                .expect("object authority"),
             &LibraryTrashRecord {
                 schema: LIBRARY_TRASH_RECORD_SCHEMA.into(),
                 trash_uri: kept_uri.into(),
@@ -11594,7 +11784,8 @@ mod r5a_tests {
         );
         write_runtime_json(
             agent.path(),
-            r4_fixture::AGENT_ID,
+            &crate::object_authority::ObjectAuthorityV1::build(agent.path(), r4_fixture::AGENT_ID)
+                .expect("object authority"),
             kept_publish_uri,
             &json!({
                 "schema": "elastos.library.publish/v1",
@@ -11638,7 +11829,8 @@ mod r5a_tests {
         fs::write(&gone_path, b"gone-trash").unwrap();
         write_trash_record(
             clear.path(),
-            r4_fixture::AGENT_ID,
+            &crate::object_authority::ObjectAuthorityV1::build(clear.path(), r4_fixture::AGENT_ID)
+                .expect("object authority"),
             &LibraryTrashRecord {
                 schema: LIBRARY_TRASH_RECORD_SCHEMA.into(),
                 trash_uri: gone_uri.into(),
@@ -11680,7 +11872,11 @@ mod r5a_tests {
             let uri = format!("{root}/.AppData/LocalHost/.Runtime/Library/R5a/write.json");
             let result = write_runtime_json(
                 dir.path(),
-                r4_fixture::principal_id(kind),
+                &crate::object_authority::ObjectAuthorityV1::build(
+                    dir.path(),
+                    r4_fixture::principal_id(kind),
+                )
+                .expect("object authority"),
                 &uri,
                 &json!({"site": 3}),
             );
@@ -11691,7 +11887,13 @@ mod r5a_tests {
         let absent = tempfile::tempdir().unwrap();
         let uri = format!("{}/R5a/write.json", r4_fixture::HUMAN_ROOT);
         let decoy = id_rule_decoy(absent.path(), &uri, b"id-rule json");
-        let result = write_runtime_json(absent.path(), r4_fixture::ID, &uri, &json!({}));
+        let result = write_runtime_json(
+            absent.path(),
+            &crate::object_authority::ObjectAuthorityV1::build(absent.path(), r4_fixture::ID)
+                .expect("object authority"),
+            &uri,
+            &json!({}),
+        );
         assert!(
             result
                 .as_ref()
@@ -11712,17 +11914,28 @@ mod r5a_tests {
             let uri = format!("{root}/.AppData/LocalHost/.Runtime/Library/R5a/read.json");
             let path = rooted_localhost_fs_path(dir.path(), &uri).unwrap();
             fs::create_dir_all(path.parent().unwrap()).unwrap();
-            crate::auth::write_principal_root_object(
-                dir.path(),
-                r4_fixture::principal_id(kind),
-                root,
-                &uri,
+            crate::object_authority::write_principal_root_object_with_authority(
+                &crate::object_authority::ObjectAuthorityV1::build(
+                    dir.path(),
+                    r4_fixture::principal_id(kind),
+                )
+                .expect("object authority"),
                 &path,
+                &uri,
+                dir.path(),
                 br#"{"site":4}"#,
+                false,
             )
             .unwrap();
-            let result: anyhow::Result<Value> =
-                read_runtime_json(dir.path(), r4_fixture::principal_id(kind), &uri);
+            let result: anyhow::Result<Value> = read_runtime_json(
+                dir.path(),
+                &crate::object_authority::ObjectAuthorityV1::build(
+                    dir.path(),
+                    r4_fixture::principal_id(kind),
+                )
+                .expect("object authority"),
+                &uri,
+            );
             assert!(
                 result.as_ref().is_ok_and(|value| value["site"] == 4),
                 "{uri}: {result:?}"
@@ -11731,7 +11944,12 @@ mod r5a_tests {
         let absent = tempfile::tempdir().unwrap();
         let uri = format!("{}/R5a/read.json", r4_fixture::HUMAN_ROOT);
         let decoy = id_rule_decoy(absent.path(), &uri, br#"{"site":4}"#);
-        let result = read_runtime_json::<Value>(absent.path(), r4_fixture::ID, &uri);
+        let result = read_runtime_json::<Value>(
+            absent.path(),
+            &crate::object_authority::ObjectAuthorityV1::build(absent.path(), r4_fixture::ID)
+                .expect("object authority"),
+            &uri,
+        );
         assert!(
             result.is_err(),
             "read an unstored principal's JSON: {result:?}"
@@ -11777,16 +11995,27 @@ mod r5a_tests {
                 "cid": "cid-r5a", "published_at": 1, "receipt": {},
                 "availability": {},
             });
-            crate::auth::write_principal_root_object(
-                dir.path(),
-                r4_fixture::principal_id(kind),
-                root,
-                &uri,
+            crate::object_authority::write_principal_root_object_with_authority(
+                &crate::object_authority::ObjectAuthorityV1::build(
+                    dir.path(),
+                    r4_fixture::principal_id(kind),
+                )
+                .expect("object authority"),
                 &path,
+                &uri,
+                dir.path(),
                 &serde_json::to_vec(&record).unwrap(),
+                false,
             )
             .unwrap();
-            let records = publish_records(dir.path(), r4_fixture::principal_id(kind));
+            let records = publish_records(
+                dir.path(),
+                &crate::object_authority::ObjectAuthorityV1::build(
+                    dir.path(),
+                    r4_fixture::principal_id(kind),
+                )
+                .expect("object authority"),
+            );
             assert_eq!(records.len(), 1, "{root}");
             assert_eq!(records[0].object_uri, format!("{root}/Documents/r5a.txt"));
         }
@@ -11810,7 +12039,12 @@ mod r5a_tests {
             .with_writer(move || writer.clone())
             .finish();
         tracing::subscriber::with_default(subscriber, || {
-            assert!(publish_records(absent.path(), r4_fixture::ID).is_empty());
+            assert!(publish_records(
+                absent.path(),
+                &crate::object_authority::ObjectAuthorityV1::build(absent.path(), r4_fixture::ID)
+                    .expect("object authority")
+            )
+            .is_empty());
         });
         // An unresolved principal returns before this directory is read.
         assert!(!runtime_json_dir_reads(absent.path()).contains(&dir_uri));
@@ -11843,7 +12077,15 @@ mod r5a_tests {
         ] {
             let dir = home(kind);
             let record = trash(root);
-            let result = write_trash_record(dir.path(), r4_fixture::principal_id(kind), &record);
+            let result = write_trash_record(
+                dir.path(),
+                &crate::object_authority::ObjectAuthorityV1::build(
+                    dir.path(),
+                    r4_fixture::principal_id(kind),
+                )
+                .expect("object authority"),
+                &record,
+            );
             let uri = trash_record_uri(root, &record.trash_uri);
             assert!(
                 result.is_ok()
@@ -11857,7 +12099,12 @@ mod r5a_tests {
         let record = trash(r4_fixture::HUMAN_ROOT);
         let id_uri = trash_record_uri(r4_fixture::HUMAN_ROOT, &record.trash_uri);
         let id_path = seed_id_rule_file(dir.path(), &id_uri, b"id-rule trash record");
-        let result = write_trash_record(dir.path(), r4_fixture::ID, &record);
+        let result = write_trash_record(
+            dir.path(),
+            &crate::object_authority::ObjectAuthorityV1::build(dir.path(), r4_fixture::ID)
+                .expect("object authority"),
+            &record,
+        );
         assert!(
             result
                 .as_ref()
@@ -11884,10 +12131,23 @@ mod r5a_tests {
         ] {
             let dir = home(kind);
             let record = trash(root);
-            write_trash_record(dir.path(), r4_fixture::principal_id(kind), &record).unwrap();
+            write_trash_record(
+                dir.path(),
+                &crate::object_authority::ObjectAuthorityV1::build(
+                    dir.path(),
+                    r4_fixture::principal_id(kind),
+                )
+                .expect("object authority"),
+                &record,
+            )
+            .unwrap();
             let result = read_trash_record(
                 dir.path(),
-                r4_fixture::principal_id(kind),
+                &crate::object_authority::ObjectAuthorityV1::build(
+                    dir.path(),
+                    r4_fixture::principal_id(kind),
+                )
+                .expect("object authority"),
                 &record.trash_uri,
             );
             assert!(
@@ -11902,7 +12162,12 @@ mod r5a_tests {
         let id_uri = trash_record_uri(r4_fixture::HUMAN_ROOT, &record.trash_uri);
         let bytes = serde_json::to_vec(&record).unwrap();
         let id_path = seed_id_rule_file(dir.path(), &id_uri, &bytes);
-        let result = read_trash_record(dir.path(), r4_fixture::ID, &record.trash_uri);
+        let result = read_trash_record(
+            dir.path(),
+            &crate::object_authority::ObjectAuthorityV1::build(dir.path(), r4_fixture::ID)
+                .expect("object authority"),
+            &record.trash_uri,
+        );
         assert!(
             result
                 .as_ref()
@@ -11923,13 +12188,26 @@ mod r5a_tests {
         ] {
             let dir = home(kind);
             let record = trash(root);
-            write_trash_record(dir.path(), r4_fixture::principal_id(kind), &record).unwrap();
+            write_trash_record(
+                dir.path(),
+                &crate::object_authority::ObjectAuthorityV1::build(
+                    dir.path(),
+                    r4_fixture::principal_id(kind),
+                )
+                .expect("object authority"),
+                &record,
+            )
+            .unwrap();
             let uri = trash_record_uri(root, &record.trash_uri);
             let path = rooted_localhost_fs_path(dir.path(), &uri).unwrap();
             assert!(path.is_file(), "{uri}");
             let result = remove_trash_record(
                 dir.path(),
-                r4_fixture::principal_id(kind),
+                &crate::object_authority::ObjectAuthorityV1::build(
+                    dir.path(),
+                    r4_fixture::principal_id(kind),
+                )
+                .expect("object authority"),
                 &record.trash_uri,
             );
             assert!(result.is_ok() && !path.exists(), "{uri}: {result:?}");
@@ -11938,7 +12216,12 @@ mod r5a_tests {
         let record = trash(r4_fixture::HUMAN_ROOT);
         let id_uri = trash_record_uri(r4_fixture::HUMAN_ROOT, &record.trash_uri);
         let id_path = seed_id_rule_file(dir.path(), &id_uri, b"id-rule trash record");
-        let result = remove_trash_record(dir.path(), r4_fixture::ID, &record.trash_uri);
+        let result = remove_trash_record(
+            dir.path(),
+            &crate::object_authority::ObjectAuthorityV1::build(dir.path(), r4_fixture::ID)
+                .expect("object authority"),
+            &record.trash_uri,
+        );
         assert!(
             result
                 .as_ref()
@@ -11973,10 +12256,24 @@ mod r5a_tests {
             let dir = home(kind);
             let record = published(root);
             let uri = publish_record_uri(root, &record.object_uri);
-            write_runtime_json(dir.path(), r4_fixture::principal_id(kind), &uri, &record).unwrap();
+            write_runtime_json(
+                dir.path(),
+                &crate::object_authority::ObjectAuthorityV1::build(
+                    dir.path(),
+                    r4_fixture::principal_id(kind),
+                )
+                .expect("object authority"),
+                &uri,
+                &record,
+            )
+            .unwrap();
             let result = read_publish_record(
                 dir.path(),
-                r4_fixture::principal_id(kind),
+                &crate::object_authority::ObjectAuthorityV1::build(
+                    dir.path(),
+                    r4_fixture::principal_id(kind),
+                )
+                .expect("object authority"),
                 &record.object_uri,
             );
             assert!(
@@ -11991,7 +12288,12 @@ mod r5a_tests {
         let id_uri = publish_record_uri(r4_fixture::HUMAN_ROOT, &record.object_uri);
         let bytes = serde_json::to_vec(&record).unwrap();
         let id_path = seed_id_rule_file(dir.path(), &id_uri, &bytes);
-        let result = read_publish_record(dir.path(), r4_fixture::ID, &record.object_uri);
+        let result = read_publish_record(
+            dir.path(),
+            &crate::object_authority::ObjectAuthorityV1::build(dir.path(), r4_fixture::ID)
+                .expect("object authority"),
+            &record.object_uri,
+        );
         assert!(
             result
                 .as_ref()
@@ -12013,7 +12315,15 @@ mod r5a_tests {
             let dir = home(kind);
             let record = published(root);
             let uri = publish_record_uri(root, &record.object_uri);
-            let result = write_publish_record(dir.path(), r4_fixture::principal_id(kind), &record);
+            let result = write_publish_record(
+                dir.path(),
+                &crate::object_authority::ObjectAuthorityV1::build(
+                    dir.path(),
+                    r4_fixture::principal_id(kind),
+                )
+                .expect("object authority"),
+                &record,
+            );
             assert!(
                 result.is_ok()
                     && rooted_localhost_fs_path(dir.path(), &uri)
@@ -12026,7 +12336,12 @@ mod r5a_tests {
         let record = published(r4_fixture::HUMAN_ROOT);
         let id_uri = publish_record_uri(r4_fixture::HUMAN_ROOT, &record.object_uri);
         let id_path = seed_id_rule_file(dir.path(), &id_uri, b"id-rule publish record");
-        let result = write_publish_record(dir.path(), r4_fixture::ID, &record);
+        let result = write_publish_record(
+            dir.path(),
+            &crate::object_authority::ObjectAuthorityV1::build(dir.path(), r4_fixture::ID)
+                .expect("object authority"),
+            &record,
+        );
         assert!(
             result
                 .as_ref()
@@ -12050,7 +12365,12 @@ mod r5a_tests {
         let before = br#"{"schema":"elastos.library.published-cids/v1","publications":{}}"#;
         fs::write(&index_path, before).unwrap();
         let record = published(r4_fixture::HUMAN_ROOT);
-        let result = write_publish_record(dir.path(), r4_fixture::ID, &record);
+        let result = write_publish_record(
+            dir.path(),
+            &crate::object_authority::ObjectAuthorityV1::build(dir.path(), r4_fixture::ID)
+                .expect("object authority"),
+            &record,
+        );
         assert!(
             result
                 .as_ref()
@@ -12074,12 +12394,26 @@ mod r5a_tests {
             let dir = home(kind);
             let record = published(root);
             let uri = publish_record_uri(root, &record.object_uri);
-            write_runtime_json(dir.path(), r4_fixture::principal_id(kind), &uri, &record).unwrap();
+            write_runtime_json(
+                dir.path(),
+                &crate::object_authority::ObjectAuthorityV1::build(
+                    dir.path(),
+                    r4_fixture::principal_id(kind),
+                )
+                .expect("object authority"),
+                &uri,
+                &record,
+            )
+            .unwrap();
             let path = rooted_localhost_fs_path(dir.path(), &uri).unwrap();
             assert!(path.is_file(), "{uri}");
             let result = remove_publish_record(
                 dir.path(),
-                r4_fixture::principal_id(kind),
+                &crate::object_authority::ObjectAuthorityV1::build(
+                    dir.path(),
+                    r4_fixture::principal_id(kind),
+                )
+                .expect("object authority"),
                 &record.object_uri,
             );
             assert!(result.is_ok() && !path.exists(), "{uri}: {result:?}");
@@ -12088,7 +12422,12 @@ mod r5a_tests {
         let record = published(r4_fixture::HUMAN_ROOT);
         let id_uri = publish_record_uri(r4_fixture::HUMAN_ROOT, &record.object_uri);
         let id_path = seed_id_rule_file(dir.path(), &id_uri, b"id-rule publish record");
-        let result = remove_publish_record(dir.path(), r4_fixture::ID, &record.object_uri);
+        let result = remove_publish_record(
+            dir.path(),
+            &crate::object_authority::ObjectAuthorityV1::build(dir.path(), r4_fixture::ID)
+                .expect("object authority"),
+            &record.object_uri,
+        );
         assert!(
             result
                 .as_ref()
@@ -12125,7 +12464,11 @@ mod r5a_tests {
             let dir = home(kind);
             write_library_events_with_root(
                 dir.path(),
-                r4_fixture::principal_id(kind),
+                &crate::object_authority::ObjectAuthorityV1::build(
+                    dir.path(),
+                    r4_fixture::principal_id(kind),
+                )
+                .expect("object authority"),
                 root,
                 &[event(root)],
             )
@@ -12133,7 +12476,11 @@ mod r5a_tests {
             let filter = format!("{root}/Documents/e.txt");
             let result = library_events(
                 dir.path(),
-                r4_fixture::principal_id(kind),
+                &crate::object_authority::ObjectAuthorityV1::build(
+                    dir.path(),
+                    r4_fixture::principal_id(kind),
+                )
+                .expect("object authority"),
                 Some(&filter),
                 None,
                 None,
@@ -12152,7 +12499,14 @@ mod r5a_tests {
             serde_json::to_string(&event(r4_fixture::HUMAN_ROOT)).unwrap()
         );
         let id_path = seed_id_rule_file(dir.path(), &id_uri, bytes.as_bytes());
-        let result = library_events(dir.path(), r4_fixture::ID, None, None, None);
+        let result = library_events(
+            dir.path(),
+            &crate::object_authority::ObjectAuthorityV1::build(dir.path(), r4_fixture::ID)
+                .expect("object authority"),
+            None,
+            None,
+            None,
+        );
         assert!(
             result
                 .as_ref()
@@ -12175,18 +12529,19 @@ mod r5a_tests {
         let log_uri = "localhost://UsersAI/ba287e12925d9408db0f24e3/.AppData/LocalHost/.Runtime/Library/events.jsonl";
         let result = append_library_event(
             agent.path(),
-            r4_fixture::AGENT_ID,
+            &crate::object_authority::ObjectAuthorityV1::build(agent.path(), r4_fixture::AGENT_ID)
+                .expect("object authority"),
             "note",
             doc_uri,
             json!({ "marker": "r5b-append" }),
         );
         let log_path = rooted_localhost_fs_path(agent.path(), log_uri).unwrap();
-        let logged = crate::auth::read_principal_root_object(
-            agent.path(),
-            r4_fixture::AGENT_ID,
-            "localhost://UsersAI/ba287e12925d9408db0f24e3",
-            log_uri,
+        let logged = crate::object_authority::read_principal_root_object_with_authority(
+            &crate::object_authority::ObjectAuthorityV1::build(agent.path(), r4_fixture::AGENT_ID)
+                .expect("object authority"),
             &log_path,
+            log_uri,
+            agent.path(),
         );
         let text = logged
             .as_ref()
@@ -12205,7 +12560,8 @@ mod r5a_tests {
         let id_path = seed_id_rule_file(absent.path(), id_log_uri, b"id-rule event log");
         let refused = append_library_event(
             absent.path(),
-            r4_fixture::ID,
+            &crate::object_authority::ObjectAuthorityV1::build(absent.path(), r4_fixture::ID)
+                .expect("object authority"),
             "note",
             doc_uri,
             json!({ "marker": "r5b-append" }),
@@ -12232,13 +12588,14 @@ mod r5a_tests {
         let child_uri = "localhost://UsersAI/ba287e12925d9408db0f24e3/Documents/child.txt";
         let child_path = rooted_localhost_fs_path(agent.path(), child_uri).unwrap();
         fs::create_dir_all(child_path.parent().unwrap()).unwrap();
-        crate::auth::write_principal_root_object(
-            agent.path(),
-            r4_fixture::AGENT_ID,
-            "localhost://UsersAI/ba287e12925d9408db0f24e3",
-            child_uri,
+        crate::object_authority::write_principal_root_object_with_authority(
+            &crate::object_authority::ObjectAuthorityV1::build(agent.path(), r4_fixture::AGENT_ID)
+                .expect("object authority"),
             &child_path,
+            child_uri,
+            agent.path(),
             b"stored child",
+            false,
         )
         .unwrap();
         let listed = handle_library_request(
@@ -12298,8 +12655,14 @@ mod r5a_tests {
             (PrincipalKind::Human, r4_fixture::HUMAN_ROOT),
         ] {
             let dir = home(kind);
-            let result =
-                chat_attach_binding_uri(dir.path(), r4_fixture::principal_id(kind), "r5b-attach");
+            let result = chat_attach_binding_uri(
+                &crate::object_authority::ObjectAuthorityV1::build(
+                    dir.path(),
+                    r4_fixture::principal_id(kind),
+                )
+                .expect("object authority"),
+                "r5b-attach",
+            );
             assert!(
                 result.as_ref().is_ok_and(|uri| uri.starts_with(&format!(
                     "{root}/.AppData/LocalHost/.Runtime/Library/ChatAttach/"
@@ -12313,7 +12676,11 @@ mod r5a_tests {
             "localhost://Users/b2caa01d2e3d5fb2ec0d1478/.AppData/LocalHost/.Runtime/Library/ChatAttach/8fef004934571f09cf782aad202bffc7b697cb5556927323270becfd7073c080.json",
             b"id-rule attach",
         );
-        let result = chat_attach_binding_uri(dir.path(), r4_fixture::ID, "r5b-attach");
+        let result = chat_attach_binding_uri(
+            &crate::object_authority::ObjectAuthorityV1::build(dir.path(), r4_fixture::ID)
+                .expect("object authority"),
+            "r5b-attach",
+        );
         assert!(
             result
                 .as_ref()
@@ -12331,7 +12698,14 @@ mod r5a_tests {
             (PrincipalKind::Human, r4_fixture::HUMAN_ROOT),
         ] {
             let dir = home(kind);
-            let result = localhost_space_pointer_object(dir.path(), r4_fixture::principal_id(kind));
+            let result = localhost_space_pointer_object(
+                dir.path(),
+                &crate::object_authority::ObjectAuthorityV1::build(
+                    dir.path(),
+                    r4_fixture::principal_id(kind),
+                )
+                .expect("object authority"),
+            );
             assert!(
                 result.as_ref().is_ok_and(|object| object.uri == root),
                 "{root}: {result:?}"
@@ -12339,7 +12713,11 @@ mod r5a_tests {
         }
         let dir = tempfile::tempdir().unwrap();
         let decoy = id_rule_decoy(dir.path(), r4_fixture::HUMAN_ROOT, b"id-rule space");
-        let result = localhost_space_pointer_object(dir.path(), r4_fixture::ID);
+        let result = localhost_space_pointer_object(
+            dir.path(),
+            &crate::object_authority::ObjectAuthorityV1::build(dir.path(), r4_fixture::ID)
+                .expect("object authority"),
+        );
         assert!(
             result
                 .as_ref()
@@ -12358,7 +12736,15 @@ mod r5a_tests {
         ] {
             let dir = home(kind);
             let uri = format!("{root}/Documents/a.txt");
-            let result = library_target(dir.path(), r4_fixture::principal_id(kind), &uri);
+            let result = library_target(
+                dir.path(),
+                &crate::object_authority::ObjectAuthorityV1::build(
+                    dir.path(),
+                    r4_fixture::principal_id(kind),
+                )
+                .expect("object authority"),
+                &uri,
+            );
             assert!(
                 result.as_ref().is_ok_and(|target| target.uri == uri),
                 "{root}: {}",
@@ -12372,7 +12758,12 @@ mod r5a_tests {
         let dir = tempfile::tempdir().unwrap();
         let uri = format!("{}/Documents/a.txt", r4_fixture::HUMAN_ROOT);
         let decoy = id_rule_decoy(dir.path(), &uri, b"id-rule target");
-        let result = library_target(dir.path(), r4_fixture::ID, &uri);
+        let result = library_target(
+            dir.path(),
+            &crate::object_authority::ObjectAuthorityV1::build(dir.path(), r4_fixture::ID)
+                .expect("object authority"),
+            &uri,
+        );
         assert!(
             result
                 .as_ref()
@@ -12448,7 +12839,8 @@ mod r5a_tests {
             "publish" => block(library_publish(
                 dir,
                 Arc::new(ProviderRegistry::new()),
-                r4_fixture::ID,
+                &crate::object_authority::ObjectAuthorityV1::build(dir, r4_fixture::ID)
+                    .expect("object authority"),
                 file,
                 None,
                 None,
@@ -12458,7 +12850,8 @@ mod r5a_tests {
             "unpublish" => block(library_unpublish(
                 dir,
                 Arc::new(ProviderRegistry::new()),
-                r4_fixture::ID,
+                &crate::object_authority::ObjectAuthorityV1::build(dir, r4_fixture::ID)
+                    .expect("object authority"),
                 file,
                 None,
             ))
@@ -12466,7 +12859,8 @@ mod r5a_tests {
             "repair" => block(library_repair(
                 dir,
                 Arc::new(ProviderRegistry::new()),
-                r4_fixture::ID,
+                &crate::object_authority::ObjectAuthorityV1::build(dir, r4_fixture::ID)
+                    .expect("object authority"),
                 file,
             ))
             .map(|_| ()),
@@ -12648,7 +13042,7 @@ mod r5a_tests {
         let principal = "person:local:ada";
         let protection = crate::auth::store_test_principal_root_protection(held.path(), principal);
         std::fs::create_dir(held.path().join("components.json")).unwrap();
-        let reply = super::handle_object_provider_raw_request(
+        let request = crate::object_authority::ObjectAuthorityV1::attach(
             held.path(),
             &serde_json::json!({
                 "op": "mkdir",
@@ -12656,7 +13050,10 @@ mod r5a_tests {
                 "parent_uri": format!("{}/Notes", protection.localhost_root),
                 "name": "kept"
             }),
-        );
+        )
+        .expect("object authority");
+        let mut request = request;
+        let reply = super::handle_object_provider_raw_request(held.path(), &mut request);
         assert_eq!(reply["status"], "error", "{reply}");
         let message = reply["message"].as_str().unwrap_or("");
         assert!(
@@ -12668,6 +13065,162 @@ mod r5a_tests {
             .join(protection.localhost_root.trim_start_matches("localhost://"))
             .join("Notes/kept")
             .exists());
+    }
+}
+
+#[cfg(all(test, unix))]
+mod object_authority_rows {
+    use base64::Engine;
+
+    fn needle(parts: &[&str]) -> String {
+        parts.concat()
+    }
+
+    #[test]
+    fn library_rs_reads_no_auth_state() {
+        let source = include_str!("library.rs");
+        for parts in [
+            &["crate::auth::", "load_auth_state"][..],
+            &["load_", "principal_root_protection"][..],
+            &["Resolved", "PrincipalRoot"][..],
+            &["read_principal_root_object", "("][..],
+            &["write_principal_root_object", "("][..],
+            &["create_principal_root_object", "("][..],
+            &["principal_root_object_content_bound", "("][..],
+        ] {
+            let text = needle(parts);
+            assert!(!source.contains(&text), "{text}");
+        }
+    }
+
+    #[test]
+    fn object_requests_without_an_envelope_are_refused() {
+        let held = tempfile::tempdir().unwrap();
+        let principal = "person:local:ada";
+        let protection = crate::auth::store_test_principal_root_protection(held.path(), principal);
+        let uri = format!("{}/Notes/plain.txt", protection.localhost_root);
+        let mut request = serde_json::json!({
+            "op": "write",
+            "principal_id": principal,
+            "uri": uri,
+            "data": base64::engine::general_purpose::STANDARD.encode(b"plain")
+        });
+        let reply = super::handle_object_provider_raw_request(held.path(), &mut request);
+        assert_eq!(reply["status"], "error", "{reply}");
+        assert_eq!(reply["code"], "invalid_request");
+        assert!(
+            reply["message"]
+                .as_str()
+                .unwrap_or("")
+                .contains("no runtime authority envelope"),
+            "{reply}"
+        );
+        assert!(!held
+            .path()
+            .join(protection.localhost_root.trim_start_matches("localhost://"))
+            .join("Notes/plain.txt")
+            .exists());
+    }
+
+    #[test]
+    fn object_envelope_for_another_principal_is_refused() {
+        let held = tempfile::tempdir().unwrap();
+        let ada = "person:local:ada";
+        let protection = crate::auth::store_test_principal_root_protection(held.path(), ada);
+        let uri = format!("{}/Notes/owned.txt", protection.localhost_root);
+        let mut request = crate::object_authority::ObjectAuthorityV1::attach(
+            held.path(),
+            &serde_json::json!({
+                "op": "write",
+                "principal_id": ada,
+                "uri": uri,
+                "data": base64::engine::general_purpose::STANDARD.encode(b"owned")
+            }),
+        )
+        .expect("object authority");
+        request["principal_id"] = serde_json::json!("person:local:bob");
+        let mismatch = super::handle_object_provider_raw_request(held.path(), &mut request);
+        assert_eq!(mismatch["status"], "error", "{mismatch}");
+        assert!(
+            mismatch["message"]
+                .as_str()
+                .unwrap_or("")
+                .contains("does not match the request"),
+            "{mismatch}"
+        );
+        let mut request = crate::object_authority::ObjectAuthorityV1::attach(
+            held.path(),
+            &serde_json::json!({
+                "op": "write",
+                "principal_id": ada,
+                "uri": uri,
+                "data": base64::engine::general_purpose::STANDARD.encode(b"owned")
+            }),
+        )
+        .expect("object authority");
+        request[crate::object_authority::WIRE_FIELD]["root"] =
+            serde_json::json!("localhost://ElastOS/System/Auth");
+        let forged = super::handle_object_provider_raw_request(held.path(), &mut request);
+        assert_eq!(forged["status"], "error", "{forged}");
+        assert!(
+            forged["message"]
+                .as_str()
+                .unwrap_or("")
+                .contains("not this principal's root"),
+            "{forged}"
+        );
+        assert!(!held
+            .path()
+            .join(protection.localhost_root.trim_start_matches("localhost://"))
+            .join("Notes/owned.txt")
+            .exists());
+    }
+
+    #[test]
+    fn object_envelope_with_a_wrong_key_is_refused() {
+        let held = tempfile::tempdir().unwrap();
+        let ada = "person:local:ada";
+        let bob = "person:local:bob";
+        let ada_root = crate::auth::store_test_principal_root_protection(held.path(), ada);
+        crate::auth::store_test_principal_root_protection(held.path(), bob);
+        let uri = format!("{}/Notes/secret.txt", ada_root.localhost_root);
+        let plain = b"secret-plain";
+        let payload = base64::engine::general_purpose::STANDARD.encode(plain);
+        let write = crate::object_authority::ObjectAuthorityV1::attach(
+            held.path(),
+            &serde_json::json!({
+                "op": "write",
+                "principal_id": ada,
+                "uri": uri,
+                "data": payload
+            }),
+        )
+        .expect("object authority");
+        let mut write = write;
+        let wrote = super::handle_object_provider_raw_request(held.path(), &mut write);
+        assert_eq!(wrote["status"], "ok", "{wrote}");
+        let bob_authority =
+            crate::object_authority::ObjectAuthorityV1::build(held.path(), bob).expect("bob");
+        let mut envelope = bob_authority.wire();
+        envelope["principal_id"] = serde_json::json!(ada);
+        envelope["root"] = serde_json::json!(ada_root.localhost_root);
+        envelope["kind"] = serde_json::json!("human");
+        let mut read_request = serde_json::json!({
+            "op": "read",
+            "principal_id": ada,
+            "uri": uri,
+            "_runtime_object_authority": envelope
+        });
+        let read = super::handle_object_provider_raw_request(held.path(), &mut read_request);
+        let text = read.to_string();
+        assert_eq!(read["status"], "error", "{read}");
+        assert!(
+            text.contains("protected principal-root object is damaged")
+                || text.contains("protected principal-root object is not encrypted"),
+            "{read}"
+        );
+        assert!(!text.contains("secret-plain"), "{read}");
+        assert!(!text.contains(&payload), "{read}");
     }
 }
 
