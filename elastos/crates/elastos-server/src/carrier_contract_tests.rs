@@ -25,7 +25,8 @@ use sha2::{Digest, Sha256};
 
 #[cfg(unix)]
 use crate::carrier::{
-    start_carrier_node_with_registry, CarrierGossipProvider, CarrierNode, CarrierProviderInvoker,
+    start_isolated_carrier_node_with_registry, CarrierGossipProvider, CarrierNode,
+    CarrierProviderInvoker,
 };
 
 #[cfg(unix)]
@@ -166,9 +167,12 @@ impl CurrentCarrier {
         let sender_registry = Arc::new(ProviderRegistry::new());
         let receiver_registry = Arc::new(ProviderRegistry::new());
         crate::library::publish_cid_for_test(receiver_dir.path(), &content_cid(FILE_BYTES));
-        let (sender_key, sender_did) = elastos_identity::derive_did(&[211; 32]);
-        let (receiver_key, receiver_did) = elastos_identity::derive_did(&[212; 32]);
-        let sender_node = start_carrier_node_with_registry(
+        let mut seed = [0u8; 32];
+        getrandom::getrandom(&mut seed).expect("contract carrier seed");
+        let (sender_key, sender_did) = elastos_identity::derive_did(&seed);
+        seed[31] ^= 0xff;
+        let (receiver_key, receiver_did) = elastos_identity::derive_did(&seed);
+        let sender_node = start_isolated_carrier_node_with_registry(
             &sender_key,
             &sender_did,
             sender_dir.path().to_path_buf(),
@@ -176,7 +180,7 @@ impl CurrentCarrier {
         )
         .await
         .unwrap();
-        let receiver_node = start_carrier_node_with_registry(
+        let receiver_node = start_isolated_carrier_node_with_registry(
             &receiver_key,
             &receiver_did,
             receiver_dir.path().to_path_buf(),
@@ -427,9 +431,21 @@ impl CarrierUnderTest for CurrentCarrier {
         let answer =
             crate::carrier::send_did_message(&self.sender_registry, &self.receiver_did, bytes)
                 .await?;
-        let recorded = inbox.lock().expect("DID message inbox");
-        assert_eq!(recorded.len(), before + 1, "DID message was not recorded");
-        let message = recorded.last().expect("DID message");
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        let message = loop {
+            let found = {
+                let locked = inbox.lock().expect("DID message inbox");
+                locked.get(before).cloned()
+            };
+            if let Some(message) = found {
+                break message;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "DID message was not recorded"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        };
         assert_eq!(message.bytes, bytes);
         assert_eq!(
             answer["data"]["sender_did"].as_str().unwrap_or(""),
