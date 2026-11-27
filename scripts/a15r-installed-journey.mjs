@@ -2380,15 +2380,52 @@ function coordsPid() {
 // The coords file names a pid in this Home. The first runtime is `serve`.
 // After a gateway restart the same file names the `gateway` process. Either
 // one counts when its bytes are the installed elastos.
+function subcommandMatchingExe(command, exePath) {
+  const text = String(command || "").trim();
+  const direct = elastosSubcommand(text, [exePath]);
+  if (direct === "serve" || direct === "gateway") return direct;
+  let exeReal = String(exePath || "");
+  try { exeReal = fs.realpathSync(exeReal.replace(/ \(deleted\)$/, "")); } catch { /* keep */ }
+  for (const word of ["serve", "gateway"]) {
+    const marker = ` ${word}`;
+    let from = 0;
+    while (from < text.length) {
+      const at = text.indexOf(marker, from);
+      if (at < 0) break;
+      const next = text.charAt(at + marker.length);
+      if (next === "" || next === " " || next === "\t") {
+        const head = text.slice(0, at).replace(/ \(deleted\)$/, "");
+        let headReal = head;
+        try { headReal = fs.realpathSync(head); } catch { /* keep */ }
+        if (headReal === exeReal) return word;
+      }
+      from = at + 1;
+    }
+  }
+  const parts = text.split(/\s+/);
+  const base = String(parts[0] || "").replace(/ \(deleted\)$/, "");
+  const exeBase = exeReal.slice(exeReal.lastIndexOf("/") + 1);
+  if ((base === exeBase || base.endsWith(`/${exeBase}`)) && (parts[1] === "serve" || parts[1] === "gateway")) {
+    return parts[1];
+  }
+  return "";
+}
+
 function verifiedServePid(executables, commands, binary) {
   const pid = coordsPid();
   if (!pid) return { state: "absent" };
   const row = executables.rows.find((item) => item.pid === pid);
   if (!row) return { state: "dead" };
   const exe = realExe(row.exe);
-  const sub = elastosSubcommand(commands.get(String(pid)) || "", [row.exe, exe, binary, serveBin]);
+  const command = commands.get(String(pid)) || "";
+  const sub = [row.exe, exe, binary, serveBin]
+    .map((path) => subcommandMatchingExe(command, path))
+    .find((item) => item === "serve" || item === "gateway") || "";
   if (sub !== "serve" && sub !== "gateway") {
-    return { state: "unverified", reason: `coords pid command is ${sub || "unrecognised"}` };
+    return {
+      state: "unverified",
+      reason: `coords pid command is unrecognised: ${command.slice(0, 160)}`,
+    };
   }
   if (exe === binary) return { state: "serve", pid };
   let same = false;
