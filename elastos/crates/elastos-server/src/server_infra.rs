@@ -12674,6 +12674,35 @@ fn main() {
         );
     }
 
+    /// The localhost binary this row starts.
+    ///
+    /// A set `CARGO_BIN_EXE_localhost_provider` that names a file is that
+    /// binary. Otherwise the file is
+    /// `target/fence-localhost-provider/debug/localhost-provider`, which
+    /// `just prepare-providers` builds. A missing file panics and names that
+    /// command. This function does not run Cargo.
+    fn prepared_localhost_provider() -> PathBuf {
+        let env_key = "CARGO_BIN_EXE_localhost_provider";
+        if let Some(value) = std::env::var_os(env_key) {
+            let path = PathBuf::from(value);
+            if path.is_file() {
+                return path;
+            }
+            panic!("{env_key} is set but {} is not a file", path.display());
+        }
+        let repo =
+            std::fs::canonicalize(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../.."))
+                .expect("repo root");
+        let binary = repo.join("target/fence-localhost-provider/debug/localhost-provider");
+        if !binary.is_file() {
+            panic!(
+                "localhost-provider is not at {}. Run `just prepare-providers` before these tests. That command builds the helper binaries; the tests do not download crates.",
+                binary.display()
+            );
+        }
+        binary
+    }
+
     /// Read and append a plain `localhost://Users` file through the provider
     /// proxy, and refuse a file past the hard limit before its body is read.
     #[tokio::test]
@@ -12684,13 +12713,7 @@ fn main() {
         use elastos_runtime::session::{Session, SessionType};
         use sha2::Digest as _;
 
-        let binary =
-            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/debug/localhost-provider");
-        assert!(
-            binary.is_file(),
-            "{} is missing. Build localhost-provider before this row.",
-            binary.display()
-        );
+        let binary = prepared_localhost_provider();
         let root = TempDir::new().unwrap();
         fs::create_dir_all(root.path().join("Users")).unwrap();
         let plain = b"hello-plain";
