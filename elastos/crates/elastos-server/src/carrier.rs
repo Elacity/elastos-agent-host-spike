@@ -13991,13 +13991,13 @@ pub(crate) mod tests {
         )
         .await
         .unwrap();
+        let consumer_invoker =
+            Arc::new(CarrierProviderInvoker::with_carrier_endpoint_and_registry(
+                consumer_node.endpoint.clone(),
+                Arc::downgrade(&consumer_registry),
+            ));
         consumer_registry
-            .set_carrier_invoker(Arc::new(
-                CarrierProviderInvoker::with_carrier_endpoint_and_registry(
-                    consumer_node.endpoint.clone(),
-                    Arc::downgrade(&consumer_registry),
-                ),
-            ))
+            .set_carrier_invoker(consumer_invoker.clone())
             .await;
         consumer_registry
             .register_sub_provider("ipfs", Arc::new(EmptyIpfsBackend))
@@ -14293,6 +14293,8 @@ pub(crate) mod tests {
         )
         .await;
         silent.publish(cid);
+        wait_for_verified_peer_route(&consumer_invoker, &consumer_node.endpoint, &silent.addr)
+            .await;
         // A fresh consumer has no history, so the newest announcement is tried first.
         availability.peer_reputation.lock().await.clear();
         seed_content_availability_announcements(
@@ -14312,7 +14314,19 @@ pub(crate) mod tests {
                 .unwrap();
         let waited = started.elapsed();
         assert_eq!(piece, weights[..4]);
-        assert_eq!(silent_requests.lock().unwrap().len(), 1);
+        let logged_by = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let count = silent_requests.lock().unwrap().len();
+            assert!(count <= 1, "expected 1 silent request, got {count}");
+            if count == 1 {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < logged_by,
+                "silent request was not recorded"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
         assert_eq!(holder_requests.lock().unwrap().len(), before + 1);
         assert!(
             waited >= std::time::Duration::from_secs(5)
