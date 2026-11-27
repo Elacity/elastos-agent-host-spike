@@ -460,18 +460,9 @@ impl LocalProvider {
         Ok(buffer)
     }
 
+    #[rustfmt::skip]
     fn seal(&self, key: &[u8; 32], plain: &[u8]) -> io::Result<Vec<u8>> {
-        if self
-            .config
-            .extra
-            .get("file_key")
-            .and_then(serde_json::Value::as_bool)
-            == Some(true)
-        {
-            encrypt_file_key_bytes(key, plain)
-        } else {
-            encrypt_bytes(key, plain)
-        }
+        if self.config.extra.get("file_key").and_then(serde_json::Value::as_bool) == Some(true) { encrypt_file_key_bytes(key, plain) } else { encrypt_bytes(key, plain) }
     }
 
     /// Write file contents
