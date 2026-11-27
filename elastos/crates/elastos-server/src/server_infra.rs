@@ -584,8 +584,8 @@ async fn spawn_allow_listed_provider(
 /// Windows fences are P2-11, parked. This arm keeps `ProviderBridge::spawn`,
 /// the call Home used before the Unix fence. On Windows that spawn refuses
 /// before a process (`bridge_windows`). Localhost calls this arm from the
-/// file-key bringup. A missing localhost binary still stops Home. A spawn
-/// refusal becomes the bringup sentence, and local apps stay off.
+/// file-key bringup. A missing localhost binary still stops Home.
+/// A spawn refusal becomes the bringup sentence, and local apps stay off.
 #[cfg(not(unix))]
 async fn spawn_allow_listed_provider(
     _component_key: &str,
