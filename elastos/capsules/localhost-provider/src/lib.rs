@@ -61,11 +61,17 @@ pub const FILE_KEY_ENVELOPE_PREFIX: &[u8] = br#"{"version":2,"nonce":""#;
 pub const FILE_KEY_ENVELOPE_MARK: &[u8] =
     br#"{"version":2,"nonce":"00112233445566778899aabb","ciphertext":"0"#;
 
-#[rustfmt::skip]
 pub fn header_is_file_key_envelope(header: &[u8]) -> bool {
-    const H: &[u8] = br#"{"version":2,"nonce":""#; const M: &[u8] = br#"","ciphertext":""#;
+    const H: &[u8] = br#"{"version":2,"nonce":""#;
+    const M: &[u8] = br#"","ciphertext":""#;
     let (mid, d) = (H.len() + 24, H.len() + 24 + M.len());
-    header.len() > d && header.starts_with(H) && header[H.len()..mid].iter().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')) && header[mid..].starts_with(M) && matches!(header[d], b'0'..=b'9' | b'a'..=b'f')
+    header.len() > d
+        && header.starts_with(H)
+        && header[H.len()..mid]
+            .iter()
+            .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+        && header[mid..].starts_with(M)
+        && matches!(header[d], b'0'..=b'9' | b'a'..=b'f')
 }
 
 /// `encrypt_bytes` has written this since the first localhost provider.
@@ -86,28 +92,40 @@ pub fn header_is_device_key_envelope(header: &[u8]) -> bool {
 }
 
 /// Cut-off or damaged old header. `{`, `{"`, and a non-hex nonce stay plain.
-#[rustfmt::skip]
 pub fn header_looks_like_device_key_envelope(header: &[u8]) -> bool {
     header_looks_like_device_key_envelope_at(header, header.len() as u64)
 }
 
-#[rustfmt::skip]
 pub fn header_looks_like_device_key_envelope_at(header: &[u8], len: u64) -> bool {
-    const H: &[u8] = br#"{"version":1,"nonce":""#; const M: &[u8] = br#"","ciphertext":""#;
+    const H: &[u8] = br#"{"version":1,"nonce":""#;
+    const M: &[u8] = br#"","ciphertext":""#;
     let (mid, digit) = (H.len() + 24, H.len() + 24 + M.len());
-    if header.len() <= 2 || header_is_device_key_envelope(header) { return false; }
+    if header.len() <= 2 || header_is_device_key_envelope(header) {
+        return false;
+    }
     let whole = header.len() as u64 >= len;
-    if !header.starts_with(H) { return whole && H.starts_with(header); }
+    if !header.starts_with(H) {
+        return whole && H.starts_with(header);
+    }
     let end = header.len().min(mid);
-    if header[H.len()..end].iter().any(|b| !matches!(b, b'0'..=b'9' | b'a'..=b'f')) { return false; }
-    if header.len() <= digit { return whole && (header.len() <= mid || M.starts_with(&header[mid..])); }
+    if header[H.len()..end]
+        .iter()
+        .any(|b| !matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+    {
+        return false;
+    }
+    if header.len() <= digit {
+        return whole && (header.len() <= mid || M.starts_with(&header[mid..]));
+    }
     header[mid..].starts_with(M) && (len > 64 || whole)
 }
 
-#[rustfmt::skip]
 fn open_new_format(key: &[u8; 32], bytes: Vec<u8>, name: &str) -> io::Result<Vec<u8>> {
     let Some((mut body, nonce, version)) = ciphertext_in_place(bytes) else {
-        return Err(io::Error::new(io::ErrorKind::InvalidData, format!("{name} is cut off. Move it aside, or remove it.")));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("{name} is cut off. Move it aside, or remove it."),
+        ));
     };
     let why = if version == FILE_KEY_ENVELOPE_VERSION {
         format!("{name} does not decrypt. Move it aside, or remove it.")
@@ -116,7 +134,8 @@ fn open_new_format(key: &[u8; 32], bytes: Vec<u8>, name: &str) -> io::Result<Vec
     } else {
         format!("{name} does not decrypt. Restore identity/device.key, or move the file aside, then restart.")
     };
-    Aes256Gcm::new_from_slice(key).map_err(|e| io::Error::other(format!("AES key init: {e}")))?
+    Aes256Gcm::new_from_slice(key)
+        .map_err(|e| io::Error::other(format!("AES key init: {e}")))?
         .decrypt_in_place(&Nonce::from(nonce), b"", &mut body)
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, why))?;
     Ok(body)
@@ -135,78 +154,180 @@ pub fn take_sealed_read_bytes() -> u64 {
     SEALED_BYTES_READ.with(|slot| slot.replace(0))
 }
 
-#[rustfmt::skip]
-fn read_body_within_hard_limit(file: &mut std::fs::File, header: &[u8], len: u64, name: &str) -> io::Result<Vec<u8>> {
-    if len > SEALED_READ_HARD_LIMIT { return Err(hard_limit_refusal(name)); }
-    let Ok(n) = usize::try_from(len) else { return Err(hard_limit_refusal(name)); };
-    if header.len() > n { return Err(io::Error::new(io::ErrorKind::InvalidData, format!("{name} is cut off. Move it aside, or remove it."))); }
+fn read_body_within_hard_limit(
+    file: &mut std::fs::File,
+    header: &[u8],
+    len: u64,
+    name: &str,
+) -> io::Result<Vec<u8>> {
+    if len > SEALED_READ_HARD_LIMIT {
+        return Err(hard_limit_refusal(name));
+    }
+    let Ok(n) = usize::try_from(len) else {
+        return Err(hard_limit_refusal(name));
+    };
+    if header.len() > n {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("{name} is cut off. Move it aside, or remove it."),
+        ));
+    }
     let mut bytes = Vec::new();
-    if bytes.try_reserve_exact(n).is_err() { return Err(hard_limit_refusal(name)); }
+    if bytes.try_reserve_exact(n).is_err() {
+        return Err(hard_limit_refusal(name));
+    }
     bytes.resize(n, 0);
     bytes[..header.len()].copy_from_slice(header);
-    file.read_exact(&mut bytes[header.len()..]).map_err(|_| io::Error::new(io::ErrorKind::InvalidData, format!("{name} is cut off. Move it aside, or remove it.")))?;
+    file.read_exact(&mut bytes[header.len()..]).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("{name} is cut off. Move it aside, or remove it."),
+        )
+    })?;
     note_sealed_bytes((n - header.len()) as u64);
     Ok(bytes)
 }
 
 /// Envelope keys are `version`, `nonce`, and `ciphertext`. Over 32 MiB the stream stops at any other key and keeps no value.
-#[rustfmt::skip]
 mod scan {
     use super::{header_rules_out_envelope, ENVELOPE_BYTE_LIMIT};
     use std::io::{self, Read};
-    pub fn reads_as_plain_bytes(header: &[u8], len: u64, rest: &mut dyn Read) -> io::Result<(bool, u64)> {
+    pub fn reads_as_plain_bytes(
+        header: &[u8],
+        len: u64,
+        rest: &mut dyn Read,
+    ) -> io::Result<(bool, u64)> {
         envelope_version(header, len, rest).map(|(version, n)| (version.is_none(), n))
     }
     /// `None` is plain. `Some(0)` is an envelope at or under 32 MiB whose version was not read.
-    pub fn envelope_version(header: &[u8], len: u64, rest: &mut dyn Read) -> io::Result<(Option<u8>, u64)> {
+    pub fn envelope_version(
+        header: &[u8],
+        len: u64,
+        rest: &mut dyn Read,
+    ) -> io::Result<(Option<u8>, u64)> {
         // A header this Home writes, new or old, is an envelope at every size. Do not scan the body.
-        if super::header_is_file_key_envelope(header) { return Ok((Some(2), 0)); }
-        if super::header_is_device_key_envelope(header) { return Ok((Some(1), 0)); }
-        if super::header_looks_like_device_key_envelope_at(header, len) { return Ok((Some(1), 0)); }
-        if header_rules_out_envelope(header) || len <= ENVELOPE_BYTE_LIMIT { return Ok(((!header_rules_out_envelope(header)).then_some(0), 0)); }
-        let mut s = Src { rest, n: 0, b: [0; 8192], i: 0, j: header.len().min(8192), v: 0 };
+        if super::header_is_file_key_envelope(header) {
+            return Ok((Some(2), 0));
+        }
+        if super::header_is_device_key_envelope(header) {
+            return Ok((Some(1), 0));
+        }
+        if super::header_looks_like_device_key_envelope_at(header, len) {
+            return Ok((Some(1), 0));
+        }
+        if header_rules_out_envelope(header) || len <= ENVELOPE_BYTE_LIMIT {
+            return Ok(((!header_rules_out_envelope(header)).then_some(0), 0));
+        }
+        let mut s = Src {
+            rest,
+            n: 0,
+            b: [0; 8192],
+            i: 0,
+            j: header.len().min(8192),
+            v: 0,
+        };
         s.b[..s.j].copy_from_slice(&header[..s.j]);
         Ok((s.open()?.then_some(s.v), s.n))
     }
-    struct Src<'a> { rest: &'a mut dyn Read, n: u64, b: [u8; 8192], i: usize, j: usize, v: u8 }
+    struct Src<'a> {
+        rest: &'a mut dyn Read,
+        n: u64,
+        b: [u8; 8192],
+        i: usize,
+        j: usize,
+        v: u8,
+    }
     impl Src<'_> {
-        fn fill(&mut self) -> io::Result<bool> { self.i = 0; self.j = self.rest.read(&mut self.b)?; self.n += self.j as u64; Ok(self.j != 0) }
-        fn byte(&mut self) -> io::Result<Option<u8>> { if self.i == self.j && !self.fill()? { return Ok(None); } self.i += 1; Ok(Some(self.b[self.i - 1])) }
+        fn fill(&mut self) -> io::Result<bool> {
+            self.i = 0;
+            self.j = self.rest.read(&mut self.b)?;
+            self.n += self.j as u64;
+            Ok(self.j != 0)
+        }
+        fn byte(&mut self) -> io::Result<Option<u8>> {
+            if self.i == self.j && !self.fill()? {
+                return Ok(None);
+            }
+            self.i += 1;
+            Ok(Some(self.b[self.i - 1]))
+        }
         fn ws(&mut self) -> io::Result<Option<u8>> {
-            loop { let Some(b) = self.byte()? else { return Ok(None); }; if !matches!(b, b' ' | b'\t' | b'\n' | b'\r') { return Ok(Some(b)); } }
+            loop {
+                let Some(b) = self.byte()? else {
+                    return Ok(None);
+                };
+                if !matches!(b, b' ' | b'\t' | b'\n' | b'\r') {
+                    return Ok(Some(b));
+                }
+            }
         }
         fn key(&mut self) -> io::Result<Option<u8>> {
             let (mut name, mut k) = ([0u8; 10], 0);
             while let Some(b) = self.byte()? {
-                if b == b'"' { return Ok([b"version".as_slice(), b"nonce", b"ciphertext"].iter().position(|x| *x == &name[..k]).map(|id| id as u8)); }
-                if k == 10 || b == b'\\' { return Ok(None); }
-                name[k] = b; k += 1;
+                if b == b'"' {
+                    return Ok([b"version".as_slice(), b"nonce", b"ciphertext"]
+                        .iter()
+                        .position(|x| *x == &name[..k])
+                        .map(|id| id as u8));
+                }
+                if k == 10 || b == b'\\' {
+                    return Ok(None);
+                }
+                name[k] = b;
+                k += 1;
             }
             Ok(None)
         }
         fn hex(&mut self) -> io::Result<Option<u64>> {
             let mut count = 0u64;
             loop {
-                if self.i == self.j && !self.fill()? { return Ok(None); }
+                if self.i == self.j && !self.fill()? {
+                    return Ok(None);
+                }
                 let start = self.i;
-                while self.i < self.j && self.b[self.i].is_ascii_hexdigit() { self.i += 1; }
+                while self.i < self.j && self.b[self.i].is_ascii_hexdigit() {
+                    self.i += 1;
+                }
                 count += (self.i - start) as u64;
-                if self.i < self.j { if self.b[self.i] != b'"' { return Ok(None); } self.i += 1; return Ok(Some(count)); }
+                if self.i < self.j {
+                    if self.b[self.i] != b'"' {
+                        return Ok(None);
+                    }
+                    self.i += 1;
+                    return Ok(Some(count));
+                }
             }
         }
         fn open(&mut self) -> io::Result<bool> {
-            if self.ws()? != Some(b'{') { return Ok(false); }
+            if self.ws()? != Some(b'{') {
+                return Ok(false);
+            }
             let mut seen = 0u8;
             loop {
-                if self.ws()? != Some(b'"') { return Ok(false); }
-                let Some(id) = self.key()? else { return Ok(false); };
-                if (seen & (1 << id)) != 0 || self.ws()? != Some(b':') { return Ok(false); }
-                let lead = self.ws()?;
-                let ok = if id == 0 { self.ver(lead)? } else {
-                    let n = if lead == Some(b'"') { self.hex()? } else { None };
-                    n == Some(24) && id == 1 || n.is_some_and(|n| id == 2 && n >= 32 && n.is_multiple_of(2))
+                if self.ws()? != Some(b'"') {
+                    return Ok(false);
+                }
+                let Some(id) = self.key()? else {
+                    return Ok(false);
                 };
-                if !ok { return Ok(false); }
+                if (seen & (1 << id)) != 0 || self.ws()? != Some(b':') {
+                    return Ok(false);
+                }
+                let lead = self.ws()?;
+                let ok = if id == 0 {
+                    self.ver(lead)?
+                } else {
+                    let n = if lead == Some(b'"') {
+                        self.hex()?
+                    } else {
+                        None
+                    };
+                    n == Some(24) && id == 1
+                        || n.is_some_and(|n| id == 2 && n >= 32 && n.is_multiple_of(2))
+                };
+                if !ok {
+                    return Ok(false);
+                }
                 seen |= 1 << id;
                 match self.ws()? {
                     Some(b',') => {}
@@ -220,7 +341,9 @@ mod scan {
             self.v = lead.map_or(0, |digit| digit.wrapping_sub(b'0'));
             let next = if good { self.byte()? } else { None };
             let bad = matches!(next, Some(b'0'..=b'9' | b'.' | b'e' | b'E' | b'+' | b'-'));
-            if good && next.is_some() && !bad { self.i -= 1; }
+            if good && next.is_some() && !bad {
+                self.i -= 1;
+            }
             Ok(good && next.is_some() && !bad)
         }
     }
@@ -296,7 +419,6 @@ pub fn stream_plain_localhost_file(
     }
 }
 
-#[rustfmt::skip]
 pub fn read_sealed_localhost_file(key: &[u8; 32], path: &Path, name: &str) -> io::Result<Vec<u8>> {
     let mut file = std::fs::File::open(path)?;
     let len = file.metadata()?.len();
@@ -307,11 +429,15 @@ pub fn read_sealed_localhost_file(key: &[u8; 32], path: &Path, name: &str) -> io
     let (plain, extra) = reads_as_plain_bytes(header, len, &mut file)?;
     note_sealed_bytes(extra);
     if plain {
-        if len > SEALED_READ_HARD_LIMIT { return Err(hard_limit_refusal(name)); }
+        if len > SEALED_READ_HARD_LIMIT {
+            return Err(hard_limit_refusal(name));
+        }
         drop(file);
         return read_plain_localhost_range(path, name, 0, None);
     }
-    if extra > 0 { std::io::Seek::seek(&mut file, std::io::SeekFrom::Start(read as u64))?; }
+    if extra > 0 {
+        std::io::Seek::seek(&mut file, std::io::SeekFrom::Start(read as u64))?;
+    }
     if len <= ENVELOPE_BYTE_LIMIT {
         let mut raw = header.to_vec();
         let room = (ENVELOPE_BYTE_LIMIT + 1).saturating_sub(read as u64);
@@ -335,7 +461,11 @@ pub fn read_sealed_localhost_file(key: &[u8; 32], path: &Path, name: &str) -> io
             name,
         );
     }
-    open_new_format(key, read_body_within_hard_limit(&mut file, header, len, name)?, name)
+    open_new_format(
+        key,
+        read_body_within_hard_limit(&mut file, header, len, name)?,
+        name,
+    )
 }
 
 /// Version 1, a 12-byte hex nonce, and hex ciphertext of at least 16 bytes.
@@ -409,16 +539,35 @@ pub enum RekeyOutcome {
 
 /// Open one device-key envelope, and seal it when `seal` is true. Both steps
 /// work in the file's own buffer, so peak memory is the file.
-#[rustfmt::skip]
-pub fn rekey_device_envelope(device_key: &[u8; 32], file_key: &[u8; 32], data: Vec<u8>, seal: bool) -> io::Result<RekeyOutcome> {
-    let Some((mut buffer, nonce, _)) = ciphertext_in_place(data) else { return Ok(RekeyOutcome::NotEnvelope); };
-    let mut opens = |key: &[u8; 32]| Aes256Gcm::new_from_slice(key).is_ok_and(|c| c.decrypt_in_place(&Nonce::from(nonce), b"", &mut buffer).is_ok());
+pub fn rekey_device_envelope(
+    device_key: &[u8; 32],
+    file_key: &[u8; 32],
+    data: Vec<u8>,
+    seal: bool,
+) -> io::Result<RekeyOutcome> {
+    let Some((mut buffer, nonce, _)) = ciphertext_in_place(data) else {
+        return Ok(RekeyOutcome::NotEnvelope);
+    };
+    let mut opens = |key: &[u8; 32]| {
+        Aes256Gcm::new_from_slice(key).is_ok_and(|c| {
+            c.decrypt_in_place(&Nonce::from(nonce), b"", &mut buffer)
+                .is_ok()
+        })
+    };
     if !opens(device_key) {
-        if !opens(file_key) { return Err(io::Error::new(io::ErrorKind::InvalidData, "does not decrypt")); }
+        if !opens(file_key) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "does not decrypt",
+            ));
+        }
         buffer.fill(0);
         return Ok(RekeyOutcome::AlreadyFileKey);
     }
-    if !seal { buffer.fill(0); return Ok(RekeyOutcome::Opens); }
+    if !seal {
+        buffer.fill(0);
+        return Ok(RekeyOutcome::Opens);
+    }
     seal_into(&mut buffer, file_key, FILE_KEY_ENVELOPE_VERSION)?;
     Ok(RekeyOutcome::Rewritten(buffer))
 }

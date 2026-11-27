@@ -279,7 +279,6 @@ fn kill_checkpoint(point: &str) {
 }
 
 #[cfg(unix)]
-#[rustfmt::skip]
 thread_local! {
     static MIGRATION_ROOT: std::cell::RefCell<std::path::PathBuf> =
         const { std::cell::RefCell::new(std::path::PathBuf::new()) };
@@ -313,17 +312,25 @@ fn set_migration_root(root: &Path) {
 }
 
 #[cfg(unix)]
-#[rustfmt::skip]
 fn relative_path(path: &Path) -> String {
     MIGRATION_ROOT.with(|root| {
         let root = root.borrow();
-        let shown = if path == root.as_path() { root.file_name().unwrap_or(path.as_os_str()) } else { path.strip_prefix(root.as_path()).unwrap_or(path).as_os_str() };
-        std::path::Path::new(shown).components().map(|c| c.as_os_str().to_string_lossy().into_owned()).collect::<Vec<_>>().join("/")
+        let shown = if path == root.as_path() {
+            root.file_name().unwrap_or(path.as_os_str())
+        } else {
+            path.strip_prefix(root.as_path())
+                .unwrap_or(path)
+                .as_os_str()
+        };
+        std::path::Path::new(shown)
+            .components()
+            .map(|c| c.as_os_str().to_string_lossy().into_owned())
+            .collect::<Vec<_>>()
+            .join("/")
     })
 }
 
 #[cfg(unix)]
-#[rustfmt::skip]
 fn localhost_refused(path: &Path, why: &str) -> anyhow::Error {
     let rel = relative_path(path);
     if why == "forged" {
@@ -368,8 +375,13 @@ fn localhost_refused(path: &Path, why: &str) -> anyhow::Error {
             "not a regular file",
             "Replace it with a regular file, then restart.",
         )
-    } else if why.contains("cut off") { ("cut off or damaged", "Move it out of the folder, then restart.")
-    } else if why.contains("another path") { ("linked from another path", "Remove the other names for this file, or copy it to a new name and delete it, then restart.")
+    } else if why.contains("cut off") {
+        (
+            "cut off or damaged",
+            "Move it out of the folder, then restart.",
+        )
+    } else if why.contains("another path") {
+        ("linked from another path", "Remove the other names for this file, or copy it to a new name and delete it, then restart.")
     } else if why.contains("link") {
         (
             "linked",
@@ -728,7 +740,6 @@ fn opened_file_still_matches(path: &Path, opened: &OpenedIdentity) -> anyhow::Re
 }
 
 #[cfg(unix)]
-#[rustfmt::skip]
 fn migrate_localhost_envelope(
     path: &Path,
     device_key: &[u8; 32],
@@ -764,7 +775,12 @@ fn migrate_localhost_envelope(
         .with_context(|| localhost_refused(path, "cannot be read"))?;
     note_bytes_read(read);
     let head = &header[..read];
-    let (version, extra) = localhost_provider::envelope_version(head, opened.len.max(localhost_provider::ENVELOPE_BYTE_LIMIT + 1), &mut file).with_context(|| localhost_refused(path, "cannot be read"))?;
+    let (version, extra) = localhost_provider::envelope_version(
+        head,
+        opened.len.max(localhost_provider::ENVELOPE_BYTE_LIMIT + 1),
+        &mut file,
+    )
+    .with_context(|| localhost_refused(path, "cannot be read"))?;
     note_bytes_read(extra as usize);
     if version.is_none()
         && localhost_provider::header_looks_like_device_key_envelope_at(head, opened.len)
@@ -775,13 +791,20 @@ fn migrate_localhost_envelope(
     if version.is_none_or(|version| version == 2) {
         return Ok(MigratedFile::Settled);
     }
-    if extra > 0 { std::io::Seek::seek(&mut file, std::io::SeekFrom::Start(read as u64)).map_err(|_| localhost_refused(path, "cannot be read"))?; }
+    if extra > 0 {
+        std::io::Seek::seek(&mut file, std::io::SeekFrom::Start(read as u64))
+            .map_err(|_| localhost_refused(path, "cannot be read"))?;
+    }
     if opened.len > localhost_provider::SEALED_READ_HARD_LIMIT {
         return Ok(MigratedFile::OverHard);
     }
     let n = opened.len as usize;
     #[cfg(test)]
-    let n = if RESERVE_FAILS.with(|slot| slot.get()) { usize::MAX } else { n };
+    let n = if RESERVE_FAILS.with(|slot| slot.get()) {
+        usize::MAX
+    } else {
+        n
+    };
     let mut bytes = Vec::new();
     if bytes.try_reserve_exact(n).is_err() {
         return Ok(MigratedFile::OverHard);
@@ -789,20 +812,39 @@ fn migrate_localhost_envelope(
     bytes.resize(n, 0);
     let keep = read.min(n);
     bytes[..keep].copy_from_slice(&header[..keep]);
-    file.read_exact(&mut bytes[keep..]).map_err(|err| localhost_refused(path, if err.kind() == std::io::ErrorKind::UnexpectedEof { "changed while it was being read" } else { "cannot be read" }))?;
+    file.read_exact(&mut bytes[keep..]).map_err(|err| {
+        localhost_refused(
+            path,
+            if err.kind() == std::io::ErrorKind::UnexpectedEof {
+                "changed while it was being read"
+            } else {
+                "cannot be read"
+            },
+        )
+    })?;
     note_bytes_read(n - keep);
     run_before_replace(path);
     opened_file_still_matches(path, &opened)?;
-    match localhost_provider::rekey_device_envelope(device_key, file_key, bytes, PASS_TWO.with(|slot| slot.get())) {
-        Ok(localhost_provider::RekeyOutcome::NotEnvelope) => Err(localhost_refused(path, "is cut off")),
+    match localhost_provider::rekey_device_envelope(
+        device_key,
+        file_key,
+        bytes,
+        PASS_TWO.with(|slot| slot.get()),
+    ) {
+        Ok(localhost_provider::RekeyOutcome::NotEnvelope) => {
+            Err(localhost_refused(path, "is cut off"))
+        }
         Ok(localhost_provider::RekeyOutcome::AlreadyFileKey) => Ok(MigratedFile::Settled),
         Ok(localhost_provider::RekeyOutcome::Rewritten(sealed)) => {
-            replace_file_fsync_rename(path, &sealed, kept_mode(opened.mode), Some(&opened)).map_err(|err| migration_io(path, "cannot be replaced", err))?;
+            replace_file_fsync_rename(path, &sealed, kept_mode(opened.mode), Some(&opened))
+                .map_err(|err| migration_io(path, "cannot be replaced", err))?;
             Ok(MigratedFile::Written)
         }
         Ok(localhost_provider::RekeyOutcome::Opens) => {
             opened_file_still_matches(path, &opened)?;
-            if !HELD.with(|slot| slot.replace(true)) { say_files_are_moving(); }
+            if !HELD.with(|slot| slot.replace(true)) {
+                say_files_are_moving();
+            }
             Ok(MigratedFile::Held)
         }
         Err(err) if err.to_string().contains("does not decrypt") => {
@@ -857,7 +899,6 @@ fn sweep_rewrite_temps(dir: &Path) -> anyhow::Result<()> {
 }
 
 #[cfg(unix)]
-#[rustfmt::skip]
 fn migrate_localhost_tree(
     dir: &Path,
     device_key: &[u8; 32],
@@ -870,52 +911,62 @@ fn migrate_localhost_tree(
     sweep_rewrite_temps(dir)?;
     let mut spins = 0u32;
     loop {
-    let names = directory_names(dir)?;
-    for name in &names {
-        let path = dir.join(name);
-        let meta = std::fs::symlink_metadata(&path)
-            .with_context(|| localhost_refused(&path, "cannot be read"))?;
-        let file_type = meta.file_type();
-        if file_type.is_symlink() {
-            let why = if std::fs::metadata(&path).is_ok_and(|meta| meta.is_dir()) {
-                "is a directory link"
-            } else {
-                "is a link"
-            };
-            let inside = std::fs::canonicalize(&path).ok().is_some_and(|t| CANON_ROOT.with(|s| t.starts_with(s.borrow().as_path())));
-            if !inside { return Err(localhost_refused(&path, why)); }
-            continue;
-        }
-        if file_type.is_fifo() || file_type.is_socket() {
-            let why = ["is a pipe", "is a socket"][usize::from(file_type.is_socket())];
-            return Err(localhost_refused(&path, why));
-        }
-        if file_type.is_dir() {
-            migrate_localhost_tree(&path, device_key, file_key, done, over_hard)?;
-            continue;
-        }
-        if !file_type.is_file() {
-            return Err(localhost_refused(&path, "is not a regular file"));
-        }
-        if meta.nlink() > 1 {
-            return Err(localhost_refused(&path, "is linked from another path"));
-        }
-        let rel = relative_path(&path);
-        if PASS_TWO.with(|slot| slot.get()) && done.contains(&rel) { continue; }
-        match migrate_localhost_envelope(&path, device_key, file_key)? {
-            MigratedFile::Settled | MigratedFile::Written => {
-                done.insert(rel);
+        let names = directory_names(dir)?;
+        for name in &names {
+            let path = dir.join(name);
+            let meta = std::fs::symlink_metadata(&path)
+                .with_context(|| localhost_refused(&path, "cannot be read"))?;
+            let file_type = meta.file_type();
+            if file_type.is_symlink() {
+                let why = if std::fs::metadata(&path).is_ok_and(|meta| meta.is_dir()) {
+                    "is a directory link"
+                } else {
+                    "is a link"
+                };
+                let inside = std::fs::canonicalize(&path)
+                    .ok()
+                    .is_some_and(|t| CANON_ROOT.with(|s| t.starts_with(s.borrow().as_path())));
+                if !inside {
+                    return Err(localhost_refused(&path, why));
+                }
+                continue;
             }
-            MigratedFile::Held => {}
-            MigratedFile::OverHard => {
-                over_hard.push(rel.clone());
-                done.insert(rel);
+            if file_type.is_fifo() || file_type.is_socket() {
+                let why = ["is a pipe", "is a socket"][usize::from(file_type.is_socket())];
+                return Err(localhost_refused(&path, why));
+            }
+            if file_type.is_dir() {
+                migrate_localhost_tree(&path, device_key, file_key, done, over_hard)?;
+                continue;
+            }
+            if !file_type.is_file() {
+                return Err(localhost_refused(&path, "is not a regular file"));
+            }
+            if meta.nlink() > 1 {
+                return Err(localhost_refused(&path, "is linked from another path"));
+            }
+            let rel = relative_path(&path);
+            if PASS_TWO.with(|slot| slot.get()) && done.contains(&rel) {
+                continue;
+            }
+            match migrate_localhost_envelope(&path, device_key, file_key)? {
+                MigratedFile::Settled | MigratedFile::Written => {
+                    done.insert(rel);
+                }
+                MigratedFile::Held => {}
+                MigratedFile::OverHard => {
+                    over_hard.push(rel.clone());
+                    done.insert(rel);
+                }
             }
         }
-    }
-    if names == directory_names(dir)? { return Ok(()); }
-    spins = spins.saturating_add(1);
-    if spins >= 16 { return Err(localhost_refused(dir, "changed while it was being read")); }
+        if names == directory_names(dir)? {
+            return Ok(());
+        }
+        spins = spins.saturating_add(1);
+        if spins >= 16 {
+            return Err(localhost_refused(dir, "changed while it was being read"));
+        }
     }
 }
 
@@ -965,7 +1016,6 @@ fn read_marker_plan(marker: &Path, file_key: &[u8; 32]) -> anyhow::Result<Marker
 }
 
 #[cfg(unix)]
-#[rustfmt::skip]
 fn encrypted_roots_absent(data_dir: &Path) -> anyhow::Result<bool> {
     for root in LOCALHOST_ENCRYPTED_ROOTS {
         let path = data_dir.join(root);
@@ -1128,11 +1178,14 @@ fn write_localhost_marker(marker: &Path, record: &[u8]) -> anyhow::Result<()> {
 #[cfg(unix)]
 struct ClearHeld;
 #[cfg(unix)]
-#[rustfmt::skip]
-impl Drop for ClearHeld { fn drop(&mut self) { HELD.with(|s| s.set(false)); PASS_TWO.with(|s| s.set(false)); } }
+impl Drop for ClearHeld {
+    fn drop(&mut self) {
+        HELD.with(|s| s.set(false));
+        PASS_TWO.with(|s| s.set(false));
+    }
+}
 
 #[cfg(unix)]
-#[rustfmt::skip]
 fn migrate_localhost_files_to_file_key(
     data_dir: &Path,
     device_key: &[u8; 32],
@@ -1144,7 +1197,9 @@ fn migrate_localhost_files_to_file_key(
     let file_key = zeroize::Zeroizing::new(localhost_file_key(device_key)?);
     let marker = identity.join(LOCALHOST_MIGRATION_MARKER);
     let first = plan_for_this_home(data_dir, &marker, &file_key)?;
-    if !matches!(first, MarkerPlan::Keep) && elastos_server::update_controller::update_can_roll_back(data_dir) {
+    if !matches!(first, MarkerPlan::Keep)
+        && elastos_server::update_controller::update_can_roll_back(data_dir)
+    {
         return Err(anyhow::anyhow!(LOCALHOST_FILES_PENDING_UPDATE));
     }
     let _lock = acquire_migration_lock(data_dir)?;
@@ -1158,36 +1213,40 @@ fn migrate_localhost_files_to_file_key(
     let mut done = std::collections::HashSet::new();
     let mut over_hard = Vec::new();
     let mut walk = || -> anyhow::Result<()> {
-    for root in LOCALHOST_ENCRYPTED_ROOTS {
-        let path = data_dir.join(root);
-        match std::fs::symlink_metadata(&path) {
-            Ok(meta) if meta.file_type().is_symlink() => {
-                return Err(localhost_refused(&path, "is a directory link"));
-            }
-            Ok(meta) if meta.is_dir() => {
-                let canon = std::fs::canonicalize(&path).map_err(|_| localhost_refused(&path, "cannot be read"))?;
-                CANON_ROOT.with(|slot| *slot.borrow_mut() = canon);
-                migrate_localhost_tree(
-                    &path,
-                    device_key,
-                    &file_key,
-                    &mut done,
-                    &mut over_hard,
-                )?;
-            }
-            Ok(_) => return Err(localhost_refused(&path, "is not a directory")),
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
-            Err(err) => {
-                return Err(err).with_context(|| localhost_refused(&path, "cannot be read"));
+        for root in LOCALHOST_ENCRYPTED_ROOTS {
+            let path = data_dir.join(root);
+            match std::fs::symlink_metadata(&path) {
+                Ok(meta) if meta.file_type().is_symlink() => {
+                    return Err(localhost_refused(&path, "is a directory link"));
+                }
+                Ok(meta) if meta.is_dir() => {
+                    let canon = std::fs::canonicalize(&path)
+                        .map_err(|_| localhost_refused(&path, "cannot be read"))?;
+                    CANON_ROOT.with(|slot| *slot.borrow_mut() = canon);
+                    migrate_localhost_tree(
+                        &path,
+                        device_key,
+                        &file_key,
+                        &mut done,
+                        &mut over_hard,
+                    )?;
+                }
+                Ok(_) => return Err(localhost_refused(&path, "is not a directory")),
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+                Err(err) => {
+                    return Err(err).with_context(|| localhost_refused(&path, "cannot be read"));
+                }
             }
         }
-    }
-    if !over_hard.is_empty() { return Err(anyhow::anyhow!(over_hard_sentence(&over_hard))); }
-    Ok(())
+        if !over_hard.is_empty() {
+            return Err(anyhow::anyhow!(over_hard_sentence(&over_hard)));
+        }
+        Ok(())
     };
     walk()?;
     if HELD.with(|slot| slot.get()) {
-        PASS_TWO.with(|slot| slot.set(true)); walk()?;
+        PASS_TWO.with(|slot| slot.set(true));
+        walk()?;
     }
     if matches!(plan, MarkerPlan::Write) {
         write_localhost_marker(&marker, &localhost_marker_record(&file_key))?;
@@ -1274,20 +1333,19 @@ fn refused(data_dir: &Path, fresh: String) -> LocalhostBringup {
 /// before gateway creates `ElastOS/System/Auth` or serve creates the roots.
 /// An empty root the person left in place is still present. A refusal is
 /// kept and this returns Ok, so Home starts and the roots stay absent.
-#[rustfmt::skip]
 pub(crate) fn prepare_localhost_files(data_dir: &Path) -> anyhow::Result<()> {
     #[cfg(unix)]
     {
         set_migration_root(data_dir);
         if let Err(err) = (|| -> anyhow::Result<()> {
-        if !encrypted_roots_absent(data_dir)? {
-            return Ok(());
-        }
-        let device_key = elastos_identity::load_or_create_device_key(data_dir).map_err(|_| anyhow::anyhow!("identity/device.key cannot be read. Make it readable, or restore it with the identity/credentials.json it belongs to, then restart."))?;
-        if let LocalhostBringup::Refuse(sentence) = localhost_bringup(data_dir, &device_key) {
-            return Err(anyhow::anyhow!(sentence));
-        }
-        Ok(())
+            if !encrypted_roots_absent(data_dir)? {
+                return Ok(());
+            }
+            let device_key = elastos_identity::load_or_create_device_key(data_dir).map_err(|_| anyhow::anyhow!("identity/device.key cannot be read. Make it readable, or restore it with the identity/credentials.json it belongs to, then restart."))?;
+            if let LocalhostBringup::Refuse(sentence) = localhost_bringup(data_dir, &device_key) {
+                return Err(anyhow::anyhow!(sentence));
+            }
+            Ok(())
         })() {
             if elastos_server::local_apps::local_apps_refusal(data_dir).is_none() {
                 elastos_server::local_apps::set_local_apps_refusal(data_dir, Some(err.to_string()));

@@ -34,9 +34,12 @@ pub struct ProviderProxyState {
 pub const IPFS_SESSION_PROXY_DENIED: &str = "ipfs_session_proxy_denied";
 pub const OBJECT_SESSION_PROXY_DENIED: &str = "object_session_proxy_denied";
 
-#[rustfmt::skip]
 pub(crate) fn inspect_name(scheme: String) -> String {
-    if scheme.eq_ignore_ascii_case("inspect") { "inspect".into() } else { scheme }
+    if scheme.eq_ignore_ascii_case("inspect") {
+        "inspect".into()
+    } else {
+        scheme
+    }
 }
 
 /// POST /api/provider/:scheme/:op
