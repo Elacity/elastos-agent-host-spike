@@ -1009,9 +1009,7 @@ pub(super) fn build_path_allow_plan(
                     root.name
                 ));
             }
-            // ElastOS/System is read-only. Landlock cannot carve Auth out of it.
-            let access = [STORAGE, READ_FILE | 8][usize::from(root.name == "ElastOS_System")];
-            rules.push(PathRule(root.name, root.path.clone(), access));
+            rules.push(PathRule(root.name, root.path.clone(), STORAGE));
             file_pins.push(None);
             held.push(root.held.take());
             root_dev.push(root.dev);

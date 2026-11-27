@@ -9150,10 +9150,9 @@ pub(crate) use crate::protected_content_runtime::ENABLED_CONFIG_KEY as PROTECT_H
 /// Fill `viewer`, `viewers`, and the `protect` capability on library objects
 /// the fenced object helper returned.
 ///
-/// The helper's roots in this slice still include `ElastOS/System`, `Users`,
-/// `UsersAI`, and `ElastOS/SystemServices/Library` (the published-CID index).
-/// The sign-in folder is inside that `ElastOS/System` grant. Piece 3 removes
-/// `ElastOS/System` from the roots. The helper does not receive
+/// The helper's roots are `Users`, `UsersAI`, and
+/// `ElastOS/SystemServices/Library` (the published-CID index). The sign-in
+/// folder is outside those roots. The helper does not receive
 /// `components.json`, `capsules`, or `config.toml`. The Runtime reads
 /// those three and writes only these fields. Every other `LibraryObject`
 /// field stays the helper's: `schema`, `uri`, `name`, `kind`, `mime`, `size`,
@@ -11667,6 +11666,18 @@ mod r5a_tests {
         path
     }
 
+    /// An empty home refuses at `build`. The library call runs only when that
+    /// build succeeds, so the row reaches the refusal instead of panicking.
+    #[cfg(unix)]
+    fn unstored_call<T>(
+        data_dir: &Path,
+        call: impl FnOnce(&crate::object_authority::ObjectAuthorityV1) -> anyhow::Result<T>,
+    ) -> anyhow::Result<T> {
+        let authority =
+            crate::object_authority::ObjectAuthorityV1::build(data_dir, r4_fixture::ID)?;
+        call(&authority)
+    }
+
     #[cfg(unix)]
     pub(super) struct IdRuleDecoy<'a> {
         dir: &'a Path,
@@ -11956,13 +11967,9 @@ mod r5a_tests {
         let absent = tempfile::tempdir().unwrap();
         let uri = format!("{}/R5a/write.json", r4_fixture::HUMAN_ROOT);
         let decoy = id_rule_decoy(absent.path(), &uri, b"id-rule json");
-        let result = write_runtime_json(
-            absent.path(),
-            &crate::object_authority::ObjectAuthorityV1::build(absent.path(), r4_fixture::ID)
-                .expect("object authority"),
-            &uri,
-            &json!({}),
-        );
+        let result = unstored_call(absent.path(), |authority| {
+            write_runtime_json(absent.path(), authority, &uri, &json!({}))
+        });
         assert!(
             result
                 .as_ref()
@@ -12013,12 +12020,9 @@ mod r5a_tests {
         let absent = tempfile::tempdir().unwrap();
         let uri = format!("{}/R5a/read.json", r4_fixture::HUMAN_ROOT);
         let decoy = id_rule_decoy(absent.path(), &uri, br#"{"site":4}"#);
-        let result = read_runtime_json::<Value>(
-            absent.path(),
-            &crate::object_authority::ObjectAuthorityV1::build(absent.path(), r4_fixture::ID)
-                .expect("object authority"),
-            &uri,
-        );
+        let result = unstored_call(absent.path(), |authority| {
+            read_runtime_json::<Value>(absent.path(), authority, &uri)
+        });
         assert!(
             result.is_err(),
             "read an unstored principal's JSON: {result:?}"
@@ -12107,22 +12111,27 @@ mod r5a_tests {
             .without_time()
             .with_writer(move || writer.clone())
             .finish();
-        tracing::subscriber::with_default(subscriber, || {
-            assert!(publish_records(
-                absent.path(),
-                &crate::object_authority::ObjectAuthorityV1::build(absent.path(), r4_fixture::ID)
-                    .expect("object authority")
-            )
-            .is_empty());
-        });
+        match crate::object_authority::ObjectAuthorityV1::build(absent.path(), r4_fixture::ID) {
+            Err(error) => {
+                assert!(
+                    error.to_string().contains("has no stored record"),
+                    "{error}"
+                );
+            }
+            Ok(authority) => {
+                tracing::subscriber::with_default(subscriber, || {
+                    assert!(publish_records(absent.path(), &authority).is_empty());
+                });
+                let warning = String::from_utf8(warnings.lock().unwrap().clone()).unwrap();
+                assert!(
+                    warning.contains("skipping unresolved publish-record principal")
+                        && warning.contains("has no stored record"),
+                    "{warning}"
+                );
+            }
+        }
         // An unresolved principal returns before this directory is read.
         assert!(!runtime_json_dir_reads(absent.path()).contains(&dir_uri));
-        let warning = String::from_utf8(warnings.lock().unwrap().clone()).unwrap();
-        assert!(
-            warning.contains("skipping unresolved publish-record principal")
-                && warning.contains("has no stored record"),
-            "{warning}"
-        );
         decoy.untouched();
     }
 
@@ -12168,12 +12177,9 @@ mod r5a_tests {
         let record = trash(r4_fixture::HUMAN_ROOT);
         let id_uri = trash_record_uri(r4_fixture::HUMAN_ROOT, &record.trash_uri);
         let id_path = seed_id_rule_file(dir.path(), &id_uri, b"id-rule trash record");
-        let result = write_trash_record(
-            dir.path(),
-            &crate::object_authority::ObjectAuthorityV1::build(dir.path(), r4_fixture::ID)
-                .expect("object authority"),
-            &record,
-        );
+        let result = unstored_call(dir.path(), |authority| {
+            write_trash_record(dir.path(), authority, &record)
+        });
         assert!(
             result
                 .as_ref()
@@ -12231,12 +12237,9 @@ mod r5a_tests {
         let id_uri = trash_record_uri(r4_fixture::HUMAN_ROOT, &record.trash_uri);
         let bytes = serde_json::to_vec(&record).unwrap();
         let id_path = seed_id_rule_file(dir.path(), &id_uri, &bytes);
-        let result = read_trash_record(
-            dir.path(),
-            &crate::object_authority::ObjectAuthorityV1::build(dir.path(), r4_fixture::ID)
-                .expect("object authority"),
-            &record.trash_uri,
-        );
+        let result = unstored_call(dir.path(), |authority| {
+            read_trash_record(dir.path(), authority, &record.trash_uri)
+        });
         assert!(
             result
                 .as_ref()
@@ -12285,12 +12288,9 @@ mod r5a_tests {
         let record = trash(r4_fixture::HUMAN_ROOT);
         let id_uri = trash_record_uri(r4_fixture::HUMAN_ROOT, &record.trash_uri);
         let id_path = seed_id_rule_file(dir.path(), &id_uri, b"id-rule trash record");
-        let result = remove_trash_record(
-            dir.path(),
-            &crate::object_authority::ObjectAuthorityV1::build(dir.path(), r4_fixture::ID)
-                .expect("object authority"),
-            &record.trash_uri,
-        );
+        let result = unstored_call(dir.path(), |authority| {
+            remove_trash_record(dir.path(), authority, &record.trash_uri)
+        });
         assert!(
             result
                 .as_ref()
@@ -12357,12 +12357,9 @@ mod r5a_tests {
         let id_uri = publish_record_uri(r4_fixture::HUMAN_ROOT, &record.object_uri);
         let bytes = serde_json::to_vec(&record).unwrap();
         let id_path = seed_id_rule_file(dir.path(), &id_uri, &bytes);
-        let result = read_publish_record(
-            dir.path(),
-            &crate::object_authority::ObjectAuthorityV1::build(dir.path(), r4_fixture::ID)
-                .expect("object authority"),
-            &record.object_uri,
-        );
+        let result = unstored_call(dir.path(), |authority| {
+            read_publish_record(dir.path(), authority, &record.object_uri)
+        });
         assert!(
             result
                 .as_ref()
@@ -12405,12 +12402,9 @@ mod r5a_tests {
         let record = published(r4_fixture::HUMAN_ROOT);
         let id_uri = publish_record_uri(r4_fixture::HUMAN_ROOT, &record.object_uri);
         let id_path = seed_id_rule_file(dir.path(), &id_uri, b"id-rule publish record");
-        let result = write_publish_record(
-            dir.path(),
-            &crate::object_authority::ObjectAuthorityV1::build(dir.path(), r4_fixture::ID)
-                .expect("object authority"),
-            &record,
-        );
+        let result = unstored_call(dir.path(), |authority| {
+            write_publish_record(dir.path(), authority, &record)
+        });
         assert!(
             result
                 .as_ref()
@@ -12434,12 +12428,9 @@ mod r5a_tests {
         let before = br#"{"schema":"elastos.library.published-cids/v1","publications":{}}"#;
         fs::write(&index_path, before).unwrap();
         let record = published(r4_fixture::HUMAN_ROOT);
-        let result = write_publish_record(
-            dir.path(),
-            &crate::object_authority::ObjectAuthorityV1::build(dir.path(), r4_fixture::ID)
-                .expect("object authority"),
-            &record,
-        );
+        let result = unstored_call(dir.path(), |authority| {
+            write_publish_record(dir.path(), authority, &record)
+        });
         assert!(
             result
                 .as_ref()
@@ -12491,12 +12482,9 @@ mod r5a_tests {
         let record = published(r4_fixture::HUMAN_ROOT);
         let id_uri = publish_record_uri(r4_fixture::HUMAN_ROOT, &record.object_uri);
         let id_path = seed_id_rule_file(dir.path(), &id_uri, b"id-rule publish record");
-        let result = remove_publish_record(
-            dir.path(),
-            &crate::object_authority::ObjectAuthorityV1::build(dir.path(), r4_fixture::ID)
-                .expect("object authority"),
-            &record.object_uri,
-        );
+        let result = unstored_call(dir.path(), |authority| {
+            remove_publish_record(dir.path(), authority, &record.object_uri)
+        });
         assert!(
             result
                 .as_ref()
@@ -12568,14 +12556,9 @@ mod r5a_tests {
             serde_json::to_string(&event(r4_fixture::HUMAN_ROOT)).unwrap()
         );
         let id_path = seed_id_rule_file(dir.path(), &id_uri, bytes.as_bytes());
-        let result = library_events(
-            dir.path(),
-            &crate::object_authority::ObjectAuthorityV1::build(dir.path(), r4_fixture::ID)
-                .expect("object authority"),
-            None,
-            None,
-            None,
-        );
+        let result = unstored_call(dir.path(), |authority| {
+            library_events(dir.path(), authority, None, None, None)
+        });
         assert!(
             result
                 .as_ref()
@@ -12627,14 +12610,15 @@ mod r5a_tests {
         let absent = tempfile::tempdir().unwrap();
         let id_log_uri = "localhost://Users/b2caa01d2e3d5fb2ec0d1478/.AppData/LocalHost/.Runtime/Library/events.jsonl";
         let id_path = seed_id_rule_file(absent.path(), id_log_uri, b"id-rule event log");
-        let refused = append_library_event(
-            absent.path(),
-            &crate::object_authority::ObjectAuthorityV1::build(absent.path(), r4_fixture::ID)
-                .expect("object authority"),
-            "note",
-            doc_uri,
-            json!({ "marker": "r5b-append" }),
-        );
+        let refused = unstored_call(absent.path(), |authority| {
+            append_library_event(
+                absent.path(),
+                authority,
+                "note",
+                doc_uri,
+                json!({ "marker": "r5b-append" }),
+            )
+        });
         assert!(
             refused
                 .as_ref()
@@ -12745,11 +12729,9 @@ mod r5a_tests {
             "localhost://Users/b2caa01d2e3d5fb2ec0d1478/.AppData/LocalHost/.Runtime/Library/ChatAttach/8fef004934571f09cf782aad202bffc7b697cb5556927323270becfd7073c080.json",
             b"id-rule attach",
         );
-        let result = chat_attach_binding_uri(
-            &crate::object_authority::ObjectAuthorityV1::build(dir.path(), r4_fixture::ID)
-                .expect("object authority"),
-            "r5b-attach",
-        );
+        let result = unstored_call(dir.path(), |authority| {
+            chat_attach_binding_uri(authority, "r5b-attach")
+        });
         assert!(
             result
                 .as_ref()
@@ -12782,11 +12764,9 @@ mod r5a_tests {
         }
         let dir = tempfile::tempdir().unwrap();
         let decoy = id_rule_decoy(dir.path(), r4_fixture::HUMAN_ROOT, b"id-rule space");
-        let result = localhost_space_pointer_object(
-            dir.path(),
-            &crate::object_authority::ObjectAuthorityV1::build(dir.path(), r4_fixture::ID)
-                .expect("object authority"),
-        );
+        let result = unstored_call(dir.path(), |authority| {
+            localhost_space_pointer_object(dir.path(), authority)
+        });
         assert!(
             result
                 .as_ref()
@@ -12827,12 +12807,9 @@ mod r5a_tests {
         let dir = tempfile::tempdir().unwrap();
         let uri = format!("{}/Documents/a.txt", r4_fixture::HUMAN_ROOT);
         let decoy = id_rule_decoy(dir.path(), &uri, b"id-rule target");
-        let result = library_target(
-            dir.path(),
-            &crate::object_authority::ObjectAuthorityV1::build(dir.path(), r4_fixture::ID)
-                .expect("object authority"),
-            &uri,
-        );
+        let result = unstored_call(dir.path(), |authority| {
+            library_target(dir.path(), authority, &uri)
+        });
         assert!(
             result
                 .as_ref()
@@ -12905,34 +12882,43 @@ mod r5a_tests {
         let trash = "localhost://Users/b2caa01d2e3d5fb2ec0d1478/.Trash/p.txt";
         let parent = "localhost://Users/b2caa01d2e3d5fb2ec0d1478/Pictures";
         match op {
-            "publish" => block(library_publish(
-                dir,
-                Arc::new(ProviderRegistry::new()),
-                &crate::object_authority::ObjectAuthorityV1::build(dir, r4_fixture::ID)
-                    .expect("object authority"),
-                file,
-                None,
-                None,
-                None,
-            ))
-            .map(|_| ()),
-            "unpublish" => block(library_unpublish(
-                dir,
-                Arc::new(ProviderRegistry::new()),
-                &crate::object_authority::ObjectAuthorityV1::build(dir, r4_fixture::ID)
-                    .expect("object authority"),
-                file,
-                None,
-            ))
-            .map(|_| ()),
-            "repair" => block(library_repair(
-                dir,
-                Arc::new(ProviderRegistry::new()),
-                &crate::object_authority::ObjectAuthorityV1::build(dir, r4_fixture::ID)
-                    .expect("object authority"),
-                file,
-            ))
-            .map(|_| ()),
+            "publish" => {
+                let authority =
+                    crate::object_authority::ObjectAuthorityV1::build(dir, r4_fixture::ID)?;
+                block(library_publish(
+                    dir,
+                    Arc::new(ProviderRegistry::new()),
+                    &authority,
+                    file,
+                    None,
+                    None,
+                    None,
+                ))
+                .map(|_| ())
+            }
+            "unpublish" => {
+                let authority =
+                    crate::object_authority::ObjectAuthorityV1::build(dir, r4_fixture::ID)?;
+                block(library_unpublish(
+                    dir,
+                    Arc::new(ProviderRegistry::new()),
+                    &authority,
+                    file,
+                    None,
+                ))
+                .map(|_| ())
+            }
+            "repair" => {
+                let authority =
+                    crate::object_authority::ObjectAuthorityV1::build(dir, r4_fixture::ID)?;
+                block(library_repair(
+                    dir,
+                    Arc::new(ProviderRegistry::new()),
+                    &authority,
+                    file,
+                ))
+                .map(|_| ())
+            }
             "chat_attach" => {
                 let registry = ProviderRegistry::new();
                 block(chat_attach_publication(

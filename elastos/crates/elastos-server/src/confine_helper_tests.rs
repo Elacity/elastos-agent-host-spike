@@ -1385,8 +1385,8 @@ async fn musl_release_helpers_start_under_the_fence() {
     .await
     .unwrap_or_else(|err| panic!("musl object init failed: {err}"));
     assert!(
-        data.join("ElastOS/System").is_dir(),
-        "piece 2 still grants ElastOS/System, so object start creates the sign-in parent; piece 3 removes that root"
+        !data.join("ElastOS/System").exists(),
+        "object start does not create the sign-in parent"
     );
     assert!(
         data.join("ElastOS/SystemServices/Library").is_dir(),
@@ -2448,30 +2448,52 @@ fn keyless_ops_attach_without_the_recovery_key() {
     assert!(!key.exists(), "the keyed refusal created the recovery key");
 }
 
-/// Piece 2 still grants `ElastOS/System`. This row checks that grant by the
-/// directory object start creates, and checks that a user-file write still
-/// succeeds. It does not claim the helper is refused under Auth. Piece 3
-/// removes the root and replaces this row with that refusal.
-#[cfg(all(
-    not(elastos_unsupported_os_check),
-    target_os = "linux",
-    any(target_arch = "x86_64", target_arch = "aarch64")
+/// The sign-in folder is outside the object helper's roots. The helper tries
+/// to create a file under `ElastOS/System/Auth` and the fence refuses it.
+/// A user-file write still succeeds.
+#[cfg(any(
+    all(not(elastos_unsupported_os_check), target_os = "macos"),
+    all(
+        not(elastos_unsupported_os_check),
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    )
 ))]
-#[tokio::test]
-async fn object_helper_writes_a_user_file_while_elastos_system_is_granted_on_linux() {
+async fn object_helper_refuses_auth_write() {
     use base64::Engine;
     let (_hold, data) = helper_data_root();
+    std::fs::create_dir_all(data.join("Users")).unwrap();
     let principal = "person:local:ada";
     let protection = crate::auth::store_test_principal_root_protection(&data, principal);
     let auth = data.join("ElastOS/System/Auth");
-    assert!(auth.join("auth-state.json").is_file());
-    assert!(auth.join("recovery-archive.key").is_file());
-    let (_, did) = elastos_identity::load_or_create_did(&data).unwrap();
-    let object = spawn_object(&provider_binary("object-provider"), &data, &did).await;
     assert!(
-        data.join("ElastOS/System").is_dir(),
-        "piece 2 still grants ElastOS/System, so the sign-in parent stays inside the object helper roots"
+        auth.is_dir(),
+        "the sign-in folder exists before the helper tries to write"
     );
+    let (_, did) = elastos_identity::load_or_create_did(&data).unwrap();
+    let mut extra = crate::library::object_helper_init_extra(&did);
+    extra["record_auth_write_refusal"] = serde_json::Value::Bool(true);
+    let object = elastos_runtime::provider::ProviderBridge::spawn_path_allow(
+        "object-provider",
+        &helper_authority(),
+        &pinned_helper(&provider_binary("object-provider"), &data),
+        &data,
+        elastos_runtime::provider::BridgeProviderConfig {
+            base_path: data.display().to_string(),
+            extra,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap_or_else(|err| panic!("object init failed: {err}"));
+    let probe = auth.join("object-write-probe");
+    assert!(
+        !probe.exists(),
+        "the helper created a file under ElastOS/System/Auth"
+    );
+    let marker = std::fs::read_to_string(data.join("Users/auth-write-refused"))
+        .unwrap_or_else(|err| panic!("the Auth write refusal was not recorded: {err}"));
+    assert_eq!(marker, "permission denied", "{marker}");
     let uri = format!("{}/open.txt", protection.localhost_root);
     let payload = base64::engine::general_purpose::STANDARD.encode(b"open");
     let wrote = exchange_ok(
@@ -2489,42 +2511,20 @@ async fn object_helper_writes_a_user_file_while_elastos_system_is_granted_on_lin
     object.bridge().shutdown().await.unwrap();
 }
 
-/// Piece 2 still grants `ElastOS/System`. This row checks that grant by the
-/// directory object start creates, and checks that a user-file write still
-/// succeeds. It does not claim the helper is refused under ElastOS. Piece 3
-/// removes the root and replaces this row with that refusal.
+#[cfg(all(
+    not(elastos_unsupported_os_check),
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+#[tokio::test]
+async fn object_helper_refuses_a_write_under_auth_on_linux() {
+    object_helper_refuses_auth_write().await;
+}
+
 #[cfg(all(not(elastos_unsupported_os_check), target_os = "macos"))]
 #[tokio::test]
-async fn object_helper_writes_a_user_file_while_elastos_system_is_granted_on_macos() {
-    use base64::Engine;
-    let (_hold, data) = helper_data_root();
-    assert!(
-        data.join("ElastOS").is_dir(),
-        "ElastOS exists before the fence"
-    );
-    let principal = "person:local:ada";
-    let protection = crate::auth::store_test_principal_root_protection(&data, principal);
-    let (_, did) = elastos_identity::load_or_create_did(&data).unwrap();
-    let object = spawn_object(&provider_binary("object-provider"), &data, &did).await;
-    assert!(
-        data.join("ElastOS/System").is_dir(),
-        "piece 2 still grants ElastOS/System, so the sign-in parent stays inside the object helper roots"
-    );
-    let uri = format!("{}/stat.txt", protection.localhost_root);
-    let payload = base64::engine::general_purpose::STANDARD.encode(b"stat");
-    let wrote = exchange_ok(
-        &data,
-        object.bridge(),
-        serde_json::json!({
-            "op": "write",
-            "principal_id": principal,
-            "uri": uri,
-            "data": payload
-        }),
-    )
-    .await;
-    assert_eq!(wrote["status"], "ok", "{wrote}");
-    object.bridge().shutdown().await.unwrap();
+async fn object_helper_refuses_a_write_under_auth_on_macos() {
+    object_helper_refuses_auth_write().await;
 }
 
 /// A split sign-in record is refused by the Runtime builder. The helper is

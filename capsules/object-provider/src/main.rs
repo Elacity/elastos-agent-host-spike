@@ -69,8 +69,16 @@ impl ObjectProviderProcess {
             );
         }
         #[cfg(unix)]
-        if let Err((code, message)) = auth_is_closed(&data_dir) {
-            return response_error(code, message);
+        {
+            let marker = config
+                .get("extra")
+                .and_then(|extra| extra.get("record_auth_write_refusal"))
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+                .then(|| data_dir.join("Users/auth-write-refused"));
+            if let Err((code, message)) = auth_is_closed(&data_dir, marker.as_deref()) {
+                return response_error(code, message);
+            }
         }
         #[cfg(unix)]
         if let Err((code, message)) = install_public_runtime_did(&config) {
@@ -114,9 +122,14 @@ fn device_key_is_closed(data_dir: &std::path::Path) -> bool {
 }
 
 /// The sign-in folder stays closed. A missing file is closed. An open, or a
-/// macOS lstat of the sign-in folder or of `ElastOS`, refuses init.
+/// macOS lstat of the sign-in folder or of `ElastOS`, refuses init. A write
+/// under `ElastOS/System/Auth` must fail on macOS and Linux. `marker`
+/// receives the refusal kind when the confined row asks for it.
 #[cfg(unix)]
-fn auth_is_closed(data_dir: &std::path::Path) -> Result<(), (&'static str, &'static str)> {
+fn auth_is_closed(
+    data_dir: &std::path::Path,
+    marker: Option<&std::path::Path>,
+) -> Result<(), (&'static str, &'static str)> {
     let auth = match elastos_server::auth::auth_state_path(data_dir) {
         Ok(path) => path.parent().map(std::path::Path::to_path_buf).ok_or((
             "object_helper_can_open_auth_state",
@@ -151,6 +164,36 @@ fn auth_is_closed(data_dir: &std::path::Path) -> Result<(), (&'static str, &'sta
                     "object helper can open auth state",
                 ))
             }
+        }
+    }
+    let probe = auth.join("object-write-probe");
+    match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&probe)
+    {
+        Err(err) if closed(&err) => {
+            if let Some(path) = marker {
+                std::fs::write(path, err.kind().to_string()).map_err(|_| {
+                    (
+                        "object_helper_can_write_auth",
+                        "object helper could not record the Auth write refusal",
+                    )
+                })?;
+            }
+        }
+        Ok(_) => {
+            let _ = std::fs::remove_file(&probe);
+            return Err((
+                "object_helper_can_write_auth",
+                "object helper can write under ElastOS/System/Auth",
+            ));
+        }
+        Err(_) => {
+            return Err((
+                "object_helper_can_write_auth",
+                "object helper can write under ElastOS/System/Auth",
+            ));
         }
     }
     if cfg!(target_os = "linux") {

@@ -639,7 +639,6 @@ mod tests {
             assert_eq!(roots.len(), expected.len(), "{component_key} root count");
             for (rule, name) in roots.iter().zip(expected.iter()) {
                 let relative = match *name {
-                    "ElastOS_System" => "ElastOS/System",
                     "LibraryIndex" => "ElastOS/SystemServices/Library",
                     other => other,
                 };
@@ -651,12 +650,7 @@ mod tests {
                     "allow list grew to the whole data directory: {:?}",
                     rule.1
                 );
-                if *name == "ElastOS_System" {
-                    assert_eq!(
-                        rule.1.parent().and_then(|parent| parent.parent()),
-                        Some(data_dir)
-                    );
-                } else if *name == "LibraryIndex" {
+                if *name == "LibraryIndex" {
                     assert_eq!(
                         rule.1
                             .parent()
@@ -672,12 +666,7 @@ mod tests {
                     "{component_key} reaches the device key through {}",
                     rule.1.display()
                 );
-                let mask = if *name == "ElastOS_System" {
-                    0xc
-                } else {
-                    storage_mask
-                };
-                assert_eq!(rule.2, mask, "{component_key} {name}");
+                assert_eq!(rule.2, storage_mask, "{component_key} {name}");
             }
             let executable_rules: Vec<_> = rest
                 .iter()
@@ -810,9 +799,7 @@ mod tests {
         names
             .into_iter()
             .map(|name| {
-                let path = if name == "ElastOS_System" {
-                    data.join("ElastOS/System")
-                } else if name == "LibraryIndex" {
+                let path = if name == "LibraryIndex" {
                     data.join("ElastOS/SystemServices/Library")
                 } else if name == "ELASTOS_WALLET" {
                     wallet.to_path_buf()

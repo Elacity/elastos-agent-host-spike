@@ -143,10 +143,9 @@ pub(super) fn render_path_allow_profile(
                     "provider start is refused: {name} cannot be a Seatbelt allow-list parameter"
                 ));
             }
-            // ElastOS/System is read-only. The other roots stay writable.
-            let rights =
-                ["file-read* file-write*", "file-read*"][usize::from(*name == "ElastOS_System")];
-            lines.push(format!("(allow {rights} (subpath (param \"{name}\")))"));
+            lines.push(format!(
+                "(allow file-read* file-write* (subpath (param \"{name}\")))"
+            ));
         }
         for index in 0..metadata_slots {
             lines.push(format!(
