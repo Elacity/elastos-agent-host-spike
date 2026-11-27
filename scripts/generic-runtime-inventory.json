@@ -588,6 +588,16 @@
       "slice": 2
     },
     {
+      "file": "elastos/crates/elastos-server/src/confine_helper_tests.rs",
+      "name": "custody-provider",
+      "slice": 4
+    },
+    {
+      "file": "elastos/crates/elastos-server/src/confine_helper_tests.rs",
+      "name": "protected-content",
+      "slice": 4
+    },
+    {
       "file": "elastos/crates/elastos-server/src/config_cmd.rs",
       "name": "protected-content",
       "slice": 3

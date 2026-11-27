@@ -136,6 +136,12 @@ impl RuntimeProviderId {
     /// it a helper that stays up keeps every large allocation. The call
     /// unmaps only an address in this process. Both numbers exist on x86_64
     /// and aarch64. Did, wallet, and model do not gain either name here.
+    ///
+    /// Custody adds `geteuid` (the owner check), `flock` (the store lock), and
+    /// `rename`/`renameat` (the replay replace). `stat` and `lstat` are the
+    /// x86_64 musl 1.2.5 metadata calls already in the number table. On
+    /// aarch64, musl 1.2.3 `stat` and `lstat` tail-call `fstatat`, and that
+    /// path issues `newfstatat`, so those two names drop there.
     pub(super) fn measured_syscalls(self) -> &'static str {
         match self {
             Self::Localhost => "munmap readlink rmdir set_tid_address stat lstat",

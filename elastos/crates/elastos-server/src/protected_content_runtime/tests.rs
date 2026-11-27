@@ -4471,6 +4471,11 @@ fn custody_probe_request_log(data_dir: &Path) -> PathBuf {
 /// One native probe for the custody fence. A shell fixture cannot exec inside
 /// `spawn_path_allow`: Linux refuses a non-ELF interpreter, and macOS would
 /// exec `/bin/sh`, which is not the provider executable.
+///
+/// The probe answers the compiled custody status unless the state root holds
+/// `mock-custody-provider.status`. When `mock-custody-provider.block-status`
+/// is present, the status reply waits until `mock-custody-provider.status.release`
+/// contains a byte, after writing `mock-custody-provider.status.signal`.
 #[cfg(unix)]
 fn custody_probe_binary() -> PathBuf {
     static BIN: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
@@ -4508,10 +4513,39 @@ fn base_path(line: &str) -> Option<String> {{
     let end = rest.find('"')?;
     Some(rest[..end].to_string())
 }}
+fn status_body(root: &std::path::Path) -> String {{
+    let path = root.join("mock-custody-provider.status");
+    if let Ok(text) = std::fs::read_to_string(path) {{
+        let trimmed = text.trim_end_matches(['\r', '\n']);
+        if !trimmed.is_empty() {{
+            return trimmed.to_string();
+        }}
+    }}
+    STATUS.to_string()
+}}
+fn block_for_status(root: &std::path::Path) {{
+    let marker = root.join("mock-custody-provider.block-status");
+    if !marker.exists() {{
+        return;
+    }}
+    let signal = root.join("mock-custody-provider.status.signal");
+    let _ = std::fs::write(&signal, b"x");
+    let release = root.join("mock-custody-provider.status.release");
+    loop {{
+        let ready = std::fs::read(&release)
+            .ok()
+            .is_some_and(|bytes| !bytes.is_empty());
+        if ready {{
+            break;
+        }}
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }}
+}}
 fn main() {{
     let stdin = std::io::stdin();
     let mut out = std::io::stdout();
     let mut log = None;
+    let mut root_path = None;
     for line in stdin.lock().lines() {{
         let Ok(line) = line else {{ break }};
         if log.is_none() {{
@@ -4530,6 +4564,7 @@ fn main() {{
                     .append(true)
                     .open(root.join("mock-custody-provider.requests"))
                     .ok();
+                root_path = Some(path);
             }}
         }}
         if let Some(file) = log.as_mut() {{
@@ -4537,15 +4572,21 @@ fn main() {{
             let _ = file.flush();
         }}
         let response = if line.contains("\"op\":\"shutdown\"") {{
-            "{{\"status\":\"ok\"}}"
+            "{{\"status\":\"ok\"}}".to_string()
         }} else if line.contains("\"unexpected\"") {{
-            "{{\"status\":\"error\",\"code\":\"invalid_request\"}}"
+            "{{\"status\":\"error\",\"code\":\"invalid_request\"}}".to_string()
         }} else if line.contains("\"op\":\"status\"") {{
-            STATUS
+            if let Some(path) = root_path.as_deref() {{
+                let root = std::path::Path::new(path);
+                block_for_status(root);
+                status_body(root)
+            }} else {{
+                STATUS.to_string()
+            }}
         }} else if line.contains("\"op\":\"release_contribution\"") {{
-            "{{\"status\":\"ok\",\"data\":{{\"echo\":\"custody\"}}}}"
+            "{{\"status\":\"ok\",\"data\":{{\"echo\":\"custody\"}}}}".to_string()
         }} else {{
-            "{{\"status\":\"ok\",\"data\":{{\"echo\":\"init\"}}}}"
+            "{{\"status\":\"ok\",\"data\":{{\"echo\":\"init\"}}}}".to_string()
         }};
         if writeln!(out, "{{response}}").is_err() || out.flush().is_err() {{
             break;
@@ -4621,6 +4662,27 @@ fn write_mock_protected_startup_provider_with_shutdown(
     );
     crate::test_support::write_from_child(&binary, &script, 0o700);
     (binary, pid_file, request_log)
+}
+
+/// Custody cannot exec the shell stand-in. The other two providers still can:
+/// they start through `ProviderBridge::spawn`, outside the path allow-list.
+#[cfg(unix)]
+fn protected_startup_stand_in(
+    provider: ProtectedStartupProvider,
+    root: &Path,
+    data_dir: &Path,
+    status: &str,
+) -> (PathBuf, PathBuf, PathBuf) {
+    if matches!(provider, ProtectedStartupProvider::Custody) {
+        let state = inactive_custody_state_root(data_dir);
+        fs::write(state.join("mock-custody-provider.status"), status).unwrap();
+        return (
+            custody_probe_binary(),
+            custody_probe_pid_file(data_dir),
+            custody_probe_request_log(data_dir),
+        );
+    }
+    write_mock_protected_startup_provider(root, provider.name(), status)
 }
 
 #[cfg(unix)]
@@ -4877,11 +4939,8 @@ async fn protected_provider_startup_rejects_status_mismatches_and_reaps_child() 
             fs::create_dir_all(&case_root).unwrap();
             let data_dir = case_root.join("data");
             provider.prepare_private_config(&data_dir);
-            let (binary, pid_file, request_log) = write_mock_protected_startup_provider(
-                &case_root,
-                provider.name(),
-                &status.to_string(),
-            );
+            let (binary, pid_file, request_log) =
+                protected_startup_stand_in(provider, &case_root, &data_dir, &status.to_string());
             let registry = Arc::new(ProviderRegistry::new());
 
             provider
@@ -4926,7 +4985,7 @@ async fn protected_provider_startup_rejects_invalid_status_and_reaps_child() {
             let data_dir = case_root.join("data");
             provider.prepare_private_config(&data_dir);
             let (binary, pid_file, request_log) =
-                write_mock_protected_startup_provider(&case_root, provider.name(), status);
+                protected_startup_stand_in(provider, &case_root, &data_dir, status);
             let registry = Arc::new(ProviderRegistry::new());
 
             provider
@@ -4963,8 +5022,20 @@ async fn protected_provider_startup_timeout_sends_shutdown_and_reaps_child() {
         let temp = tempfile::tempdir().unwrap();
         let data_dir = temp.path().join("data");
         provider.prepare_private_config(&data_dir);
-        let (binary, pid_file, request_log, status_signal, status_release) =
-            write_blocking_protected_status_provider(temp.path(), provider);
+        let custody = matches!(provider, ProtectedStartupProvider::Custody);
+        let (binary, pid_file, request_log, status_signal, status_release) = if custody {
+            let state = inactive_custody_state_root(&data_dir);
+            fs::write(state.join("mock-custody-provider.block-status"), b"1").unwrap();
+            (
+                custody_probe_binary(),
+                custody_probe_pid_file(&data_dir),
+                custody_probe_request_log(&data_dir),
+                state.join("mock-custody-provider.status.signal"),
+                state.join("mock-custody-provider.status.release"),
+            )
+        } else {
+            write_blocking_protected_status_provider(temp.path(), provider)
+        };
         let registry = Arc::new(ProviderRegistry::new());
         let task_registry = registry.clone();
         let task_data_dir = data_dir.clone();
@@ -4974,53 +5045,83 @@ async fn protected_provider_startup_timeout_sends_shutdown_and_reaps_child() {
                 .await
         });
 
-        let mut signal = fs::OpenOptions::new()
-            .read(true)
-            .custom_flags(libc::O_NONBLOCK)
-            .open(&status_signal)
-            .unwrap();
-        let mut marker = [0u8; 1];
-        tokio::time::timeout(std::time::Duration::from_secs(10), async {
-            loop {
-                match signal.read(&mut marker) {
-                    Ok(1) => break,
-                    Ok(0) => {}
-                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
-                    result => panic!("{provider:?}: status signal read failed: {result:?}"),
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .unwrap_or_else(|_| panic!("{provider:?}: child did not signal its status request"));
-        assert_eq!(marker, [b'x']);
-        let mut release = tokio::time::timeout(std::time::Duration::from_secs(10), async {
-            loop {
-                match fs::OpenOptions::new()
-                    .write(true)
-                    .custom_flags(libc::O_NONBLOCK)
-                    .open(&status_release)
-                {
-                    Ok(release) => break release,
-                    Err(error) if error.raw_os_error() == Some(libc::ENXIO) => {
-                        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        if custody {
+            tokio::time::timeout(std::time::Duration::from_secs(10), async {
+                loop {
+                    let signaled = fs::read(&status_signal)
+                        .ok()
+                        .is_some_and(|bytes| bytes.first() == Some(&b'x'));
+                    if signaled {
+                        break;
                     }
-                    Err(error) => panic!("{provider:?}: status release open failed: {error}"),
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
                 }
-            }
-        })
-        .await
-        .unwrap_or_else(|_| panic!("{provider:?}: child did not open its status release pipe"));
-        tokio::time::pause();
-        let release_status = tokio::spawn(async move {
-            let elapsed = tokio::time::timeout(
-                PROTECTED_CONTENT_PROVIDER_STATUS_TIMEOUT + std::time::Duration::from_millis(1),
-                std::future::pending::<()>(),
-            )
-            .await;
-            assert!(elapsed.is_err());
-            release.write_all(b"x").unwrap();
-        });
+            })
+            .await
+            .unwrap_or_else(|_| panic!("{provider:?}: child did not signal its status request"));
+        } else {
+            let mut signal = fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(libc::O_NONBLOCK)
+                .open(&status_signal)
+                .unwrap();
+            let mut marker = [0u8; 1];
+            tokio::time::timeout(std::time::Duration::from_secs(10), async {
+                loop {
+                    match signal.read(&mut marker) {
+                        Ok(1) => break,
+                        Ok(0) => {}
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+                        result => panic!("{provider:?}: status signal read failed: {result:?}"),
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .unwrap_or_else(|_| panic!("{provider:?}: child did not signal its status request"));
+            assert_eq!(marker, [b'x']);
+        }
+        let release_status = if custody {
+            tokio::time::pause();
+            let release_path = status_release.clone();
+            tokio::spawn(async move {
+                let elapsed = tokio::time::timeout(
+                    PROTECTED_CONTENT_PROVIDER_STATUS_TIMEOUT + std::time::Duration::from_millis(1),
+                    std::future::pending::<()>(),
+                )
+                .await;
+                assert!(elapsed.is_err());
+                fs::write(&release_path, b"x").unwrap();
+            })
+        } else {
+            let mut release = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+                loop {
+                    match fs::OpenOptions::new()
+                        .write(true)
+                        .custom_flags(libc::O_NONBLOCK)
+                        .open(&status_release)
+                    {
+                        Ok(release) => break release,
+                        Err(error) if error.raw_os_error() == Some(libc::ENXIO) => {
+                            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                        }
+                        Err(error) => panic!("{provider:?}: status release open failed: {error}"),
+                    }
+                }
+            })
+            .await
+            .unwrap_or_else(|_| panic!("{provider:?}: child did not open its status release pipe"));
+            tokio::time::pause();
+            tokio::spawn(async move {
+                let elapsed = tokio::time::timeout(
+                    PROTECTED_CONTENT_PROVIDER_STATUS_TIMEOUT + std::time::Duration::from_millis(1),
+                    std::future::pending::<()>(),
+                )
+                .await;
+                assert!(elapsed.is_err());
+                release.write_all(b"x").unwrap();
+            })
+        };
         tokio::task::yield_now().await;
         tokio::time::advance(
             PROTECTED_CONTENT_PROVIDER_STATUS_TIMEOUT + std::time::Duration::from_millis(1),
@@ -5064,9 +5165,10 @@ async fn protected_provider_duplicate_unregister_and_restart_settle_exact_proces
         let temp = tempfile::tempdir().unwrap();
         let data_dir = temp.path().join("data");
         provider.prepare_private_config(&data_dir);
-        let (binary, pid_file, request_log) = write_mock_protected_startup_provider(
+        let (binary, pid_file, request_log) = protected_startup_stand_in(
+            provider,
             temp.path(),
-            provider.name(),
+            &data_dir,
             &provider.status().to_string(),
         );
         let registry = Arc::new(ProviderRegistry::new());
