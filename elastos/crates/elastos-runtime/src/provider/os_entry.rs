@@ -693,6 +693,71 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
     use std::path::PathBuf;
 
+    /// Same decision as `close_except`. `-1` is absent. `None` means `cursor` is kept.
+    fn close_before(held: &[i32], extra: [i32; 2], cursor: i32) -> (Option<u32>, Option<i32>) {
+        let mut next = None;
+        for fd in held.iter().copied().chain(extra) {
+            if fd >= cursor && next.is_none_or(|kept| fd < kept) {
+                next = Some(fd);
+            }
+        }
+        let end = (next != Some(cursor)).then(|| next.map_or(u32::MAX, |fd| (fd - 1) as u32));
+        (end, next)
+    }
+
+    fn kept_and_closed(held: &[i32], extra: [i32; 2]) -> (Vec<i32>, Vec<(u32, u32)>) {
+        let mut cursor = 3;
+        let mut kept = Vec::new();
+        let mut closed = Vec::new();
+        loop {
+            let (end, next) = close_before(held, extra, cursor);
+            if let Some(last) = end {
+                closed.push((cursor as u32, last));
+            }
+            let Some(fd) = next else { break };
+            kept.push(fd);
+            cursor = fd + 1;
+        }
+        (kept, closed)
+    }
+
+    #[test]
+    fn close_before_keeps_the_report_descriptor_and_stops_the_range_before_it() {
+        let (kept, closed) = kept_and_closed(&[4, 5, 6], [3, -1]);
+        assert_eq!(kept, vec![3, 4, 5, 6]);
+        assert_eq!(closed, vec![(7, u32::MAX)]);
+        let (kept, closed) = kept_and_closed(&[8], [5, -1]);
+        assert_eq!(kept, vec![5, 8]);
+        assert_eq!(closed, vec![(3, 4), (6, 7), (9, u32::MAX)]);
+        let (kept, closed) = kept_and_closed(&[4, 4, 6], [5, -1]);
+        assert_eq!(kept, vec![4, 5, 6]);
+        assert_eq!(closed, vec![(3, 3), (7, u32::MAX)]);
+        // 6 is listed before 4. The range must still stop before 4.
+        let (kept, closed) = kept_and_closed(&[6, 4], [3, -1]);
+        assert_eq!(kept, vec![3, 4, 6]);
+        assert_eq!(closed, vec![(5, 5), (7, u32::MAX)]);
+        let installer = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src/provider/preexec_installer.rs"
+        ))
+        .unwrap();
+        let close_except = installer
+            .split("fn close_except(")
+            .nth(1)
+            .unwrap()
+            .split("pub(super) fn prepare_path_allow(")
+            .next()
+            .unwrap();
+        assert!(
+            close_except.contains("held.iter().copied().chain(extra)"),
+            "the child keeps the smallest descriptor, not the first listed one"
+        );
+        assert!(
+            close_except.contains("(fd - 1) as u32"),
+            "the close range stops before the kept descriptor"
+        );
+    }
+
     fn pipe_pair() -> (i32, i32) {
         let mut fds = [-1; 2];
         #[cfg(target_os = "linux")]

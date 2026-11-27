@@ -179,13 +179,13 @@ pub(super) fn prepare(
     assemble(provider, admitted, plan)
 }
 
-/// Close every descriptor from 3 up except `held`, which is sorted, and the
-/// two `extra` descriptors. The forked child runs this, so it allocates nothing.
+/// Close every descriptor from 3 up except `held` and the two `extra`
+/// descriptors. Order does not matter. The child allocates nothing.
 fn close_except(held: &[i32], extra: [i32; 2]) -> Result<(), i32> {
     let mut cursor = 3i32;
     loop {
-        let mut next = held.iter().copied().find(|fd| *fd >= cursor);
-        for fd in extra {
+        let mut next = None;
+        for fd in held.iter().copied().chain(extra) {
             if fd >= cursor && next.is_none_or(|kept| fd < kept) {
                 next = Some(fd);
             }
@@ -1104,9 +1104,12 @@ mod tests {
         let hidden = plant_library(root.path(), "/lib/hidden.so");
         let hidden = CString::new(hidden.as_os_str().as_bytes()).unwrap();
         let report = std::fs::File::open("/dev/null").unwrap();
+        // owned_fd_above_stdio duplicates each library descriptor to 4 or
+        // above and closes the original. That original is 3, so this open
+        // receives 3. install keeps a report descriptor of 3.
         assert!(
-            report.as_raw_fd() > 3,
-            "the report fd must survive close_range"
+            report.as_raw_fd() >= 3,
+            "install keeps a report descriptor of 3 or above"
         );
         let pid = unsafe { libc::fork() };
         assert!(pid >= 0);
@@ -1114,6 +1117,7 @@ mod tests {
             let code = match unsafe { install(&prepared, report.as_raw_fd(), -1) } {
                 Err(_) => 80,
                 Ok(()) => {
+                    let report_open = unsafe { libc::close(report.as_raw_fd()) } == 0;
                     // The filter admits openat and answers any other open with
                     // EACCES, the same errno Landlock uses for a missing rule.
                     let allowed =
@@ -1124,7 +1128,9 @@ mod tests {
                     if allowed >= 0 {
                         unsafe { libc::close(allowed) };
                     }
-                    if allowed >= 0 && denied < 0 && denied_errno == libc::EACCES {
+                    if !report_open {
+                        82
+                    } else if allowed >= 0 && denied < 0 && denied_errno == libc::EACCES {
                         0
                     } else {
                         81
@@ -1137,7 +1143,7 @@ mod tests {
         assert_eq!(unsafe { libc::waitpid(pid, &mut status, 0) }, pid);
         assert!(
             libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0,
-            "status {status}"
+            "status {status} (80 install refused, 81 the library open, 82 the report descriptor was closed)"
         );
     }
 
