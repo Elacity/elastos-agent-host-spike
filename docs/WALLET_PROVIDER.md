@@ -96,11 +96,10 @@ Built-in wallet keys are provider-owned and encrypted at rest under
 `localhost://ElastOS/SystemServices/Wallet/wallet-key.hex`. On macOS the
 localhost helper's Seatbelt allows `ElastOS` and then denies
 `ElastOS/SystemServices/Wallet`. macOS localhost start creates that directory when it is missing, at mode 0700, so the deny has a directory to name. Linux Landlock cannot exclude a child of a granted directory. The Linux localhost fence still includes that wallet
-directory because it grants `ElastOS`. The object helper's root is
-`ElastOS/System`, which does not include the wallet directory. On macOS the
-object profile also has a `file-read-metadata` literal for the `ElastOS`
-directory itself, so the auth-state walk can reject a symlink there. That
-literal is not a grant of the other children. They are
+directory because it grants `ElastOS`. The object helper's roots are
+`Users`, `UsersAI`, and `ElastOS/SystemServices/Library`. Those roots do not
+include the wallet directory or the sign-in folder. The object profile has no
+`file-read-metadata` literal for `ElastOS`. Built-in wallet keys are
 passkey-controlled, not passkey-derived: a long-lived Wallet/System/Inbox launch
 token may list and review requests, but every built-in signature, transaction
 send, account deletion, and Wallet recovery-key export/import must include a

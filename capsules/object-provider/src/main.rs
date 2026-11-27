@@ -66,6 +66,10 @@ impl ObjectProviderProcess {
             );
         }
         #[cfg(unix)]
+        if let Err((code, message)) = auth_is_closed(&data_dir) {
+            return response_error(code, message);
+        }
+        #[cfg(unix)]
         if let Err((code, message)) = install_public_runtime_did(&config) {
             return response_error(code, &message);
         }
@@ -104,6 +108,64 @@ fn device_key_is_closed(data_dir: &std::path::Path) -> bool {
         Ok(_) => false,
     };
     open_closed && stat_closed
+}
+
+/// The sign-in folder stays closed. A missing file is closed. An open, or a
+/// macOS lstat of the sign-in folder or of `ElastOS`, refuses init.
+#[cfg(unix)]
+fn auth_is_closed(data_dir: &std::path::Path) -> Result<(), (&'static str, &'static str)> {
+    let auth = match elastos_server::auth::auth_state_path(data_dir) {
+        Ok(path) => path.parent().map(std::path::Path::to_path_buf).ok_or((
+            "object_helper_can_open_auth_state",
+            "object helper can open auth state",
+        ))?,
+        Err(_) => {
+            return Err((
+                "object_helper_can_open_auth_state",
+                "object helper can open auth state",
+            ))
+        }
+    };
+    let closed = |err: &std::io::Error| {
+        matches!(
+            err.kind(),
+            std::io::ErrorKind::NotFound | std::io::ErrorKind::PermissionDenied
+        )
+    };
+    for name in [
+        "auth-state.json",
+        "audit-chain-required.json",
+        "audit-chain-required.json.lock",
+        "recovery-archive.key",
+        "agent-records.json",
+        "principal-root-lifecycle.lock",
+    ] {
+        match std::fs::File::open(auth.join(name)) {
+            Err(err) if closed(&err) => {}
+            _ => {
+                return Err((
+                    "object_helper_can_open_auth_state",
+                    "object helper can open auth state",
+                ))
+            }
+        }
+    }
+    if cfg!(target_os = "linux") {
+        return Ok(());
+    }
+    let elastos = data_dir.join("ElastOS");
+    for path in [auth.as_path(), elastos.as_path()] {
+        match std::fs::symlink_metadata(path) {
+            Err(err) if closed(&err) => {}
+            _ => {
+                return Err((
+                    "object_helper_can_stat_elastos",
+                    "object helper can stat ElastOS",
+                ))
+            }
+        }
+    }
+    Ok(())
 }
 
 /// The public runtime DID from init config. A missing or non-canonical DID

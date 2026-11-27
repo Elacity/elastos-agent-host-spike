@@ -19,21 +19,19 @@ pub(crate) struct HelperConfinement {
     pub landlock_abi: u32,
     pub landlock_handled: u64,
     pub landlock: Vec<super::landlock_plan::PathRule>,
-    /// Data directory, its ancestors, and for object the `ElastOS` directory
-    /// itself. Seatbelt `file-read-metadata` literals only. They are not
-    /// Landlock rules: a path-beneath rule here would include
-    /// `identity/device.key`.
+    /// Data directory and its ancestors. Seatbelt `file-read-metadata`
+    /// literals only. They are not Landlock rules: a path-beneath rule here
+    /// would include `identity/device.key`.
     pub metadata: Vec<PathBuf>,
 }
 
 /// Object file roots. The seatbelt parameter is the first name. The directory
 /// is the second. Seatbelt parameter names cannot contain `/`, so
-/// `ElastOS_System` is the parameter for `ElastOS/System` and `LibraryIndex`
-/// is the parameter for `ElastOS/SystemServices/Library`.
+/// `LibraryIndex` is the parameter for `ElastOS/SystemServices/Library`.
 ///
 /// `Users` and `UsersAI` hold caller-chosen object names and stay writable.
-/// `ElastOS/System` is read-only, including `ElastOS/System/Auth`: the helper
-/// reads auth state and the recovery key and does not write them. The
+/// The sign-in folder is outside these roots. The Runtime passes one
+/// per-request envelope, and the helper does not open that folder. The
 /// published-CID index under `ElastOS/SystemServices/Library` is the one
 /// SystemServices directory this helper may write. Home creates it before
 /// the helper starts and leaves it owner-only.
@@ -43,7 +41,6 @@ pub(crate) struct HelperConfinement {
 /// that grant on Linux. macOS adds a Seatbelt deny for that wallet directory
 /// after the `ElastOS` allow. The object helper does not grant `ElastOS`.
 const OBJECT_ROOTS: &[(&str, &str)] = &[
-    ("ElastOS_System", "ElastOS/System"),
     ("Users", "Users"),
     ("UsersAI", "UsersAI"),
     ("LibraryIndex", "ElastOS/SystemServices/Library"),
@@ -297,22 +294,11 @@ pub(super) fn render_with_plan(
     // Chain's measured profile has no ancestor metadata. The data directory
     // stays out of the Seatbelt text, so identity/device.key stays unreadable.
     // A grant without storage has no file roots and no metadata literals.
-    let mut metadata = if chain || !storage {
+    let metadata = if chain || !storage {
         Vec::new()
     } else {
         metadata_literals(data_dir)?
     };
-    if matches!(provider, RuntimeProviderId::Object) && storage {
-        // The auth-state walk stats `ElastOS` on the way to `ElastOS/System/Auth`.
-        // That directory is not a root. A metadata literal lets the walk reject
-        // a symlink there. It does not grant the other children of `ElastOS`.
-        // Linux Landlock does not mediate stat, so the Landlock plan stays
-        // `ElastOS/System` and still cannot exclude a child of a granted directory.
-        let elast = data_dir.join("ElastOS");
-        if !metadata.iter().any(|path| path == &elast) {
-            metadata.push(elast);
-        }
-    }
     let mut seatbelt = super::macos_profile::render_path_allow_profile(
         &names,
         metadata.len(),
@@ -448,10 +434,7 @@ mod tests {
                 "localhost-provider",
                 elastos_common::localhost::FILE_BACKED_ROOTS,
             ),
-            (
-                "object-provider",
-                &["ElastOS_System", "Users", "UsersAI", "LibraryIndex"],
-            ),
+            ("object-provider", &["Users", "UsersAI", "LibraryIndex"]),
             ("chain-provider", &["chain-provider"]),
         ];
         let did = super::super::landlock_plan::build(
@@ -521,11 +504,11 @@ mod tests {
                 assert!(rendered.metadata.iter().any(|path| path == data_dir));
                 if *component_key == "object-provider" {
                     assert!(
-                        rendered
+                        !rendered
                             .metadata
                             .iter()
                             .any(|path| path == &data_dir.join("ElastOS")),
-                        "object stats ElastOS itself so the auth walk can reject a symlink"
+                        "object metadata must not name ElastOS"
                     );
                 }
             }
@@ -596,17 +579,12 @@ mod tests {
             }
             if *component_key == "object-provider" {
                 assert!(
-                    rendered.landlock.iter().any(
-                        |rule| rule.0 == "ElastOS_System" && rule.1.ends_with("ElastOS/System")
-                    ),
+                    !rendered.landlock.iter().any(|rule| {
+                        rule.0 == "ElastOS_System" || rule.1.ends_with("ElastOS/System")
+                    }),
                     "object grants ElastOS/System"
                 );
-                assert!(rendered
-                    .seatbelt
-                    .contains("(allow file-read* (subpath (param \"ElastOS_System\")))"));
-                assert!(!rendered
-                    .seatbelt
-                    .contains("file-write* (subpath (param \"ElastOS_System\"))"));
+                assert!(!rendered.seatbelt.contains("ElastOS_System"));
                 assert!(
                     !rendered
                         .landlock
@@ -764,7 +742,7 @@ mod tests {
     }
 
     #[test]
-    fn object_system_root_is_created_when_the_home_has_no_elastos_directory() {
+    fn object_library_index_is_created_without_the_sign_in_root() {
         use std::os::unix::fs::PermissionsExt;
         let held = tempfile::tempdir().expect("data directory");
         let data = held.path();
@@ -772,17 +750,18 @@ mod tests {
         std::fs::create_dir(data.join("UsersAI")).unwrap();
         assert!(!data.join("ElastOS").exists());
         let rendered = render("object-provider", data, Path::new(EXE), 5)
-            .expect("a missing ElastOS/System is created");
+            .expect("a missing Library index is created");
         let system = data.join("ElastOS/System");
-        let meta = std::fs::symlink_metadata(&system).unwrap();
-        assert!(meta.is_dir());
-        assert_eq!(meta.permissions().mode() & 0o777, 0o700);
+        assert!(
+            !system.exists(),
+            "object render must not create the sign-in parent"
+        );
+        assert!(!rendered.landlock.iter().any(|rule| rule.1 == system));
         let library = data.join("ElastOS/SystemServices/Library");
         let library_meta = std::fs::symlink_metadata(&library).unwrap();
         assert!(library_meta.is_dir());
         assert_eq!(library_meta.permissions().mode() & 0o777, 0o700);
         assert!(!data.join("ElastOS/SystemServices/Wallet").exists());
-        assert!(rendered.landlock.iter().any(|rule| rule.1 == system));
         assert!(rendered.landlock.iter().any(|rule| rule.1 == library));
     }
 
@@ -1008,7 +987,7 @@ mod tests {
                 .unwrap_or_else(|err| panic!("{key} at {}: {err}", data.display()));
             let file = match key {
                 "chain-provider" => data.join("chain-provider/kept.txt"),
-                "object-provider" => data.join("ElastOS/System/kept.txt"),
+                "object-provider" => data.join("Users"),
                 _ => data.join("ElastOS/kept.txt"),
             };
             assert!(
@@ -1020,6 +999,16 @@ mod tests {
                 file.display(),
                 rendered.landlock
             );
+            if key == "object-provider" {
+                let sign_in = data.join("ElastOS/System/kept.txt");
+                assert!(
+                    !rendered
+                        .landlock
+                        .iter()
+                        .any(|rule| sign_in.starts_with(&rule.1) && rule.1 != data),
+                    "object plan still covers the sign-in tree"
+                );
+            }
         }
         for relative in [
             "ElastOS/kept.txt",
@@ -1179,5 +1168,37 @@ mod tests {
             "{error}"
         );
         assert!(error.contains("start Home again"), "{error}");
+    }
+
+    #[test]
+    fn path_allow_object_roots_are_users_usersai_libraryindex() {
+        let held = real_data_dir();
+        let data_dir = held.path();
+        let rendered =
+            render("object-provider", data_dir, Path::new(EXE), 5).expect("object profile");
+        for name in ["Users", "UsersAI", "LibraryIndex"] {
+            assert!(
+                rendered.seatbelt.contains(&format!("(param \"{name}\")")),
+                "{name} left the seatbelt profile"
+            );
+            assert!(
+                rendered.landlock.iter().any(|rule| rule.0 == name),
+                "{name} left the Landlock plan"
+            );
+        }
+        assert!(!rendered.seatbelt.contains("ElastOS_System"));
+        assert!(!rendered
+            .landlock
+            .iter()
+            .any(|rule| rule.0 == "ElastOS_System" || rule.1.ends_with("ElastOS/System")));
+        let elastos = data_dir.join("ElastOS");
+        assert!(!rendered.metadata.iter().any(|path| path == &elastos));
+        let index = rendered
+            .landlock
+            .iter()
+            .find(|rule| rule.0 == "LibraryIndex")
+            .expect("LibraryIndex");
+        assert_ne!(index.2, 0xc, "the Library index is not read-only");
+        assert!(index.1.ends_with("ElastOS/SystemServices/Library"));
     }
 }
