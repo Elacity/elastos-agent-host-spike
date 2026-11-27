@@ -166,8 +166,19 @@ impl CurrentCarrier {
         let sender_registry = Arc::new(ProviderRegistry::new());
         let receiver_registry = Arc::new(ProviderRegistry::new());
         crate::library::publish_cid_for_test(receiver_dir.path(), &content_cid(FILE_BYTES));
-        let (sender_key, sender_did) = elastos_identity::derive_did(&[211; 32]);
-        let (receiver_key, receiver_did) = elastos_identity::derive_did(&[212; 32]);
+        // Parallel row tests run in one process. Fixed seeds would repeat
+        // derive_did keys that other elastos-server tests bind as live Carrier
+        // endpoints, so mDNS LAN discovery could land one row's peer dial on
+        // another row's node. Draw a fresh OS-random key pair per carrier; the
+        // derived DIDs stay on the struct for the row's assertions.
+        let mut sender_seed = [0u8; 32];
+        getrandom::getrandom(&mut sender_seed)
+            .expect("OS entropy source unavailable for contract carrier keys");
+        let mut receiver_seed = [0u8; 32];
+        getrandom::getrandom(&mut receiver_seed)
+            .expect("OS entropy source unavailable for contract carrier keys");
+        let (sender_key, sender_did) = elastos_identity::derive_did(&sender_seed);
+        let (receiver_key, receiver_did) = elastos_identity::derive_did(&receiver_seed);
         let sender_node = start_carrier_node_with_registry(
             &sender_key,
             &sender_did,
@@ -499,7 +510,17 @@ impl CarrierUnderTest for CurrentCarrier {
         }
     }
     fn remote_calls(&self) -> usize {
-        self.remote_requests.lock().unwrap().len()
+        // Count only calls this row's own sender made: a late call that another
+        // row's carrier landed here must not move a refusal assertion.
+        self.remote_requests
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|request| {
+                request["_runtime_invocation"]["carrier"]["source_endpoint_did"].as_str()
+                    == Some(self.sender_did.as_str())
+            })
+            .count()
     }
 }
 

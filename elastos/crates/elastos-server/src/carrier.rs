@@ -19704,11 +19704,33 @@ pub(crate) mod tests {
         assert!(pool[0].selection_reason.starts_with("trusted_source"));
     }
 
+    /// Inserts `message` and returns the instant a waiting fetch can see it.
+    /// Prompt-completion bounds start at that instant, after node setup.
+    async fn publish_topic_buffer_message_now(
+        buffers: &Mutex<HashMap<String, TopicBuffer>>,
+        topic: &str,
+        message: GossipMessage,
+    ) -> std::time::Instant {
+        {
+            let mut guard = buffers.lock().await;
+            let buffer = guard.get_mut(topic).expect("topic buffer");
+            assert!(
+                push_gossip_buffer_message(buffer, message),
+                "late announcement was already in the topic buffer"
+            );
+        }
+        std::time::Instant::now()
+    }
+
     #[tokio::test]
     async fn test_carrier_availability_fetch_waits_for_a_late_signed_announcement() {
         // A consumer that joins after the holder announced still has an empty
         // local buffer. The fetch waits for the signed announcement instead of
         // returning carrier_fetch_unavailable before gossip delivers it.
+        // The 2s bound starts when that announcement becomes visible. It proves
+        // the fetch then finishes promptly. Production still allows
+        // CONTENT_AVAILABILITY_DISCOVERY_WAIT (30s) for the announcement to
+        // arrive. Node setup and the lateness gap stay outside this bound.
         let cid = "bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi";
         let topic_name = content_availability_topic_name(cid);
         let (local_sk, local_did) = elastos_identity::derive_did(&[25u8; 32]);
@@ -19741,16 +19763,6 @@ pub(crate) mod tests {
                 .insert(topic_name.clone(), test_topic_buffer([], 0));
         }
         let buffers = state.lock().await.buffers.clone();
-        let ticket = holder_ticket.clone();
-        let topic = topic_name.clone();
-        tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(200)).await;
-            let (message, _) =
-                signed_content_availability_message(cid, [26u8; 32], &ticket, "", now_secs());
-            let mut buffers = buffers.lock().await;
-            let buffer = buffers.get_mut(&topic).expect("topic buffer");
-            assert!(push_gossip_buffer_message(buffer, message));
-        });
         let data_dir = tempfile::tempdir().unwrap();
         let registry = Arc::new(ProviderRegistry::new());
         let invoker = Arc::new(MockCarrierProviderPlaneInvoker::default());
@@ -19760,21 +19772,45 @@ pub(crate) mod tests {
             Arc::downgrade(&registry),
             data_dir.path().to_path_buf(),
         );
-        let started = std::time::Instant::now();
-        let response = provider
-            .send_raw(&serde_json::json!({
-                "op": "fetch",
-                "cid": cid,
-                "path": crate::content::CONTENT_OBJECT_MANIFEST_PATH,
-                "bounded_read": true,
-                "max_bytes": 65536,
-                "transfer": "stream"
-            }))
-            .await
-            .unwrap();
+        let mut fetch = tokio::spawn(async move {
+            provider
+                .send_raw(&serde_json::json!({
+                    "op": "fetch",
+                    "cid": cid,
+                    "path": crate::content::CONTENT_OBJECT_MANIFEST_PATH,
+                    "bounded_read": true,
+                    "max_bytes": 65536,
+                    "transfer": "stream"
+                }))
+                .await
+        });
+        // The buffer is still empty. Yield so a fetch that does not wait can
+        // return before the announcement exists. The gap stays outside the bound.
+        for _ in 0..8 {
+            if fetch.is_finished() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        tokio::select! {
+            biased;
+            finished = &mut fetch => {
+                panic!(
+                    "fetch returned before the signed announcement was published: {finished:?}"
+                );
+            }
+            _ = tokio::time::sleep(Duration::from_millis(200)) => {}
+        }
+        let (message, _) =
+            signed_content_availability_message(cid, [26u8; 32], &holder_ticket, "", now_secs());
+        let published_at = publish_topic_buffer_message_now(&buffers, &topic_name, message).await;
+        let response = fetch.await.expect("late announcement fetch task").unwrap();
         assert_eq!(response["status"], "ok", "{response}");
-        assert!(started.elapsed() >= Duration::from_millis(200));
-        assert!(started.elapsed() < Duration::from_secs(2));
+        let after_announcement = published_at.elapsed();
+        assert!(
+            after_announcement < Duration::from_secs(2),
+            "fetch took {after_announcement:?} after the announcement was published"
+        );
         let requests = invoker.requests.lock().await;
         assert!(
             requests
