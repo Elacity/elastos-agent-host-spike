@@ -1274,18 +1274,16 @@ fn browser_home_refuses_a_port_another_program_holds_on_either_loopback() {
         )
     };
 
-    let v4 = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = v4.local_addr().unwrap().port();
-    let error = refuse_browser_home_port_in_use(data.path(), port).unwrap_err();
-    assert_eq!(error.to_string(), expected(port));
-    drop(v4);
-    refuse_browser_home_port_in_use(data.path(), port).unwrap();
-
-    // `localhost` would still bind 127.0.0.1 here while browsers reach the other program.
-    if let Ok(v6) = std::net::TcpListener::bind("[::1]:0") {
-        let port = v6.local_addr().unwrap().port();
+    for ip in [
+        std::net::IpAddr::from(std::net::Ipv4Addr::LOCALHOST),
+        std::net::IpAddr::from(std::net::Ipv6Addr::LOCALHOST),
+    ] {
+        // Keep this port owned until its refusal is checked. A released port can
+        // be claimed by another test, and both loopbacks must be exercised.
+        let listener = std::net::TcpListener::bind((ip, 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
         let error = refuse_browser_home_port_in_use(data.path(), port).unwrap_err();
-        assert_eq!(error.to_string(), expected(port));
+        assert_eq!(error.to_string(), expected(port), "held listener on {ip}");
     }
 }
 
