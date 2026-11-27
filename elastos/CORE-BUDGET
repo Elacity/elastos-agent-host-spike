@@ -34,4 +34,40 @@
 # authority, noted in #1802's description. Measured on main after the merge.
 # +5 for #1804 (P2-8 slice 4a: a capsule start requires the component closure; the gate in
 # capsule/manager.rs component_closure_required). Measured 23 Nov 2026 after merging main.
-13122
+# +10 for the request-map write hold used by the plan-grant drop row. The counter
+# does not treat cfg(any(test, feature = "test-hooks")) as test-only. Measured 25 Nov 2026.
+# +775 for the P2-4 path-allow fences after an honest trim of repeated checks, one shared
+# plan for both start paths, and one signed-authority admission for localhost, object, and
+# chain. This raise is larger than any earlier raise. Owner: Claude, CTO.
+# Review date 8 Dec 2026. Measured on this branch.
+# formatted; 93 lines that were packed
+# +4: an unlisted syscall name is absent, and a declared ioctl selects ABI 5
+# +121: a loader is the first trusted file in a fixed directory list
+# +8: the object helper's missing DID is its own error
+# +285: round 18 pins the planned loader file, maps the optional libraries, and tightens an older chain directory
+# +295: round 20 holds each checked file and directory until its rule is added, reads PT_INTERP, and names an omitted library
+# +206: round 22 admits the x86_64 musl open, stat, and lstat calls for localhost, object, and chain, the chain DNS bind, sendto, recvmsg, and IPV6_V6ONLY shapes, copies the closed chain settings into Init, names a BrokenPipe by the omitted libraries, finishes the unconfined reap, clears the checked directory when prepare stops early, creates the macOS wallet directory so its Seatbelt deny can be installed, and lets the object helper stat the ElastOS directory itself so the auth walk can reject a symlink. Measured 25 Nov 2026.
+# +314: round 23 admits set_tid_address and munmap for localhost, object, and chain, gives localhost the same fdopendir fcntl commands as object, and restarts chain once when /etc/resolv.conf's device and inode change. Measured 25 Nov 2026.
+# Rounds 24-28 kept the core at 15223 while the object helper's System grant went
+# read-only, Library publish/rename/move stayed fenced, and chain restart kept the
+# last accepted Init. auth.rs stayed at the freeze baseline except for a round-28
+# refusal that round 29 moves into auth_state_files. Round 29 maps musl libgcc like
+# glibc, returns (target, generation) under the restart lock, and gates the resolv
+# test hook. Measured 26 Nov 2026.
+# +18: round 30 gives landlock_plan, HEAD and AdmittedRights::admits the path_allow cfg,
+# so an unsupported Unix builds under -D warnings (+27), and the forked child closes
+# descriptors from a list sorted before fork (-11). Measured 26 Nov 2026.
+# +2: round 31 sets the launch fd in with_launch_fd and verifies once at spawn.
+# Measured 26 Nov 2026.
+# +35: round 33 swaps the object helper under one write lock and gates
+# CHECKED_DIRECTORY to Linux and tests. Measured 26 Nov 2026.
+# -39: round 34 removes the object helper's live restart and its one-lock swap (-37);
+# the object fence already covers Users and UsersAI, where every capsule storage root
+# lives. last_errno reads errno through std (-2). Measured 26 Nov 2026.
+# +4: round 36 names the failed child's pid in the two launch errors the operator sees.
+# Measured 27 Nov 2026.
+# -1712: legacy launchers are cfg(test) (CapsuleManager, ShellManager, ElastosRuntime,
+# RequestHandler, CapsuleIoBridge, prepare_fetched_capsule). Measured 27 Nov 2026.
+# Merge of origin/spike/agent-host 75616ff93 (#1871) into the P2-4 fences. Both notes stay. Measured 27 Nov 2026.
+# +7: round 39 shares one close-range step, which close_except calls. Measured 27 Nov 2026.
+13568

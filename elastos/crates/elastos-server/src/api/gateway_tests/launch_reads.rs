@@ -12,7 +12,11 @@ fn launch_id() -> String {
 /// A page's token bound to `resource`, with `page` as its executable, as the
 /// open will mint it.
 fn page_token(dir: &std::path::Path, resource: &str, page: &str) -> String {
-    let context = local_home_launch_token_context(dir).unwrap();
+    let context = if resource.starts_with("elastos://launch/") {
+        local_home_launch_token_context(dir).unwrap()
+    } else {
+        bind_device_session_grant(dir, &[HOME_CAPSULE_ID]).unwrap()
+    };
     issue_home_projection_launch_token_with_context(dir, resource, page, &context).unwrap()
 }
 

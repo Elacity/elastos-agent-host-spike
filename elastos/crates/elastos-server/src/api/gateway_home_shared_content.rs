@@ -441,6 +441,7 @@ pub(super) async fn home_shared_content_check(
     let expires_at = match gateway_home_token::grant_bound_token_expiry(
         &state.data_dir,
         &home,
+        HOME_CAPSULE_ID,
         now,
         SHARED_CONTENT_CHECK_TTL_SECS,
     ) {

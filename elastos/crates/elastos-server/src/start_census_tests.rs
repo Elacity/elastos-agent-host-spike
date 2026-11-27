@@ -174,7 +174,7 @@ fn places() -> Vec<Place> {
         ),
         place(
             "elastos-runtime/src/provider/os_entry.rs",
-            "macos_start",
+            "macos_launch",
             "spawn()".to_string(),
             1,
             "admitted grant, checked storage, Seatbelt profile",
@@ -185,6 +185,13 @@ fn places() -> Vec<Place> {
             "libc::fexecve".to_string(),
             1,
             "B3 S10: admitted rights, checked root identity, bound executable",
+        ),
+        place(
+            "elastos-runtime/src/provider/chain_resolver.rs",
+            "restart_once",
+            spawn.clone(),
+            1,
+            "chain path allow-list; same checked binary and inputs",
         ),
         place(
             "elastos-server/src/setup/verified_executable.rs",
@@ -298,20 +305,6 @@ fn places() -> Vec<Place> {
             1,
             "update version probe; outside capsule start",
         ),
-        place(
-            "elastos-runtime/src/capsule/manager.rs",
-            "launch_internal",
-            label_of("compute", &load),
-            1,
-            "caller's trust level (shell bootstrap or LaunchCapsule request)",
-        ),
-        place(
-            "elastos-runtime/src/capsule/manager.rs",
-            "launch_internal",
-            label_of("compute", &start),
-            1,
-            "caller's trust level (shell bootstrap or LaunchCapsule request)",
-        ),
         // The load moved into load_microvm_capsule, which checks the entrypoint first.
         place(
             "elastos-server/src/serve_cmd.rs",
@@ -352,15 +345,15 @@ fn places() -> Vec<Place> {
             "elastos-server/src/server_infra.rs",
             "setup_server_infrastructure_impl",
             spawn.clone(),
-            14,
+            12,
             P2_2,
         ),
         place(
             "elastos-server/src/server_infra.rs",
-            "apply",
+            "spawn_allow_listed_provider",
             spawn.clone(),
-            1,
-            P2_2,
+            2,
+            "localhost, object, chain path allow-list; Windows P2-11 parked",
         ),
         place(
             "elastos-server/src/server_infra.rs",

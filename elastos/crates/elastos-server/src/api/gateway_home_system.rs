@@ -1416,6 +1416,412 @@ fn unconfigured_people_discovery_summary() -> HomePeopleDiscoverySummary {
     }
 }
 
+#[derive(Deserialize)]
+pub(super) struct HomeFrameQuery {
+    app: Option<String>,
+}
+
+pub(super) async fn home_v2_frame(
+    State(state): State<GatewayState>,
+    headers: HeaderMap,
+    Query(query): Query<HomeFrameQuery>,
+) -> Response {
+    let context = match require_home_token_context(&state.data_dir, &headers) {
+        Ok(context) => context,
+        Err(err) => return home_error_response(err),
+    };
+    if home_frame_guest(&state.data_dir, &context) {
+        return (StatusCode::FORBIDDEN, "guest session").into_response();
+    }
+    let app = query.app.unwrap_or_default();
+    let nodes = if app.is_empty() || app.len() > 128 {
+        Vec::new()
+    } else {
+        managed_frame_nodes(&state.data_dir, &context, &app).await
+    };
+    Json(serde_json::json!({ "nodes": nodes })).into_response()
+}
+
+/// A token with no proof binding is the device owner. The launch-token
+/// verifier admits `proof_binding_id == None` only for schema
+/// `elastos.home.launch-token/v4`, and only as the device principal for
+/// `home` and `home-cli` (`gateway_home_token` proofless arm). Every other
+/// verified token carries a binding. A missing binding is therefore the
+/// owner, and this function returns false.
+fn home_frame_guest(data_dir: &std::path::Path, context: &HomeLaunchTokenContext) -> bool {
+    let Some(id) = context.proof_binding_id() else {
+        return false;
+    };
+    !matches!(
+        crate::auth::load_principal_for_proof_binding(data_dir, id),
+        Ok(principal) if principal.role != crate::auth::RuntimePrincipalRole::Guest
+    )
+}
+
+type FrameFlight = (tokio::sync::Notify, Mutex<Option<Option<String>>>);
+type FlightMap = Mutex<Vec<(String, Arc<FrameFlight>)>>;
+
+struct FrameSlot {
+    client: reqwest::Client,
+    shells: Vec<(String, String)>,
+    prefix: String,
+}
+
+#[cfg(test)]
+static FRAME_FLIGHT_WAITS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+fn frame_slot() -> &'static tokio::sync::Mutex<FrameSlot> {
+    static SLOT: OnceLock<tokio::sync::Mutex<FrameSlot>> = OnceLock::new();
+    SLOT.get_or_init(|| {
+        tokio::sync::Mutex::new(FrameSlot {
+            client: reqwest::Client::builder()
+                .timeout(elastos_compute::providers::V2_FRAME_ROUTE_DEADLINE)
+                .build()
+                .unwrap_or_else(|_| reqwest::Client::new()),
+            shells: Vec::new(),
+            prefix: String::new(),
+        })
+    })
+}
+
+fn frame_flights() -> &'static FlightMap {
+    static FLIGHTS: OnceLock<FlightMap> = OnceLock::new();
+    FLIGHTS.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+struct FlightGuard {
+    key: String,
+    flight: Arc<FrameFlight>,
+}
+
+impl Drop for FlightGuard {
+    fn drop(&mut self) {
+        let mut flights = frame_flights().lock().expect("flights");
+        let before = flights.len();
+        flights.retain(|(saved, _)| saved != &self.key);
+        if flights.len() != before {
+            self.flight.0.notify_waiters();
+        }
+    }
+}
+
+fn frame_runtime_prefix(api_url: &str, secret: &str) -> String {
+    format!("{}\n{secret}\n", api_url.trim_end_matches('/'))
+}
+
+fn frame_key(api_url: &str, secret: &str, principal: &str) -> String {
+    format!("{}{principal}", frame_runtime_prefix(api_url, secret))
+}
+
+#[derive(Deserialize)]
+struct FrameAttachResponse {
+    token: String,
+}
+
+/// Mints one shell for the principal on this verified launch. A caller of
+/// this function cannot name a different principal.
+async fn home_attach_frame_shell(
+    client: &reqwest::Client,
+    api_url: &str,
+    attach_secret: &str,
+    context: &HomeLaunchTokenContext,
+) -> anyhow::Result<String> {
+    let principal = context.principal_id();
+    Ok(client
+        .post(format!("{}/api/auth/attach", api_url))
+        .json(&serde_json::json!({
+            "secret": attach_secret,
+            "scope": "shell",
+            "principal": principal,
+        }))
+        .send()
+        .await?
+        .error_for_status()?
+        .json::<FrameAttachResponse>()
+        .await?
+        .token)
+}
+
+async fn frame_shell(
+    api_url: &str,
+    secret: &str,
+    context: &HomeLaunchTokenContext,
+) -> Option<(reqwest::Client, String)> {
+    let prefix = frame_runtime_prefix(api_url, secret);
+    let key = format!("{prefix}{}", context.principal_id());
+    let client;
+    let guard;
+    {
+        let mut slot = frame_slot().lock().await;
+        if slot.prefix != prefix {
+            slot.shells.clear();
+            slot.prefix = prefix.clone();
+            for (_, flight) in std::mem::take(&mut *frame_flights().lock().expect("flights")) {
+                flight.0.notify_waiters();
+            }
+        }
+        if let Some((_, token)) = slot.shells.iter().find(|(saved, _)| saved == &key) {
+            return Some((slot.client.clone(), token.clone()));
+        }
+        client = slot.client.clone();
+        let existing = frame_flights()
+            .lock()
+            .expect("flights")
+            .iter()
+            .find(|(saved, _)| saved == &key)
+            .map(|(_, flight)| Arc::clone(flight));
+        if let Some(flight) = existing {
+            let notified = flight.0.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            let settled = flight.1.lock().expect("frame").is_some()
+                || frame_flights()
+                    .lock()
+                    .expect("flights")
+                    .iter()
+                    .all(|(saved, _)| saved != &key);
+            #[cfg(test)]
+            FRAME_FLIGHT_WAITS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            drop(slot);
+            if !settled {
+                notified.await;
+            }
+            let found = flight.1.lock().expect("frame").clone().flatten();
+            return found.map(|token| (client, token));
+        }
+        let flight = Arc::new((tokio::sync::Notify::new(), Mutex::new(None)));
+        frame_flights()
+            .lock()
+            .expect("flights")
+            .push((key.clone(), Arc::clone(&flight)));
+        guard = FlightGuard {
+            key: key.clone(),
+            flight,
+        };
+    }
+    let token = home_attach_frame_shell(&client, api_url, secret, context)
+        .await
+        .ok();
+    let mut slot = frame_slot().lock().await;
+    if slot.prefix == prefix {
+        if let Some(token) = &token {
+            slot.shells.retain(|(saved, _)| saved != &key);
+            let room = crate::api::handlers::attach::FRAME_SHELL_CAP - 1;
+            let drop_n = slot.shells.len().saturating_sub(room);
+            slot.shells.drain(0..drop_n);
+            slot.shells.push((key.clone(), token.clone()));
+        }
+    }
+    drop(slot);
+    *guard.flight.1.lock().expect("frame") = Some(token.clone());
+    drop(guard);
+    token.map(|token| (client, token))
+}
+
+async fn drop_frame_shell(api_url: &str, secret: &str, principal: &str) {
+    let key = frame_key(api_url, secret, principal);
+    frame_slot()
+        .lock()
+        .await
+        .shells
+        .retain(|(saved, _)| saved != &key);
+}
+
+#[cfg(test)]
+pub(super) async fn frame_shell_keys() -> Vec<String> {
+    frame_slot()
+        .lock()
+        .await
+        .shells
+        .iter()
+        .map(|(key, _)| key.clone())
+        .collect()
+}
+
+#[cfg(test)]
+pub(super) fn reset_frame_flight_waits() {
+    FRAME_FLIGHT_WAITS.store(0, std::sync::atomic::Ordering::SeqCst);
+}
+
+#[cfg(test)]
+pub(super) fn frame_flight_waits() -> usize {
+    FRAME_FLIGHT_WAITS.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+#[cfg(test)]
+pub(super) fn frame_flight_count() -> usize {
+    frame_flights().lock().expect("flights").len()
+}
+
+#[cfg(test)]
+pub(super) fn testing_clear_flights() {
+    for (_, flight) in std::mem::take(&mut *frame_flights().lock().expect("flights")) {
+        flight.0.notify_waiters();
+    }
+}
+
+#[cfg(test)]
+pub(super) async fn testing_frame_shell(
+    api_url: &str,
+    secret: &str,
+    principal: &str,
+) -> Option<String> {
+    let context = HomeLaunchTokenContext::for_test(
+        principal,
+        "session",
+        None,
+        "grant",
+        crate::auth::PrincipalKind::Human,
+    );
+    frame_shell(api_url, secret, &context)
+        .await
+        .map(|(_, token)| token)
+}
+
+async fn frame_bytes(mut response: reqwest::Response) -> Vec<u8> {
+    let cap = crate::component::V2_FRAME_ANSWER_MAX + 1;
+    let mut bytes = Vec::new();
+    while bytes.len() < cap {
+        let Ok(Some(chunk)) = response.chunk().await else {
+            break;
+        };
+        let room = cap - bytes.len();
+        bytes.extend_from_slice(&chunk[..chunk.len().min(room)]);
+        if chunk.len() >= room {
+            break;
+        }
+    }
+    bytes
+}
+
+/// Coords for a frame poll. The bytes are `read_private_runtime_coord_bytes`
+/// and the pid is `pid_is_alive`, the checks the other readers use. A dead
+/// pid or a file that fails the private read sends nothing.
+fn frame_coords(data_dir: &std::path::Path) -> Option<crate::runtime_control::RuntimeCoords> {
+    let path = crate::runtime_control::home_runtime_coord_path(data_dir);
+    let data = crate::runtime_control::read_private_runtime_coord_bytes(&path)?;
+    let coords: crate::runtime_control::RuntimeCoords = serde_json::from_slice(&data).ok()?;
+    if !crate::runtime_control::pid_is_alive(coords.pid) {
+        return None;
+    }
+    crate::local_http::LoopbackHttpBaseUrl::parse(&coords.api_url).ok()?;
+    Some(coords)
+}
+
+enum FrameAnswer {
+    Nodes(Vec<serde_json::Value>),
+    Unauthorized,
+    Other,
+}
+
+async fn ask_resident_frame(
+    client: &reqwest::Client,
+    api_url: &str,
+    shell: &str,
+    principal: &str,
+    app: &str,
+) -> FrameAnswer {
+    let Ok(response) = client
+        .get(format!(
+            "{}/api/residents/frame",
+            api_url.trim_end_matches('/')
+        ))
+        .header(AUTHORIZATION, format!("Bearer {shell}"))
+        .query(&[("app", app), ("principal", principal)])
+        .send()
+        .await
+    else {
+        return FrameAnswer::Other;
+    };
+    if response.status() == StatusCode::UNAUTHORIZED {
+        return FrameAnswer::Unauthorized;
+    }
+    if !response.status().is_success() {
+        return FrameAnswer::Other;
+    }
+    FrameAnswer::Nodes(accepted_frame_nodes(&frame_bytes(response).await))
+}
+
+/// The managed Runtime's stored nodes for this session's principal. A down
+/// Runtime, a stopped app, or a bad answer is an empty node list. A poll
+/// reuses the shell it already holds. A 401 attaches once more. A connection
+/// error does not attach. A dead pid or a coords file that fails the private
+/// read sends nothing.
+async fn managed_frame_nodes(
+    data_dir: &std::path::Path,
+    context: &HomeLaunchTokenContext,
+    app: &str,
+) -> Vec<serde_json::Value> {
+    let Some(coords) = frame_coords(data_dir) else {
+        return Vec::new();
+    };
+    let principal = context.principal_id();
+    let Some((client, shell)) = frame_shell(&coords.api_url, &coords.attach_secret, context).await
+    else {
+        return Vec::new();
+    };
+    match ask_resident_frame(&client, &coords.api_url, &shell, principal, app).await {
+        FrameAnswer::Nodes(nodes) => nodes,
+        FrameAnswer::Other => Vec::new(),
+        FrameAnswer::Unauthorized => {
+            drop_frame_shell(&coords.api_url, &coords.attach_secret, principal).await;
+            let Some((client, shell)) =
+                frame_shell(&coords.api_url, &coords.attach_secret, context).await
+            else {
+                return Vec::new();
+            };
+            match ask_resident_frame(&client, &coords.api_url, &shell, principal, app).await {
+                FrameAnswer::Nodes(nodes) => nodes,
+                FrameAnswer::Unauthorized => {
+                    drop_frame_shell(&coords.api_url, &coords.attach_secret, principal).await;
+                    Vec::new()
+                }
+                FrameAnswer::Other => Vec::new(),
+            }
+        }
+    }
+}
+
+fn accepted_frame_nodes(bytes: &[u8]) -> Vec<serde_json::Value> {
+    if bytes.len() > crate::component::V2_FRAME_ANSWER_MAX {
+        return Vec::new();
+    }
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(bytes) else {
+        return Vec::new();
+    };
+    let Some(object) = value.as_object() else {
+        return Vec::new();
+    };
+    if object.len() != 1 {
+        return Vec::new();
+    }
+    let Some(nodes) = object.get("nodes").and_then(|node| node.as_array()) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for node in nodes {
+        let Some(node) = node.as_object() else {
+            return Vec::new();
+        };
+        let clean = match node.get("kind").and_then(|kind| kind.as_str()) {
+            Some("text") if node.len() == 2 => node
+                .get("text")
+                .and_then(|text| text.as_str())
+                .map(|text| serde_json::json!({ "kind": "text", "text": text })),
+            Some("image") if node.len() == 2 => node
+                .get("resource")
+                .and_then(|resource| resource.as_str())
+                .map(|resource| serde_json::json!({ "kind": "image", "resource": resource })),
+            _ => None,
+        };
+        let Some(clean) = clean else {
+            return Vec::new();
+        };
+        out.push(clean);
+    }
+    out
+}
+
 #[cfg(unix)]
 #[cfg(test)]
 mod discovery_summary_tests {
@@ -6887,7 +7293,10 @@ async fn home_desktop_objects_summary(
         "uri": uri,
     });
     let response = match registry.send_raw("object", &request).await {
-        Ok(response) => response,
+        Ok(mut response) => {
+            crate::library::fill_fenced_library_fields(&state.data_dir, &mut response);
+            response
+        }
         Err(err) => {
             return HomeDesktopObjectsSummary {
                 schema: HOME_DESKTOP_OBJECTS_SCHEMA.to_string(),
@@ -6954,7 +7363,8 @@ async fn home_trash_desktop_object(
         "op": "roots",
         "principal_id": context.principal_id(),
     });
-    let response = registry.send_raw("object", &request).await.ok()?;
+    let mut response = registry.send_raw("object", &request).await.ok()?;
+    crate::library::fill_fenced_library_fields(&state.data_dir, &mut response);
     if response.get("status").and_then(serde_json::Value::as_str) != Some("ok") {
         return None;
     }
@@ -7015,9 +7425,10 @@ async fn home_desktop_events_signature(
             "uri": uri,
             "limit": 32,
         });
-        let Ok(response) = registry.send_raw("object", &request).await else {
+        let Ok(mut response) = registry.send_raw("object", &request).await else {
             continue;
         };
+        crate::library::fill_fenced_library_fields(&state.data_dir, &mut response);
         let Some(events) = response
             .get("data")
             .and_then(|data| data.get("events"))
@@ -11335,5 +11746,31 @@ mod service_decision_ticket_tests {
         )
         .expect("a model decision with no ticket is a grant");
         assert!(model.get("connect_ticket").is_none(), "{model}");
+    }
+}
+
+#[cfg(test)]
+mod home_frame_guest_tests {
+    use super::{home_frame_guest, HomeLaunchTokenContext};
+
+    #[test]
+    fn a_principal_load_error_fails_closed() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = HomeLaunchTokenContext::for_test(
+            "owner",
+            "session",
+            Some("missing-binding".to_string()),
+            "grant",
+            crate::auth::PrincipalKind::Human,
+        );
+        assert!(home_frame_guest(dir.path(), &missing));
+        let unbound = HomeLaunchTokenContext::for_test(
+            "owner",
+            "session",
+            None,
+            "grant",
+            crate::auth::PrincipalKind::Human,
+        );
+        assert!(!home_frame_guest(dir.path(), &unbound));
     }
 }

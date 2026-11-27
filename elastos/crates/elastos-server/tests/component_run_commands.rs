@@ -239,3 +239,204 @@ fn pinned_component_cli_refuses_unstaged_folder() {
     );
     assert!(text(&result).contains("stage-bundle"), "{}", text(&result));
 }
+
+/// A Home that trusts `key`, and the data directory that Home's CLI uses.
+#[cfg(unix)]
+fn trusted_home(key: &SigningKey) -> (tempfile::TempDir, std::path::PathBuf) {
+    let home = tempfile::tempdir().unwrap();
+    assert_isolated_home(home.path());
+    let configured = command(home.path(), &["config", "set", "dev_mode", "false"]);
+    assert!(configured.status.success(), "{}", text(&configured));
+    let configured = String::from_utf8(configured.stdout).unwrap();
+    let config_path = configured
+        .trim()
+        .strip_prefix("Set dev_mode in ")
+        .unwrap()
+        .to_owned();
+    let key_hex = hex::encode(key.verifying_key().to_bytes());
+    fs::OpenOptions::new()
+        .append(true)
+        .open(&config_path)
+        .unwrap()
+        .write_all(format!("trusted_keys = [\"{key_hex}\"]\n").as_bytes())
+        .unwrap();
+    let data_dir = Path::new(&config_path).parent().unwrap().to_path_buf();
+    (home, data_dir)
+}
+
+#[cfg(unix)]
+fn manifest_named(name: &str, requires: Option<serde_json::Value>) -> String {
+    let mut json: serde_json::Value = serde_json::from_str(MANIFEST).unwrap();
+    json["name"] = serde_json::json!(name);
+    if let Some(requires) = requires {
+        json["requires"] = requires;
+    }
+    json.to_string()
+}
+
+/// `folder` always writes `my-app`. A second bundle takes another directory.
+#[cfg(unix)]
+fn bundle_named(home: &Path, dir: &str, manifest: &str) -> std::path::PathBuf {
+    let made = folder(home, manifest);
+    let dest = home.join(dir);
+    if made != dest {
+        fs::rename(&made, &dest).unwrap();
+    }
+    dest
+}
+
+#[cfg(unix)]
+fn stage_signed(home: &Path, folder: &Path, key: &SigningKey) -> serde_json::Value {
+    let named = command(home, &["stage-bundle", folder.to_str().unwrap()]);
+    assert!(named.status.success(), "{}", text(&named));
+    let named: serde_json::Value = serde_json::from_slice(&named.stdout).unwrap();
+    let cid = named["cid"].as_str().unwrap().to_owned();
+    let mut digest = Sha256::new();
+    digest.update(b"elastos.capsule.bundle.v1\0");
+    digest.update(cid.as_bytes());
+    let signature = hex::encode(key.sign(&digest.finalize()).to_bytes());
+    let did_bytes = [vec![0xed, 0x01], key.verifying_key().to_bytes().to_vec()].concat();
+    let signature_file = home.join(format!("{cid}.sig.json"));
+    fs::write(
+        &signature_file,
+        serde_json::to_vec(&serde_json::json!({
+            "schema": "elastos.capsule.bundle-signature/v1",
+            "cid": cid,
+            "signer_did": format!("did:key:z{}", bs58::encode(&did_bytes).into_string()),
+            "signature": signature,
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let staged = command(
+        home,
+        &[
+            "stage-bundle",
+            folder.to_str().unwrap(),
+            "--signature",
+            signature_file.to_str().unwrap(),
+        ],
+    );
+    assert!(staged.status.success(), "{}", text(&staged));
+    let receipt: serde_json::Value = serde_json::from_slice(&staged.stdout)
+        .unwrap_or_else(|error| panic!("{error}: {}", text(&staged)));
+    assert_eq!(receipt["cid"].as_str(), Some(cid.as_str()));
+    let stderr = String::from_utf8_lossy(&staged.stderr);
+    let named = receipt["empty_folders"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    if named.is_empty() {
+        assert!(
+            !stderr.contains("Empty folders are not part"),
+            "{}",
+            text(&staged)
+        );
+    } else {
+        assert!(
+            stderr.contains("Empty folders are not part of a bundle's name or its stored bytes"),
+            "{}",
+            text(&staged)
+        );
+        for name in named {
+            assert!(stderr.contains(name.as_str().unwrap()), "{}", text(&staged));
+        }
+    }
+    receipt
+}
+
+#[cfg(unix)]
+fn slot_entrypoint(data_dir: &Path, cid: &str) -> std::path::PathBuf {
+    data_dir
+        .join("capsules")
+        .join("by-cid")
+        .join(cid)
+        .join("my-app.component.wasm")
+}
+
+/// Staging wrote the file read-only. The write bit comes back without the
+/// readonly helper clippy refuses.
+#[cfg(unix)]
+fn flip_last_byte(path: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let mut permissions = fs::metadata(path).unwrap().permissions();
+    permissions.set_mode(permissions.mode() | 0o200);
+    fs::set_permissions(path, permissions).unwrap();
+    let mut bytes = fs::read(path).unwrap();
+    let last = bytes.last_mut().expect("the entrypoint has a byte");
+    *last ^= 0xff;
+    fs::write(path, &bytes).unwrap();
+}
+
+#[cfg(unix)]
+fn assert_ran(home: &Path, cid: &str, name: &str) {
+    let ran = command(home, &["run", "--bundle", cid]);
+    assert!(ran.status.success(), "{}", text(&ran));
+    let body = String::from_utf8_lossy(&ran.stdout);
+    assert!(body.contains(name), "{}", text(&ran));
+    assert!(
+        body.contains("\"ended\":\"ok\"") || body.contains("\"ended\": \"ok\""),
+        "{}",
+        text(&ran)
+    );
+}
+
+/// The installed `run --bundle` is a second process. It accepts the slot it
+/// staged, then refuses that same slot after one byte of the root changes.
+#[cfg(unix)]
+#[test]
+fn installed_start_refuses_a_root_changed_between_stage_and_launch() {
+    let key = SigningKey::from_bytes(&[91; 32]);
+    let (home, data_dir) = trusted_home(&key);
+    let source = bundle_named(
+        home.path(),
+        "my-app",
+        &manifest_named("cli-component", None),
+    );
+    fs::create_dir(source.join("spare")).unwrap();
+    let staged = stage_signed(home.path(), &source, &key);
+    assert_eq!(staged["empty_folders"], serde_json::json!(["spare"]));
+    let cid = staged["cid"].as_str().unwrap();
+    assert_ran(home.path(), cid, "cli-component");
+    flip_last_byte(&slot_entrypoint(&data_dir, cid));
+    let refused = command(home.path(), &["run", "--bundle", cid]);
+    assert!(!refused.status.success(), "{}", text(&refused));
+    assert!(
+        text(&refused).contains("bundle_cid_mismatch"),
+        "{}",
+        text(&refused)
+    );
+}
+
+/// Same installed start, for a pin. The control run admits the member. The
+/// next run, after that member's bytes change, refuses it by name.
+#[cfg(unix)]
+#[test]
+fn installed_start_refuses_a_pinned_member_changed_between_stage_and_launch() {
+    let key = SigningKey::from_bytes(&[92; 32]);
+    let (home, data_dir) = trusted_home(&key);
+    let member = bundle_named(home.path(), "member", &manifest_named("needed", None));
+    let member_staged = stage_signed(home.path(), &member, &key);
+    let member_cid = member_staged["cid"].as_str().unwrap().to_owned();
+    let root = bundle_named(
+        home.path(),
+        "root",
+        &manifest_named(
+            "cli-root",
+            Some(serde_json::json!([{
+                "name": "needed",
+                "kind": "capsule",
+                "cid": member_cid,
+            }])),
+        ),
+    );
+    let root_staged = stage_signed(home.path(), &root, &key);
+    let root_cid = root_staged["cid"].as_str().unwrap();
+    assert_ran(home.path(), root_cid, "cli-root");
+    flip_last_byte(&slot_entrypoint(&data_dir, &member_cid));
+    let refused = command(home.path(), &["run", "--bundle", root_cid]);
+    assert!(!refused.status.success(), "{}", text(&refused));
+    let refusal = text(&refused);
+    assert!(refusal.contains("bundle_cid_mismatch"), "{refusal}");
+    assert!(refusal.contains("requirement needed"), "{refusal}");
+}

@@ -106,6 +106,14 @@ pub fn is_plaintext_root(root: &str) -> bool {
     matches!(root, "MyWebSite" | "Public")
 }
 
+/// Roots a v2 read may name. The bridge and the localhost provider both use
+/// this list, so the two processes cannot drift. MyWebSite stays on v1.
+pub const V2_READ_ROOTS: &[&str] = &["Local", "Public", "Users"];
+
+pub fn v2_read_offers(root: &str) -> bool {
+    V2_READ_ROOTS.contains(&root)
+}
+
 pub fn file_backed_prefixes() -> Vec<String> {
     FILE_BACKED_ROOTS
         .iter()
@@ -318,9 +326,44 @@ pub fn ensure_system_service_roots(base_dir: &Path) -> std::io::Result<Vec<PathB
     Ok(created)
 }
 
+#[cfg(unix)]
+pub fn private_dir(path: &Path, relative: &str, create: bool) -> Result<(), String> {
+    use std::os::fd::AsRawFd;
+    use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+    let refuse = |err: std::io::Error| {
+        format!("provider start is refused: {relative} could not be created: {err}")
+    };
+    if create {
+        if let Err(err) = std::fs::DirBuilder::new().mode(0o700).create(path) {
+            if err.kind() != std::io::ErrorKind::AlreadyExists {
+                return Err(refuse(err));
+            }
+        }
+    }
+    let dir = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW)
+        .open(path)
+        .map_err(refuse)?;
+    if unsafe { libc::fchmod(dir.as_raw_fd(), 0o700) } < 0 {
+        return Err(refuse(std::io::Error::last_os_error()));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn v2_read_roots_are_local_public_and_users() {
+        assert_eq!(V2_READ_ROOTS, ["Local", "Public", "Users"]);
+        assert!(v2_read_offers("Local"));
+        assert!(v2_read_offers("Public"));
+        assert!(v2_read_offers("Users"));
+        assert!(!v2_read_offers("MyWebSite"));
+        assert!(!v2_read_offers("UsersAI"));
+    }
 
     #[test]
     fn test_parse_localhost_uri() {
@@ -413,6 +456,42 @@ mod tests {
             edge_browser_app_path(base, "demo-app"),
             PathBuf::from("/tmp/elastos/ElastOS/SystemServices/Edge/BrowserApps/demo-app.json")
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ensure_private_directory_is_0700_and_does_not_follow_a_link() {
+        use std::os::unix::fs::PermissionsExt;
+        let held = tempfile::tempdir().unwrap();
+        let mode = |path: &Path| {
+            std::fs::symlink_metadata(path)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777
+        };
+        let existing = held.path().join("existing");
+        std::fs::create_dir(&existing).unwrap();
+        std::fs::set_permissions(&existing, std::fs::Permissions::from_mode(0o755)).unwrap();
+        private_dir(&existing, "ElastOS/System", false).unwrap();
+        assert_eq!(mode(&existing), 0o700);
+        let fresh = held.path().join("fresh");
+        private_dir(&fresh, "ElastOS/System", true).unwrap();
+        assert_eq!(mode(&fresh), 0o700);
+        std::fs::set_permissions(&fresh, std::fs::Permissions::from_mode(0o755)).unwrap();
+        private_dir(&fresh, "ElastOS/System", true).unwrap();
+        assert_eq!(mode(&fresh), 0o700);
+        let target = held.path().join("target");
+        std::fs::create_dir(&target).unwrap();
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let link = held.path().join("link");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        let refused = private_dir(&link, "ElastOS/System", false).unwrap_err();
+        assert!(
+            refused.contains("provider start is refused"),
+            "a link was followed or accepted: {refused}"
+        );
+        assert_eq!(mode(&target), 0o755);
     }
 
     #[test]

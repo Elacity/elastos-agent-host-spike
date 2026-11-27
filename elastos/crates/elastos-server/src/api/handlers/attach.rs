@@ -9,12 +9,78 @@ use std::sync::Arc;
 use axum::{extract::State, http::StatusCode, response::IntoResponse, Json};
 use elastos_runtime::session::{SessionRegistry, SessionType};
 
+/// Frame shells this process keeps. The gateway frame slot uses this same cap.
+pub(crate) const FRAME_SHELL_CAP: usize = 32;
+
+#[derive(Default)]
+struct NotedShells {
+    /// Frame shells, each bound to the principal named when it was minted.
+    /// An ordinary attach is not recorded: it answers the frame route as it
+    /// does without this list.
+    frame: Vec<(String, String)>,
+}
+
+/// Frame shells minted by attach with the secret. A shell created another way
+/// is not in this set. A validate miss drops the token. Past the cap, the
+/// oldest token is returned so attach can end that session.
+#[derive(Clone, Default)]
+pub struct AttachShells {
+    inner: Arc<std::sync::Mutex<NotedShells>>,
+}
+
+impl AttachShells {
+    /// Records a frame shell. Returns the token that lost its slot, if the
+    /// cap was already full. That token is no longer a frame shell.
+    pub fn note_frame(&self, token: &str, principal: &str) -> Option<String> {
+        let Ok(mut set) = self.inner.lock() else {
+            return None;
+        };
+        if let Some(found) = set.frame.iter_mut().find(|(kept, _)| kept == token) {
+            found.1 = principal.to_string();
+            return None;
+        }
+        let dropped = if set.frame.len() >= FRAME_SHELL_CAP {
+            Some(set.frame.remove(0).0)
+        } else {
+            None
+        };
+        set.frame.push((token.to_string(), principal.to_string()));
+        dropped
+    }
+
+    /// The principal bound to this frame shell. An ordinary shell has none.
+    pub fn frame_principal(&self, token: &str) -> Option<String> {
+        self.inner.lock().ok().and_then(|set| {
+            set.frame
+                .iter()
+                .find(|(kept, _)| kept == token)
+                .map(|(_, principal)| principal.clone())
+        })
+    }
+
+    pub fn forget(&self, token: &str) {
+        let Ok(mut set) = self.inner.lock() else {
+            return;
+        };
+        set.frame.retain(|(kept, _)| kept != token);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn frame_tokens(&self) -> Vec<String> {
+        self.inner
+            .lock()
+            .map(|set| set.frame.iter().map(|(token, _)| token.clone()).collect())
+            .unwrap_or_default()
+    }
+}
+
 /// Shared state for the attach endpoint.
 #[derive(Clone)]
 pub struct AttachState {
     pub session_registry: Arc<SessionRegistry>,
     /// The expected secret (from runtime-coords.json).
     pub secret: String,
+    pub shells: AttachShells,
 }
 
 #[derive(serde::Deserialize)]
@@ -24,6 +90,23 @@ pub struct AttachRequest {
     /// Requested scope: "shell" or "client" (default: "client").
     #[serde(default = "default_scope")]
     pub scope: String,
+    /// The principal a frame shell is bound to. Empty for every other attach.
+    ///
+    /// The holder of the attach secret, the reader of runtime-coords.json, can
+    /// POST any principal string. This handler stores that string on the new
+    /// shell token. AttachState carries the session registry, the secret, and
+    /// the shell notes. The session it creates is owned by the device DID
+    /// (`local_session_owner`). Home launch records and the Home person do not
+    /// reach this handler, so a principal those records would not name is
+    /// accepted. `home_attach_frame_shell` is the gateway mint: it posts only
+    /// the principal on the verified `HomeLaunchTokenContext`, and a caller of
+    /// that function cannot supply a different one. A later frame read with
+    /// the shell token returns the frame for the principal stored here. The
+    /// query principal is ignored. A second process that holds the same secret
+    /// can POST a principal these records do not name, and this handler
+    /// accepts that post.
+    #[serde(default)]
+    pub principal: String,
 }
 
 fn default_scope() -> String {
@@ -62,6 +145,13 @@ pub async fn attach(
         .session_registry
         .create_session(session_type, None)
         .await;
+    if session.is_shell() && !body.principal.is_empty() {
+        // The dropped shell is a dead session. The next poll is 401 and
+        // attaches once more. An ordinary shell is not in this list.
+        if let Some(old) = state.shells.note_frame(&session.token, &body.principal) {
+            state.session_registry.invalidate_session(&old).await;
+        }
+    }
 
     (
         StatusCode::OK,
@@ -84,6 +174,7 @@ mod tests {
         let state = AttachState {
             session_registry: Arc::new(SessionRegistry::new(Arc::new(AuditLog::new()))),
             secret: secret.to_string(),
+            shells: AttachShells::default(),
         };
         Router::new()
             .route("/api/auth/attach", post(attach))
@@ -163,6 +254,7 @@ mod tests {
         let attach_state = AttachState {
             session_registry: registry.clone(),
             secret: "the-secret".to_string(),
+            shells: AttachShells::default(),
         };
         let attach_routes = Router::new()
             .route("/api/auth/attach", post(attach))

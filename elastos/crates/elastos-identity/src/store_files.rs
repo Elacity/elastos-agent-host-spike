@@ -40,6 +40,9 @@ impl IdentityFiles {
     }
 
     fn open_mode(data_dir: &Path, create: bool) -> anyhow::Result<Self> {
+        if super::object_helper_process() {
+            anyhow::bail!("the object helper does not open identity/");
+        }
         if create {
             std::fs::create_dir_all(data_dir)?;
         }

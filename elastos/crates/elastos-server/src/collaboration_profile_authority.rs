@@ -194,12 +194,18 @@ struct CollaborationProfileAuthorityBundle {
 }
 
 pub(crate) fn load_existing_device_did(data_dir: &Path) -> anyhow::Result<Option<String>> {
+    if elastos_identity::object_helper_process() {
+        return Ok(elastos_identity::object_helper_installed_runtime_did());
+    }
     Ok(load_existing_device_signing_key(data_dir)?.map(|(_, did)| did))
 }
 
 pub(crate) fn load_existing_device_signing_key(
     data_dir: &Path,
 ) -> anyhow::Result<Option<(SigningKey, String)>> {
+    if elastos_identity::object_helper_process() {
+        anyhow::bail!("the object helper does not open the device key");
+    }
     #[cfg(windows)]
     Err::<(), _>(std::io::Error::new(
         std::io::ErrorKind::Unsupported,

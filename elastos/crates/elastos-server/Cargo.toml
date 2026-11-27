@@ -121,6 +121,7 @@ data-encoding = "2.6"
 custody-provider = { path = "../../../capsules/custody-provider" }
 
 [dev-dependencies]
+elastos-compute = { path = "../elastos-compute", features = ["test-fixtures", "test-hooks"] }
 p256 = { version = "0.13", features = ["ecdsa"] }
 tokio = { version = "1.0", features = ["full", "test-util"] }
 tempfile = "3.10"
@@ -130,6 +131,7 @@ wasm-encoder = "=0.254.2"
 wat = "=1.254.2"
 elastos-auth = { path = "../elastos-auth" }
 elastos-common = { path = "../elastos-common", features = ["test-fixtures"] }
+elastos-runtime = { path = "../elastos-runtime", features = ["test-hooks"] }
 elastos-protected-content-custody = { path = "../elastos-protected-content-custody" }
 x-wing = { version = "=0.1.0", features = ["hazmat", "zeroize"] }
 # The rand generation iroh-gossip's membership state machine takes; the

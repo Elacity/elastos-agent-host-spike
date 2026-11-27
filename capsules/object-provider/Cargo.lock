@@ -4051,6 +4051,7 @@ dependencies = [
 name = "object-provider"
 version = "0.1.0"
 dependencies = [
+ "elastos-identity",
  "elastos-server",
  "serde_json",
  "tempfile",

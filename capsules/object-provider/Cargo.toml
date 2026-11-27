@@ -10,6 +10,7 @@ name = "object-provider"
 path = "src/main.rs"
 
 [dependencies]
+elastos-identity = { path = "../../elastos/crates/elastos-identity" }
 elastos-server = { path = "../../elastos/crates/elastos-server" }
 serde_json = "1.0"
 

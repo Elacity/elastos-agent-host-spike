@@ -132,9 +132,6 @@ async fn start_gateway_server_with_shutdown(
     let browser_lifecycle_reconciler =
         super::gateway_browser::start_browser_lifecycle_reconciler(state.clone())
             .map_err(anyhow::Error::msg)?;
-    // The reconciler registration proves this process is the in-process Home
-    // for the data directory: a second start on any port is refused there, and
-    // a failed bind already returned. Settle before a request can claim a plan.
     // Production callers hold this data directory's host lock before they
     // reach here. This function does not take that lock. While this process
     // holds it, leftover coordinates are not an owner. With no host lock, only

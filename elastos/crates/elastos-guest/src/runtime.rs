@@ -56,8 +56,15 @@ pub enum RuntimeResponse {
     /// Error response
     Error { code: String, message: String },
 
-    /// Capability token received (capsule requested, shell approved)
-    CapabilityToken { token: String },
+    /// Capability token received (capsule requested, shell approved).
+    /// `max_uses` and `expires_at_ms` are absent on a v1 grant.
+    CapabilityToken {
+        token: String,
+        #[serde(default)]
+        max_uses: Option<u32>,
+        #[serde(default)]
+        expires_at_ms: Option<u64>,
+    },
 
     /// Resource invoke result
     ResourceResult {
@@ -369,6 +376,8 @@ impl RuntimeClient {
                                 if let Some(tok) = status.get("token").and_then(|t| t.as_str()) {
                                     return Ok(RuntimeResponse::CapabilityToken {
                                         token: tok.to_string(),
+                                        max_uses: None,
+                                        expires_at_ms: None,
                                     });
                                 }
                                 if status.get("status").and_then(|s| s.as_str()) == Some("denied") {
@@ -403,6 +412,8 @@ impl RuntimeClient {
                 } else if let Some(tok) = resp_json.get("token").and_then(|t| t.as_str()) {
                     Ok(RuntimeResponse::CapabilityToken {
                         token: tok.to_string(),
+                        max_uses: None,
+                        expires_at_ms: None,
                     })
                 } else {
                     Ok(RuntimeResponse::Error {
@@ -893,7 +904,7 @@ impl RuntimeClient {
             action: action.to_string(),
             reason: String::new(),
         })? {
-            RuntimeResponse::CapabilityToken { token } => Ok(token),
+            RuntimeResponse::CapabilityToken { token, .. } => Ok(token),
             RuntimeResponse::Error { code, message } => {
                 Err(io::Error::other(format!("{}: {}", code, message)))
             }

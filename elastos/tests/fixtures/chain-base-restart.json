@@ -1,0 +1,48 @@
+{
+  "accepted_id": "base-mainnet",
+  "accepted_rpc_url": "https://127.0.0.1:9",
+  "accepted_display_name": "Accepted network",
+  "accepted_section": "protected_content_network",
+  "protected_content_runtime_issuer": "__ISSUER__",
+  "protected_content_network": {
+    "id": "base-mainnet",
+    "display_name": "Accepted network",
+    "kind": "evm_json_rpc",
+    "chain_id": 8453,
+    "native_symbol": "ETH",
+    "provider": "operator",
+    "mainnet": true,
+    "explorer_url": null,
+    "rpc_url": "https://127.0.0.1:9",
+    "rights_methods": [
+      {
+        "id": "has_access_by_content_id",
+        "contract": "0x0000000000000000000000000000000000000001",
+        "abi": "has_access_by_content_id_address_bytes16",
+        "selector": "0x12345678",
+        "protected_content_policies": [
+          {
+            "action": "view",
+            "evidence_rpc_urls": [
+              "https://rights-a.example.invalid",
+              "https://rights-b.example.invalid"
+            ]
+          }
+        ]
+      }
+    ],
+    "protected_content_creator_mint": {
+      "ledger": "0x0000000000000000000000000000000000000022",
+      "pay_token": "0x0000000000000000000000000000000000000033",
+      "asset_created_emitter": "0x0000000000000000000000000000000000000044",
+      "abi": "elacity_mint_v1"
+    },
+    "protected_content_market": {
+      "authority_gateway_contract": "0x00000000000000000000000000000000000000aa",
+      "evidence_rpc_urls": [
+        "https://market-a.example.invalid",
+        "https://market-b.example.invalid"
+      ]
+    }
+  }
+}

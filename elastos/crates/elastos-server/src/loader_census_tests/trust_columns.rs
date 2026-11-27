@@ -65,26 +65,6 @@ fn managed_runtime_trust_root() -> &'static str {
 fn columns() -> Vec<TrustColumn> {
     vec![
         TrustColumn {
-            file: "elastos-runtime/src/capsule/manager.rs",
-            function: "launch_internal",
-            call: "compute.load",
-            class: "n/a",
-            trust_root: "none",
-            verified_when: "never",
-            evidence: ["comput", "e.load"].concat(),
-            os_path: "",
-        },
-        TrustColumn {
-            file: "elastos-runtime/src/capsule/manager.rs",
-            function: "launch_internal",
-            call: "compute.start",
-            class: "n/a",
-            trust_root: "none",
-            verified_when: "never",
-            evidence: ["comput", "e.start"].concat(),
-            os_path: "",
-        },
-        TrustColumn {
             file: "elastos-runtime/src/provider/failure_record.rs",
             function: "launch",
             call: "libc::fexecve",
@@ -156,12 +136,13 @@ fn columns() -> Vec<TrustColumn> {
             evidence: ["Command::new", "(prepared.exec_path())"].concat(),
             os_path: "",
         },
-        // The macOS confined start checks the storage root's identity and
-        // wraps the provider in a Seatbelt profile. Neither checks the
-        // executable's bytes; the caller's admission does that.
+        // C2 round 2 (6448d2257) moved Command::new(launcher) into
+        // macos_sandbox_command. That function clears the environment and
+        // runs /usr/bin/sandbox-exec. It does not check the executable bytes.
+        // The caller admits the binary first. macos_command only forwards.
         TrustColumn {
             file: "elastos-runtime/src/provider/os_entry.rs",
-            function: "macos_command",
+            function: "macos_sandbox_command",
             call: "command",
             class: "n/a",
             trust_root: "none",
@@ -169,9 +150,12 @@ fn columns() -> Vec<TrustColumn> {
             evidence: ["Command::new", "(launcher)"].concat(),
             os_path: "",
         },
+        // C2 round 2 (6448d2257) moved .spawn() into macos_launch.
+        // macos_start checks the storage directory and builds the command.
+        // This function spawns it and does not check the executable bytes.
         TrustColumn {
             file: "elastos-runtime/src/provider/os_entry.rs",
-            function: "macos_start",
+            function: "macos_launch",
             call: "spawn()",
             class: "n/a",
             trust_root: "none",
@@ -741,14 +725,42 @@ fn columns() -> Vec<TrustColumn> {
             evidence: ["ProviderBr", "idge::spawn; verified via setup_server_infrastructure_impl; not verified via ProviderPlane::register"].concat(),
             os_path: "",
         },
+        // Unix is spawn_path_allow. Windows is ProviderBridge::spawn.
+        // Both re-check the CheckedExecutable's pinned release digest in
+        // verify_at_spawn before the process starts. The scanner's label is
+        // ProviderBridge::spawn because spawn_path_allow starts with that prefix.
+        TrustColumn {
+            file: "elastos-server/src/server_infra.rs",
+            function: "spawn_allow_listed_provider",
+            call: "ProviderBridge::spawn",
+            class: "n/a",
+            trust_root: "release-signature",
+            verified_when: "at-every-start",
+            evidence: ["ProviderBr", "idge::spawn"].concat(),
+            os_path: "",
+        },
+        // Chain restart calls spawn_path_allow again. The scanner's label is
+        // ProviderBridge::spawn because that name is the prefix. verify_at_spawn
+        // checks the pinned digest before the new process starts.
+        TrustColumn {
+            file: "elastos-runtime/src/provider/chain_resolver.rs",
+            function: "restart_once",
+            call: "ProviderBridge::spawn",
+            class: "n/a",
+            trust_root: "release-signature",
+            verified_when: "at-every-start",
+            evidence: ["ProviderBr", "idge::spawn"].concat(),
+            os_path: "",
+        },
+        // spawn_path_allow calls verify_at_spawn before the chain process starts.
         TrustColumn {
             file: "elastos-server/src/server_infra.rs",
             function: "register_chain_provider_plane",
             call: "ProviderBridge::spawn",
             class: "n/a",
-            trust_root: "none",
-            verified_when: "never",
-            evidence: ["ProviderBr", "idge::spawn; separate verified spawn via setup_server_infrastructure_impl; not verified via ProviderPlane::register"].concat(),
+            trust_root: "release-signature",
+            verified_when: "at-every-start",
+            evidence: ["ProviderBr", "idge::spawn"].concat(),
             os_path: "",
         },
         TrustColumn {
@@ -769,16 +781,6 @@ fn columns() -> Vec<TrustColumn> {
             trust_root: "components-json-in-data-dir",
             verified_when: "at-every-start",
             evidence: ["ProviderBr", "idge::spawn"].concat(),
-            os_path: "",
-        },
-        TrustColumn {
-            file: "elastos-server/src/server_infra.rs",
-            function: "apply",
-            call: "ProviderBridge::spawn",
-            class: "n/a",
-            trust_root: "components-json-in-data-dir",
-            verified_when: "at-every-start",
-            evidence: ["ProviderBridge::", "spawn(helper, config)"].concat(),
             os_path: "",
         },
         // start_did_provider admits the exact binary through
@@ -1338,9 +1340,19 @@ fn production_callers(
     sources: &BTreeMap<String, String>,
     function: &str,
 ) -> BTreeSet<(String, String)> {
+    callers_in(sources, function, |file| {
+        file.starts_with("elastos-server/src/")
+    })
+}
+
+fn callers_in(
+    sources: &BTreeMap<String, String>,
+    function: &str,
+    include_file: impl Fn(&str) -> bool,
+) -> BTreeSet<(String, String)> {
     let mut found = BTreeSet::new();
     for (file, text) in sources {
-        if !file.starts_with("elastos-server/src/") {
+        if !include_file(file) {
             continue;
         }
         let code = source::code_only(text);
@@ -1362,6 +1374,41 @@ fn production_callers(
         }
     }
     found
+}
+
+/// Names that reach the legacy launchers. Those items are `#[cfg(test)]`.
+fn legacy_launcher_names() -> [&'static str; 6] {
+    [
+        "CapsuleIoBridge",
+        "CapsuleManager",
+        "ElastosRuntime",
+        "RequestHandler",
+        "ShellManager",
+        "prepare_fetched_capsule",
+    ]
+}
+
+fn assert_legacy_launchers_unreachable(sources: &BTreeMap<String, String>) {
+    let mut hits = BTreeSet::new();
+    for (file, text) in sources {
+        let code = source::code_only(text);
+        let bytes = code.as_bytes();
+        for name in legacy_launcher_names() {
+            for (at, _) in code.match_indices(name) {
+                let ident = |byte: u8| byte.is_ascii_alphanumeric() || byte == b'_';
+                let left = at == 0 || !ident(bytes[at - 1]);
+                let end = at + name.len();
+                let right = end >= bytes.len() || !ident(bytes[end]);
+                if left && right {
+                    hits.insert((file.clone(), name.to_string()));
+                }
+            }
+        }
+    }
+    assert!(
+        hits.is_empty(),
+        "legacy launcher reachable from production code: {hits:?}"
+    );
 }
 
 fn assert_caller_paths(sources: &BTreeMap<String, String>) {
@@ -1576,7 +1623,11 @@ fn trust_columns_cover_each_loader_and_bind_to_source() {
         (
             "elastos-server/src/server_infra.rs",
             "apply",
-            ["ProviderBridge::", "spawn(helper, config)"].concat(),
+            [
+                "spawn_allow_listed_provider(\n",
+                "                        \"localhost-provider\"",
+            ]
+            .concat(),
             1,
         ),
         (
@@ -1600,7 +1651,11 @@ fn trust_columns_cover_each_loader_and_bind_to_source() {
         (
             "elastos-server/src/server_infra.rs",
             "setup_server_infrastructure_impl",
-            ["ProviderBridge::", "spawn(&path, object_config)"].concat(),
+            [
+                "spawn_allow_listed_provider(",
+                "\"object-provider\", &path, &data_dir, object_config)",
+            ]
+            .concat(),
             1,
         ),
         (
@@ -1618,7 +1673,11 @@ fn trust_columns_cover_each_loader_and_bind_to_source() {
         (
             "elastos-server/src/server_infra.rs",
             "setup_server_infrastructure_impl",
-            ["ProviderBridge::", "spawn(&path, generic_chain_config)"].concat(),
+            [
+                "spawn_allow_listed_provider(",
+                "\"chain-provider\", &path, &data_dir, chain_config)",
+            ]
+            .concat(),
             1,
         ),
         (
@@ -1676,6 +1735,32 @@ fn new_unchecked_production_caller_turns_caller_path_red() {
 }
 
 #[test]
+fn legacy_launchers_have_no_production_caller() {
+    assert_legacy_launchers_unreachable(&source::production_sources());
+}
+
+#[test]
+fn planted_legacy_launcher_caller_turns_the_row_red() {
+    let clean = source::production_sources();
+    let file = "elastos-server/src/server_infra.rs";
+    let plants = [
+        "fn planted() { elastos_runtime::capsule::prepare_fetched_capsule(); }\n",
+        "use elastos_runtime::capsule::prepare_fetched_capsule as prep;\nfn planted() { prep(); }\n",
+        "fn planted() { let _f = elastos_runtime::capsule::CapsuleManager::launch_local; }\n",
+        "fn planted() { let _b = elastos_runtime::bootstrap::ElastosRuntime::build; }\n",
+        "static PLANTED: fn() = elastos_runtime::bootstrap::ShellManager::bootstrap;\n",
+    ];
+    for plant in plants {
+        let mut sources = clean.clone();
+        sources.get_mut(file).unwrap().push_str(plant);
+        let refused = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            assert_legacy_launchers_unreachable(&sources);
+        }));
+        assert!(refused.is_err(), "planted caller stayed green: {plant}");
+    }
+}
+
+#[test]
 fn trust_column_counts_and_chokepoint_queue() {
     let columns = columns();
     let count = |field: fn(&TrustColumn) -> &str| {
@@ -1695,25 +1780,42 @@ fn trust_column_counts_and_chokepoint_queue() {
                 && matches!(column.trust_root, "none" | "components-json-in-data-dir")
         })
         .count();
+    // Counts are the columns() list on this merged tree.
+    // The fence rows stay: spawn_allow_listed_provider and restart_once are
+    // class n/a, trust root release-signature, verified at-every-start, and
+    // register_chain_provider_plane stays on that same pair.
+    // Localhost's direct spawn left apply. The child starts through
+    // spawn_allow_listed_provider, so that column is gone and the
+    // components-json root count is one lower.
+    // S8 drops launch_internal's compute.load and compute.start. Both calls
+    // sit on cfg(test) items, and each column was class n/a, trust root none,
+    // verified never. Those two columns are not in this list.
+    // Five signed-start rows (three own-command, two managed-runtime) are
+    // release-signature and at-every-start on Unix. On Windows those five
+    // keep trust root none and their own verified-when text, so they leave
+    // never and do not join at-every-start.
+    // release-signature is only that exact root. The separate root
+    // "release-signature or source Home dev-pinned image" stays one row
+    // and is not added into this number.
     println!("loader trust rows={} classes={classes:?} roots={roots:?} verified_when={times:?} to_gate={to_gate}", columns.len());
-    assert_eq!(columns.len(), 106);
-    assert_eq!(classes.get("n/a"), Some(&57));
+    assert_eq!(columns.len(), 105);
+    assert_eq!(classes.get("n/a"), Some(&56));
     assert_eq!(classes.get("os-tool"), Some(&2));
     assert_eq!(classes.get("other"), Some(&37));
     assert_eq!(classes.get("own-binary"), Some(&5));
     assert_eq!(classes.get("release-component"), Some(&5));
-    assert_eq!(roots.get("components-json-in-data-dir"), Some(&12));
+    assert_eq!(roots.get("components-json-in-data-dir"), Some(&11));
     assert_eq!(roots.get("content-cid"), Some(&3));
     assert_eq!(roots.get("publisher-did-signature"), Some(&2));
     #[cfg(not(windows))]
     {
-        assert_eq!(roots.get("none"), Some(&51));
-        assert_eq!(roots.get("release-signature"), Some(&29));
+        assert_eq!(roots.get("none"), Some(&48));
+        assert_eq!(roots.get("release-signature"), Some(&32));
     }
     #[cfg(windows)]
     {
-        assert_eq!(roots.get("none"), Some(&56));
-        assert_eq!(roots.get("release-signature"), Some(&24));
+        assert_eq!(roots.get("none"), Some(&53));
+        assert_eq!(roots.get("release-signature"), Some(&27));
     }
     assert_eq!(
         roots.get("release-signature or source Home dev-pinned image"),
@@ -1721,16 +1823,16 @@ fn trust_column_counts_and_chokepoint_queue() {
     );
     assert_eq!(roots.get("staged-cid"), Some(&8));
     #[cfg(not(windows))]
-    assert_eq!(times.get("at-every-start"), Some(&39));
+    assert_eq!(times.get("at-every-start"), Some(&41));
     #[cfg(windows)]
     {
-        assert_eq!(times.get("at-every-start"), Some(&34));
+        assert_eq!(times.get("at-every-start"), Some(&36));
         assert_eq!(times.get(own_command_verified_when()), Some(&3));
         assert_eq!(times.get(managed_runtime_verified_when()), Some(&2));
     }
     assert_eq!(times.get("at-install-only"), Some(&7));
     assert_eq!(times.get("at-stage-and-start"), Some(&9));
-    assert_eq!(times.get("never"), Some(&51));
+    assert_eq!(times.get("never"), Some(&48));
     assert_eq!(to_gate, 31);
 }
 

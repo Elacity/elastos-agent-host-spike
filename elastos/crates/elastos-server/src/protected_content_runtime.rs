@@ -33,6 +33,7 @@ use elastos_protected_content_contracts::{
     RuntimeSessionBindingV1, SignedCustodyCommitteeAuthorizationV1, SignedCustodyEpochV1,
     SignedCustodyPoolV1, SignedRuntimeReleaseOperationV1, SignedTerminalReceiptV1,
     TerminalReceiptIssuerKey, TerminalReceiptStatementV1, WalletSignedRightsRequestV1,
+    MAX_RECIPIENT_KEY_AUTHORIZATION_LIFETIME_SECS, RIGHTS_CLOCK_SKEW_SECS,
 };
 use elastos_protected_content_provider_contracts::{
     CencFmp4MediaIdentityV1, DecryptProviderRequestOpV1, DecryptProviderRequestV1,
@@ -79,6 +80,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::Digest as _;
 
+/// `config.toml` key for `elastos config set`. Home reads this same constant.
+pub const ENABLED_CONFIG_KEY: &str = "protected_content";
+
 /// Protected content (Elacity Player, Protect and List, Marketplace Media)
 /// ships after 0.8.0 (#91). It stays off, and Home hides those surfaces and
 /// refuses protected publishing, unless the host sets
@@ -89,10 +93,29 @@ pub(crate) fn protected_content_enabled(data_dir: &Path) -> bool {
         .and_then(|contents| contents.parse::<toml::Table>().ok())
         .and_then(|config| {
             config
-                .get("protected_content")
+                .get(ENABLED_CONFIG_KEY)
                 .and_then(toml::Value::as_bool)
         })
         .unwrap_or(false)
+}
+
+#[cfg(test)]
+mod enabled_config_key {
+    use super::{protected_content_enabled, ENABLED_CONFIG_KEY};
+
+    #[test]
+    fn the_reader_follows_the_exported_key() {
+        assert_eq!(ENABLED_CONFIG_KEY, "protected_content");
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        assert!(!protected_content_enabled(dir.path()));
+        std::fs::write(&path, format!("{ENABLED_CONFIG_KEY} = true\n")).unwrap();
+        assert!(protected_content_enabled(dir.path()));
+        std::fs::write(&path, format!("{ENABLED_CONFIG_KEY} = false\n")).unwrap();
+        assert!(!protected_content_enabled(dir.path()));
+        std::fs::write(&path, "other = true\n").unwrap();
+        assert!(!protected_content_enabled(dir.path()));
+    }
 }
 pub(crate) const ELACITY_PLAYER_CAPSULE_ID: &str = "elacity-player";
 
@@ -177,6 +200,35 @@ pub(crate) const RUNTIME_CUSTODY_RELEASE_APPROVAL_UNAVAILABLE_MESSAGE: &str =
 /// identical open, which resumes the persisted release.
 pub(crate) const RUNTIME_CUSTODY_OPEN_PENDING_MESSAGE: &str =
     "Runtime custody viewer release is pending exact Wallet approval";
+pub(crate) const RUNTIME_CUSTODY_RELEASE_WINDOW_CLOSED_MESSAGE: &str =
+    "Runtime custody viewer release window has closed; open it again";
+pub(crate) const RELEASE_ISSUE_SKEW_SECS: u64 = RIGHTS_CLOCK_SKEW_SECS;
+pub(crate) const RELEASE_CONTRIBUTION_WINDOW_SECS: u64 = 50;
+pub(crate) const WHOLE_RELEASE_SECS: u64 =
+    RELEASE_CONTRIBUTION_WINDOW_SECS + RIGHTS_CLOCK_SKEW_SECS;
+pub(crate) const RIGHTS_REQUEST_AHEAD_SECS: u64 = 180;
+pub(crate) fn custody_release_round_fits(
+    round: u64,
+    rights_issued_at: u64,
+    rights_expires_at: u64,
+    prepared_expires_at: u64,
+    pending_expires_at: u64,
+) -> bool {
+    round.saturating_sub(RELEASE_ISSUE_SKEW_SECS) >= rights_issued_at
+        && round.saturating_add(WHOLE_RELEASE_SECS) <= rights_expires_at
+        && round.saturating_add(RELEASE_CONTRIBUTION_WINDOW_SECS) <= prepared_expires_at
+        && round < prepared_expires_at.min(pending_expires_at)
+}
+
+#[cfg(all(test, unix))]
+pub(crate) fn latest_custody_resume_offset_secs() -> u64 {
+    let prepared_after =
+        MAX_RECIPIENT_KEY_AUTHORIZATION_LIFETIME_SECS.saturating_sub(RELEASE_ISSUE_SKEW_SECS);
+    RIGHTS_REQUEST_AHEAD_SECS
+        .saturating_sub(WHOLE_RELEASE_SECS)
+        .min(prepared_after.saturating_sub(RELEASE_CONTRIBUTION_WINDOW_SECS))
+        .min(prepared_after.saturating_sub(1))
+}
 
 /// Fail-closed mapping for the viewer release path: logs the cause and source
 /// line at warn and keeps the stable message outermost while carrying the
@@ -6152,13 +6204,12 @@ fn viewer_open_now() -> u64 {
 
 /// The wall-clock reading of one later decision inside a viewer open.
 ///
-/// The open keeps its single reading for its own expiry decisions, release
-/// window, operation assembly, resume and record stamps. The decisions that
-/// verify a provider-stamped artifact — the availability receipt (stamped when
-/// the fresh `ensure` finishes), each release coordinator response, the
-/// terminal receipt's contributions and the session-open request — take their
-/// own reading when they run instead, and clamp it at the open's reading so a
-/// backward step never verifies against an earlier moment.
+/// The prepared recipient and the rights request keep the open's reading. The
+/// release window is a later reading, taken after the wallet returns, so the
+/// preamble does not spend the contribution budget. Decisions that verify a
+/// provider-stamped artifact take their own reading when they run, and clamp
+/// it at the open's reading so a backward step never verifies against an
+/// earlier moment.
 fn viewer_decision_now() -> u64 {
     #[cfg(test)]
     {
@@ -6167,6 +6218,27 @@ fn viewer_decision_now() -> u64 {
         }
     }
     crate::auth::now_ts()
+}
+
+/// Clears the stale open so the next open starts at once, then refuses by name.
+async fn refuse_closed_custody_release_window(
+    data_dir: &Path,
+    registry: &Arc<ProviderRegistry>,
+    listing: &RuntimeCustodyListingRecord,
+    principal_id: &str,
+    mint_id: Digest32,
+    open_pending: RuntimeCustodyViewerRecord,
+) -> anyhow::Error {
+    let _ = settle_runtime_custody_viewer_cleanup(
+        data_dir,
+        registry.clone(),
+        listing,
+        principal_id,
+        mint_id,
+        open_pending,
+    )
+    .await;
+    anyhow::anyhow!(RUNTIME_CUSTODY_RELEASE_WINDOW_CLOSED_MESSAGE)
 }
 
 pub(crate) async fn open_runtime_custody_viewer(
@@ -6179,12 +6251,8 @@ pub(crate) async fn open_runtime_custody_viewer(
         acquire_runtime_custody_viewer_lifecycle_guard(data_dir, &input.principal_id, mint_id)
             .await;
     // One wall-clock reading per open, taken after the lifecycle lock is
-    // acquired. Every availability, expiry, release, operation, coordinator,
-    // resume and receipt consumer below uses this value, so a wall-clock step
-    // inside the operation cannot split two readings that are compared with
-    // each other, and a record that expires while this open waits for the
-    // lock is judged by the later reading rather than the one it saw on
-    // arrival.
+    // acquired. The prepared recipient and the rights request use it. The
+    // release window is a later reading, taken once the wallet has returned.
     let now = viewer_open_now();
     let purchase = load_runtime_custody_purchase(data_dir, &input.principal_id, mint_id)?
         .ok_or_else(|| anyhow::anyhow!(RUNTIME_CUSTODY_OPEN_DENIED_MESSAGE))?;
@@ -6352,8 +6420,9 @@ pub(crate) async fn open_runtime_custody_viewer(
                 runtime_session_binding,
                 audit_request_id,
                 runtime_issuer,
-                now.saturating_sub(5),
-                now + 60,
+                now.saturating_sub(RELEASE_ISSUE_SKEW_SECS),
+                now.saturating_sub(RELEASE_ISSUE_SKEW_SECS)
+                    .saturating_add(MAX_RECIPIENT_KEY_AUTHORIZATION_LIFETIME_SECS),
             )
             .await
             {
@@ -6383,20 +6452,63 @@ pub(crate) async fn open_runtime_custody_viewer(
             }
             (prepared, open_pending, audit_request_id, None)
         };
+    let wallet_invocation = RuntimeReleaseWalletInvocation {
+        principal_id: &input.principal_id,
+        account_id: &purchase.account_id,
+        proof_binding_id,
+        session_id,
+        grant_id,
+        mint_id,
+        runtime_session_binding,
+    };
+    if let Some(bytes) = replay_wallet_request.as_deref() {
+        let rights = match runtime_release_wallet_request(
+            &buy,
+            prepared.recipient_identity(),
+            &wallet_invocation,
+            Some(bytes),
+            now,
+        ) {
+            Ok((_, rights)) => rights,
+            Err(error) => {
+                // Like every other failed resume: clear the pending open, so
+                // the next open starts fresh.
+                let _ = settle_runtime_custody_viewer_cleanup(
+                    data_dir,
+                    registry.clone(),
+                    &listing,
+                    &input.principal_id,
+                    mint_id,
+                    open_pending.clone(),
+                )
+                .await;
+                return Err(error);
+            }
+        };
+        if !custody_release_round_fits(
+            now,
+            rights.issued_at(),
+            rights.expires_at(),
+            prepared.expires_at(),
+            open_pending.expires_at,
+        ) {
+            return Err(refuse_closed_custody_release_window(
+                data_dir,
+                &registry,
+                &listing,
+                &input.principal_id,
+                mint_id,
+                open_pending,
+            )
+            .await);
+        }
+    }
     let (release_wallet_request, release_wallet_response, signed_rights) =
         match invoke_runtime_release_wallet(
             registry.as_ref(),
             &buy,
             prepared.recipient_identity(),
-            RuntimeReleaseWalletInvocation {
-                principal_id: &input.principal_id,
-                account_id: &purchase.account_id,
-                proof_binding_id,
-                session_id,
-                grant_id,
-                mint_id,
-                runtime_session_binding,
-            },
+            wallet_invocation,
             replay_wallet_request.as_deref(),
             now,
         )
@@ -6473,6 +6585,28 @@ pub(crate) async fn open_runtime_custody_viewer(
             anyhow::bail!("Runtime custody rights policy is unavailable");
         }
     };
+    // The 50 s contribution budget starts here, after availability, media,
+    // recipient prepare and the wallet. It is not a longer timeout.
+    let release_now = viewer_decision_now().max(now);
+    // The wallet and policy steps took time: refuse before any custody
+    // release that cannot finish inside every lifetime.
+    if !custody_release_round_fits(
+        release_now,
+        signed_rights.request().issued_at(),
+        signed_rights.request().expires_at(),
+        prepared.expires_at(),
+        open_pending.expires_at,
+    ) {
+        return Err(refuse_closed_custody_release_window(
+            data_dir,
+            &registry,
+            &listing,
+            &input.principal_id,
+            mint_id,
+            open_pending,
+        )
+        .await);
+    }
     let release_request = match KeyReleaseRequestV1::new(
         signed_rights.request().binding().clone(),
         signed_rights
@@ -6481,8 +6615,8 @@ pub(crate) async fn open_runtime_custody_viewer(
             .map_err(release_unavailable!())?,
         RightsActionV1::View,
         prepared.recipient_identity().clone(),
-        now.saturating_sub(5),
-        now + 55,
+        release_now.saturating_sub(RELEASE_ISSUE_SKEW_SECS),
+        release_now.saturating_add(WHOLE_RELEASE_SECS),
         ReplayNonce16::new(audit_nonce_bytes(audit_request_id)),
     ) {
         Ok(request) => request,
@@ -6547,10 +6681,10 @@ pub(crate) async fn open_runtime_custody_viewer(
             evidence_request,
             custody_epoch: composition.signed_epoch.clone(),
             audit_request_id,
-            issued_at: now.saturating_sub(3),
-            expires_at: now + 50,
+            issued_at: release_now.saturating_sub(3),
+            expires_at: release_now.saturating_add(RELEASE_CONTRIBUTION_WINDOW_SECS),
         },
-        now,
+        release_now,
     ) {
         Ok(operation) => operation,
         Err(_) => {
@@ -6592,7 +6726,7 @@ pub(crate) async fn open_runtime_custody_viewer(
             &release_wallet_request,
             &release_wallet_response,
             operation.clone(),
-            now,
+            release_now,
         )
         .await
     {
@@ -6609,7 +6743,7 @@ pub(crate) async fn open_runtime_custody_viewer(
                 ?reason,
                 "runtime custody open: release nonterminal, resuming exact operation"
             );
-            match coordinator.resume_exact(operation_hash, now).await {
+            match coordinator.resume_exact(operation_hash, release_now).await {
                 Ok(RuntimeReleaseCoordinatorOutcome::Terminal(
                     RuntimeReleaseTerminalResult::ContributionsReady {
                         signed_node_contributions,
@@ -6651,7 +6785,7 @@ pub(crate) async fn open_runtime_custody_viewer(
         &operation,
         &contributions,
         &composition.signed_epoch,
-        now,
+        release_now,
         viewer_decision_now,
     ) {
         Ok(receipt) => receipt,
@@ -6687,7 +6821,7 @@ pub(crate) async fn open_runtime_custody_viewer(
     // The session-open request carries the provider-stamped contributions and
     // the terminal receipt, so this decision verifies them against its own
     // reading, never earlier than the open's.
-    let session_now_unix_seconds = now.max(viewer_decision_now());
+    let session_now_unix_seconds = release_now.max(viewer_decision_now());
     let session = match open_viewer_session(
         &decrypt,
         &RuntimeOpenViewerSessionInput {
@@ -7645,8 +7779,8 @@ fn runtime_release_wallet_request(
             .map_err(release_unavailable!())?,
         buy.action(),
         recipient.clone(),
-        now.saturating_sub(5),
-        now + 180,
+        now.saturating_sub(RELEASE_ISSUE_SKEW_SECS),
+        now.saturating_add(RIGHTS_REQUEST_AHEAD_SECS),
         ReplayNonce16::new(replay_nonce),
     )
     .map_err(release_unavailable!())?;

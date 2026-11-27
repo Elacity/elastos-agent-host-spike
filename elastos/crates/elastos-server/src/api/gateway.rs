@@ -98,7 +98,13 @@ pub(crate) use gateway_inbox::inbox_request_entries_for_test;
 #[path = "gateway_inspect_actions.rs"]
 mod gateway_inspect_actions;
 pub(crate) use gateway_inspect_actions::agent_plan_result_for_requester;
+#[cfg(all(test, unix))]
+pub(in crate::api) use gateway_inspect_actions::dispatch_approved_agent_plan;
 pub(crate) use gateway_inspect_actions::submit_pending_agent_plan;
+#[cfg(all(test, unix))]
+pub(in crate::api) use gateway_inspect_actions::{
+    clear_plan_dispatch_wait_for_test, set_plan_dispatch_wait_for_test,
+};
 #[path = "gateway_model_remote.rs"]
 mod gateway_model_remote;
 #[path = "gateway_model_service.rs"]
@@ -188,6 +194,8 @@ pub(super) use gateway_home_token::issue_home_launch_token_with_context;
 #[cfg(unix)]
 #[cfg(test)]
 pub(super) use gateway_home_token::launch_principal_root;
+#[cfg(all(test, unix))]
+pub(super) use gateway_home_token::sign_direct_launch_for_test;
 pub(super) use gateway_home_token::HomeLaunchTokenContext;
 pub(crate) use gateway_home_token::RuntimeWalletAuthority;
 pub(crate) use gateway_home_token::VerifiedLaunchGrant;
@@ -222,7 +230,9 @@ use gateway_home_cli_mint::{
 };
 #[cfg(unix)]
 #[cfg(test)]
-pub(in crate::api) use gateway_home_token::issue_expired_home_launch_token_with_context;
+pub(in crate::api) use gateway_home_token::{
+    issue_expired_home_launch_token_with_context, issue_expired_home_projection_token_with_context,
+};
 #[cfg(test)]
 pub(in crate::api) use gateway_home_token::{
     issue_home_launch_token, local_home_launch_token_context, set_test_home_launch_auth_data_dir,
@@ -1189,6 +1199,7 @@ fn gateway_router_with_api_url(state: GatewayState, gateway_api_url: String) -> 
             post(home_appearance_preferences_update),
         )
         .route("/api/apps/home/summary", get(home_summary))
+        .route("/api/apps/home/frame", get(home_v2_frame))
         .route("/api/apps/home/events", get(home_events))
         .route("/api/apps/home/events/stream", get(home_events_stream))
         .route(
