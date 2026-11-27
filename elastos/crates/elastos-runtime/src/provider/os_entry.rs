@@ -748,6 +748,21 @@ mod tests {
         #[cfg(not(target_os = "linux"))]
         let opened = unsafe { libc::pipe(fds.as_mut_ptr()) };
         assert_eq!(opened, 0);
+        // Linux `pipe2` already sets this. On macOS a later `Command` (rustc
+        // in a parallel test) inherits any fd without it, and the probe's
+        // stdin stays open until that child exits.
+        #[cfg(not(target_os = "linux"))]
+        unsafe {
+            for fd in fds {
+                let flags = libc::fcntl(fd, libc::F_GETFD);
+                assert!(flags >= 0, "F_GETFD {fd}");
+                assert_eq!(
+                    libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC),
+                    0,
+                    "FD_CLOEXEC {fd}"
+                );
+            }
+        }
         (fds[0], fds[1])
     }
 
@@ -1652,9 +1667,20 @@ mod tests {
                 result.with_file_name("denied.txt")
             };
             let denied_lit = format!("{:?}", denied.display().to_string());
-            let mut probe = String::from(
-                "use std::os::unix::fs::PermissionsExt;\nfn main() {\n    let mut report = String::new();\n    let checks: &[(&str, &str)] = &[\n        (\"device\", ",
-            );
+            // The launcher accepts the child only while that child is still
+            // alive after exec. A probe that exits in the gap between the
+            // report pipe closing and the parent's wait is the zero-byte
+            // refusal. This probe blocks on stdin until the parent has that
+            // acceptance, then the parent drops the write end.
+            let mut probe = String::new();
+            probe.push_str("use std::io::Read;\n");
+            probe.push_str("use std::os::unix::fs::PermissionsExt;\n");
+            probe.push_str("fn main() {\n");
+            probe.push_str("    let mut hold = [0u8; 1];\n");
+            probe.push_str("    let _ = std::io::stdin().read(&mut hold);\n");
+            probe.push_str("    let mut report = String::new();\n");
+            probe.push_str("    let checks: &[(&str, &str)] = &[\n");
+            probe.push_str("        (\"device\", ");
             probe.push_str(&device_lit);
             probe.push_str("),\n        (\"own\", ");
             probe.push_str(&own_lit);
@@ -1690,7 +1716,12 @@ mod tests {
                 libc::close(child_in);
                 libc::close(child_out);
             }
-            let launched = started.unwrap_or_else(|err| panic!("{key} did not start: {err}"));
+            let mut launched = started.unwrap_or_else(|err| panic!("{key} did not start: {err}"));
+            let release = std::fs::File::open("/dev/null").expect("the probe release");
+            drop(std::mem::replace(
+                &mut launched.to_child,
+                OwnedFd::from(release),
+            ));
             let status = reap_probe(launched.pid, &launched.from_child);
             drop(launched);
             let report = std::fs::read_to_string(&result).unwrap_or_else(|err| {
