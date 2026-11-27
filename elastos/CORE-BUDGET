@@ -36,4 +36,6 @@
 # capsule/manager.rs component_closure_required). Measured 23 Nov 2026 after merging main.
 # +10 for the request-map write hold used by the plan-grant drop row. The counter
 # does not treat cfg(any(test, feature = "test-hooks")) as test-only. Measured 25 Nov 2026.
-13132
+# -1712: legacy launchers are cfg(test) (CapsuleManager, ShellManager, ElastosRuntime,
+# RequestHandler, CapsuleIoBridge, prepare_fetched_capsule). Measured 27 Nov 2026.
+11420

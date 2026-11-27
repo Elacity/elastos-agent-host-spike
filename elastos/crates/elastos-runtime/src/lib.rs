@@ -18,6 +18,7 @@ pub mod auth;
 pub mod bootstrap;
 pub mod capability;
 pub mod capsule;
+#[cfg(test)]
 pub mod handler;
 pub mod inspect;
 pub mod invoke;

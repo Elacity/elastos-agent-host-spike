@@ -8,10 +8,13 @@
 //! - Memory clearing on termination (security)
 
 mod entrypoint;
+#[cfg(test)]
 mod fetched_launch;
+#[cfg(test)]
 mod manager;
 
 pub use entrypoint::check_entrypoint_file;
+#[cfg(test)]
 pub use fetched_launch::{prepare_fetched_capsule, PreparedFetchedCapsule};
-#[allow(unused_imports)]
+#[cfg(test)]
 pub use manager::{CapsuleId, CapsuleInfo, CapsuleManager, CapsuleState};
