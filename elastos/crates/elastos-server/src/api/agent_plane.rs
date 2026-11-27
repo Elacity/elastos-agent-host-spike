@@ -527,6 +527,17 @@ pub(crate) fn release_dir_for_test(data_dir: &Path) {
     }
 }
 
+/// End the plane's HTTP task and leave the runtime and its guest in place.
+#[cfg(all(test, unix, feature = "prototype-agents"))]
+pub(crate) fn end_live_listener_for_test(data_dir: &Path) -> bool {
+    let homes = homes_lock();
+    let Some(plane) = homes.get(data_dir).and_then(|slot| slot.live.as_ref()) else {
+        return false;
+    };
+    plane.server.abort();
+    true
+}
+
 /// Whether this Home's plane still has `capsule_id` running.
 pub(crate) fn instance_is_running(data_dir: &Path, capsule_id: &str) -> bool {
     watched_runtimes(data_dir)

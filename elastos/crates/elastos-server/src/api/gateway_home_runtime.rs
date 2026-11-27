@@ -657,8 +657,8 @@ struct RuntimeAgentLaunchResponse {
 
 /// The runtime that runs the agent. That is the agent plane in this process.
 /// When the plane is down, Start is refused by name and no plan is created.
-/// A plane task that has ended is named, and Stop and retire treat the guest
-/// as already ended.
+/// A plane task that has ended is named. A listener that has ended while this
+/// process still runs the guest is not an ended guest.
 async fn live_agent_coords(
     data_dir: &FsPath,
 ) -> anyhow::Result<crate::runtime_control::RuntimeCoords> {
@@ -906,6 +906,42 @@ pub(super) async fn stop_runtime_agent_session(
     stop_runtime_agent_rows(data_dir, agent_id, Some(session_id), None).await
 }
 
+/// Stop a guest this process still holds after its listener has ended.
+/// The answer is an error, so Retire does not report that guest retired.
+async fn stop_guest_held_without_listener(
+    data_dir: &FsPath,
+    agent_id: &str,
+    session_id: Option<&str>,
+) -> anyhow::Result<()> {
+    if !crate::api::agent_plane::serves(Some(data_dir)) {
+        return Ok(());
+    }
+    let Some(runtime) = crate::api::agent_plane::plane_runtime(data_dir) else {
+        return Ok(());
+    };
+    let mut sessions = runtime.live_sessions_for_agent(agent_id).await;
+    if let Some(wanted) = session_id {
+        sessions.retain(|id| id == wanted);
+    }
+    if sessions.is_empty() {
+        return Ok(());
+    }
+    let guests = crate::api::agent_plane::end_plane_guests_after_task_panic(data_dir).await;
+    let outcome = runtime_stop_from_guests(agent_id, session_id, guests);
+    if let Some(row) = outcome.stopping.first() {
+        anyhow::bail!("agent stop is not confirmed: stopping {}", row.session_id);
+    }
+    if let Some(row) = outcome.unknown.first() {
+        anyhow::bail!("agent stop is not confirmed: unknown {}", row.session_id);
+    }
+    let named = outcome
+        .stopped
+        .first()
+        .map(|row| row.session_id.clone())
+        .unwrap_or_else(|| sessions[0].clone());
+    anyhow::bail!("agent stop is not confirmed: stopped {named}")
+}
+
 async fn stop_runtime_agent_rows(
     data_dir: &FsPath,
     agent_id: &str,
@@ -919,6 +955,7 @@ async fn stop_runtime_agent_rows(
             return Ok(runtime_stop_from_guests(agent_id, session_id, guests));
         }
         Err(error) if error.to_string() == "agent runtime is not running" => {
+            stop_guest_held_without_listener(data_dir, agent_id, session_id).await?;
             let body = serde_json::to_vec(&RuntimeAgentStopRequest {
                 agent_id,
                 session_id,

@@ -3290,6 +3290,73 @@ async fn retire_of_an_idle_agent_succeeds_while_the_plane_is_down() {
 }
 
 #[tokio::test]
+async fn retire_does_not_report_retired_when_the_listener_ended_with_a_live_guest() {
+    let (home, dir) = live_home();
+    let agent = home.create_agent("Live", &sign_probe(&dir));
+    let gateway = Gateway::start(&home.data).await;
+    let session = home.launch(&agent, &dir).await;
+    let mut up = false;
+    for _ in 0..50 {
+        if capsule_live(&gateway.agent_url, &gateway.secret, &session).await {
+            up = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(up, "guest is up before the listener ends");
+    assert!(crate::api::agent_plane::end_live_listener_for_test(
+        &home.data
+    ));
+    port_closed(&gateway.agent_url).await;
+    assert!(crate::api::agent_plane::task_fault(&home.data).is_none());
+    assert!(crate::api::agent_plane::plane_runtime(&home.data).is_some());
+    let (status, body) = post_json(
+        &gateway.addr,
+        &system_token(&home),
+        "/api/apps/system/agents/retire",
+        &json!({ "agent_id": agent }).to_string(),
+    )
+    .await;
+    let runtime = crate::api::agent_plane::plane_runtime(&home.data).expect("runtime still held");
+    let still = runtime.live_sessions_for_agent(&agent).await;
+    assert_ne!(
+        status, 200,
+        "retire reported retired; guest still live: {still:?}; {body}"
+    );
+    let record = crate::auth::stored_principal_record(&home.data, &agent)
+        .unwrap()
+        .unwrap();
+    assert!(record.retired_at.is_none(), "{record:?}");
+    let named = body.contains("stopping") || body.contains("unknown");
+    assert!(
+        still.is_empty() || (named && body.contains(&session)),
+        "guest {still:?} was not stopped or named: {body}"
+    );
+    let owed = crate::agents::owed_stop_rows(&home.data);
+    assert!(
+        owed.iter().any(|row| {
+            row.result == "stopping" && row.reason.contains(&agent) && row.reason.contains("retire")
+        }),
+        "the owed stop was not recorded: {owed:?}"
+    );
+    if still.is_empty() {
+        let (again, again_body) = post_json(
+            &gateway.addr,
+            &system_token(&home),
+            "/api/apps/system/agents/retire",
+            &json!({ "agent_id": agent }).to_string(),
+        )
+        .await;
+        assert_eq!(again, 200, "{again_body}");
+        let retired = crate::auth::stored_principal_record(&home.data, &agent)
+            .unwrap()
+            .unwrap();
+        assert!(retired.retired_at.is_some(), "{retired:?}");
+    }
+    gateway.shutdown().await;
+}
+
+#[tokio::test]
 async fn a_failed_role_read_does_not_stop_another_admins_agent() {
     let home = Home::open();
     let owner = super::passkey_authority_with_name_role_credential(
