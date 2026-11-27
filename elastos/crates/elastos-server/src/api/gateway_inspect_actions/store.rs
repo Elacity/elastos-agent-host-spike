@@ -1470,7 +1470,7 @@ mod tests {
             )
             .unwrap();
             let request_id = created["request_id"].as_str().unwrap().to_string();
-            let bridge = crate::resource_bridge::plan_wait_bridge_for_test(
+            let bridge = crate::resource_bridge::tests::plan_wait_bridge_for_test(
                 dir.path(),
                 requester,
                 capsule,
@@ -1497,7 +1497,7 @@ mod tests {
             let parked_capsule = capsule.to_string();
             let parked_session = session.to_string();
             std::thread::spawn(move || {
-                let answer = crate::resource_bridge::park_agent_plan_result_for_test(
+                let answer = crate::resource_bridge::tests::park_agent_plan_result_for_test(
                     &home,
                     &parked_id,
                     &parked_owner,

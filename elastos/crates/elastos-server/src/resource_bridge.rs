@@ -658,64 +658,6 @@ fn set_plan_park_waiting(home: &Path, waiting: bool) {
     }
 }
 
-#[cfg(unix)]
-#[cfg(test)]
-fn plan_wait_bridge(
-    data_dir: &Path,
-    requester_id: &str,
-    capsule_id: &str,
-    session_id: &str,
-) -> BridgeContext {
-    let audit_log = Arc::new(elastos_runtime::primitives::audit::AuditLog::new());
-    BridgeContext {
-        provider_registry: Arc::new(ProviderRegistry::new()),
-        capability_manager: Arc::new(CapabilityManager::new(
-            Arc::new(elastos_runtime::capability::CapabilityStore::new()),
-            audit_log.clone(),
-            Arc::new(elastos_runtime::primitives::metrics::MetricsManager::new()),
-        )),
-        pending_store: Arc::new(
-            elastos_runtime::capability::pending::PendingRequestStore::new(audit_log),
-        ),
-        capsule_id: capsule_id.to_string(),
-        session_id: session_id.to_string(),
-        principal_id: Some(requester_id.to_string()),
-        manifest_capabilities: Vec::new(),
-        data_dir: Some(data_dir.to_path_buf()),
-        launch: None,
-        model_token_ceiling: None,
-        model_budget: None,
-        stop: None,
-        plan_book: None,
-    }
-}
-
-/// Park the same way a guest status read does. The caller is the waiting agent.
-#[cfg(unix)]
-#[cfg(test)]
-pub(crate) fn park_agent_plan_result_for_test(
-    data_dir: &Path,
-    request_id: &str,
-    owner_id: &str,
-    requester_id: &str,
-    capsule_id: &str,
-    session_id: &str,
-) -> serde_json::Value {
-    let bridge_ctx = plan_wait_bridge(data_dir, requester_id, capsule_id, session_id);
-    park_for_agent_plan_result(&bridge_ctx, data_dir, request_id, owner_id, requester_id)
-}
-
-#[cfg(unix)]
-#[cfg(test)]
-pub(crate) fn plan_wait_bridge_for_test(
-    data_dir: &Path,
-    requester_id: &str,
-    capsule_id: &str,
-    session_id: &str,
-) -> BridgeContext {
-    plan_wait_bridge(data_dir, requester_id, capsule_id, session_id)
-}
-
 fn plan_park_limit(data_dir: &Path) -> Duration {
     #[cfg(not(test))]
     let _ = data_dir;
@@ -4088,6 +4030,47 @@ pub(crate) mod tests {
                 "request_id": "wallet-approval:test"
             }))
         }
+    }
+
+    /// The bridge a parked plan wait uses. Fields the wait reads are the caller's.
+    #[cfg(unix)]
+    fn plan_wait_bridge(
+        data_dir: &Path,
+        requester_id: &str,
+        capsule_id: &str,
+        session_id: &str,
+    ) -> BridgeContext {
+        let mut ctx = bridge_context();
+        ctx.capsule_id = capsule_id.to_string();
+        ctx.session_id = session_id.to_string();
+        ctx.principal_id = Some(requester_id.to_string());
+        ctx.manifest_capabilities.clear();
+        ctx.data_dir = Some(data_dir.to_path_buf());
+        ctx
+    }
+
+    /// Park the same way a guest status read does. The caller is the waiting agent.
+    #[cfg(unix)]
+    pub(crate) fn park_agent_plan_result_for_test(
+        data_dir: &Path,
+        request_id: &str,
+        owner_id: &str,
+        requester_id: &str,
+        capsule_id: &str,
+        session_id: &str,
+    ) -> serde_json::Value {
+        let bridge_ctx = plan_wait_bridge(data_dir, requester_id, capsule_id, session_id);
+        super::park_for_agent_plan_result(&bridge_ctx, data_dir, request_id, owner_id, requester_id)
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn plan_wait_bridge_for_test(
+        data_dir: &Path,
+        requester_id: &str,
+        capsule_id: &str,
+        session_id: &str,
+    ) -> BridgeContext {
+        plan_wait_bridge(data_dir, requester_id, capsule_id, session_id)
     }
 
     fn bridge_context() -> BridgeContext {
