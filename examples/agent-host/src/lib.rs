@@ -4230,9 +4230,10 @@ fn decode_standard_base64(text: &str) -> Option<Vec<u8>> {
         return None;
     }
     let mut out = Vec::new();
-    for chunk in bytes.chunks(4) {
+    let count = bytes.len() / 4;
+    for (index, chunk) in bytes.chunks(4).enumerate() {
         let pad = chunk.iter().rev().take_while(|byte| **byte == b'=').count();
-        if pad > 2 {
+        if pad > 2 || (pad > 0 && index + 1 != count) {
             return None;
         }
         let mut bits = 0u32;
@@ -17437,7 +17438,8 @@ mod tests {
     }
 
     /// The guest's request and reply shapes are the ones the bridge reads and
-    /// writes. A rename on either side fails here.
+    /// writes. A rename on either side fails here. The read body is the fixture
+    /// that `read_content_value`'s own test checks, and `reply_content` decodes it.
     #[test]
     fn the_write_body_is_what_the_bridge_reads() {
         assert_eq!(
@@ -17468,6 +17470,13 @@ mod tests {
         let host =
             include_str!("../../../elastos/crates/elastos-compute/src/providers/component.rs");
         assert!(host.contains("let body = serde_json::to_vec(&result)"));
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("../bridge-read-content.json"))
+                .expect("bridge read fixture");
+        for row in fixture.as_array().expect("bridge read rows") {
+            let bytes: Vec<u8> = serde_json::from_value(row["bytes"].clone()).expect("bytes");
+            assert_eq!(reply_content(&row["content"]), Some(bytes));
+        }
     }
 
     fn encode_standard_base64(bytes: &[u8]) -> String {
@@ -17490,12 +17499,27 @@ mod tests {
         out
     }
 
-    /// One row for each body `read_content_value` sends: a byte array, and
-    /// standard base64. A bad base64 body is not a journal.
+    /// A stored read accepts a byte array and canonical standard base64.
+    /// Padding only in the final chunk, nothing after `=`, a multiple of four
+    /// characters, and zero unused bits. Anything else is not a journal.
     #[test]
     fn a_stored_read_accepts_the_byte_array_and_the_base64_body() {
         assert_eq!(encode_standard_base64(&[0, 255]), "AP8=");
         assert_eq!(encode_standard_base64(b"a"), "YQ==");
+        let rows: [(&str, Option<&[u8]>); 5] = [
+            ("YQ==YQ==", None),
+            ("YQ==", Some(b"a".as_slice())),
+            ("YWI=", Some(b"ab".as_slice())),
+            ("", Some(b"".as_slice())),
+            ("YR==", None),
+        ];
+        for (text, want) in rows {
+            assert_eq!(
+                reply_content(&serde_json::json!({"b64": text})),
+                want.map(ToOwned::to_owned),
+                "{text}"
+            );
+        }
         assert_eq!(
             reply_content(&serde_json::json!([0, 255])),
             Some(vec![0, 255])
