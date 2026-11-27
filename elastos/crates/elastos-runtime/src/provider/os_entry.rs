@@ -675,6 +675,21 @@ fn dispatch(
     refuse_unsupported_os(provider, admitted, executable.path(), checked, stdio)
 }
 
+// The end is absent when `cursor` itself is kept, so the range never covers it.
+#[cfg(any(test, target_os = "linux"))]
+#[cfg(any(test, not(elastos_unsupported_os_check)))]
+#[cfg(any(test, target_arch = "x86_64", target_arch = "aarch64"))]
+fn close_step(held: &[i32], extra: [i32; 2], cursor: i32) -> (Option<u32>, Option<i32>) {
+    let mut next = None;
+    for fd in held.iter().copied().chain(extra) {
+        if fd >= cursor && next.is_none_or(|kept| fd < kept) {
+            next = Some(fd);
+        }
+    }
+    let end = (next != Some(cursor)).then(|| next.map_or(u32::MAX, |fd| (fd - 1) as u32));
+    (end, next)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -693,24 +708,12 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
     use std::path::PathBuf;
 
-    /// Same decision as `close_except`. `-1` is absent. `None` means `cursor` is kept.
-    fn close_before(held: &[i32], extra: [i32; 2], cursor: i32) -> (Option<u32>, Option<i32>) {
-        let mut next = None;
-        for fd in held.iter().copied().chain(extra) {
-            if fd >= cursor && next.is_none_or(|kept| fd < kept) {
-                next = Some(fd);
-            }
-        }
-        let end = (next != Some(cursor)).then(|| next.map_or(u32::MAX, |fd| (fd - 1) as u32));
-        (end, next)
-    }
-
     fn kept_and_closed(held: &[i32], extra: [i32; 2]) -> (Vec<i32>, Vec<(u32, u32)>) {
         let mut cursor = 3;
         let mut kept = Vec::new();
         let mut closed = Vec::new();
         loop {
-            let (end, next) = close_before(held, extra, cursor);
+            let (end, next) = close_step(held, extra, cursor);
             if let Some(last) = end {
                 closed.push((cursor as u32, last));
             }
@@ -736,26 +739,6 @@ mod tests {
         let (kept, closed) = kept_and_closed(&[6, 4], [3, -1]);
         assert_eq!(kept, vec![3, 4, 6]);
         assert_eq!(closed, vec![(5, 5), (7, u32::MAX)]);
-        let installer = std::fs::read_to_string(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/src/provider/preexec_installer.rs"
-        ))
-        .unwrap();
-        let close_except = installer
-            .split("fn close_except(")
-            .nth(1)
-            .unwrap()
-            .split("pub(super) fn prepare_path_allow(")
-            .next()
-            .unwrap();
-        assert!(
-            close_except.contains("held.iter().copied().chain(extra)"),
-            "the child keeps the smallest descriptor, not the first listed one"
-        );
-        assert!(
-            close_except.contains("(fd - 1) as u32"),
-            "the close range stops before the kept descriptor"
-        );
     }
 
     fn pipe_pair() -> (i32, i32) {
@@ -1359,12 +1342,14 @@ mod tests {
     }
 
     /// `dispatch` says allocation finishes before the fork. The child runs the
-    /// launcher's `pid == 0` arm, its record writers, and the installer's
-    /// `sequence`, `close_except` and `install`. None of them names a call
-    /// that allocates on the heap.
+    /// launcher's `pid == 0` arm, its record writers, the installer's
+    /// `sequence`, `close_except` and `install`, and `close_step`. None of
+    /// them names a call that allocates on the heap.
     #[test]
     fn the_child_between_fork_and_exec_does_not_allocate() {
-        assert!(production_source().contains("Allocation finishes before the fork."));
+        let entry = production_source();
+        assert!(entry.contains("Allocation finishes before the fork."));
+        let step_at = entry.find("fn close_step(").expect("close_step");
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/provider");
         let installer = std::fs::read_to_string(root.join("preexec_installer.rs")).unwrap();
         let launcher = std::fs::read_to_string(root.join("failure_record.rs")).unwrap();
@@ -1390,6 +1375,7 @@ mod tests {
                 "fn close_except(",
                 "pub(super) fn prepare_path_allow(",
             ),
+            entry[step_at..].to_string(),
             between(&launcher, "if pid == 0 {", "drop(stderr_null);"),
             between(&launcher, "fn child_test_hook(hook", "fn decode("),
         ];

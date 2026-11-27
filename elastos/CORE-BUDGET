@@ -69,4 +69,5 @@
 # -1712: legacy launchers are cfg(test) (CapsuleManager, ShellManager, ElastosRuntime,
 # RequestHandler, CapsuleIoBridge, prepare_fetched_capsule). Measured 27 Nov 2026.
 # Merge of origin/spike/agent-host 75616ff93 (#1871) into the P2-4 fences. Both notes stay. Measured 27 Nov 2026.
-13561
+# +7: round 39 shares one close-range step, which close_except calls. Measured 27 Nov 2026.
+13568

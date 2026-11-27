@@ -184,17 +184,11 @@ pub(super) fn prepare(
 fn close_except(held: &[i32], extra: [i32; 2]) -> Result<(), i32> {
     let mut cursor = 3i32;
     loop {
-        let mut next = None;
-        for fd in held.iter().copied().chain(extra) {
-            if fd >= cursor && next.is_none_or(|kept| fd < kept) {
-                next = Some(fd);
+        let (end, next) = super::close_step(held, extra, cursor);
+        if let Some(last) = end {
+            if unsafe { libc::syscall(libc::SYS_close_range, cursor as u32, last, 0u32) } < 0 {
+                return Err(unsafe { *libc::__errno_location() });
             }
-        }
-        let last = next.map_or(u32::MAX, |fd| (fd - 1) as u32);
-        if next != Some(cursor)
-            && unsafe { libc::syscall(libc::SYS_close_range, cursor as u32, last, 0u32) } < 0
-        {
-            return Err(unsafe { *libc::__errno_location() });
         }
         let Some(fd) = next else { return Ok(()) };
         cursor = fd + 1;
@@ -1041,6 +1035,65 @@ mod tests {
         );
     }
 
+    /// Unsorted held descriptors, report descriptor 3, and one open marker that
+    /// is not kept. `close_except` leaves the kept descriptors open and closes
+    /// the marker. Highest descriptor first, so a later place does not reuse it.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn close_except_keeps_an_unsorted_list_and_closes_the_marker() {
+        fn place(target: i32) -> i32 {
+            let opened =
+                unsafe { libc::open(c"/dev/null".as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC) };
+            if opened < 0 {
+                unsafe { libc::_exit(70) };
+            }
+            if opened == target {
+                return opened;
+            }
+            if unsafe { libc::dup2(opened, target) } != target {
+                unsafe { libc::_exit(71) };
+            }
+            unsafe { libc::close(opened) };
+            target
+        }
+        fn descriptor_open(fd: i32) -> bool {
+            unsafe { libc::fcntl(fd, libc::F_GETFD) >= 0 }
+        }
+
+        let pid = unsafe { libc::fork() };
+        assert!(pid >= 0);
+        if pid == 0 {
+            let marker = place(7);
+            let high = place(6);
+            let low = place(4);
+            let keep = place(3);
+            if marker != 7 || high != 6 || low != 4 || keep != 3 {
+                unsafe { libc::_exit(75) };
+            }
+            let code = match close_except(&[6, 4], [3, -1]) {
+                Err(_) => 72,
+                Ok(()) => {
+                    let kept_open = descriptor_open(3) && descriptor_open(4) && descriptor_open(6);
+                    if !kept_open {
+                        73
+                    } else if descriptor_open(marker) {
+                        74
+                    } else {
+                        0
+                    }
+                }
+            };
+            unsafe { libc::_exit(code) };
+        }
+        let mut status = 0;
+        assert_eq!(unsafe { libc::waitpid(pid, &mut status, 0) }, pid);
+        assert!(
+            libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0,
+            "status {status} exit {} (70 open, 71 dup2, 72 close_except, 73 a kept descriptor was closed, 74 the marker stayed open, 75 the descriptors were not 3, 4, 6, and 7)",
+            libc::WEXITSTATUS(status)
+        );
+    }
+
     /// A copied tree under the test root, found through an injected directory
     /// list that is not the multiarch directory. This child installs that one
     /// file rule. The installer's signature stays the entry's.
@@ -1104,12 +1157,13 @@ mod tests {
         let hidden = plant_library(root.path(), "/lib/hidden.so");
         let hidden = CString::new(hidden.as_os_str().as_bytes()).unwrap();
         let report = std::fs::File::open("/dev/null").unwrap();
-        // owned_fd_above_stdio duplicates each library descriptor to 4 or
-        // above and closes the original. That original is 3, so this open
-        // receives 3. install keeps a report descriptor of 3.
+        // owned_fd_above_stdio dups each library descriptor to 4 or above and
+        // closes the original, so this open can receive 3. install accepts
+        // keep >= 3. On 1769732ad the assert required a descriptor above 3
+        // and failed here, before fork, so close_except did not run.
         assert!(
             report.as_raw_fd() >= 3,
-            "install keeps a report descriptor of 3 or above"
+            "install accepts a report descriptor of 3 or above"
         );
         let pid = unsafe { libc::fork() };
         assert!(pid >= 0);
