@@ -43,6 +43,10 @@
 //! (`main.rs`), which walks and does not take the host lock. `elastos capsule`
 //! attaches to a running runtime and does not walk. `elastos run`, `elastos open`,
 //! and a host can therefore overlap.
+//! After the migration lock is held, and again before pass 2, the walk reads
+//! `update_can_roll_back`. An update that began while the walk waited for the
+//! lock, or while pass 1 read, defers with the pending-update sentence. No
+//! file is rewritten and no marker is written.
 //! They cannot mix keys: on Unix the file key is HKDF-SHA256 of the device key
 //! (info `elastos-localhost-file-v1`), and the migration lock lets one walk
 //! write at a time. On Windows the helper still receives the device key, and
@@ -1208,8 +1212,13 @@ fn migrate_localhost_files_to_file_key(
     if matches!(plan, MarkerPlan::Keep) {
         return Ok(());
     }
+    // The lock is held. An update that started while this run waited, or
+    // while pass 1 read, still defers before any rewrite and before the marker.
     #[cfg(test)]
     run_before_walk();
+    if elastos_server::update_controller::update_can_roll_back(data_dir) {
+        return Err(anyhow::anyhow!(LOCALHOST_FILES_PENDING_UPDATE));
+    }
     let mut done = std::collections::HashSet::new();
     let mut over_hard = Vec::new();
     let mut walk = || -> anyhow::Result<()> {
@@ -1245,6 +1254,9 @@ fn migrate_localhost_files_to_file_key(
     };
     walk()?;
     if HELD.with(|slot| slot.get()) {
+        if elastos_server::update_controller::update_can_roll_back(data_dir) {
+            return Err(anyhow::anyhow!(LOCALHOST_FILES_PENDING_UPDATE));
+        }
         PASS_TWO.with(|slot| slot.set(true));
         walk()?;
     }
