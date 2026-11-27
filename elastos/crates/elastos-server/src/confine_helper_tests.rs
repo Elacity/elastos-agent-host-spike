@@ -1102,8 +1102,10 @@ fn argument_is_object(head: &str) -> bool {
 }
 
 /// Deleting `AttachedRequest::new`, `ObjectAuthorityV1::attach`, or
-/// `attach_object_authority` before an object send turns this red. The
-/// confined registration has to name `AuthorityAttachingProvider` too.
+/// `attach_object_authority` before an object send turns this red.
+/// A `ProviderRegistry` send is covered by `AuthorityAttachingProvider`
+/// instead of a second attach at the call. The confined registration has
+/// to name `AuthorityAttachingProvider` too.
 #[test]
 fn every_object_dispatch_path_carries_the_envelope() {
     let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
@@ -1141,8 +1143,14 @@ fn scan_object_authority(dir: &std::path::Path, misses: &mut Vec<String>) {
             let literal = argument_is_object(head);
             let scheme = head.contains("&scheme") || head.contains("&dispatch.scheme");
             let object_scheme = scheme && window.contains("== \"object\"");
-            let back = start.saturating_sub(2500);
-            if (literal || object_scheme) && !carries_object_authority(&text[back..start]) {
+            let back = text.floor_char_boundary(start.saturating_sub(2500));
+            // A provider-registry send reaches AuthorityAttachingProvider,
+            // which inserts the Runtime envelope. Removing that registration
+            // fails the assertion in `every_object_dispatch_path_carries_the_envelope`.
+            if (literal || object_scheme)
+                && !registry_object_send(&text[..start])
+                && !carries_object_authority(&text[back..start])
+            {
                 let line = text[..start].lines().count();
                 misses.push(format!("{}:{line}", path.display()));
             }
@@ -1155,6 +1163,13 @@ fn carries_object_authority(before: &str) -> bool {
     before.contains("ObjectAuthorityV1::attach")
         || before.contains("AttachedRequest::new")
         || before.contains("attach_object_authority(")
+}
+
+/// `registry.send_raw("object")` and a registry field split across lines.
+/// The registered object provider is `AuthorityAttachingProvider`.
+fn registry_object_send(before: &str) -> bool {
+    let tail = before.trim_end().trim_end_matches('.').trim_end();
+    tail.ends_with("registry")
 }
 
 /// Release musl helpers, started by `spawn_path_allow` on Linux. The CI step
