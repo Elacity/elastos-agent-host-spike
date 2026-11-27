@@ -2621,11 +2621,14 @@ class ReleasePolicyTests(unittest.TestCase):
                 found = {name for name in job_inputs(WORKFLOW, changed, job) if rule.is_notes_or_lab(name)}
                 self.assertIn(path, found, (job, planted))
         # Line by line: the jobs' steps and every script they reach name no notes path but in two
-        # messages, and build one test target, in the elastos workspace, which names no lab crate.
+        # messages, and build two test targets, in the elastos workspace, which name no lab crate.
         messages = {("scripts/check-versioning.sh", "docs/VERSIONING.md"), ("scripts/publish-release.sh", "docs/VERSIONING.md")}
         test_targets = {("scripts/pinned-model-consumer-proof.sh",
                          'env "${PROOF_ENV[@]}" "$CARGO_BIN" test --locked -p elastos-server --lib -- --ignored --nocapture '
-                         '--exact "$test_id"')}
+                         '--exact "$test_id"'),
+                        ("scripts/musl-helper-fence.sh",
+                         "cargo test --locked -p elastos-server --lib -- --exact --nocapture "
+                         "confine_helper_tests::musl_release_helpers_start_under_the_fence")}
 
         def seen(source=SOURCE, texts=None):
             lines = installed_app_lines(source, texts)

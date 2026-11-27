@@ -342,6 +342,19 @@ pub(crate) fn list_active_capsule_manifests(data_dir: &Path) -> Vec<CapsuleManif
     list_manifests(&installed_capsules_root(data_dir), Some(&active_capsules))
 }
 
+pub(crate) fn read_active_storage_grants(data_dir: &Path) -> Result<Vec<String>, String> {
+    match std::fs::read(data_dir.join("components.json")) {
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(_) => return Err("components.json".into()),
+        Ok(_) => {}
+    }
+    components_manifest(data_dir).ok_or_else(|| "components.json".to_string())?;
+    Ok(list_active_capsule_manifests(data_dir)
+        .into_iter()
+        .flat_map(|manifest| manifest.permissions.storage)
+        .collect())
+}
+
 #[cfg(test)]
 pub(crate) fn list_development_capsule_manifests() -> Vec<CapsuleManifest> {
     list_manifests(&development_capsules_root(), None)

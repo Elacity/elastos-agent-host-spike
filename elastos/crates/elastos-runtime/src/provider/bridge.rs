@@ -236,6 +236,25 @@ fn model_engine_receipt_file_matches(
     Ok(entry["sha256"].as_str() == Some(expected.as_str()))
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn local_llama_ids(offers: &[serde_json::Value]) -> Result<Vec<&str>, BridgeError> {
+    offers
+        .iter()
+        .filter(|offer| {
+            offer
+                .pointer("/adapter/kind")
+                .and_then(serde_json::Value::as_str)
+                == Some("local_llama_cpp_text")
+        })
+        .map(|offer| {
+            offer
+                .get("id")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| BridgeError::InitFailed("local offer id unavailable".into()))
+        })
+        .collect()
+}
+
 #[cfg(target_os = "macos")]
 fn model_file_policy(
     binary_path: &Path,
@@ -447,6 +466,14 @@ pub struct ProviderBridge {
     executable_copy: Arc<Mutex<Option<PreparedExecutable>>>,
     #[cfg(unix)]
     helper_owner: Mutex<Option<elastos_common::process_lifetime::ParentLifetime>>,
+    /// Shutdown, the chain resolver, and the local-model bookkeeping. One
+    /// value so every constructor starts from the same defaults.
+    tail: BridgeTail,
+}
+
+/// Shared defaults behind [`ProviderBridge`]. Field access goes through `Deref`.
+#[derive(Default)]
+pub struct BridgeTail {
     /// True once a shutdown attempt has completed (child reaped, or the
     /// protocol shutdown was delivered on a childless bridge). Later
     /// shutdown() calls are idempotent no-ops.
@@ -454,6 +481,13 @@ pub struct ProviderBridge {
     /// Timeout applied to each shutdown settle stage (protocol request,
     /// child wait, force reap). Tests inject a short value.
     shutdown_timeout: std::time::Duration,
+    /// Optional libraries the plan left out. Named when init sees the helper
+    /// exit before it answers.
+    omitted_libraries: std::sync::Mutex<Vec<String>>,
+    /// Chain's resolver file. Empty for every other helper. A restart keeps
+    /// the new helper here, on the bridge the caller already holds.
+    chain_resolver: std::sync::Mutex<Option<Arc<super::chain_resolver::ChainResolver>>>,
+    pub(super) resolv_opened: std::sync::OnceLock<Option<(u64, u64)>>,
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     _local_brokers: Mutex<BrokerTasks>,
     #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -464,6 +498,29 @@ pub struct ProviderBridge {
     _local_provider_birth: Arc<AtomicU64>,
     #[cfg(target_os = "macos")]
     hosted_run_bindings: Arc<StdMutex<BTreeMap<String, HostedRunBinding>>>,
+}
+
+impl BridgeTail {
+    fn new(shutdown_timeout: std::time::Duration, omitted: Vec<String>) -> Self {
+        Self {
+            shutdown_timeout,
+            omitted_libraries: std::sync::Mutex::new(omitted),
+            ..Self::default()
+        }
+    }
+}
+
+impl std::ops::Deref for ProviderBridge {
+    type Target = BridgeTail;
+    fn deref(&self) -> &Self::Target {
+        &self.tail
+    }
+}
+
+struct ChainHop {
+    observed: u64,
+    resolver: Option<Arc<super::chain_resolver::ChainResolver>>,
+    target: Option<Arc<ProviderBridge>>,
 }
 
 #[cfg(target_os = "macos")]
@@ -991,8 +1048,8 @@ impl Drop for ForkChild {
 
 /// A provider that was confined at launch and answered `Init`.
 ///
-/// The field is private and `spawn_confined` is the only constructor. There is
-/// no `From<ProviderBridge>`, so a plain spawn cannot be dressed as confined.
+/// The field is private. `spawn_confined` and `spawn_path_allow` construct it.
+/// There is no `From<ProviderBridge>`, so a plain spawn cannot be dressed as confined.
 pub struct Confined {
     bridge: Arc<ProviderBridge>,
 }
@@ -1249,6 +1306,13 @@ fn remove_children(directory: &OwnedFd) {
 }
 
 /// The last component of the directory this descriptor holds.
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn held_directory_name(_directory: &OwnedFd) -> Option<std::ffi::CString> {
+    None
+}
+
+/// The last component of the directory this descriptor holds.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn held_directory_name(directory: &OwnedFd) -> Option<std::ffi::CString> {
     use std::os::unix::ffi::OsStrExt;
     #[cfg(target_os = "linux")]
@@ -1266,11 +1330,6 @@ fn held_directory_name(directory: &OwnedFd) -> Option<std::ffi::CString> {
         let text = unsafe { std::ffi::CStr::from_ptr(buf.as_ptr().cast()) };
         let path = Path::new(std::ffi::OsStr::from_bytes(text.to_bytes()));
         path.file_name()?.as_bytes().to_vec()
-    };
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-    let bytes = {
-        let _ = directory;
-        return None;
     };
     std::ffi::CString::new(bytes).ok()
 }
@@ -1640,6 +1699,43 @@ fn pipe_pair() -> Result<(OwnedFd, OwnedFd), BridgeError> {
     unsafe { Ok((OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1]))) }
 }
 
+/// The chain settings `config.rs` and `rpc.rs` used to read. Runtime copies
+/// only these names from its own environment. Empty values are left out.
+/// Nothing here is logged.
+const CHAIN_OPERATOR_KEYS: &[&str] = &[
+    "BASE_RPC_URL",
+    "BITCOIN_REST_URL",
+    "BITCOIN_RPC_USER",
+    "BITCOIN_RPC_PASSWORD",
+];
+
+fn chain_operator_settings_from(lookup: impl Fn(&str) -> Option<String>) -> serde_json::Value {
+    let mut map = serde_json::Map::new();
+    for key in CHAIN_OPERATOR_KEYS {
+        if let Some(value) = lookup(key) {
+            if !value.is_empty() {
+                map.insert((*key).to_string(), serde_json::Value::String(value));
+            }
+        }
+    }
+    serde_json::Value::Object(map)
+}
+
+fn chain_resolver_changed(result: &Result<ProviderResponse, BridgeError>) -> bool {
+    let name = super::chain_resolver::CHAIN_RESOLVER_CHANGED;
+    matches!(result, Err(BridgeError::Refused(message)) if message == name)
+}
+
+fn insert_chain_operator_settings(config: &mut ProviderConfig) {
+    let settings = chain_operator_settings_from(|key| std::env::var(key).ok());
+    if config.extra.is_null() {
+        config.extra = serde_json::json!({});
+    }
+    if let Some(object) = config.extra.as_object_mut() {
+        object.insert("operator_settings".to_string(), settings);
+    }
+}
+
 impl ProviderBridge {
     async fn force_child_reap(
         child: &mut Child,
@@ -1681,6 +1777,51 @@ impl ProviderBridge {
         Self::spawn_with_timeouts(binary_path, config, INIT_TIMEOUT, SHUTDOWN_TIMEOUT).await
     }
 
+    fn bridge_from_launch(launched: super::os_entry::Launched) -> Result<Self, BridgeError> {
+        #[cfg(target_os = "macos")]
+        let executable_copy = {
+            #[cfg(not(elastos_unsupported_os_check))]
+            {
+                Some(launched.prepared)
+            }
+            #[cfg(elastos_unsupported_os_check)]
+            {
+                None
+            }
+        };
+        let fork = ForkChild::start(launched.pid)?;
+        let mut to_child = std::fs::File::from(launched.to_child);
+        if let Some(line) = launched_pid_line(launched.pid) {
+            use std::io::Write as _;
+            if let Err(error) = to_child.write_all(line.as_bytes()) {
+                drop(fork);
+                return Err(BridgeError::Io(error));
+            }
+        }
+        let from_child = std::fs::File::from(launched.from_child);
+        let bridge = Self {
+            io: Arc::new(Mutex::new(ProviderIo {
+                writer: Box::new(tokio::fs::File::from_std(to_child)),
+                reader: Box::new(tokio::io::BufReader::new(tokio::fs::File::from_std(
+                    from_child,
+                ))),
+            })),
+            child: Arc::new(Mutex::new(None)),
+            fork: Mutex::new(Some(fork)),
+            #[cfg(target_os = "macos")]
+            executable_copy: Arc::new(Mutex::new(executable_copy)),
+            #[cfg(unix)]
+            helper_owner: Mutex::new(None),
+            tail: BridgeTail::new(SHUTDOWN_TIMEOUT, launched.omitted_libraries),
+        };
+        if let Some(opened) = elastos_common::resolv::take_opened_resolv() {
+            bridge.resolv_opened.set(opened).ok();
+        }
+        #[cfg(target_os = "macos")]
+        bridge.watch_confined_executable_copy();
+        Ok(bridge)
+    }
+
     /// Start a rights-declaring provider through the OS entry and return
     /// `Confined` only after `Init` succeeded.
     ///
@@ -1718,14 +1859,7 @@ impl ProviderBridge {
             &created_root.directory,
             &created_root.name,
         );
-        let (stdin_read, to_child) = pipe_pair()?;
-        let (from_child, stdout_write) = pipe_pair()?;
-        let stdio = super::os_entry::ChildStdio {
-            stdin: stdin_read.as_raw_fd(),
-            stdout: stdout_write.as_raw_fd(),
-            to_child,
-            from_child,
-        };
+        let (stdin_read, stdout_write, stdio) = Self::protocol_pipes()?;
         let launched =
             super::os_entry::start_provider(provider, authority, binary_path, checked, stdio)
                 .map_err(BridgeError::Refused)?;
@@ -1734,55 +1868,7 @@ impl ProviderBridge {
         drop(stdin_read);
         drop(stdout_write);
 
-        #[cfg(target_os = "macos")]
-        let executable_copy = {
-            #[cfg(not(elastos_unsupported_os_check))]
-            {
-                Some(launched.prepared)
-            }
-            #[cfg(elastos_unsupported_os_check)]
-            {
-                None
-            }
-        };
-        let fork = ForkChild::start(launched.pid)?;
-        let mut to_child = std::fs::File::from(launched.to_child);
-        if let Some(line) = launched_pid_line(launched.pid) {
-            use std::io::Write as _;
-            if let Err(error) = to_child.write_all(line.as_bytes()) {
-                drop(fork);
-                return Err(BridgeError::Io(error));
-            }
-        }
-        let from_child = std::fs::File::from(launched.from_child);
-        let bridge = Self {
-            io: Arc::new(Mutex::new(ProviderIo {
-                writer: Box::new(tokio::fs::File::from_std(to_child)),
-                reader: Box::new(tokio::io::BufReader::new(tokio::fs::File::from_std(
-                    from_child,
-                ))),
-            })),
-            child: Arc::new(Mutex::new(None)),
-            fork: Mutex::new(Some(fork)),
-            #[cfg(target_os = "macos")]
-            executable_copy: Arc::new(Mutex::new(executable_copy)),
-            #[cfg(unix)]
-            helper_owner: Mutex::new(None),
-            shutdown_completed: std::sync::atomic::AtomicBool::new(false),
-            shutdown_timeout: SHUTDOWN_TIMEOUT,
-            #[cfg(any(target_os = "macos", target_os = "linux"))]
-            _local_ipc_dir: Mutex::new(None),
-            #[cfg(any(target_os = "macos", target_os = "linux"))]
-            _local_brokers: Mutex::new(BrokerTasks::default()),
-            #[cfg(any(target_os = "macos", target_os = "linux"))]
-            _local_provider_pid: Arc::new(AtomicU32::new(0)),
-            #[cfg(any(target_os = "macos", target_os = "linux"))]
-            _local_provider_birth: Arc::new(AtomicU64::new(0)),
-            #[cfg(target_os = "macos")]
-            hosted_run_bindings: Arc::new(StdMutex::new(BTreeMap::new())),
-        };
-        #[cfg(target_os = "macos")]
-        bridge.watch_confined_executable_copy();
+        let bridge = Self::bridge_from_launch(launched)?;
         let mut start = ConfinedStart {
             bridge: Some(bridge),
             root: created_root,
@@ -1802,6 +1888,200 @@ impl ProviderBridge {
         Ok(Confined {
             bridge: Arc::new(bridge),
         })
+    }
+
+    fn protocol_pipes() -> Result<(OwnedFd, OwnedFd, super::os_entry::ChildStdio), BridgeError> {
+        let (stdin_read, to_child) = pipe_pair()?;
+        let (from_child, stdout_write) = pipe_pair()?;
+        let stdio = super::os_entry::ChildStdio {
+            stdin: stdin_read.as_raw_fd(),
+            stdout: stdout_write.as_raw_fd(),
+            to_child,
+            from_child,
+        };
+        Ok((stdin_read, stdout_write, stdio))
+    }
+
+    /// `chain-provider/` must be a real directory this user owns before the
+    /// path allow-list renders. Create it at mode 0700 when it is missing.
+    /// A directory that already existed, and one that appears in the create
+    /// race, are accepted through an opened handle: `O_DIRECTORY |
+    /// O_NOFOLLOW`, owner check, then `fchmod` to 0700 on that handle. An
+    /// older helper created the directory with `create_dir_all` (0755 under
+    /// umask 022). A setgid parent stores 02700. Those directories are
+    /// tightened and the start continues. A symlink or a non-directory is
+    /// refused.
+    fn ensure_chain_provider_root(data_dir: &Path) -> Result<(), BridgeError> {
+        let root = data_dir.join("chain-provider");
+        match Self::accept_chain_provider_root(&root) {
+            Ok(()) => Ok(()),
+            Err(BridgeError::Io(err)) if err.kind() == std::io::ErrorKind::NotFound => {
+                Self::create_chain_provider_root(&root)
+            }
+            Err(err) => Err(err),
+        }
+    }
+
+    /// Create `chain-provider` at mode 0700. `AlreadyExists` means another
+    /// start created it after this one saw `NotFound`. That path uses the
+    /// same opened-handle check as a directory that was already there.
+    fn create_chain_provider_root(root: &Path) -> Result<(), BridgeError> {
+        use std::os::unix::fs::DirBuilderExt;
+        let mut builder = std::fs::DirBuilder::new();
+        builder.mode(0o700);
+        match builder.create(root) {
+            Ok(()) => Self::accept_chain_provider_root(root),
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
+                Self::accept_chain_provider_root(root)
+            }
+            Err(err) => Err(BridgeError::Io(err)),
+        }
+    }
+
+    /// Open `root` with `O_DIRECTORY | O_NOFOLLOW`. The owner is checked on
+    /// that handle. A directory this user owns is then `fchmod`'d to 0700 and
+    /// `fsync`'d, the same calls `create_storage_root` uses, and the start
+    /// continues. `NotFound` stays an I/O error so the create path can run.
+    /// A symlink or a non-directory never reaches `fchmod`.
+    fn accept_chain_provider_root(root: &Path) -> Result<(), BridgeError> {
+        use std::os::fd::AsRawFd;
+        use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+        let refused = BridgeError::Refused("provider start is refused: chain-provider is not a directory this user owns with mode 0700. Replace it with a directory you own, then start Home again.".into());
+        let dir = match std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW)
+            .open(root)
+        {
+            Ok(dir) => dir,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                return Err(BridgeError::Io(err))
+            }
+            Err(_) => return Err(refused),
+        };
+        let meta = dir.metadata().map_err(BridgeError::Io)?;
+        if meta.uid() != unsafe { libc::geteuid() } {
+            return Err(refused);
+        }
+        if unsafe { libc::fchmod(dir.as_raw_fd(), 0o700) } < 0
+            || unsafe { libc::fsync(dir.as_raw_fd()) } < 0
+        {
+            return Err(BridgeError::Io(std::io::Error::last_os_error()));
+        }
+        Ok(())
+    }
+
+    /// Start localhost, object, or chain on that provider's path allow-list.
+    ///
+    /// There is no single storage root. A refusal starts nothing. Chain keeps
+    /// the start inputs beside this bridge so a resolver change can start the
+    /// same helper again.
+    pub async fn spawn_path_allow(
+        component_key: &str,
+        authority: &ProviderAuthority,
+        binary_path: &CheckedExecutable,
+        data_dir: &Path,
+        config: ProviderConfig,
+    ) -> Result<Confined, BridgeError> {
+        Self::spawn_path_allow_with(
+            component_key,
+            authority,
+            binary_path,
+            data_dir,
+            config,
+            true,
+        )
+        .await
+    }
+
+    /// `attach_resolver` is set for the bridge the caller holds. A restart
+    /// passes false: the replacement stays beside that bridge and does not
+    /// watch the file again.
+    pub(super) async fn spawn_path_allow_with(
+        component_key: &str,
+        authority: &ProviderAuthority,
+        binary_path: &CheckedExecutable,
+        data_dir: &Path,
+        mut config: ProviderConfig,
+        attach_resolver: bool,
+    ) -> Result<Confined, BridgeError> {
+        // Admission is the first refusal, before a chain directory is created.
+        super::os_entry::admit_path_allow(component_key, authority)
+            .map_err(BridgeError::Refused)?;
+        // A symlinked data directory is the real directory it names. The fence
+        // and the helper both use that directory, so a read matches the grant.
+        let data_dir = &std::fs::canonicalize(data_dir).map_err(BridgeError::Io)?;
+        config.base_path = data_dir.to_string_lossy().into_owned();
+        if component_key == "chain-provider" {
+            Self::ensure_chain_provider_root(data_dir)?;
+            // Closed list from this process. The helper applies it in Init.
+            // The values are not logged.
+            insert_chain_operator_settings(&mut config);
+        }
+        let (stdin_read, stdout_write, stdio) = Self::protocol_pipes()?;
+        let launched = super::os_entry::start_path_allow(
+            component_key,
+            authority,
+            binary_path,
+            data_dir,
+            stdio,
+        )
+        .map_err(BridgeError::Refused)?;
+        drop(stdin_read);
+        drop(stdout_write);
+        let bridge = Self::bridge_from_launch(launched)?;
+        if attach_resolver && component_key == "chain-provider" {
+            bridge.install_chain_resolver(super::chain_resolver::ChainResolver::prepare(
+                component_key,
+                authority,
+                binary_path,
+                data_dir,
+                &config,
+                bridge.resolv_opened.get().copied(),
+            ));
+        }
+        bridge.init_provider(config, INIT_TIMEOUT).await?;
+        Ok(Confined {
+            bridge: Arc::new(bridge),
+        })
+    }
+
+    fn install_chain_resolver(&self, resolver: Arc<super::chain_resolver::ChainResolver>) {
+        *self
+            .chain_resolver
+            .lock()
+            .unwrap_or_else(|err| err.into_inner()) = Some(resolver);
+    }
+
+    fn chain_resolver(&self) -> Option<Arc<super::chain_resolver::ChainResolver>> {
+        self.chain_resolver
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .clone()
+    }
+
+    #[cfg(test)]
+    pub(super) fn chain_resolver_restarts(&self) -> u64 {
+        self.chain_resolver()
+            .map(|resolver| resolver.restarts())
+            .unwrap_or(0)
+    }
+
+    /// Kill the forked helper without a protocol shutdown. A call that is
+    /// already on the pipe then ends, and the caller retries.
+    pub(super) async fn abandon_child_for_restart(&self) {
+        let mut slot = self.fork.lock().await;
+        let Some(mut child) = slot.take() else {
+            return;
+        };
+        child.force_kill();
+        match tokio::time::timeout(self.shutdown_timeout, &mut child.status).await {
+            Ok(_) => child.reaped = true,
+            Err(_) => {
+                child.reaped = (&mut child.status).await.is_ok();
+            }
+        }
+        self.shutdown_completed
+            .store(true, std::sync::atomic::Ordering::Release);
     }
 
     /// Admit only Runtime-selected private engine sockets for the native model provider.
@@ -1865,21 +2145,7 @@ impl ProviderBridge {
             &journal,
             pinned_engine_bundle,
         )?;
-        let local_ids = offers
-            .iter()
-            .filter(|offer| {
-                offer
-                    .pointer("/adapter/kind")
-                    .and_then(serde_json::Value::as_str)
-                    == Some("local_llama_cpp_text")
-            })
-            .map(|offer| {
-                offer
-                    .get("id")
-                    .and_then(serde_json::Value::as_str)
-                    .ok_or_else(|| BridgeError::InitFailed("local offer id unavailable".into()))
-            })
-            .collect::<Result<Vec<_>, _>>()?;
+        let local_ids = local_llama_ids(offers)?;
         if local_ids.len() > MAX_LOCAL_MODEL_SLOTS {
             return Err(BridgeError::InitFailed(
                 "too many local model offers".into(),
@@ -1981,8 +2247,8 @@ impl ProviderBridge {
         provider_pid.store(pid, Ordering::Release);
         *bridge._local_ipc_dir.lock().await = Some(ipc_dir);
         *bridge._local_brokers.lock().await = brokers;
-        bridge._local_provider_pid = provider_pid;
-        bridge._local_provider_birth = provider_birth;
+        bridge.tail._local_provider_pid = provider_pid;
+        bridge.tail._local_provider_birth = provider_birth;
         Ok((bridge, sockets, vacant_sockets, config, hosted_listener))
     }
 
@@ -2008,21 +2274,7 @@ impl ProviderBridge {
         let mut brokers = BrokerTasks::default();
         let provider_pid = Arc::new(AtomicU32::new(0));
         let provider_birth = Arc::new(AtomicU64::new(0));
-        let local_ids = offers
-            .iter()
-            .filter(|offer| {
-                offer
-                    .pointer("/adapter/kind")
-                    .and_then(serde_json::Value::as_str)
-                    == Some("local_llama_cpp_text")
-            })
-            .map(|offer| {
-                offer
-                    .get("id")
-                    .and_then(serde_json::Value::as_str)
-                    .ok_or_else(|| BridgeError::InitFailed("local offer id unavailable".into()))
-            })
-            .collect::<Result<Vec<_>, _>>()?;
+        let local_ids = local_llama_ids(offers)?;
         if local_ids.len() > MAX_LOCAL_MODEL_SLOTS {
             return Err(BridgeError::InitFailed(
                 "too many local model offers".into(),
@@ -2091,8 +2343,8 @@ impl ProviderBridge {
         provider_pid.store(pid, Ordering::Release);
         *bridge._local_ipc_dir.lock().await = Some(ipc_dir);
         *bridge._local_brokers.lock().await = brokers;
-        bridge._local_provider_pid = provider_pid;
-        bridge._local_provider_birth = provider_birth;
+        bridge.tail._local_provider_pid = provider_pid;
+        bridge.tail._local_provider_birth = provider_birth;
         Ok((bridge, sockets, vacant_sockets, config))
     }
 
@@ -2502,18 +2754,7 @@ impl ProviderBridge {
             executable_copy: Arc::new(Mutex::new(Some(prepared))),
             #[cfg(unix)]
             helper_owner: Mutex::new(helper_owner),
-            shutdown_completed: std::sync::atomic::AtomicBool::new(false),
-            shutdown_timeout,
-            #[cfg(any(target_os = "macos", target_os = "linux"))]
-            _local_ipc_dir: Mutex::new(None),
-            #[cfg(any(target_os = "macos", target_os = "linux"))]
-            _local_brokers: Mutex::new(BrokerTasks::default()),
-            #[cfg(any(target_os = "macos", target_os = "linux"))]
-            _local_provider_pid: Arc::new(AtomicU32::new(0)),
-            #[cfg(any(target_os = "macos", target_os = "linux"))]
-            _local_provider_birth: Arc::new(AtomicU64::new(0)),
-            #[cfg(target_os = "macos")]
-            hosted_run_bindings: Arc::new(StdMutex::new(BTreeMap::new())),
+            tail: BridgeTail::new(shutdown_timeout, Vec::new()),
         };
 
         #[cfg(target_os = "macos")]
@@ -2581,6 +2822,22 @@ impl ProviderBridge {
         });
     }
 
+    /// Name omitted optional libraries when the helper exits before it answers.
+    /// An empty list stays the plain process-exited text.
+    pub(super) fn early_exit_detail(error: &BridgeError, omitted: &[String]) -> String {
+        let early = match error {
+            BridgeError::ProcessExited => true,
+            BridgeError::Io(err) if err.kind() == std::io::ErrorKind::BrokenPipe => true,
+            _ => false,
+        };
+        let mut detail = error.to_string();
+        if early && !omitted.is_empty() {
+            detail.push_str("; ");
+            detail.push_str(&omitted.join("; "));
+        }
+        detail
+    }
+
     /// The one Init implementation: send `Init`, bound by `init_timeout`, and
     /// settle a failed start through `shutdown`.
     async fn init_provider(
@@ -2593,11 +2850,18 @@ impl ProviderBridge {
             Ok(Ok(response)) => response,
             Ok(Err(error)) => {
                 let shutdown_error = self.shutdown().await.err().map(|err| err.to_string());
+                let named = Self::early_exit_detail(
+                    &error,
+                    &self
+                        .omitted_libraries
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner()),
+                );
                 let detail = match shutdown_error {
                     Some(shutdown_error) => {
-                        format!("{error}; failed to settle provider child: {shutdown_error}")
+                        format!("{named}; failed to settle provider child: {shutdown_error}")
                     }
-                    None => error.to_string(),
+                    None => named,
                 };
                 return Err(BridgeError::InitFailed(detail));
             }
@@ -2616,6 +2880,10 @@ impl ProviderBridge {
         match response {
             ProviderResponse::Ok { .. } => Ok(()),
             ProviderResponse::Error { code, message } => {
+                if code == "no_public_runtime_did" {
+                    let _ = self.shutdown().await;
+                    return Err(BridgeError::NoPublicRuntimeDid);
+                }
                 let shutdown_error = self.shutdown().await.err().map(|err| err.to_string());
                 let detail = match shutdown_error {
                     Some(shutdown_error) => {
@@ -2647,26 +2915,56 @@ impl ProviderBridge {
             executable_copy: Arc::new(Mutex::new(None)),
             #[cfg(unix)]
             helper_owner: Mutex::new(None),
-            shutdown_completed: std::sync::atomic::AtomicBool::new(false),
-            shutdown_timeout: SHUTDOWN_TIMEOUT,
-            #[cfg(any(target_os = "macos", target_os = "linux"))]
-            _local_ipc_dir: Mutex::new(None),
-            #[cfg(any(target_os = "macos", target_os = "linux"))]
-            _local_brokers: Mutex::new(BrokerTasks::default()),
-            #[cfg(any(target_os = "macos", target_os = "linux"))]
-            _local_provider_pid: Arc::new(AtomicU32::new(0)),
-            #[cfg(any(target_os = "macos", target_os = "linux"))]
-            _local_provider_birth: Arc::new(AtomicU64::new(0)),
-            #[cfg(target_os = "macos")]
-            hosted_run_bindings: Arc::new(StdMutex::new(BTreeMap::new())),
+            tail: BridgeTail::new(SHUTDOWN_TIMEOUT, Vec::new()),
+        }
+    }
+
+    /// Home's second chain Init. A resolver change restarts the helper and
+    /// this sends the same Init once more. A second change is returned by
+    /// the name `chain_resolver_changed`.
+    pub async fn accept_following_init(
+        &self,
+        config: ProviderConfig,
+    ) -> Result<ProviderResponse, BridgeError> {
+        match self
+            .request(ProviderRequest::Init {
+                config: config.clone(),
+            })
+            .await
+        {
+            err if chain_resolver_changed(&err) => {
+                self.request(ProviderRequest::Init { config }).await
+            }
+            other => other,
         }
     }
 
     /// Send a request and receive a response (with timeout).
+    ///
+    /// An Init that returns Ok is the config a chain restart will use. A
+    /// refused Init is not recorded.
     pub async fn request(&self, req: ProviderRequest) -> Result<ProviderResponse, BridgeError> {
-        tokio::time::timeout(REQUEST_TIMEOUT, self.request_raw(req))
-            .await
-            .map_err(|_| BridgeError::Timeout)?
+        let accepted = if let ProviderRequest::Init { config } = &req {
+            Some(config.clone())
+        } else {
+            None
+        };
+        let hop = self.prepare_chain_dispatch().await?;
+        let result = match hop.target.clone() {
+            Some(bridge) => tokio::time::timeout(REQUEST_TIMEOUT, bridge.request_raw(req)).await,
+            None => tokio::time::timeout(REQUEST_TIMEOUT, self.request_raw(req)).await,
+        };
+        let result = match result {
+            Ok(response) => response,
+            Err(_) => Err(BridgeError::Timeout),
+        };
+        let result = self.finish_chain_dispatch(hop, result);
+        if matches!(result, Ok(ProviderResponse::Ok { .. })) {
+            if let (Some(config), Some(resolver)) = (accepted, self.chain_resolver()) {
+                resolver.record_accepted(config);
+            }
+        }
+        result
     }
 
     /// Send a request and receive a response (no timeout).
@@ -2689,10 +2987,28 @@ impl ProviderBridge {
         let dispatch_run = recorded_run.clone();
         #[cfg(not(target_os = "macos"))]
         let dispatch_run = None;
-        let line = match self
-            .send_json_line(request.clone(), dispatch_run, super::dispatch::current())
-            .await
-        {
+        let hop = match self.prepare_chain_dispatch().await {
+            Ok(hop) => hop,
+            Err(error) => {
+                #[cfg(target_os = "macos")]
+                if let Some(run_id) = &recorded_run {
+                    self.settle_confined_model_run(run_id, false);
+                }
+                return Err(error);
+            }
+        };
+        let line = match hop.target.clone() {
+            Some(bridge) => {
+                bridge
+                    .send_json_line(request.clone(), dispatch_run, super::dispatch::current())
+                    .await
+            }
+            None => {
+                self.send_json_line(request.clone(), dispatch_run, super::dispatch::current())
+                    .await
+            }
+        };
+        let line = match self.finish_chain_dispatch(hop, line) {
             Ok(line) => line,
             Err(error) => {
                 #[cfg(target_os = "macos")]
@@ -2719,6 +3035,58 @@ impl ProviderBridge {
         #[cfg(target_os = "macos")]
         self.retire_terminal_model_run(&response);
         Ok(response)
+    }
+
+    /// Chain compares `/etc/resolv.conf` before a caller dispatch. Init and
+    /// the protocol shutdown stay on the pipe they already hold.
+    async fn prepare_chain_dispatch(&self) -> Result<ChainHop, BridgeError> {
+        let Some(resolver) = self.chain_resolver() else {
+            return Ok(ChainHop {
+                observed: 0,
+                resolver: None,
+                target: None,
+            });
+        };
+        let (target, observed) = resolver.before(self).await?;
+        self.race_restart_during_dispatch().await?;
+        Ok(ChainHop {
+            observed,
+            resolver: Some(resolver),
+            target,
+        })
+    }
+
+    #[cfg(test)]
+    async fn race_restart_during_dispatch(&self) -> Result<(), BridgeError> {
+        if !super::chain_resolver::take_race_restart() {
+            return Ok(());
+        }
+        if let Some(path) = super::chain_resolver::resolv_override() {
+            let next = path.with_extension("race");
+            let _ = std::fs::write(&next, b"nameserver 192.0.2.99\n");
+            let _ = std::fs::rename(&next, &path);
+        }
+        if let Some(resolver) = self.chain_resolver() {
+            resolver.before(self).await?;
+        }
+        Ok(())
+    }
+
+    #[cfg(not(test))]
+    async fn race_restart_during_dispatch(&self) -> Result<(), BridgeError> {
+        let _ = self;
+        Ok(())
+    }
+
+    fn finish_chain_dispatch<T>(
+        &self,
+        hop: ChainHop,
+        result: Result<T, BridgeError>,
+    ) -> Result<T, BridgeError> {
+        match hop.resolver {
+            Some(resolver) => resolver.map_transport(hop.observed, result),
+            None => result,
+        }
     }
 
     /// Write one request and always drain exactly one response line.
@@ -2851,6 +3219,9 @@ impl ProviderBridge {
 
     /// Gracefully shut down the provider.
     pub async fn shutdown(&self) -> Result<(), BridgeError> {
+        if let Some(resolver) = self.chain_resolver() {
+            resolver.shutdown_replacement().await;
+        }
         #[cfg(unix)]
         self.helper_owner.lock().await.take();
         if let Some(mut fork) = self.fork.lock().await.take() {
@@ -3024,7 +3395,7 @@ impl CapsuleProvider {
     }
 
     /// Create a CapsuleProvider from a provider the confined entry launched.
-    /// Only `spawn_confined` can produce `Confined`.
+    /// `spawn_confined` and `spawn_path_allow` produce `Confined`.
     pub fn from_confined(confined: Confined, scheme: impl Into<String>) -> Self {
         Self::with_scheme(confined.bridge, scheme)
     }
@@ -4300,10 +4671,12 @@ int main(void) {
             .parent()
             .unwrap()
             .to_path_buf();
+        let copies = std::fs::canonicalize(temp.path().join("provider-copies")).unwrap();
+        let resolved_copy = std::fs::canonicalize(&copy_dir).unwrap();
         assert!(
-            copy_dir.starts_with(temp.path().join("provider-copies")),
+            resolved_copy.starts_with(&copies),
             "copy {} is under the Home provider-copies",
-            copy_dir.display()
+            resolved_copy.display()
         );
         let name = copy_dir.file_name().unwrap().to_str().unwrap();
         assert!(
@@ -4361,8 +4734,9 @@ int main(void) {
             .verify_at_spawn()
             .unwrap();
         let copy_dir = prepared.exec_path().parent().unwrap().to_path_buf();
-        let root = temp.path().join("provider-copies");
-        assert_eq!(copy_dir.parent(), Some(root.as_path()));
+        let copy = std::fs::canonicalize(&copy_dir).unwrap();
+        let root = std::fs::canonicalize(temp.path().join("provider-copies")).unwrap();
+        assert_eq!(copy.parent(), Some(root.as_path()));
         assert!(copy_dir.exists(), "spawn receives a copy in its Home");
         let command = Command::new(prepared.exec_path());
         let result = ProviderBridge::spawn_command(
@@ -6121,7 +6495,7 @@ int main(void) {
             tokio::io::BufReader::new(tokio::io::empty()),
             tokio::io::sink(),
         );
-        bridge.shutdown_timeout = std::time::Duration::from_millis(40);
+        bridge.tail.shutdown_timeout = std::time::Duration::from_millis(40);
         *bridge.fork.lock().await = Some(fork);
         let releaser = std::thread::spawn(move || {
             std::thread::sleep(std::time::Duration::from_millis(500));
@@ -6305,5 +6679,168 @@ int main(void) {
         );
         assert!(!marker.exists(), "the provider binary never runs");
         assert!(!root.exists(), "a refused start leaves no root");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_chain_root_that_is_not_a_directory_names_what_to_do() {
+        let temp = TempDir::new().unwrap();
+        fs::write(temp.path().join("chain-provider"), b"not-a-directory").unwrap();
+        let error = ProviderBridge::ensure_chain_provider_root(temp.path()).unwrap_err();
+        let text = error.to_string();
+        assert!(text.contains("chain-provider"), "{text}");
+        assert!(
+            text.contains("Replace it with a directory you own"),
+            "{text}"
+        );
+        assert!(text.contains("start Home again"), "{text}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_missing_chain_root_is_created_for_an_old_home() {
+        let temp = TempDir::new().unwrap();
+        ProviderBridge::ensure_chain_provider_root(temp.path()).unwrap();
+        let meta = fs::symlink_metadata(temp.path().join("chain-provider")).unwrap();
+        assert!(meta.is_dir());
+        assert_eq!(meta.permissions().mode() & 0o7777, 0o700);
+    }
+
+    /// `AlreadyExists` is the race where two starts both saw a missing root.
+    /// A foreign owner cannot be planted here without extra privileges.
+    #[cfg(unix)]
+    #[test]
+    fn a_raced_chain_root_is_accepted_only_when_it_is_ours() {
+        let temp = TempDir::new().unwrap();
+        let root = temp.path().join("chain-provider");
+        fs::create_dir(&root).unwrap();
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+        ProviderBridge::create_chain_provider_root(&root).unwrap();
+
+        fs::remove_dir(&root).unwrap();
+        fs::write(&root, b"not-a-directory").unwrap();
+        let text = ProviderBridge::create_chain_provider_root(&root)
+            .unwrap_err()
+            .to_string();
+        assert!(text.contains("chain-provider"), "{text}");
+        assert!(text.contains("directory"), "{text}");
+
+        fs::remove_file(&root).unwrap();
+        std::os::unix::fs::symlink("elsewhere", &root).unwrap();
+        let text = ProviderBridge::create_chain_provider_root(&root)
+            .unwrap_err()
+            .to_string();
+        assert!(text.contains("chain-provider"), "{text}");
+        assert!(text.contains("0700"), "{text}");
+
+        fs::remove_file(&root).unwrap();
+        // The old helper used create_dir_all and left the umask mode. This
+        // row does not force 0700 before the accept.
+        fs::create_dir_all(&root).unwrap();
+        let created = fs::symlink_metadata(&root).unwrap().permissions().mode() & 0o7777;
+        assert_eq!(
+            created, 0o755,
+            "umask 022 leaves the old helper directory at 0755"
+        );
+        ProviderBridge::ensure_chain_provider_root(temp.path()).unwrap();
+        assert_eq!(
+            fs::symlink_metadata(&root).unwrap().permissions().mode() & 0o7777,
+            0o700,
+            "an older 0755 directory is tightened on the opened handle"
+        );
+
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o2700)).unwrap();
+        let planted = fs::symlink_metadata(&root).unwrap().permissions().mode() & 0o7777;
+        assert_eq!(
+            planted, 0o2700,
+            "the setgid bit has to be stored to prove the full mode word"
+        );
+        ProviderBridge::ensure_chain_provider_root(temp.path()).unwrap();
+        ProviderBridge::create_chain_provider_root(&root).unwrap();
+        assert_eq!(
+            fs::symlink_metadata(&root).unwrap().permissions().mode() & 0o7777,
+            0o700,
+            "a setgid directory is tightened to 0700"
+        );
+
+        fs::remove_dir(&root).unwrap();
+        let good = temp.path().join("good-chain-root");
+        fs::create_dir(&good).unwrap();
+        fs::set_permissions(&good, fs::Permissions::from_mode(0o700)).unwrap();
+        std::os::unix::fs::symlink(&good, &root).unwrap();
+        for refused in [
+            ProviderBridge::ensure_chain_provider_root(temp.path()),
+            ProviderBridge::create_chain_provider_root(&root),
+        ] {
+            let text = refused.unwrap_err().to_string();
+            assert!(
+                text.contains("chain-provider") && text.contains("0700"),
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_early_exit_names_each_omitted_optional_library() {
+        let named = ProviderBridge::early_exit_detail(
+            &BridgeError::ProcessExited,
+            &["omitted library libm.so.6, tried /lib/libm.so.6".to_string()],
+        );
+        assert!(named.contains("libm.so.6"), "{named}");
+        assert!(named.contains("omitted library"), "{named}");
+        assert!(
+            !named.contains("refused"),
+            "an omitted optional library is not a refusal: {named}"
+        );
+        assert_eq!(
+            ProviderBridge::early_exit_detail(&BridgeError::ProcessExited, &[]),
+            "provider process exited unexpectedly"
+        );
+        let broken = ProviderBridge::early_exit_detail(
+            &BridgeError::Io(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "broken pipe",
+            )),
+            &["omitted library libgcc_s.so.1, tried /lib/libgcc_s.so.1".to_string()],
+        );
+        assert!(broken.contains("libgcc_s.so.1"), "{broken}");
+        assert!(broken.contains("omitted library"), "{broken}");
+        let other = ProviderBridge::early_exit_detail(
+            &BridgeError::Io(std::io::Error::new(std::io::ErrorKind::NotFound, "missing")),
+            &["omitted library libgcc_s.so.1, tried /lib/libgcc_s.so.1".to_string()],
+        );
+        assert!(!other.contains("omitted library"), "{other}");
+    }
+
+    #[test]
+    fn chain_operator_settings_are_the_closed_list() {
+        let settings = chain_operator_settings_from(|key| match key {
+            "BASE_RPC_URL" => Some("https://base.example.test".to_string()),
+            "BITCOIN_RPC_PASSWORD" => Some("secret-value".to_string()),
+            "BITCOIN_REST_URL" => Some(String::new()),
+            "OTHER" => Some("no".to_string()),
+            _ => None,
+        });
+        let object = settings.as_object().unwrap();
+        assert_eq!(
+            object.get("BASE_RPC_URL").and_then(|value| value.as_str()),
+            Some("https://base.example.test")
+        );
+        assert_eq!(
+            object
+                .get("BITCOIN_RPC_PASSWORD")
+                .and_then(|value| value.as_str()),
+            Some("secret-value")
+        );
+        assert!(object.get("BITCOIN_REST_URL").is_none());
+        assert!(object.get("OTHER").is_none());
+        assert_eq!(object.len(), 2);
+        let source = include_str!("bridge.rs");
+        let function = source
+            .split("fn chain_operator_settings_from")
+            .nth(1)
+            .unwrap();
+        let body = &function[..function.find("\nfn ").unwrap_or(function.len())];
+        assert!(!body.contains("tracing") && !body.contains("eprintln") && !body.contains("log::"));
     }
 }

@@ -80,6 +80,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::Digest as _;
 
+/// `config.toml` key for `elastos config set`. Home reads this same constant.
+pub const ENABLED_CONFIG_KEY: &str = "protected_content";
+
 /// Protected content (Elacity Player, Protect and List, Marketplace Media)
 /// ships after 0.8.0 (#91). It stays off, and Home hides those surfaces and
 /// refuses protected publishing, unless the host sets
@@ -90,10 +93,29 @@ pub(crate) fn protected_content_enabled(data_dir: &Path) -> bool {
         .and_then(|contents| contents.parse::<toml::Table>().ok())
         .and_then(|config| {
             config
-                .get("protected_content")
+                .get(ENABLED_CONFIG_KEY)
                 .and_then(toml::Value::as_bool)
         })
         .unwrap_or(false)
+}
+
+#[cfg(test)]
+mod enabled_config_key {
+    use super::{protected_content_enabled, ENABLED_CONFIG_KEY};
+
+    #[test]
+    fn the_reader_follows_the_exported_key() {
+        assert_eq!(ENABLED_CONFIG_KEY, "protected_content");
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        assert!(!protected_content_enabled(dir.path()));
+        std::fs::write(&path, format!("{ENABLED_CONFIG_KEY} = true\n")).unwrap();
+        assert!(protected_content_enabled(dir.path()));
+        std::fs::write(&path, format!("{ENABLED_CONFIG_KEY} = false\n")).unwrap();
+        assert!(!protected_content_enabled(dir.path()));
+        std::fs::write(&path, "other = true\n").unwrap();
+        assert!(!protected_content_enabled(dir.path()));
+    }
 }
 pub(crate) const ELACITY_PLAYER_CAPSULE_ID: &str = "elacity-player";
 

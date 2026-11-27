@@ -20,6 +20,10 @@
 //! manifests. Comparison normalises whitespace only; rule order and rule count
 //! stay meaningful, and template text carries no `;` comments, so a declared
 //! rule with a comment is refused.
+//!
+//! The template match is the binding. The helper manifest is compiled into the
+//! signed Runtime binary. This gate does not check a second signature on those
+//! bytes. A declared rule that is not the template is refused.
 
 use super::rights_table::{self, RuntimeProviderId};
 use elastos_common::ProviderAuthority;
@@ -58,6 +62,9 @@ fn provider_label(provider: RuntimeProviderId) -> &'static str {
         RuntimeProviderId::Did => "did-provider",
         RuntimeProviderId::Wallet => "wallet-provider",
         RuntimeProviderId::Model => "model-provider",
+        RuntimeProviderId::Localhost => "localhost-provider",
+        RuntimeProviderId::Object => "object-provider",
+        RuntimeProviderId::Chain => "chain-provider",
     }
 }
 
@@ -76,6 +83,20 @@ impl AdmittedRights {
 
     pub(super) fn rows(&self) -> &[&'static rights_table::RightRow] {
         &self.rows
+    }
+
+    #[cfg(all(
+        not(elastos_unsupported_os_check),
+        any(
+            target_os = "macos",
+            all(
+                target_os = "linux",
+                any(target_arch = "x86_64", target_arch = "aarch64")
+            )
+        )
+    ))]
+    pub(super) fn admits(&self, id: &str) -> bool {
+        self.rows.iter().any(|row| row.id == id)
     }
 }
 
@@ -104,7 +125,7 @@ pub(super) fn git_show(spec: &str) -> std::process::Output {
 #[cfg(test)]
 #[rustfmt::skip]
 pub(super) fn admit_committed(provider: RuntimeProviderId) -> AdmittedRights {
-    let name = match provider { RuntimeProviderId::Did => "did-provider", RuntimeProviderId::Wallet => "wallet-provider", RuntimeProviderId::Model => "model-provider" };
+    let name = match provider { RuntimeProviderId::Did => "did-provider", RuntimeProviderId::Wallet => "wallet-provider", RuntimeProviderId::Model => "model-provider", RuntimeProviderId::Localhost => "localhost-provider", RuntimeProviderId::Object => "object-provider", RuntimeProviderId::Chain => "chain-provider" };
     let path = format!("{}/../../../capsules/{name}/capsule.json", env!("CARGO_MANIFEST_DIR"));
     let json = std::fs::read_to_string(&path).unwrap_or_else(|err| panic!("{path}: {err}"));
     let manifest: elastos_common::CapsuleManifest = serde_json::from_str(&json).unwrap_or_else(|err| panic!("{path}: {err}"));

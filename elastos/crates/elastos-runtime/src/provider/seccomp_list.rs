@@ -3,8 +3,8 @@ use super::rights::AdmittedRights;
 use super::rights_table::RuntimeProviderId;
 use super::seccomp_program::number;
 
-#[derive(Clone, Copy, Debug)]
-#[allow(dead_code)] // The installer is a later B3 slice.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[allow(dead_code)] // Unused when the Linux installer is not compiled (unsupported-OS check, macOS lib).
 pub(super) enum AuditArch {
     X86_64,
     Aarch64,
@@ -23,10 +23,38 @@ const BASELINE: &str = concat!(
     "arch_prctl close exit_group getrandom mmap mprotect ppoll poll rt_sigaction",
 );
 
-// Linux probe rows follow the original model names. `socket` is absent here:
-// the program admits it only for AF_UNIX. `connect`, `sendto` and `bind` stay,
-// because the probe measured them and they do not carry an address family.
+// Linux probe rows follow the original model names. `socket` is absent from
+// this model list: the model program admits it only for AF_UNIX, in the
+// argument rules. `connect`, `sendto` and `bind` stay, because the probe
+// measured them and they do not carry an address family.
 const MODEL: &str = "epoll_create1 epoll_ctl epoll_pwait epoll_wait eventfd2 exit flock geteuid munmap rename renameat rseq accept4 bind connect dup2 getpgrp getpid getsockopt listen pipe2 readlink recvfrom rt_sigprocmask sendto setpgid waitid";
+
+/// Names the provider declares, before an unlisted name is dropped.
+///
+/// `abi_required` reads this list. A declared `ioctl` still selects Landlock
+/// ABI 5 when `number` has no row for it, and the filter below does not admit
+/// that name.
+pub(super) fn declared_linux_names(
+    provider: RuntimeProviderId,
+    admitted: &AdmittedRights,
+) -> Vec<&'static str> {
+    let mut names: Vec<_> = admitted
+        .rows()
+        .iter()
+        .flat_map(|row| row.linux_syscalls.split_whitespace())
+        .chain(BASELINE.split_whitespace())
+        .chain(provider.measured_syscalls().split_whitespace())
+        .collect();
+    match provider {
+        RuntimeProviderId::Did
+        | RuntimeProviderId::Localhost
+        | RuntimeProviderId::Object
+        | RuntimeProviderId::Chain => {}
+        RuntimeProviderId::Wallet => names.extend(["rename", "renameat"]),
+        RuntimeProviderId::Model => names.extend(MODEL.split_whitespace()),
+    }
+    names
+}
 
 /// The lab sorts names after it joins declared rights and the baseline.
 pub(super) fn linux_seccomp_list(
@@ -34,17 +62,7 @@ pub(super) fn linux_seccomp_list(
     admitted: &AdmittedRights,
     arch: AuditArch,
 ) -> Vec<&'static str> {
-    let mut names: Vec<_> = admitted
-        .rows()
-        .iter()
-        .flat_map(|row| row.linux_syscalls.split_whitespace())
-        .chain(BASELINE.split_whitespace())
-        .collect();
-    match provider {
-        RuntimeProviderId::Did => {}
-        RuntimeProviderId::Wallet => names.extend(["rename", "renameat"]),
-        RuntimeProviderId::Model => names.extend(MODEL.split_whitespace()),
-    }
+    let mut names = declared_linux_names(provider, admitted);
     names.retain(|name| number(name, arch).is_some());
     names.sort_unstable();
     names.dedup();
@@ -153,7 +171,7 @@ mod tests {
     ];
 
     fn slug(provider: RuntimeProviderId) -> &'static str {
-        match provider { RuntimeProviderId::Did => "did", RuntimeProviderId::Wallet => "wallet", RuntimeProviderId::Model => "model" }
+        match provider { RuntimeProviderId::Did => "did", RuntimeProviderId::Wallet => "wallet", RuntimeProviderId::Model => "model", RuntimeProviderId::Localhost => "localhost", RuntimeProviderId::Object => "object", RuntimeProviderId::Chain => "chain" }
     }
     fn same_arch(left: AuditArch, right: AuditArch) -> bool {
         matches!((left, right), (AuditArch::X86_64, AuditArch::X86_64) | (AuditArch::Aarch64, AuditArch::Aarch64))
@@ -237,5 +255,205 @@ mod tests {
                 assert!(lab.contains(call), "pin d0dd5693 does not derive baseline {call} for the {name} {arch:?} grant");
             }
         });
+    }
+
+    #[test]
+    fn each_helper_keeps_its_own_measured_calls() {
+        let local = crate::provider::rights::admit_runtime_grant(RuntimeProviderId::Localhost);
+        let object = crate::provider::rights::admit_runtime_grant(RuntimeProviderId::Object);
+        let chain = crate::provider::rights::admit_runtime_grant(RuntimeProviderId::Chain);
+        let did = crate::provider::rights::admit_runtime_grant(RuntimeProviderId::Did);
+        let local_x86 = linux_seccomp_list(RuntimeProviderId::Localhost, &local, AuditArch::X86_64);
+        let object_x86 = linux_seccomp_list(RuntimeProviderId::Object, &object, AuditArch::X86_64);
+        let chain_x86 = linux_seccomp_list(RuntimeProviderId::Chain, &chain, AuditArch::X86_64);
+        let chain_arm = linux_seccomp_list(RuntimeProviderId::Chain, &chain, AuditArch::Aarch64);
+        let did_x86 = linux_seccomp_list(RuntimeProviderId::Did, &did, AuditArch::X86_64);
+        assert_ne!(chain_x86, did_x86, "chain keeps its own grant");
+        for name in ["connect", "recvfrom", "sendmmsg", "epoll_create1", "epoll_ctl", "epoll_pwait", "epoll_wait", "eventfd2", "exit", "rseq", "rt_sigprocmask", "rename"] {
+            assert!(chain_x86.contains(&name), "chain x86_64 is missing {name}");
+        }
+        assert!(!chain_x86.contains(&"renameat"));
+        assert!(chain_arm.contains(&"renameat") && chain_arm.contains(&"epoll_pwait"));
+        assert!(!chain_arm.contains(&"rename") && !chain_arm.contains(&"epoll_wait"));
+        for name in ["socket", "getsockopt", "sendto", "fcntl", "clone", "clone3", "setsockopt", "bind", "listen", "pipe2"] {
+            assert!(!chain_x86.contains(&name) && !chain_arm.contains(&name), "{name} is not an unconditional chain allow");
+            assert!(!local_x86.contains(&name) && !object_x86.contains(&name), "{name} leaked onto another helper");
+        }
+        assert!(!local_x86.contains(&"sendmmsg") && !object_x86.contains(&"sendmmsg"));
+        assert!(local_x86.contains(&"stat") && local_x86.contains(&"lstat"));
+        assert!(!local_x86.contains(&"open"), "open is argument-checked, not unconditional");
+        assert!(object_x86.contains(&"stat") && chain_x86.contains(&"lstat"));
+        assert!(!chain_arm.contains(&"stat") && !chain_arm.contains(&"lstat"));
+        assert!(!did_x86.contains(&"stat") && !did_x86.contains(&"lstat") && !did_x86.contains(&"open"));
+        assert!(local_x86.contains(&"rmdir"));
+        assert!(local_x86.contains(&"readlink"), "x86_64 realpath uses syscall readlink");
+        assert!(local_x86.contains(&"readlinkat"));
+        assert!(!local_x86.contains(&"chmod"));
+        assert!(!local_x86.contains(&"fchmodat"));
+        assert!(!local_x86.contains(&"flock"));
+        assert!(!local_x86.contains(&"socket"));
+        assert!(!local_x86.contains(&"connect"));
+        assert!(!chain_x86.contains(&"readlink"), "chain does not canonicalize");
+        assert!(!chain_arm.contains(&"readlink"), "chain does not canonicalize");
+        assert!(object_x86.contains(&"readlink"), "x86_64 realpath uses syscall readlink");
+        assert!(object_x86.contains(&"readlinkat"));
+        assert!(object_x86.contains(&"flock"));
+        assert!(object_x86.contains(&"fchmod"), "mode uses fchmod on the held descriptor");
+        assert!(!object_x86.contains(&"chmod"), "path chmod is not mediated by Landlock");
+        assert!(!object_x86.contains(&"fchmodat"), "path chmod is not mediated by Landlock");
+        assert!(object_x86.contains(&"rename"));
+        assert!(object_x86.contains(&"rmdir"));
+        assert!(!object_x86.contains(&"socket"));
+        assert!(!object_x86.contains(&"clone"));
+        let local_arm = linux_seccomp_list(RuntimeProviderId::Localhost, &local, AuditArch::Aarch64);
+        let object_arm = linux_seccomp_list(RuntimeProviderId::Object, &object, AuditArch::Aarch64);
+        assert!(!local_arm.contains(&"rmdir"));
+        assert!(!local_arm.contains(&"readlink"), "aarch64 realpath uses readlinkat");
+        assert!(local_arm.contains(&"readlinkat"));
+        assert!(!local_arm.contains(&"chmod"));
+        assert!(!local_arm.contains(&"fchmodat"));
+        assert!(local_arm.contains(&"unlinkat"));
+        assert!(!object_arm.contains(&"readlink"), "aarch64 realpath uses readlinkat");
+        assert!(object_arm.contains(&"readlinkat"));
+        assert!(object_arm.contains(&"flock"));
+        assert!(object_arm.contains(&"fchmod"), "mode uses fchmod on the held descriptor");
+        assert!(!object_arm.contains(&"fchmodat"), "path chmod is not mediated by Landlock");
+        assert!(object_arm.contains(&"renameat"));
+        assert!(!object_arm.contains(&"chmod"));
+        assert!(!object_arm.contains(&"rename"));
+        assert!(!local_arm.contains(&"stat") && !local_arm.contains(&"lstat"));
+        assert!(!object_arm.contains(&"stat") && !object_arm.contains(&"lstat"));
+        for name in ["munmap", "set_tid_address"] {
+            assert!(local_x86.contains(&name) && local_arm.contains(&name), "{name}");
+            assert!(object_x86.contains(&name) && object_arm.contains(&name), "{name}");
+            assert!(chain_x86.contains(&name) && chain_arm.contains(&name), "{name}");
+            assert!(!did_x86.contains(&name), "did does not get {name}");
+        }
+        assert_ne!(object_x86, local_x86);
+        assert_ne!(object_arm, local_arm);
+    }
+
+    /// Every declared name resolves on both architectures, or it is named here
+    /// with the reason the number table leaves that cell blank. `readx` is the
+    /// typo: it is not allowlisted and it has no number, so this row is red.
+    #[test]
+    fn every_declared_seccomp_name_resolves_or_is_allowlisted() {
+        use RuntimeProviderId::*;
+        const ALLOWED: &[(&str, AuditArch, &str)] = &[
+            (
+                "ioctl",
+                AuditArch::X86_64,
+                "Landlock ABI 5 device ioctl; the filter has no ioctl number and abi_required still selects ABI 5",
+            ),
+            (
+                "ioctl",
+                AuditArch::Aarch64,
+                "Landlock ABI 5 device ioctl; the filter has no ioctl number and abi_required still selects ABI 5",
+            ),
+            (
+                "rmdir",
+                AuditArch::Aarch64,
+                "aarch64 has no rmdir syscall; unlinkat is the call",
+            ),
+            (
+                "readlink",
+                AuditArch::Aarch64,
+                "aarch64 glibc uses readlinkat, which the baseline allows; the number table has no readlink there",
+            ),
+            (
+                "stat",
+                AuditArch::Aarch64,
+                "aarch64 has no stat syscall; newfstatat and statx are the calls, and musl 1.2.5 uses those",
+            ),
+            (
+                "lstat",
+                AuditArch::Aarch64,
+                "aarch64 has no lstat syscall; newfstatat with AT_SYMLINK_NOFOLLOW is the call",
+            ),
+            (
+                "arch_prctl",
+                AuditArch::Aarch64,
+                "aarch64 has no arch_prctl",
+            ),
+            (
+                "poll",
+                AuditArch::Aarch64,
+                "aarch64 has no poll; the baseline also allows ppoll",
+            ),
+            (
+                "mkdir",
+                AuditArch::Aarch64,
+                "aarch64 uses mkdirat, which the storage row allows",
+            ),
+            (
+                "unlink",
+                AuditArch::Aarch64,
+                "aarch64 uses unlinkat, which the storage row allows",
+            ),
+            (
+                "rename",
+                AuditArch::Aarch64,
+                "aarch64 uses renameat or renameat2; the number table has no rename there",
+            ),
+            (
+                "renameat",
+                AuditArch::X86_64,
+                "x86_64 uses renameat2; the renameat number is the aarch64 call",
+            ),
+            (
+                "epoll_wait",
+                AuditArch::Aarch64,
+                "aarch64 uses epoll_pwait; the number table has no epoll_wait there",
+            ),
+            (
+                "dup2",
+                AuditArch::Aarch64,
+                "the measured x86-only dup2 has no AArch64 syscall",
+            ),
+            (
+                "getpgrp",
+                AuditArch::Aarch64,
+                "the measured x86-only getpgrp has no AArch64 syscall",
+            ),
+        ];
+        let allowed = |name: &str, arch: AuditArch| {
+            ALLOWED.iter().any(|(allowed_name, allowed_arch, reason)| {
+                *allowed_name == name && *allowed_arch == arch && !reason.is_empty()
+            })
+        };
+        assert!(number("readx", AuditArch::X86_64).is_none());
+        assert!(!allowed("readx", AuditArch::X86_64), "a typo is not allowlisted");
+        for provider in [Did, Wallet, Model, Localhost, Object, Chain] {
+            let admitted = super::super::rights::admit_runtime_grant(provider);
+            let names = declared_linux_names(provider, &admitted);
+            for arch in [AuditArch::X86_64, AuditArch::Aarch64] {
+                for name in &names {
+                    assert!(
+                        number(name, arch).is_some() || allowed(name, arch),
+                        "{provider:?} {arch:?} {name} does not resolve and is not allowlisted"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn object_writes_keep_getpid() {
+        let admitted = super::super::rights::admit_runtime_grant(RuntimeProviderId::Object);
+        for arch in [AuditArch::X86_64, AuditArch::Aarch64] {
+            let names = linux_seccomp_list(RuntimeProviderId::Object, &admitted, arch);
+            assert!(
+                names.contains(&"getpid"),
+                "{arch:?} object list: {names:?}"
+            );
+        }
+        let writer = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../elastos-server/src/auth_state_files.rs"
+        ));
+        assert!(
+            writer.contains("std::process::id()"),
+            "object writes the auth-state file with the process id"
+        );
     }
 }

@@ -61,8 +61,9 @@ struct ChainProvider {
     node_lifecycle_state_path: PathBuf,
     node_lifecycle_state: NodeLifecycleStateFile,
     node_lifecycle_state_error: Option<String>,
-    node_supervisor: NodeSupervisorConfig,
     protected_content_runtime_issuer: Option<RuntimeOperationIssuerKeyV1>,
+    bitcoin_rpc_user: Option<String>,
+    bitcoin_rpc_password: Option<String>,
     now_unix_seconds: fn() -> u64,
 }
 
@@ -89,8 +90,9 @@ impl ChainProvider {
             node_lifecycle_state_path,
             node_lifecycle_state,
             node_lifecycle_state_error,
-            node_supervisor: NodeSupervisorConfig::default(),
             protected_content_runtime_issuer: None,
+            bitcoin_rpc_user: None,
+            bitcoin_rpc_password: None,
             now_unix_seconds: now_ts,
         }
     }
@@ -254,6 +256,18 @@ impl ChainProvider {
 
     fn init(&mut self, config: Value) -> Response {
         let extra = config.get("extra").unwrap_or(&config);
+        // The fence grants execute only on the provider copy and the loader.
+        // An operator supervisor is refused here, before this init changes any
+        // stored network. Null leaves the key unset.
+        if extra
+            .get("node_supervisor")
+            .is_some_and(|value| !value.is_null())
+        {
+            return Response::error(
+                "node_supervisor_refused",
+                "node_supervisor is refused at admission: the fence does not run an operator supervisor",
+            );
+        }
         let configured_networks = config
             .get("extra")
             .and_then(|extra| extra.get("networks"))
@@ -265,19 +279,6 @@ impl ChainProvider {
                 "full networks and protected-content network configuration are ambiguous",
             );
         }
-        let next_supervisor = if let Some(supervisor) = extra.get("node_supervisor") {
-            match serde_json::from_value::<NodeSupervisorConfig>(supervisor.clone()) {
-                Ok(supervisor) => {
-                    if let Err(err) = validate_node_supervisor_config(&supervisor) {
-                        return Response::error("invalid_config", &err);
-                    }
-                    Some(supervisor)
-                }
-                Err(err) => return Response::error("invalid_config", &err.to_string()),
-            }
-        } else {
-            None
-        };
         let next_runtime_issuer = if let Some(runtime_issuer) = config
             .get("extra")
             .and_then(|extra| extra.get("protected_content_runtime_issuer"))
@@ -359,19 +360,94 @@ impl ChainProvider {
             } else {
                 (None, self.protected_content_network_id.clone())
             };
-        if let Some(networks) = next_networks {
-            self.networks = networks;
+        // Settings are checked on the staged list. Self changes only after they pass.
+        let mut staged_networks = next_networks.unwrap_or_else(|| self.networks.clone());
+        let mut staged_user = self.bitcoin_rpc_user.clone();
+        let mut staged_password = self.bitcoin_rpc_password.clone();
+        let replaced: std::collections::BTreeSet<String> = if configured_networks.is_some() {
+            staged_networks.iter().map(|n| n.id.clone()).collect()
+        } else if configured_protected_content_network.is_some() {
+            next_protected_content_network_id.iter().cloned().collect()
+        } else {
+            std::collections::BTreeSet::new()
+        };
+        if let Err(response) = Self::stage_operator_settings(
+            &mut staged_networks,
+            &mut staged_user,
+            &mut staged_password,
+            extra.get("operator_settings"),
+            &replaced,
+        ) {
+            return response;
         }
+        self.networks = staged_networks;
         self.protected_content_network_id = next_protected_content_network_id;
-        if let Some(supervisor) = next_supervisor {
-            self.node_supervisor = supervisor;
-        }
         self.protected_content_runtime_issuer = next_runtime_issuer;
+        self.bitcoin_rpc_user = staged_user;
+        self.bitcoin_rpc_password = staged_password;
         Response::ok(json!({
             "provider": "chain",
             "protocol_version": "1.0",
             "network_count": self.networks.len(),
         }))
+    }
+
+    /// Closed list. Runtime copies these from its own environment into Init.
+    /// This function does not read the process environment and does not log
+    /// the values. `replaced` is the network ids this Init accepted. Those
+    /// keep their rpc. Bitcoin user and password are not a network record.
+    #[rustfmt::skip]
+    fn stage_operator_settings(
+        networks: &mut [ChainNetwork], bitcoin_rpc_user: &mut Option<String>,
+        bitcoin_rpc_password: &mut Option<String>, settings: Option<&Value>,
+        replaced: &std::collections::BTreeSet<String>,
+    ) -> Result<(), Response> {
+        const KEYS: &[&str] = &["BASE_RPC_URL", "BITCOIN_REST_URL", "BITCOIN_RPC_USER", "BITCOIN_RPC_PASSWORD"];
+        let Some(settings) = settings else { return Ok(()); };
+        let Some(map) = settings.as_object() else {
+            return Err(Response::error("invalid_config", "operator_settings must be an object"));
+        };
+        for key in map.keys() {
+            if !KEYS.contains(&key.as_str()) {
+                return Err(Response::error("invalid_config", "operator_settings has an unknown key"));
+            }
+        }
+        for (id, key) in [("base-mainnet", "BASE_RPC_URL"), ("btc-mainnet", "BITCOIN_REST_URL")] {
+            let Some(url) = map.get(key).and_then(Value::as_str) else { continue; };
+            let network = networks.iter().find(|n| n.id == id);
+            let hosts = network.map(|n| n.plain_http_rpc_hosts.as_slice()).unwrap_or(&[]);
+            let empty = network.is_some_and(|n| n.kind == ChainKind::BitcoinCoreRpc);
+            validate_rpc_url_value(id, url, empty, hosts).map_err(|err| Response::error("invalid_config", &err))?;
+            if !replaced.contains(id) {
+                if let Some(n) = networks.iter_mut().find(|n| n.id == id) { n.rpc_url = url.to_string(); }
+            }
+        }
+        if let Some((user, password)) = bitcoin_rpc_auth(map.get("BITCOIN_RPC_USER").and_then(Value::as_str), map.get("BITCOIN_RPC_PASSWORD").and_then(Value::as_str)) {
+            *bitcoin_rpc_user = Some(user);
+            *bitcoin_rpc_password = Some(password);
+        }
+        Ok(())
+    }
+
+    #[cfg(test)]
+    fn set_transport_timeout_for_test(&mut self, timeout: Duration) {
+        self.client = reqwest::blocking::Client::builder()
+            .timeout(timeout)
+            .build()
+            .expect("chain test client");
+    }
+
+    #[cfg(test)]
+    pub(crate) fn rpc_url_for(&self, id: &str) -> Option<&str> {
+        self.networks
+            .iter()
+            .find(|network| network.id == id)
+            .map(|network| network.rpc_url.as_str())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn bitcoin_rpc_user_for_test(&self) -> Option<&str> {
+        self.bitcoin_rpc_user.as_deref()
     }
 
     fn status(&self, network_id: &str) -> Response {
@@ -2734,13 +2810,10 @@ impl ChainProvider {
         };
         let loopback = network.rpc_url.starts_with("http://127.0.0.1:")
             || network.rpc_url.starts_with("http://localhost:");
-        let supervisor = self.node_supervisor.networks.get(&network.id).cloned();
-        let control_available = loopback && supervisor.is_some();
+        // Admission refuses node_supervisor, and the process does not run one.
         let managed = loopback;
         let state = if network.rpc_url.trim().is_empty() {
             NodeLifecycleStateKind::NotConfigured
-        } else if control_available {
-            NodeLifecycleStateKind::ManagedLocal
         } else if loopback {
             NodeLifecycleStateKind::ExternalLoopback
         } else {
@@ -2748,22 +2821,11 @@ impl ChainProvider {
         };
         let network_id = network.id.clone();
         let network = network.public_view();
-        if action != NodeLifecycleAction::Status && !control_available {
+        if action != NodeLifecycleAction::Status {
             return Response::error(
                 "managed_node_unavailable",
                 "local node lifecycle control is not configured for this network",
             );
-        }
-        if action != NodeLifecycleAction::Status {
-            let Some(supervisor) = supervisor.as_ref() else {
-                return Response::error(
-                    "managed_node_unavailable",
-                    "local node lifecycle control is not configured for this network",
-                );
-            };
-            if let Err(response) = run_node_supervisor_action(supervisor, action) {
-                return response;
-            }
         }
         let persisted = match self.persist_node_lifecycle_state(&network_id, state, managed) {
             Ok(persisted) => persisted,
@@ -2773,8 +2835,8 @@ impl ChainProvider {
             "schema": "elastos.chain.node_lifecycle/v1",
             "network": network,
             "managed": persisted.managed,
-            "control_available": control_available,
-            "control_reason": if control_available { "operator-approved supervisor configured" } else { NODE_LIFECYCLE_CONTROL_REASON },
+            "control_available": false,
+            "control_reason": NODE_LIFECYCLE_CONTROL_REASON,
             "action": action,
             "state": persisted.state,
             "first_seen_at": persisted.first_seen_at,

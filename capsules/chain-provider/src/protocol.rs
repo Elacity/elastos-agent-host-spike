@@ -351,28 +351,6 @@ pub(super) enum NodeLifecycleStateKind {
     RemoteBackend,
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
-pub(super) struct NodeSupervisorConfig {
-    #[serde(default)]
-    pub(super) networks: BTreeMap<String, NodeSupervisorNetworkConfig>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub(super) struct NodeSupervisorNetworkConfig {
-    pub(super) start: NodeSupervisorCommand,
-    pub(super) stop: NodeSupervisorCommand,
-    pub(super) restart: NodeSupervisorCommand,
-    #[serde(default)]
-    pub(super) timeout_ms: Option<u64>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub(super) struct NodeSupervisorCommand {
-    pub(super) program: String,
-    #[serde(default)]
-    pub(super) args: Vec<String>,
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub(super) struct PersistedNodeLifecycleState {
     pub(super) state: NodeLifecycleStateKind,

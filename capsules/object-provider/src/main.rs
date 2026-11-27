@@ -53,6 +53,21 @@ impl ObjectProviderProcess {
         if !data_dir.is_absolute() {
             return response_error("invalid_config", "config.base_path must be absolute");
         }
+        #[cfg(unix)]
+        if !device_key_is_closed(&data_dir) {
+            return response_error(
+                "refused",
+                if cfg!(target_os = "linux") {
+                    "object helper can open identity/device.key"
+                } else {
+                    "object helper can open or stat identity/device.key"
+                },
+            );
+        }
+        #[cfg(unix)]
+        if let Err((code, message)) = install_public_runtime_did(&config) {
+            return response_error(code, &message);
+        }
         self.data_dir = Some(data_dir.clone());
         response_ok(json!({
             "provider": PROVIDER_ID,
@@ -61,6 +76,55 @@ impl ObjectProviderProcess {
             "base_path": data_dir,
         }))
     }
+}
+
+/// A missing key is closed. A successful open refuses init.
+///
+/// macOS also requires lstat to fail. Linux Landlock does not mediate lstat,
+/// so a successful stat is not treated as an open. This is not a grant.
+#[cfg(unix)]
+fn device_key_is_closed(data_dir: &std::path::Path) -> bool {
+    let path = data_dir.join("identity").join("device.key");
+    let closed = |err: &std::io::Error| {
+        matches!(
+            err.kind(),
+            std::io::ErrorKind::NotFound | std::io::ErrorKind::PermissionDenied
+        )
+    };
+    let open_closed = match std::fs::File::open(&path) {
+        Err(err) => closed(&err),
+        Ok(_) => false,
+    };
+    if cfg!(target_os = "linux") {
+        return open_closed;
+    }
+    let stat_closed = match std::fs::symlink_metadata(&path) {
+        Err(err) => closed(&err),
+        Ok(_) => false,
+    };
+    open_closed && stat_closed
+}
+
+/// The public runtime DID from init config. A missing or non-canonical DID
+/// refuses init with `no_public_runtime_did`. A different DID already stored
+/// in this process keeps its own code and the install message. The value is
+/// kept in memory. There is no runtime-did file.
+#[cfg(unix)]
+fn install_public_runtime_did(config: &Value) -> Result<(), (&'static str, String)> {
+    let did = config
+        .get("extra")
+        .and_then(|extra| extra.get("runtime_did"))
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim();
+    if elastos_identity::decode_did_key(did).is_err() {
+        return Err((
+            "no_public_runtime_did",
+            "object helper spawn refused: no public runtime DID".to_string(),
+        ));
+    }
+    elastos_identity::install_object_helper_runtime_did(did)
+        .map_err(|err| ("runtime_did_install_failed", err.to_string()))
 }
 
 fn response_ok(data: Value) -> Value {
@@ -79,6 +143,8 @@ fn response_error(code: &str, message: &str) -> Value {
 }
 
 fn main() {
+    #[cfg(unix)]
+    std::env::set_var("ELASTOS_OBJECT_HELPER", "1");
     eprintln!("object-provider: starting v{PROVIDER_VERSION}");
     let stdin = io::stdin();
     let mut stdout = io::stdout();
@@ -151,6 +217,91 @@ mod tests {
         assert_eq!(relative["code"], "invalid_config");
     }
 
+    fn public_runtime_did() -> String {
+        elastos_identity::derive_did(&[0x11; 32]).1
+    }
+
+    fn init_config(base: &std::path::Path) -> Value {
+        json!({
+            "base_path": base.to_string_lossy().to_string(),
+            "extra": { "runtime_did": public_runtime_did() }
+        })
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn init_refuses_a_missing_public_runtime_did() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut provider = ObjectProviderProcess::new();
+        let response = provider.handle(json!({
+            "op": "init",
+            "config": { "base_path": dir.path().to_string_lossy().to_string() }
+        }));
+        assert_eq!(response["status"], "error");
+        assert_eq!(response["code"], "no_public_runtime_did");
+        assert_eq!(
+            response["message"],
+            "object helper spawn refused: no public runtime DID"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_different_runtime_did_keeps_its_install_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut provider = ObjectProviderProcess::new();
+        let first = provider.handle(json!({
+            "op": "init",
+            "config": init_config(dir.path())
+        }));
+        assert_eq!(first["status"], "ok", "{first}");
+        let same = provider.handle(json!({
+            "op": "init",
+            "config": init_config(dir.path())
+        }));
+        assert_eq!(same["status"], "ok", "{same}");
+        let other = elastos_identity::derive_did(&[0x22; 32]).1;
+        let again = tempfile::tempdir().unwrap();
+        let response = provider.handle(json!({
+            "op": "init",
+            "config": {
+                "base_path": again.path().to_string_lossy().to_string(),
+                "extra": { "runtime_did": other }
+            }
+        }));
+        assert_eq!(response["code"], "runtime_did_install_failed");
+        let message = response["message"].as_str().unwrap();
+        assert!(message.contains("already set"), "{message}");
+        assert_ne!(
+            message,
+            "object helper spawn refused: no public runtime DID"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn init_refuses_when_the_device_key_can_be_opened() {
+        let dir = tempfile::tempdir().unwrap();
+        let identity = dir.path().join("identity");
+        std::fs::create_dir(&identity).unwrap();
+        std::fs::write(identity.join("device.key"), b"secret").unwrap();
+        let mut provider = ObjectProviderProcess::new();
+        let response = provider.handle(json!({
+            "op": "init",
+            "config": init_config(dir.path())
+        }));
+        assert_eq!(response["code"], "refused");
+        let message = response["message"].as_str().unwrap();
+        if cfg!(target_os = "linux") {
+            assert_eq!(message, "object helper can open identity/device.key");
+        } else {
+            assert_eq!(
+                message,
+                "object helper can open or stat identity/device.key"
+            );
+        }
+    }
+
     #[test]
     fn initialized_raw_provider_refuses_runtime_coordinated_content_ops() {
         let dir = tempfile::tempdir().unwrap();
@@ -158,11 +309,9 @@ mod tests {
 
         let init = provider.handle(json!({
             "op": "init",
-            "config": {
-                "base_path": dir.path().to_string_lossy().to_string()
-            }
+            "config": init_config(dir.path())
         }));
-        assert_eq!(init["status"], "ok");
+        assert_eq!(init["status"], "ok", "{init}");
 
         let response = provider.handle(json!({
             "op": "publish",

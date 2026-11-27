@@ -175,6 +175,9 @@ cleanup() {
             && docker compose "${SMOKE_COMPOSE_ARGS[@]}" ps -a >"${EVIDENCE_DIR}/compose-ps.txt" 2>&1 \
             && docker compose "${SMOKE_COMPOSE_ARGS[@]}" logs --no-color >"${EVIDENCE_DIR}/compose-logs.txt" 2>&1) \
             || log "WARN: failed to preserve the ${SMOKE_PROJECT} container logs at ${EVIDENCE_DIR}"
+        # The job log shows why a node did not stay up; the whole log stays in the uploaded directory.
+        (grep -iE 'refus|error|fail|panic' "${EVIDENCE_DIR}/compose-logs.txt" | tail -n 40 | cut -c1-400) \
+            || log "(no refusal or error line in the container logs)"
     fi
 
     if [ "$SMOKE_PROJECT_UP" = true ]; then
