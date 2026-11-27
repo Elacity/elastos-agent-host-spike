@@ -190,7 +190,8 @@ mod tests {
         for provider in [RuntimeProviderId::Did, RuntimeProviderId::Wallet, RuntimeProviderId::Model] {
             let name = slug(provider);
             let profile = pin(&format!("capsules/{name}-provider/confine.sb"));
-            let admitted = crate::provider::rights::admit_committed(provider);
+            let admitted = crate::provider::rights::admit_committed(provider)
+                .expect("committed capsule authority");
             for arch in [AuditArch::X86_64, AuditArch::Aarch64] { body(provider, name, arch, &admitted, &src, &profile); }
         }
     }

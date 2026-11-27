@@ -1264,6 +1264,7 @@ mod tests {
         for provider in [Did, Wallet, Model, Localhost, Object, Chain] {
             let admitted = if matches!(provider, Did | Wallet | Model) {
                 super::super::rights::admit_committed(provider)
+                    .expect("committed capsule authority")
             } else {
                 super::super::rights::admit_runtime_grant(provider)
             };
@@ -1344,7 +1345,8 @@ mod tests {
                 storage_dev: 7,
                 storage_ino: 9,
             };
-            let admitted = super::super::rights::admit_committed(provider);
+            let admitted = super::super::rights::admit_committed(provider)
+                .expect("committed capsule authority");
             for arch in [LoaderArch::X86_64, LoaderArch::Aarch64] {
                 let plan = build_for_arch(provider, &admitted, &bindings, arch, 5).unwrap();
                 assert_eq!(plan.abi, 5, "{name} {arch:?} abi");

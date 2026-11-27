@@ -472,7 +472,8 @@ mod tests {
             super::super::rights_table::RuntimeProviderId::Did,
             &super::super::rights::admit_committed(
                 super::super::rights_table::RuntimeProviderId::Did,
-            ),
+            )
+            .expect("committed capsule authority"),
             &super::super::landlock_plan::Bindings {
                 storage_root: "/provider/Did".into(),
                 provider_executable: "/bin/Did".into(),
@@ -754,7 +755,8 @@ mod tests {
             super::super::rights_table::RuntimeProviderId::Wallet,
             &super::super::rights::admit_committed(
                 super::super::rights_table::RuntimeProviderId::Wallet,
-            ),
+            )
+            .expect("committed capsule authority"),
         );
         assert_eq!(
             wallet, WALLET_PROFILE,

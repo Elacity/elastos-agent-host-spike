@@ -231,7 +231,8 @@ mod tests {
         ] {
             let rendered = render_macos_profile(
                 provider,
-                &super::super::rights::admit_committed(provider),
+                &super::super::rights::admit_committed(provider)
+                    .expect("committed capsule authority"),
             );
             let mut parameters = BTreeSet::new();
             let mut literals = BTreeSet::new();
@@ -315,8 +316,11 @@ mod tests {
         );
         for provider in [RuntimeProviderId::Did, RuntimeProviderId::Wallet] {
             assert!(!provider.rights().contains(&"model-gpu"));
-            let rendered =
-                render_macos_profile(provider, &super::super::rights::admit_committed(provider));
+            let rendered = render_macos_profile(
+                provider,
+                &super::super::rights::admit_committed(provider)
+                    .expect("committed capsule authority"),
+            );
             assert!(!rendered.contains("iokit-open-user-client"));
             assert!(!rendered.contains("MTLCompilerService"));
         }

@@ -101,7 +101,7 @@ pub(super) fn start_provider(
     dispatch(provider, &admitted, executable, checked, stdio)
 }
 
-/// The signed-authority gate for localhost, object, and chain. Both OS arms
+/// The signed-authority gate for localhost, object, chain, and custody. Both OS arms
 /// start from this result. Linux does not admit a second grant.
 pub(crate) fn admit_path_allow(
     component_key: &str,
@@ -121,7 +121,7 @@ pub(crate) fn admit_path_allow(
     Ok((provider, admitted))
 }
 
-/// Start localhost, object, or chain under that provider's path allow-list.
+/// Start localhost, object, chain, or custody under that provider's path allow-list.
 ///
 /// The data directory is not a storage root. `identity/device.key` stays
 /// outside the Seatbelt parameters and the Landlock rules. Admission is the
@@ -230,9 +230,9 @@ fn start_path_allow_os(
 /// child uses it. A symlink at that path does not grant its target. A real
 /// directory swapped onto the path is readable, including a file moved into
 /// it. `identity/device.key` is not under any allowed root, so that path
-/// stays unread. The three helpers do not compare the device and
-/// inode again after the profile is on. sandbox-exec resolved the rules by
-/// name, so a same-user swap after that is the helper's own read.
+/// stays unread. Localhost, object, chain, and custody do not compare the
+/// device and inode again after the profile is on. sandbox-exec resolved the
+/// rules by name, so a same-user swap after that is the helper's own read.
 ///
 /// `plan.root_dev` lines up with the storage roots, which are the first rules.
 /// The executable, loader, and resolver paths are not roots. Metadata literals
@@ -824,7 +824,8 @@ mod tests {
         let storage = Path::new("/private/fixture/data/did");
         let profile = super::super::macos_profile::render_macos_profile(
             RuntimeProviderId::Did,
-            &super::super::rights::admit_committed(RuntimeProviderId::Did),
+            &super::super::rights::admit_committed(RuntimeProviderId::Did)
+                .expect("committed capsule authority"),
         );
         let command = macos_command(
             Path::new("/usr/bin/sandbox-exec"),
@@ -888,7 +889,8 @@ mod tests {
         let storage = Path::new("/private/fixture/data/did");
         let profile = super::super::macos_profile::render_macos_profile(
             RuntimeProviderId::Did,
-            &super::super::rights::admit_committed(RuntimeProviderId::Did),
+            &super::super::rights::admit_committed(RuntimeProviderId::Did)
+                .expect("committed capsule authority"),
         );
         let command = macos_command(
             Path::new("/usr/bin/sandbox-exec"),

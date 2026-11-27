@@ -43,8 +43,8 @@ pub(super) static RIGHTS: &[RightRow] = &[
 const DID_RIGHT_IDS: &[&str] = &["storage", "bound-executable"];
 const WALLET_RIGHT_IDS: &[&str] = &["storage", "bound-executable"];
 const MODEL_RIGHT_IDS: &[&str] = &["storage", "bound-executable", "model-gpu"];
-/// Localhost, object, and chain use the same file and exec rows. A helper's
-/// extra calls live in `measured_syscalls`, not in a second storage root.
+/// Localhost, object, chain, and custody use the same file and exec rows.
+/// A helper's extra calls live in `measured_syscalls`, not in a second storage root.
 const HELPER_RIGHT_IDS: &[&str] = DID_RIGHT_IDS;
 
 /// The caller derives this id from the Runtime's `components.json` key,
@@ -72,13 +72,13 @@ impl RuntimeProviderId {
             "did-provider" => Some(Self::Did),
             "wallet-provider" => Some(Self::Wallet),
             "model-provider" => Some(Self::Model),
-            // These three use the path allow-list, not the single storage root.
+            // Localhost, object, chain, and custody use the path allow-list.
             _ => None,
         }
     }
 
-    /// Localhost, object, and chain. `from_component_key` stays empty for them
-    /// so `spawn_confined` cannot start them on one storage root.
+    /// Localhost, object, chain, and custody. `from_component_key` stays empty
+    /// for them so `spawn_confined` cannot start them on one storage root.
     pub(super) fn path_allow(key: &str) -> Option<Self> {
         match key {
             "localhost-provider" => Some(Self::Localhost),
@@ -122,7 +122,7 @@ impl RuntimeProviderId {
     /// its Linux run already passed, so `readlink` stays off the chain row.
     ///
     /// `stat` and `lstat` are the x86_64 musl 1.2.5 forms of `statx` and
-    /// `newfstatat`, which these three helpers already allow. On x86_64,
+    /// `newfstatat`, which these four helpers already allow. On x86_64,
     /// `kstat.st_atime_sec` is `long` (the same width as `time_t`), so
     /// `fstatat` does not try `statx` first and `fstatat_kstat` issues
     /// `SYS_stat` or `SYS_lstat`. They let metadata and realpath see a path.
