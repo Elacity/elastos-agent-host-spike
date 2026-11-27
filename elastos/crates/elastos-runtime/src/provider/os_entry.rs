@@ -748,6 +748,21 @@ mod tests {
         #[cfg(not(target_os = "linux"))]
         let opened = unsafe { libc::pipe(fds.as_mut_ptr()) };
         assert_eq!(opened, 0);
+        // Linux `pipe2` already sets this. On macOS a later `Command` (rustc
+        // in a parallel test) inherits any fd without it, and the probe's
+        // stdin stays open until that child exits.
+        #[cfg(not(target_os = "linux"))]
+        unsafe {
+            for fd in fds {
+                let flags = libc::fcntl(fd, libc::F_GETFD);
+                assert!(flags >= 0, "F_GETFD {fd}");
+                assert_eq!(
+                    libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC),
+                    0,
+                    "FD_CLOEXEC {fd}"
+                );
+            }
+        }
         (fds[0], fds[1])
     }
 
