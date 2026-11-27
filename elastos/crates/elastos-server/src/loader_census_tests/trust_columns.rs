@@ -65,26 +65,6 @@ fn managed_runtime_trust_root() -> &'static str {
 fn columns() -> Vec<TrustColumn> {
     vec![
         TrustColumn {
-            file: "elastos-runtime/src/capsule/manager.rs",
-            function: "launch_internal",
-            call: "compute.load",
-            class: "n/a",
-            trust_root: "none",
-            verified_when: "never",
-            evidence: ["comput", "e.load"].concat(),
-            os_path: "",
-        },
-        TrustColumn {
-            file: "elastos-runtime/src/capsule/manager.rs",
-            function: "launch_internal",
-            call: "compute.start",
-            class: "n/a",
-            trust_root: "none",
-            verified_when: "never",
-            evidence: ["comput", "e.start"].concat(),
-            os_path: "",
-        },
-        TrustColumn {
             file: "elastos-runtime/src/provider/failure_record.rs",
             function: "launch",
             call: "libc::fexecve",
@@ -1328,9 +1308,19 @@ fn production_callers(
     sources: &BTreeMap<String, String>,
     function: &str,
 ) -> BTreeSet<(String, String)> {
+    callers_in(sources, function, |file| {
+        file.starts_with("elastos-server/src/")
+    })
+}
+
+fn callers_in(
+    sources: &BTreeMap<String, String>,
+    function: &str,
+    include_file: impl Fn(&str) -> bool,
+) -> BTreeSet<(String, String)> {
     let mut found = BTreeSet::new();
     for (file, text) in sources {
-        if !file.starts_with("elastos-server/src/") {
+        if !include_file(file) {
             continue;
         }
         let code = source::code_only(text);
@@ -1352,6 +1342,41 @@ fn production_callers(
         }
     }
     found
+}
+
+/// Names that reach the legacy launchers. Those items are `#[cfg(test)]`.
+fn legacy_launcher_names() -> [&'static str; 6] {
+    [
+        "CapsuleIoBridge",
+        "CapsuleManager",
+        "ElastosRuntime",
+        "RequestHandler",
+        "ShellManager",
+        "prepare_fetched_capsule",
+    ]
+}
+
+fn assert_legacy_launchers_unreachable(sources: &BTreeMap<String, String>) {
+    let mut hits = BTreeSet::new();
+    for (file, text) in sources {
+        let code = source::code_only(text);
+        let bytes = code.as_bytes();
+        for name in legacy_launcher_names() {
+            for (at, _) in code.match_indices(name) {
+                let ident = |byte: u8| byte.is_ascii_alphanumeric() || byte == b'_';
+                let left = at == 0 || !ident(bytes[at - 1]);
+                let end = at + name.len();
+                let right = end >= bytes.len() || !ident(bytes[end]);
+                if left && right {
+                    hits.insert((file.clone(), name.to_string()));
+                }
+            }
+        }
+    }
+    assert!(
+        hits.is_empty(),
+        "legacy launcher reachable from production code: {hits:?}"
+    );
 }
 
 fn assert_caller_paths(sources: &BTreeMap<String, String>) {
@@ -1666,6 +1691,32 @@ fn new_unchecked_production_caller_turns_caller_path_red() {
 }
 
 #[test]
+fn legacy_launchers_have_no_production_caller() {
+    assert_legacy_launchers_unreachable(&source::production_sources());
+}
+
+#[test]
+fn planted_legacy_launcher_caller_turns_the_row_red() {
+    let clean = source::production_sources();
+    let file = "elastos-server/src/server_infra.rs";
+    let plants = [
+        "fn planted() { elastos_runtime::capsule::prepare_fetched_capsule(); }\n",
+        "use elastos_runtime::capsule::prepare_fetched_capsule as prep;\nfn planted() { prep(); }\n",
+        "fn planted() { let _f = elastos_runtime::capsule::CapsuleManager::launch_local; }\n",
+        "fn planted() { let _b = elastos_runtime::bootstrap::ElastosRuntime::build; }\n",
+        "static PLANTED: fn() = elastos_runtime::bootstrap::ShellManager::bootstrap;\n",
+    ];
+    for plant in plants {
+        let mut sources = clean.clone();
+        sources.get_mut(file).unwrap().push_str(plant);
+        let refused = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            assert_legacy_launchers_unreachable(&sources);
+        }));
+        assert!(refused.is_err(), "planted caller stayed green: {plant}");
+    }
+}
+
+#[test]
 fn trust_column_counts_and_chokepoint_queue() {
     let columns = columns();
     let count = |field: fn(&TrustColumn) -> &str| {
@@ -1686,8 +1737,8 @@ fn trust_column_counts_and_chokepoint_queue() {
         })
         .count();
     println!("loader trust rows={} classes={classes:?} roots={roots:?} verified_when={times:?} to_gate={to_gate}", columns.len());
-    assert_eq!(columns.len(), 105);
-    assert_eq!(classes.get("n/a"), Some(&56));
+    assert_eq!(columns.len(), 103);
+    assert_eq!(classes.get("n/a"), Some(&54));
     assert_eq!(classes.get("os-tool"), Some(&2));
     assert_eq!(classes.get("other"), Some(&37));
     assert_eq!(classes.get("own-binary"), Some(&5));
@@ -1697,12 +1748,12 @@ fn trust_column_counts_and_chokepoint_queue() {
     assert_eq!(roots.get("publisher-did-signature"), Some(&2));
     #[cfg(not(windows))]
     {
-        assert_eq!(roots.get("none"), Some(&51));
+        assert_eq!(roots.get("none"), Some(&49));
         assert_eq!(roots.get("release-signature"), Some(&29));
     }
     #[cfg(windows)]
     {
-        assert_eq!(roots.get("none"), Some(&56));
+        assert_eq!(roots.get("none"), Some(&54));
         assert_eq!(roots.get("release-signature"), Some(&24));
     }
     assert_eq!(
@@ -1720,7 +1771,7 @@ fn trust_column_counts_and_chokepoint_queue() {
     }
     assert_eq!(times.get("at-install-only"), Some(&7));
     assert_eq!(times.get("at-stage-and-start"), Some(&9));
-    assert_eq!(times.get("never"), Some(&51));
+    assert_eq!(times.get("never"), Some(&49));
     assert_eq!(to_gate, 31);
 }
 

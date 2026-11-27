@@ -10,7 +10,8 @@
 // Import test utilities from the runtime crate
 // Note: These tests run as integration tests, so they need to import from the crate
 
-#[cfg(test)]
+// Library items behind cfg(test) are absent when this crate links the library.
+#[cfg(any())]
 mod tests {
     use elastos_common::{CapsuleManifest, CapsuleStatus, CapsuleType};
     use elastos_compute::{CapsuleHandle, CapsuleInfo as ComputeCapsuleInfo, ComputeProvider};

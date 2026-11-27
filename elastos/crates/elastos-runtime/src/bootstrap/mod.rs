@@ -14,9 +14,9 @@
 mod runtime_builder;
 mod shell;
 
-#[allow(unused_imports)]
-pub use runtime_builder::{
-    BuildError, ConfigFile, ElastosRuntime, RuntimeConfig, StartError, StopError,
-};
-#[allow(unused_imports)]
-pub use shell::{ShellConfig, ShellError, ShellManager};
+#[cfg(test)]
+pub use runtime_builder::ElastosRuntime;
+pub use runtime_builder::{BuildError, ConfigFile, RuntimeConfig, StartError, StopError};
+#[cfg(test)]
+pub use shell::ShellManager;
+pub use shell::{ShellConfig, ShellError};

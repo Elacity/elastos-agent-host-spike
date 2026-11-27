@@ -1601,8 +1601,15 @@ async fn run() -> anyhow::Result<()> {
                     "cid": staged.cid,
                     "signer_did": staged.signer_did,
                     "files_written": staged.files_written,
+                    "empty_folders": staged.empty_folders,
                 })
             );
+            if !staged.empty_folders.is_empty() {
+                eprintln!(
+                    "Empty folders are not part of a bundle's name or its stored bytes: {}.",
+                    staged.empty_folders.join(", ")
+                );
+            }
         }
 
         Commands::PublishRelease {

@@ -26,6 +26,9 @@
 //!
 //! This module compiles only with `prototype-agents`. A build without that
 //! feature does not contain these rows.
+//!
+//! Within one process, one Home has one plan book for dispatch and Stop.
+//! The installed two-process path runs no agent today and its proof comes with the package.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -260,6 +263,7 @@ async fn replay(
         model_token_ceiling: None,
         model_budget: None,
         stop: None,
+        v2_guests: None,
         plan_book: None,
     };
     crate::resource_bridge::handle_component_resource_request(&line, ctx)
@@ -747,6 +751,7 @@ async fn retained_plan_dispatch_after(end: InstanceEnd) {
         model_token_ceiling: None,
         model_budget: None,
         stop: None,
+        v2_guests: None,
         plan_book: None,
     };
     crate::resource_bridge::retain_agent_plan_dispatch_authority(

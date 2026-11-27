@@ -937,6 +937,7 @@ async fn an_approved_plan_is_found_by_dispatch_in_this_process() {
         model_token_ceiling: None,
         model_budget: None,
         stop: None,
+        v2_guests: None,
         plan_book: None,
     };
     crate::resource_bridge::retain_agent_plan_dispatch_authority(
@@ -1367,6 +1368,7 @@ async fn a_stopped_plan_is_not_minted() {
         model_token_ceiling: None,
         model_budget: None,
         stop: Some(flag),
+        v2_guests: None,
         plan_book: None,
     };
     crate::resource_bridge::retain_agent_plan_dispatch_authority(

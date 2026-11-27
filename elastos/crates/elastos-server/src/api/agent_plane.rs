@@ -651,6 +651,7 @@ pub(crate) fn router(config: ServerConfig) -> anyhow::Result<Router> {
             Box::new(elastos_runtime::capability::evaluator::ShellPassthroughVerifier),
             config.capability_manager.audit_log().clone(),
         )),
+        v2_guests: runtime.component_guests(),
     };
     let mut capsules = Router::new()
         .route("/api/capsules", get(crate::api::routes::list_capsules))
@@ -697,6 +698,7 @@ pub(crate) fn router(config: ServerConfig) -> anyhow::Result<Router> {
                 .with_state(crate::api::handlers::attach::AttachState {
                     session_registry,
                     secret,
+                    shells: crate::api::handlers::attach::AttachShells::default(),
                 }),
         );
     }
@@ -917,13 +919,19 @@ async fn listen(
         elastos_storage::providers::LocalFSProvider::new(data_dir.join("agent-runtime-storage"))
             .await?,
     );
-    let runtime = std::sync::Arc::new(crate::runtime::Runtime::with_providers_and_component(
+    let mut runtime = crate::runtime::Runtime::with_providers_and_component(
         storage,
         Vec::new(),
         Some(std::sync::Arc::new(
             elastos_compute::providers::ComponentProvider::new(),
         )),
-    ));
+    );
+    // This Home already has the one plan book. A second Runtime, including a
+    // plane that starts again after the previous one, uses that book.
+    if let Some(book) = crate::runtime::wired_plan_book(&data_dir) {
+        runtime.plan_book = book;
+    }
+    let runtime = std::sync::Arc::new(runtime);
     runtime
         .configure_capsule_admission(&data_dir, &loaded.trusted_keys, loaded.dev_mode)
         .await?;

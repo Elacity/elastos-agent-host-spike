@@ -8,6 +8,7 @@ use axum::{
     response::IntoResponse,
     Extension, Json,
 };
+use base64::Engine as _;
 use elastos_runtime::primitives::audit::{AuditEvent, AuditLog, TrustLevel};
 use elastos_runtime::primitives::SecureTimestamp;
 use serde::{Deserialize, Serialize};
@@ -73,6 +74,105 @@ pub async fn list_capsules(
         .collect();
 
     Json(CapsuleListResponse { capsules })
+}
+
+#[derive(Deserialize)]
+pub(crate) struct ResidentFrameQuery {
+    app: String,
+    principal: String,
+}
+
+/// One stored frame. The shell token returns the frame for the principal
+/// stored when it was minted. The query principal is ignored.
+///
+/// The holder of the attach secret can POST any principal to
+/// `/api/auth/attach`. The gateway mint, `home_attach_frame_shell`, posts only
+/// the principal on the verified Home launch context. A presenter of the
+/// resulting shell token reads that stored principal's frame. Home launch
+/// records do not reach attach: AttachState has the session registry, the
+/// secret, and the shell notes, and the session is owned by the device DID.
+/// A second process that holds the secret can still name a principal those
+/// records do not. A guest session, a Home app session, and no session are
+/// refused by name.
+pub(crate) async fn resident_frame(
+    Extension(runtime): Extension<Arc<Runtime>>,
+    Extension(sessions): Extension<Arc<elastos_runtime::session::SessionRegistry>>,
+    Extension(shells): Extension<crate::api::handlers::attach::AttachShells>,
+    headers: HeaderMap,
+    axum::extract::Query(query): axum::extract::Query<ResidentFrameQuery>,
+) -> axum::response::Response {
+    if let Some(guests) = runtime.component_guests() {
+        guests.reap_joined_residents().await;
+    }
+    let Some(token) = frame_bearer(&headers) else {
+        return (StatusCode::UNAUTHORIZED, "no session").into_response();
+    };
+    if let Some(session) = sessions.validate_token(&token).await {
+        if session.is_shell() {
+            if let Some(principal) = shells.frame_principal(&token) {
+                let _query_names = query.principal.as_str();
+                return resident_frame_body(&runtime, &query.app, &principal).await;
+            }
+            // An ordinary shell stays forbidden. A frame shell that lost its
+            // slot is already gone from the registry, so that poll is 401.
+            return (StatusCode::FORBIDDEN, "shell has no frame principal").into_response();
+        }
+        return (StatusCode::FORBIDDEN, "guest session").into_response();
+    }
+    shells.forget(&token);
+    if home_app_session_token(&token) {
+        return (StatusCode::FORBIDDEN, "Home app session").into_response();
+    }
+    (StatusCode::UNAUTHORIZED, "no session").into_response()
+}
+
+fn frame_bearer(headers: &HeaderMap) -> Option<String> {
+    headers
+        .get(axum::http::header::AUTHORIZATION)?
+        .to_str()
+        .ok()?
+        .strip_prefix("Bearer ")
+        .filter(|token| !token.is_empty())
+        .map(str::to_string)
+}
+
+fn home_app_session_token(token: &str) -> bool {
+    let Ok(bytes) = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(token) else {
+        return false;
+    };
+    serde_json::from_slice::<serde_json::Value>(&bytes)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("payload")?
+                .get("schema")?
+                .as_str()
+                .map(str::to_owned)
+        })
+        .as_deref()
+        == Some("elastos.home.launch-token/v4")
+}
+
+async fn resident_frame_body(
+    runtime: &Runtime,
+    app: &str,
+    principal: &str,
+) -> axum::response::Response {
+    if app.is_empty() || app.len() > 128 || principal.is_empty() || principal.len() > 256 {
+        return Json(serde_json::json!({ "nodes": [] })).into_response();
+    }
+    let Some(provider) = runtime.component_guests() else {
+        return Json(serde_json::json!({ "nodes": [] })).into_response();
+    };
+    match crate::component::v2_frame_answer(provider.as_ref(), principal, app).await {
+        Ok(bytes) => (
+            StatusCode::OK,
+            [(axum::http::header::CONTENT_TYPE, "application/json")],
+            bytes,
+        )
+            .into_response(),
+        Err(reason) => (StatusCode::PAYLOAD_TOO_LARGE, reason).into_response(),
+    }
 }
 
 /// Unknown fields are refused: a launch request carries no principal kind. The
@@ -547,7 +647,7 @@ fn capsule_stop_response(
         name,
         status: if decision.stopping {
             "stopping".to_string()
-        } else if !decision.unknown_steps.is_empty() {
+        } else if status_text != "failed" && !decision.unknown_steps.is_empty() {
             "stopped".to_string()
         } else {
             status_text
@@ -753,7 +853,6 @@ async fn stop_collected_agent_rows(
         )
             .into_response();
     }
-    runtime.note_agent_stop_requested(agent_id).await;
     let mut stopped = Vec::with_capacity(ready.len());
     let mut stopping = Vec::new();
     for id in ready {
@@ -772,7 +871,10 @@ async fn stop_collected_agent_rows(
             continue;
         }
         let info = match runtime.stop_capsule_with_reason(&id, "owner").await {
-            Ok(Some(info)) => info,
+            Ok(Some(info)) => {
+                runtime.note_agent_stop_requested(agent_id);
+                info
+            }
             Ok(None) => continue,
             Err(error) => {
                 return (
@@ -938,7 +1040,7 @@ pub(crate) mod tests {
     fn principal_launch_rejects_raw_principal_id_even_with_grant() {
         let dir = tempfile::tempdir().unwrap();
         let capsule_dir = write_test_capsule(dir.path(), "chat-wasm");
-        let context = gateway::local_home_launch_token_context(dir.path()).unwrap();
+        let context = gateway::bind_device_session_grant(dir.path(), &["chat-wasm"]).unwrap();
         let grant =
             gateway::issue_home_launch_token_with_context(dir.path(), "chat-wasm", &context)
                 .unwrap();
@@ -983,7 +1085,7 @@ pub(crate) mod tests {
     fn principal_launch_rejects_grant_without_runtime_data_dir() {
         let dir = tempfile::tempdir().unwrap();
         let capsule_dir = write_test_capsule(dir.path(), "chat-wasm");
-        let context = gateway::local_home_launch_token_context(dir.path()).unwrap();
+        let context = gateway::bind_device_session_grant(dir.path(), &["chat-wasm"]).unwrap();
         let grant =
             gateway::issue_home_launch_token_with_context(dir.path(), "chat-wasm", &context)
                 .unwrap();
@@ -2101,6 +2203,7 @@ pub(crate) mod tests {
                     Box::new(ShellPassthroughVerifier),
                     self.audit_log.clone(),
                 )),
+                v2_guests: None,
             }
         }
 
@@ -4292,7 +4395,7 @@ pub(crate) mod tests {
         .unwrap();
         assert_stopping(launch_grant(&home, &home.capsule_dir, &agent, &grant).await);
         assert!(
-            home.runtime.stop_requested_for_test(&agent).await,
+            home.runtime.stop_requested_for_test(&agent),
             "Start cleared the stop mark while an effect was in flight"
         );
 
@@ -5200,6 +5303,7 @@ pub(crate) mod tests {
             model_token_ceiling: tables.model_token_ceiling,
             model_budget: None,
             stop: tables.stop,
+            v2_guests: None,
             plan_book: None,
         };
         let answer = crate::resource_bridge::handle_component_resource_request(&line, ctx)
@@ -6356,6 +6460,7 @@ pub(crate) mod tests {
             model_token_ceiling: None,
             model_budget: None,
             stop: None,
+            v2_guests: None,
             plan_book: None,
         };
         let request = serde_json::json!({"path": foreign, "content": "x"});
@@ -9348,6 +9453,154 @@ pub(crate) mod tests {
         );
     }
 
+    /// What `start_agent_once` answers. The launch route returns this sentence
+    /// once admission has passed, and System paints Running or Stopping from it.
+    #[cfg(unix)]
+    async fn start_sentence(
+        runtime: &Arc<Runtime>,
+        data_dir: &std::path::Path,
+        agent: &str,
+        launch_id: &str,
+    ) -> String {
+        let expires = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs()
+            + 3600;
+        let err = runtime
+            .start_agent_once(
+                std::path::Path::new("unused"),
+                crate::agent_admission::AdmissionContext::for_test(agent),
+                crate::runtime::AgentStartFacts {
+                    agent_id: agent,
+                    owner: "person:owner",
+                    host_cid: "cid",
+                    launch_id,
+                    expires_at: expires,
+                    data_dir,
+                },
+            )
+            .await
+            .expect_err("Start was accepted");
+        match err {
+            elastos_common::ElastosError::InvalidManifest(message) => message,
+            other => panic!("Start returned {other}"),
+        }
+    }
+
+    /// The launch route System Start calls, before a grant is presented.
+    /// Stopping is decided here. Already running is decided in `start_agent_once`
+    /// after the grant, which this call does not reach.
+    #[cfg(unix)]
+    async fn launch_route_body(runtime: &Arc<Runtime>, agent: &str) -> (StatusCode, String) {
+        match launch_capsule(
+            Extension(runtime.clone()),
+            Extension(Arc::new(AuditLog::new())),
+            Extension(Some(std::path::PathBuf::from("unused-home"))),
+            None,
+            Json(LaunchRequest {
+                path: "unused".to_string(),
+                principal_id: None,
+                launch_grant: None,
+                agent_id: Some(agent.to_string()),
+            }),
+        )
+        .await
+        {
+            Ok(answer) => (StatusCode::OK, answer.0.id),
+            Err((status, body)) => (status, body),
+        }
+    }
+
+    /// The agent's own live run has a plan step in flight. Start says already
+    /// running. The launch route does not say stopping.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_live_run_with_a_held_step_says_already_running() {
+        let (runtime, dir) = crate::runtime::tests::test_runtime().await;
+        let runtime = Arc::new(runtime);
+        let agent = "agent:r10-live";
+        let session = "session-r10-live";
+        runtime.plant_open_agent_stop_for_test(agent, session).await;
+        let guard =
+            Runtime::try_enter_plan_effect(&runtime.plan_book(), session, agent, "step-r10-live")
+                .expect("the live step enters");
+        assert!(
+            !runtime.agent_is_stopping(agent).await,
+            "a live step made the agent stopping"
+        );
+        assert_eq!(
+            start_sentence(&runtime, dir.path(), agent, "launch:r10-live").await,
+            Runtime::AGENT_ALREADY_RUNNING
+        );
+        let (status, body) = launch_route_body(&runtime, agent).await;
+        assert!(
+            status != StatusCode::CONFLICT || body != Runtime::AGENT_STOPPING,
+            "the launch route said stopping for a live step: {status} {body}"
+        );
+        drop(guard);
+    }
+
+    /// The run has ended and a plan step is still landing. Start says stopping,
+    /// and the launch route says the same sentence.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_stopped_run_with_a_landing_step_says_stopping() {
+        let (runtime, dir) = crate::runtime::tests::test_runtime().await;
+        let runtime = Arc::new(runtime);
+        let agent = "agent:r10-land";
+        let session = "session-r10-land";
+        runtime.plant_open_agent_stop_for_test(agent, session).await;
+        let guard =
+            Runtime::try_enter_plan_effect(&runtime.plan_book(), session, agent, "step-r10-land")
+                .expect("the landing step enters");
+        runtime.note_plan_instance_ended(session);
+        assert!(runtime.agent_is_stopping(agent).await);
+        assert_eq!(
+            start_sentence(&runtime, dir.path(), agent, "launch:r10-land").await,
+            Runtime::AGENT_STOPPING
+        );
+        let (status, body) = launch_route_body(&runtime, agent).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        assert_eq!(body, Runtime::AGENT_STOPPING);
+        drop(guard);
+    }
+
+    /// System Start goes through the launch route. A live step is already
+    /// running. A step that is still landing after the run ended is stopping.
+    /// The page paints Running and Stopping from those two sentences.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_system_list_labels_a_live_step_running_and_a_landing_step_stopping() {
+        if crate::agents::require_build().is_err() {
+            return;
+        }
+        let home = ProbeLaunch::new(&[]).await;
+        let (dir, cid) = home.spin_host();
+        let agent = home.create_agent_for_host("r10-label", &cid);
+        let first = home
+            .launch_from(&dir, &agent)
+            .await
+            .expect("the run starts")
+            .0;
+        home.wait_running(&first.id).await;
+        let guard = Runtime::try_enter_plan_effect(
+            &home.runtime.plan_book(),
+            &first.id,
+            &agent,
+            "step-r10-label",
+        )
+        .expect("the live step enters");
+        assert!(!home.runtime.agent_is_stopping(&agent).await);
+        assert_already_running(home.launch_from(&dir, &agent).await);
+        home.runtime.note_plan_instance_ended(&first.id);
+        assert!(home.runtime.agent_is_stopping(&agent).await);
+        assert_stopping(home.launch_from(&dir, &agent).await);
+        guard.release();
+        let (status, body) = stop_route(&home, &first.id, Some("owner")).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+    }
+
     #[cfg(unix)]
     fn panic_message(payload: Box<dyn std::any::Any + Send>) -> String {
         if let Some(message) = payload.downcast_ref::<String>() {
@@ -9413,6 +9666,7 @@ pub(crate) mod tests {
             model_token_ceiling: tables.model_token_ceiling,
             model_budget: None,
             stop: tables.stop,
+            v2_guests: None,
             plan_book: None,
         };
         let answer = crate::resource_bridge::handle_component_resource_request(&line, ctx)
@@ -10342,6 +10596,60 @@ pub(crate) mod tests {
             !start_refused_because_stopping(&runtime, agent).await,
             "a panic in Stop left Start refused"
         );
+    }
+
+    /// Stop names an unknown step and keeps a failed capsule failed.
+    #[tokio::test]
+    async fn a_failed_stop_keeps_failed_when_it_names_an_unknown_step() {
+        use axum::body::to_bytes;
+
+        let response = capsule_stop_response(
+            "cap".to_string(),
+            "guest".to_string(),
+            "failed".to_string(),
+            "session".to_string(),
+            Some("failed: boom".to_string()),
+            crate::runtime::PlanStopDecision {
+                stopping: false,
+                unknown_steps: vec!["step-9".to_string()],
+            },
+        );
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let answer: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(answer["status"], "failed");
+        assert_eq!(answer["unknown_steps"][0], "step-9");
+
+        let running = capsule_stop_response(
+            "cap".to_string(),
+            "guest".to_string(),
+            "running".to_string(),
+            "session".to_string(),
+            None,
+            crate::runtime::PlanStopDecision {
+                stopping: false,
+                unknown_steps: vec!["step-9".to_string()],
+            },
+        );
+        let running_bytes = to_bytes(running.into_body(), usize::MAX).await.unwrap();
+        let running_answer: serde_json::Value = serde_json::from_slice(&running_bytes).unwrap();
+        assert_eq!(running_answer["status"], "stopped");
+
+        let landing = capsule_stop_response(
+            "cap".to_string(),
+            "guest".to_string(),
+            "failed".to_string(),
+            "session".to_string(),
+            Some("failed: boom".to_string()),
+            crate::runtime::PlanStopDecision {
+                stopping: true,
+                unknown_steps: vec!["step-9".to_string()],
+            },
+        );
+        assert_eq!(landing.status(), StatusCode::ACCEPTED);
+        let landing_bytes = to_bytes(landing.into_body(), usize::MAX).await.unwrap();
+        let landing_answer: serde_json::Value = serde_json::from_slice(&landing_bytes).unwrap();
+        assert_eq!(landing_answer["status"], "stopping");
     }
 }
 

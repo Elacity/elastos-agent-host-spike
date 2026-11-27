@@ -385,6 +385,13 @@ fn rows() -> Vec<AuthorityRow> {
         ),
         row(
             HOME_SYSTEM,
+            "home_v2_frame",
+            "require_home_token_context",
+            1,
+            "home-own: /api/apps/home/frame admits the owner Home token; /api/residents/frame admits one attach shell on the managed Runtime",
+        ),
+        row(
+            HOME_SYSTEM,
             "home_runtime_ensure",
             "require_home_token",
             1,

@@ -714,6 +714,15 @@ fn issue_step_up_token(
     issued_at: u64,
 ) -> anyhow::Result<IssuedPasskeyStepUp> {
     let step_up_id = format!("step-up:{}", gateway_home_token::uuid_like_token());
+    let ttl = PASSKEY_STEP_UP_TTL_SECS;
+    let grant_exp = gateway_home_token::grant_bound_expiry(
+        data_dir,
+        &pending.principal_id,
+        &pending.session_id,
+        Some(&pending.proof_binding_id),
+        &pending.grant_id,
+        pending.launch_context.authority_actor.as_str(),
+    )?;
     let payload = PasskeyStepUpPayload {
         schema: PASSKEY_STEP_UP_SCHEMA.to_string(),
         step_up_id: step_up_id.clone(),
@@ -726,15 +735,7 @@ fn issue_step_up_token(
         operation: pending.operation.clone(),
         request_sha256: pending.request_sha256.clone(),
         iat: issued_at,
-        exp: gateway_home_token::grant_bound_expiry(
-            data_dir,
-            &pending.principal_id,
-            &pending.session_id,
-            Some(&pending.proof_binding_id),
-            &pending.grant_id,
-            issued_at,
-            PASSKEY_STEP_UP_TTL_SECS,
-        )?,
+        exp: issued_at.saturating_add(ttl).min(grant_exp),
         non_delegatable: true,
     };
     payload.validate(issued_at, PASSKEY_STEP_UP_TTL_SECS)?;

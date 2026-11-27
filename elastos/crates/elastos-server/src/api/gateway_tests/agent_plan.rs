@@ -194,6 +194,7 @@ fn submit_with_bounds(
             model_token_ceiling: Some(16),
             model_budget: None,
             stop: None,
+            v2_guests: None,
             plan_book: None,
         };
         crate::runtime::Runtime::bind_detached_plan_for_test(
@@ -2127,6 +2128,7 @@ async fn plan_inflight_row(
         model_token_ceiling: Some(16),
         model_budget: None,
         stop: None,
+        v2_guests: None,
         plan_book: Some(runtime.plan_book()),
     };
     crate::resource_bridge::retain_agent_plan_dispatch_authority(
@@ -2349,7 +2351,7 @@ async fn assert_plan_grant_closed(
 async fn bare_runtime(dir: &std::path::Path) -> Arc<crate::runtime::Runtime> {
     let storage = dir.join("cap-storage");
     std::fs::create_dir_all(&storage).unwrap();
-    Arc::new(crate::runtime::Runtime::with_providers_and_component(
+    let runtime = Arc::new(crate::runtime::Runtime::with_providers_and_component(
         Arc::new(
             elastos_storage::providers::LocalFSProvider::new(storage)
                 .await
@@ -2359,7 +2361,9 @@ async fn bare_runtime(dir: &std::path::Path) -> Arc<crate::runtime::Runtime> {
         Some(Arc::new(
             elastos_compute::providers::ComponentProvider::new(),
         )),
-    ))
+    ));
+    runtime.set_plant_dir_for_test(dir);
+    runtime
 }
 
 struct PlantedEffect {
@@ -2470,6 +2474,7 @@ async fn plant_approved(
         model_token_ceiling: Some(16),
         model_budget: None,
         stop: None,
+        v2_guests: None,
         plan_book: Some(runtime.plan_book()),
     };
     crate::resource_bridge::retain_agent_plan_dispatch_authority(
@@ -2635,6 +2640,7 @@ async fn dispatch_without_an_open_instance(bound_then_gone: bool) {
         model_token_ceiling: None,
         model_budget: None,
         stop: None,
+        v2_guests: None,
         plan_book: None,
     };
     if bound_then_gone {
@@ -2862,6 +2868,19 @@ async fn a_panic_in_dispatch_records_unknown() {
     let record = read_record(plant.dir.path(), &plant.id);
     assert_eq!(record["status"], "unknown", "{record}");
     assert_eq!(record["result"]["code"], "dispatch_panic", "{record}");
+    let unknown_audits = crate::auth::load_auth_state(plant.dir.path())
+        .unwrap()
+        .audit
+        .iter()
+        .filter(|event| {
+            event.event_type == "agent_plan.dispatch.unknown"
+                && event.challenge_id.as_deref() == Some(plant.id.as_str())
+        })
+        .count();
+    assert_eq!(
+        unknown_audits, 1,
+        "a panic wrote more than one unknown audit"
+    );
     assert_ne!(record["status"], "completed");
     assert_ne!(record["status"], "refused");
     assert_eq!(std::fs::read(&plant.path).unwrap(), plant.before);
@@ -2875,6 +2894,225 @@ async fn a_panic_in_dispatch_records_unknown() {
     assert_eq!(named.len(), 1);
     assert_eq!(named[0].request_id, plant.id);
     assert!(plant.runtime.plan_book_is_empty());
+}
+
+/// Drop and the task error arm both revoke. One audit is written.
+#[cfg(unix)]
+#[tokio::test]
+async fn two_callers_revoke_an_abandoned_grant_once() {
+    let audit = Arc::new(elastos_runtime::primitives::audit::AuditLog::new());
+    let manager = Arc::new(elastos_runtime::capability::CapabilityManager::new(
+        Arc::new(elastos_runtime::capability::CapabilityStore::new()),
+        audit,
+        Arc::new(elastos_runtime::primitives::metrics::MetricsManager::new()),
+    ));
+    let store = Arc::new(
+        elastos_runtime::capability::pending::PendingRequestStore::new(manager.audit_log().clone()),
+    );
+    let resource = elastos_runtime::capability::ResourceId::new("elastos://availability/status");
+    let token = manager.grant(
+        "capsule:revoke-once",
+        resource.clone(),
+        elastos_runtime::capability::Action::Read,
+        elastos_runtime::capability::TokenConstraints::default(),
+        None,
+    );
+    let pending = store
+        .create_request(
+            elastos_runtime::session::SessionId::from_string("capsule:revoke-once"),
+            resource,
+            elastos_runtime::capability::Action::Read,
+        )
+        .await;
+    let pending_id = pending.id.as_str().to_string();
+    store
+        .grant_request(
+            &pending_id,
+            token.clone(),
+            elastos_runtime::capability::pending::GrantDuration::Session,
+        )
+        .await
+        .unwrap();
+    crate::resource_bridge::park_abandoned_grant_for_test(
+        "revoke-once",
+        Arc::clone(&manager),
+        store,
+        token,
+        pending_id,
+    );
+    let overlap = crate::resource_bridge::arm_abandoned_revoke_overlap("revoke-once");
+    let left = tokio::spawn(crate::resource_bridge::revoke_abandoned_plan_grant(
+        "revoke-once",
+    ));
+    let right = tokio::spawn(crate::resource_bridge::revoke_abandoned_plan_grant(
+        "revoke-once",
+    ));
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    loop {
+        let seen = overlap.entered.load(std::sync::atomic::Ordering::SeqCst)
+            + overlap.waiting.load(std::sync::atomic::Ordering::SeqCst);
+        if seen >= 2 || std::time::Instant::now() >= deadline {
+            break;
+        }
+        let wait = overlap.progress.notified();
+        let seen = overlap.entered.load(std::sync::atomic::Ordering::SeqCst)
+            + overlap.waiting.load(std::sync::atomic::Ordering::SeqCst);
+        if seen >= 2 {
+            break;
+        }
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        if left.is_zero() {
+            break;
+        }
+        let _ = tokio::time::timeout(left, wait).await;
+    }
+    assert_eq!(
+        overlap.entered.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "both callers revoked"
+    );
+    assert!(
+        overlap.waiting.load(std::sync::atomic::Ordering::SeqCst) >= 1,
+        "the second caller returned before the first revoke finished"
+    );
+    for _ in 0..8 {
+        tokio::task::yield_now().await;
+    }
+    assert!(
+        !right.is_finished(),
+        "the second revoke returned while the first was still open"
+    );
+    overlap.release_for_test();
+    left.await.unwrap();
+    right.await.unwrap();
+    let revokes = manager
+        .audit_log()
+        .recent_events(40)
+        .into_iter()
+        .filter(|event| {
+            matches!(
+                event,
+                elastos_runtime::primitives::audit::AuditEvent::CapabilityRevoke { reason, .. }
+                    if reason == "plan dispatch abandoned"
+            )
+        })
+        .count();
+    assert_eq!(revokes, 1, "two callers each audited the revoke");
+}
+
+/// The first revoke is cancelled while it is still open. Its mark clears, and
+/// the next revoke runs.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_cancelled_revoke_lets_the_next_one_run() {
+    let audit = Arc::new(elastos_runtime::primitives::audit::AuditLog::new());
+    let manager = Arc::new(elastos_runtime::capability::CapabilityManager::new(
+        Arc::new(elastos_runtime::capability::CapabilityStore::new()),
+        audit,
+        Arc::new(elastos_runtime::primitives::metrics::MetricsManager::new()),
+    ));
+    let store = Arc::new(
+        elastos_runtime::capability::pending::PendingRequestStore::new(manager.audit_log().clone()),
+    );
+    let resource = elastos_runtime::capability::ResourceId::new("elastos://availability/status");
+    let token = manager.grant(
+        "capsule:revoke-cancel",
+        resource.clone(),
+        elastos_runtime::capability::Action::Read,
+        elastos_runtime::capability::TokenConstraints::default(),
+        None,
+    );
+    let pending = store
+        .create_request(
+            elastos_runtime::session::SessionId::from_string("capsule:revoke-cancel"),
+            resource,
+            elastos_runtime::capability::Action::Read,
+        )
+        .await;
+    let pending_id = pending.id.as_str().to_string();
+    store
+        .grant_request(
+            &pending_id,
+            token.clone(),
+            elastos_runtime::capability::pending::GrantDuration::Session,
+        )
+        .await
+        .unwrap();
+    crate::resource_bridge::park_abandoned_grant_for_test(
+        "revoke-cancel",
+        Arc::clone(&manager),
+        store,
+        token,
+        pending_id,
+    );
+    let overlap = crate::resource_bridge::arm_abandoned_revoke_overlap("revoke-cancel");
+    let first = tokio::spawn(crate::resource_bridge::revoke_abandoned_plan_grant(
+        "revoke-cancel",
+    ));
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    loop {
+        if overlap.entered.load(std::sync::atomic::Ordering::SeqCst) >= 1
+            || std::time::Instant::now() >= deadline
+        {
+            break;
+        }
+        let wait = overlap.progress.notified();
+        if overlap.entered.load(std::sync::atomic::Ordering::SeqCst) >= 1 {
+            break;
+        }
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        if left.is_zero() {
+            break;
+        }
+        let _ = tokio::time::timeout(left, wait).await;
+    }
+    assert_eq!(
+        overlap.entered.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "the first revoke did not open"
+    );
+    first.abort();
+    let _ = first.await;
+    let second = tokio::spawn(crate::resource_bridge::revoke_abandoned_plan_grant(
+        "revoke-cancel",
+    ));
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    loop {
+        if overlap.entered.load(std::sync::atomic::Ordering::SeqCst) >= 2
+            || std::time::Instant::now() >= deadline
+        {
+            break;
+        }
+        let wait = overlap.progress.notified();
+        if overlap.entered.load(std::sync::atomic::Ordering::SeqCst) >= 2 {
+            break;
+        }
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        if left.is_zero() {
+            break;
+        }
+        let _ = tokio::time::timeout(left, wait).await;
+    }
+    assert_eq!(
+        overlap.entered.load(std::sync::atomic::Ordering::SeqCst),
+        2,
+        "the cancelled revoke left its mark set"
+    );
+    overlap.release_for_test();
+    second.await.unwrap();
+    let revokes = manager
+        .audit_log()
+        .recent_events(40)
+        .into_iter()
+        .filter(|event| {
+            matches!(
+                event,
+                elastos_runtime::primitives::audit::AuditEvent::CapabilityRevoke { reason, .. }
+                    if reason == "plan dispatch abandoned"
+            )
+        })
+        .count();
+    assert_eq!(revokes, 1, "the next revoke did not run once");
 }
 
 /// A late store after unknown is the same effect. The record stays unknown,
@@ -3002,6 +3240,8 @@ async fn a_hundred_timeouts_leave_no_flight_and_no_instance() {
         }}]})
     })
     .await;
+    let start = std::time::Instant::now();
+    plant.runtime.set_plan_clock_for_test(Some(start));
     for n in 0..100u64 {
         let session = format!("session-hundred-{n}");
         plant
@@ -3069,6 +3309,7 @@ async fn a_hundred_timeouts_leave_no_flight_and_no_instance() {
             model_token_ceiling: Some(16),
             model_budget: None,
             stop: None,
+            v2_guests: None,
             plan_book: Some(plant.runtime.plan_book()),
         };
         crate::resource_bridge::retain_agent_plan_dispatch_authority(
@@ -3081,7 +3322,7 @@ async fn a_hundred_timeouts_leave_no_flight_and_no_instance() {
         set_approved(plant.dir.path(), &id);
         super::gateway_inspect_actions::set_plan_dispatch_wait_for_test(
             &id,
-            std::time::Duration::from_secs(2),
+            std::time::Duration::from_millis(200),
         );
         let pause = crate::resource_bridge::arm_plan_dispatch_hold(
             &id,
@@ -3118,10 +3359,23 @@ async fn a_hundred_timeouts_leave_no_flight_and_no_instance() {
         .runtime
         .evict_ended_session_for_test(&plant.session)
         .await;
-    assert!(
-        plant.runtime.plan_book_is_empty(),
+    assert_eq!(
+        plant.runtime.plan_run_state_for_test(),
+        (0, 0, 0),
         "a hundred timeouts left a flight or an instance"
     );
+    assert!(
+        plant.runtime.unknown_count_for_test(&plant.agent) <= 32,
+        "a hundred timeouts kept more than 32 names"
+    );
+    plant
+        .runtime
+        .set_plan_clock_for_test(Some(start + crate::runtime::ENDED_CAPSULE_RETENTION));
+    assert!(
+        plant.runtime.plan_book_is_empty(),
+        "names stayed after the retention that started at the end"
+    );
+    plant.runtime.set_plan_clock_for_test(None);
 }
 
 /// An effect already in flight when the instance ends is recorded as it
@@ -3433,7 +3687,7 @@ async fn a_failed_settle_write_matches_the_stored_record() {
         }}]})
     })
     .await;
-    super::gateway_inspect_actions::arm_plan_settle_fault(audit.dir.path(), "audit");
+    super::gateway_inspect_actions::arm_plan_settle_fault(audit.dir.path(), &audit.id, "audit");
     let answer = dispatch_planted(&audit)
         .await
         .expect("a failed audit still answers with the stored outcome");
@@ -3451,7 +3705,7 @@ async fn a_failed_settle_write_matches_the_stored_record() {
         }}]})
     })
     .await;
-    super::gateway_inspect_actions::arm_plan_settle_fault(missed.dir.path(), "record");
+    super::gateway_inspect_actions::arm_plan_settle_fault(missed.dir.path(), &missed.id, "record");
     let answer = dispatch_planted(&missed)
         .await
         .expect("one record fault is retried");
@@ -3469,7 +3723,12 @@ async fn a_failed_settle_write_matches_the_stored_record() {
         }}]})
     })
     .await;
-    super::gateway_inspect_actions::arm_plan_settle_faults(stuck.dir.path(), "record", 3);
+    super::gateway_inspect_actions::arm_plan_settle_faults(
+        stuck.dir.path(),
+        &stuck.id,
+        "record",
+        3,
+    );
     let refused = dispatch_planted(&stuck).await;
     assert!(
         refused.is_err(),
@@ -3831,6 +4090,7 @@ async fn three_hundred_spent_grants_still_let_stop_settle() {
             model_token_ceiling: Some(16),
             model_budget: None,
             stop: None,
+            v2_guests: None,
             plan_book: Some(plant.runtime.plan_book()),
         };
         crate::resource_bridge::retain_agent_plan_dispatch_authority(
@@ -4330,4 +4590,1109 @@ async fn a_parked_guest_reads_owner_demoted_and_passkey_revoked_by_name() {
         assert_eq!(receipt["status"], status, "{receipt}");
         assert_ne!(receipt["status"], "pending");
     }
+}
+
+async fn register_component_handle(runtime: &crate::runtime::Runtime, agent: &str, session: &str) {
+    let manifest: elastos_common::CapsuleManifest = serde_json::from_str(
+        &crate::runtime::tests::component_manifest_json("failed-stop"),
+    )
+    .unwrap();
+    runtime
+        .register_capsule(crate::runtime::RunningCapsuleInfo {
+            id: session.to_string(),
+            name: "planted".to_string(),
+            status: crate::runtime::CAPSULE_RUNNING.to_string(),
+            capsule_type: elastos_common::CapsuleType::Wasm,
+            handle: Some(elastos_compute::CapsuleHandle {
+                id: elastos_common::CapsuleId(session.to_string()),
+                manifest,
+                args: Vec::new(),
+            }),
+            session_id: session.to_string(),
+            principal: Some(agent.to_string()),
+            cause: None,
+            ended_at: None,
+        })
+        .await;
+}
+
+/// The dispatch timeout is longer than retention. The row is already gone when
+/// the unknown name is recorded. An injected clock stands in for that wait.
+/// After one retention, Stop of the idle agent is the no-session answer.
+#[cfg(unix)]
+#[tokio::test]
+async fn an_unknown_name_leaves_after_the_row_when_the_timeout_is_longer() {
+    let plant = plant_approved(78, false, |_, target| {
+        json!({"steps": [{"scheme": "localhost", "operation": "write", "request": {
+            "path": target, "content": [112, 108, 97, 110]
+        }}]})
+    })
+    .await;
+    let wait = crate::runtime::ENDED_CAPSULE_RETENTION + std::time::Duration::from_secs(60);
+    assert!(wait > crate::runtime::ENDED_CAPSULE_RETENTION);
+    super::gateway_inspect_actions::set_plan_dispatch_wait_for_test(&plant.id, wait);
+    let book = plant.runtime.plan_book();
+    let guard = crate::runtime::Runtime::try_enter_plan_effect(
+        &book,
+        &plant.session,
+        &plant.agent,
+        &plant.id,
+    )
+    .expect("the flight enters");
+    drop(guard);
+    plant.runtime.note_plan_instance_ended(&plant.session);
+    plant
+        .runtime
+        .end_planted_session_for_test(&plant.session)
+        .await;
+    plant
+        .runtime
+        .evict_ended_session_for_test(&plant.session)
+        .await;
+    assert!(
+        plant.runtime.get_capsule(&plant.session).await.is_none(),
+        "the row was still listed"
+    );
+    let start = std::time::Instant::now();
+    plant.runtime.set_plan_clock_for_test(Some(start));
+    crate::runtime::resolve_unknown_plan_effect(&plant.id);
+    assert_eq!(
+        plant.runtime.unknown_count_for_test(&plant.agent),
+        1,
+        "the name did not outlive the row"
+    );
+    plant
+        .runtime
+        .set_plan_clock_for_test(Some(start + crate::runtime::ENDED_CAPSULE_RETENTION));
+    assert_eq!(plant.runtime.unknown_count_for_test(&plant.agent), 0);
+    let (status, body) = stop_plan_agent(plant.runtime.clone(), &plant.agent).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(
+        !body.to_string().contains(&plant.id),
+        "Stop still named the old step: {body}"
+    );
+    plant.runtime.set_plan_clock_for_test(None);
+    super::gateway_inspect_actions::clear_plan_dispatch_wait_for_test(&plant.id);
+}
+
+/// Unknown at 5s on a live run. Stop at 70s still names the step.
+#[cfg(unix)]
+#[tokio::test]
+async fn an_unknown_on_a_live_run_is_named_when_stop_comes_later() {
+    let dir = tempfile::tempdir().unwrap();
+    let runtime = bare_runtime(dir.path()).await;
+    let agent = "agent:r7-live";
+    let session = "session-r7-live";
+    let start = std::time::Instant::now();
+    runtime.set_plan_clock_for_test(Some(start));
+    register_open_row(&runtime, agent, session).await;
+    runtime.set_plan_clock_for_test(Some(start + std::time::Duration::from_secs(5)));
+    leave_flight(&runtime, session, agent, "live-step");
+    crate::runtime::resolve_unknown_plan_effect("live-step");
+    runtime.set_plan_clock_for_test(Some(start + std::time::Duration::from_secs(70)));
+    assert_eq!(runtime.unknown_count_for_test(agent), 1);
+    let (status, body) = stop_one_capsule(runtime.clone(), session).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let named = body["unknown_steps"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .any(|step| step == "live-step");
+    assert!(named, "Stop did not name the live step: {body}");
+    runtime.set_plan_clock_for_test(None);
+}
+
+/// U1 is unknown. U2 stays in flight past one retention. The session ends at
+/// two seconds. The Stop after U2 leaves still names U1.
+#[cfg(unix)]
+#[tokio::test]
+async fn an_unknown_name_stays_until_the_sessions_last_flight_is_gone() {
+    let dir = tempfile::tempdir().unwrap();
+    let runtime = bare_runtime(dir.path()).await;
+    let agent = "agent:r11-u1";
+    let session = "session-r11-u1";
+    let start = std::time::Instant::now();
+    runtime.set_plan_clock_for_test(Some(start));
+    register_open_row(&runtime, agent, session).await;
+    leave_flight(&runtime, session, agent, "U1");
+    crate::runtime::resolve_unknown_plan_effect("U1");
+    let guard =
+        crate::runtime::Runtime::try_enter_plan_effect(&runtime.plan_book(), session, agent, "U2")
+            .expect("U2 enters");
+    runtime.set_plan_clock_for_test(Some(start + std::time::Duration::from_secs(2)));
+    runtime.note_plan_instance_ended(session);
+    runtime.end_planted_session_for_test(session).await;
+    runtime.set_plan_clock_for_test(Some(
+        start
+            + std::time::Duration::from_secs(2)
+            + crate::runtime::ENDED_CAPSULE_RETENTION
+            + std::time::Duration::from_secs(1),
+    ));
+    assert_eq!(
+        runtime.unknown_count_for_test(agent),
+        1,
+        "U1 was dropped while U2 was still in flight"
+    );
+    guard.release();
+    let (status, body) = stop_one_capsule(runtime.clone(), session).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let named = body["unknown_steps"]
+        .as_array()
+        .is_some_and(|steps| steps.iter().any(|step| step == "U1"));
+    assert!(named, "the final Stop answer did not name U1: {body}");
+    runtime.set_plan_clock_for_test(None);
+}
+
+/// A capability poll watching the flag during a failing stop does not cancel.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_failed_stop_does_not_cut_a_waiting_poll() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let dir = tempfile::tempdir().unwrap();
+    let runtime = bare_runtime(dir.path()).await;
+    let agent = "agent:r5-poll";
+    let session = "session-r5-poll";
+    runtime.plant_open_agent_stop_for_test(agent, session).await;
+    register_component_handle(&runtime, agent, session).await;
+    let flag = runtime
+        .activation_stop_flag_for_test(session)
+        .expect("the planted stop");
+    let hold = runtime.arm_provider_stop_hold(session);
+    runtime.arm_failing_capsule_stop(session);
+    let saw = Arc::new(AtomicBool::new(false));
+    let poll_flag = Arc::clone(&flag);
+    let saw_poll = Arc::clone(&saw);
+    let poll = tokio::spawn(async move {
+        loop {
+            if poll_flag.requested.load(Ordering::Acquire) {
+                poll_flag.cancelled.store(true, Ordering::Release);
+                saw_poll.store(true, Ordering::Release);
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+    });
+    let stopping = runtime.clone();
+    let stop =
+        tokio::spawn(async move { stopping.stop_capsule_with_reason(session, "owner").await });
+    tokio::time::timeout(std::time::Duration::from_secs(5), hold.entered())
+        .await
+        .expect("the stop did not reach the provider");
+    for _ in 0..50 {
+        tokio::task::yield_now().await;
+    }
+    assert!(
+        !flag.requested.load(Ordering::Acquire),
+        "the flag was up before the provider stop returned"
+    );
+    assert!(!saw.load(Ordering::Acquire), "the poll cancelled early");
+    hold.release_one();
+    let stopped = tokio::time::timeout(std::time::Duration::from_secs(5), stop)
+        .await
+        .expect("the stop did not return")
+        .expect("the stop task");
+    assert!(stopped.is_err(), "the provider stop succeeded");
+    assert!(!flag.requested.load(Ordering::Acquire));
+    assert!(!flag.cancelled.load(Ordering::Acquire));
+    assert!(!saw.load(Ordering::Acquire), "the poll left the call");
+    assert!(runtime.requested_stop_for_test(session).is_none());
+    poll.abort();
+}
+
+/// Two stops overlap. The one that succeeds keeps its cause and its flag.
+/// The one that fails does not clear either.
+#[cfg(unix)]
+#[tokio::test]
+async fn two_stops_keep_the_cause_the_first_success_raised() {
+    use std::sync::atomic::Ordering;
+    let dir = tempfile::tempdir().unwrap();
+    let runtime = bare_runtime(dir.path()).await;
+    let agent = "agent:r5-two";
+    let session = "session-r5-two";
+    runtime.plant_open_agent_stop_for_test(agent, session).await;
+    register_component_handle(&runtime, agent, session).await;
+    let _limit = runtime.limit_stop_wait_for_test(std::time::Duration::from_millis(0));
+    let hold = runtime.arm_provider_stop_hold(session);
+    let flag = runtime
+        .activation_stop_flag_for_test(session)
+        .expect("the planted stop");
+    let first_runtime = runtime.clone();
+    let second_runtime = runtime.clone();
+    let first = tokio::spawn(async move {
+        first_runtime
+            .stop_capsule_with_reason(session, "alpha")
+            .await
+    });
+    let second = tokio::spawn(async move {
+        second_runtime
+            .stop_capsule_with_reason(session, "beta")
+            .await
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            if hold.arrived() >= 2 {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("both stops did not reach the provider");
+    assert!(
+        runtime.requested_stop_for_test(session).is_none(),
+        "a cause was written before either stop committed"
+    );
+    assert!(!flag.requested.load(Ordering::Acquire));
+    hold.release_one();
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            if flag.requested.load(Ordering::Acquire) {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the successful stop did not raise the flag");
+    let cause = runtime.requested_stop_for_test(session);
+    assert!(cause.is_some(), "the successful stop wrote no cause");
+    runtime.arm_failing_capsule_stop(session);
+    hold.release_one();
+    let (first, second) = tokio::join!(first, second);
+    let first = first.expect("first stop task");
+    let second = second.expect("second stop task");
+    assert_eq!(
+        usize::from(first.is_ok()) + usize::from(second.is_ok()),
+        1,
+        "first {first:?} second {second:?}"
+    );
+    assert_eq!(runtime.requested_stop_for_test(session), cause);
+    assert!(flag.requested.load(Ordering::Acquire));
+    assert!(!flag.cancelled.load(Ordering::Acquire));
+}
+
+/// A failed Stop leaves the live run. The next Start says already running.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_failed_stop_lets_start_say_already_running() {
+    let dir = tempfile::tempdir().unwrap();
+    let runtime = bare_runtime(dir.path()).await;
+    let agent = "agent:r5-start";
+    let session = "session-r5-start";
+    runtime.plant_open_agent_stop_for_test(agent, session).await;
+    register_component_handle(&runtime, agent, session).await;
+    runtime.arm_failing_capsule_stop(session);
+    let (status, body) = stop_plan_agent(runtime.clone(), agent).await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{body}");
+    assert!(!runtime.stop_requested_for_test(agent));
+    assert!(!runtime.activation_stop_requested_for_test(session));
+    let expires = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+        + 3600;
+    let err = runtime
+        .start_agent_once(
+            Path::new("unused"),
+            crate::agent_admission::AdmissionContext::for_test(agent),
+            crate::runtime::AgentStartFacts {
+                agent_id: agent,
+                owner: "person:owner",
+                host_cid: "cid",
+                launch_id: "launch:r5-after-fail",
+                expires_at: expires,
+                data_dir: dir.path(),
+            },
+        )
+        .await
+        .expect_err("Start accepted a live run");
+    let elastos_common::ElastosError::InvalidManifest(message) = err else {
+        panic!("Start returned {err}");
+    };
+    assert_eq!(message, crate::runtime::Runtime::AGENT_ALREADY_RUNNING);
+}
+
+/// Dropping an unsettled dispatch on a thread with no Tokio runtime settles
+/// once. The grant stays in this process's memory and the spend is refused.
+/// Nothing waits on the async revoke.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_dropped_dispatch_revokes_without_a_runtime() {
+    let plant = plant_approved(82, false, |_, target| {
+        json!({"steps": [{"scheme": "localhost", "operation": "write", "request": {
+            "path": target, "content": [112, 108, 97, 110]
+        }}]})
+    })
+    .await;
+    let pending = plant
+        .store
+        .create_request(
+            elastos_runtime::session::SessionId(plant.session.clone()),
+            elastos_runtime::capability::ResourceId::new("elastos://availability/status"),
+            elastos_runtime::capability::Action::Read,
+        )
+        .await;
+    let token = plant.manager.grant(
+        &plant.session,
+        pending.resource.clone(),
+        pending.action,
+        elastos_runtime::capability::TokenConstraints::new(0, false, None, None),
+        None,
+    );
+    plant
+        .store
+        .grant_request(
+            pending.id.as_str(),
+            token.clone(),
+            elastos_runtime::capability::pending::GrantDuration::Session,
+        )
+        .await
+        .expect("the grant is pending");
+    let spend_token = token.clone();
+    crate::resource_bridge::park_abandoned_grant_for_test(
+        &plant.id,
+        plant.manager.clone(),
+        plant.store.clone(),
+        token,
+        pending.id.as_str().to_string(),
+    );
+    let dir = plant.dir.path().to_path_buf();
+    let id = plant.id.clone();
+    let joined = std::thread::spawn(move || {
+        assert!(tokio::runtime::Handle::try_current().is_err());
+        super::gateway_inspect_actions::drop_unsettled_dispatch_for_test(&dir, &id);
+    })
+    .join();
+    assert!(joined.is_ok(), "{joined:?}");
+    let record = read_record(plant.dir.path(), &plant.id);
+    assert_eq!(record["status"], "unknown", "{record}");
+    assert_eq!(record["result"]["code"], "dispatch_lost", "{record}");
+    let unknown_audits = crate::auth::load_auth_state(plant.dir.path())
+        .unwrap()
+        .audit
+        .iter()
+        .filter(|event| {
+            event.event_type == "agent_plan.dispatch.unknown"
+                && event.challenge_id.as_deref() == Some(plant.id.as_str())
+        })
+        .count();
+    assert_eq!(
+        unknown_audits, 1,
+        "the drop wrote more than one unknown audit"
+    );
+    let spent =
+        crate::resource_bridge::spend_plan_grant_for_test(&plant.manager, &spend_token).await;
+    assert!(
+        spent.is_err(),
+        "the dropped grant was still spendable: {spent:?}"
+    );
+    let row = plant
+        .store
+        .get_request(pending.id.as_str())
+        .await
+        .expect("the pending row");
+    assert!(
+        row.is_granted(),
+        "a drop with no runtime revoked the in-memory row: {row:?}"
+    );
+}
+
+/// Drop on a current-thread runtime returns while another task holds the
+/// request-map write lock. A spend in that window is refused. One audit.
+#[cfg(unix)]
+#[test]
+fn a_drop_on_a_current_thread_runtime_returns_while_the_write_lock_is_held() {
+    let setup = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
+    let (dir, path, manager, store, id, spend_token) = setup.block_on(async {
+        let plant = plant_approved(84, false, |_, target| {
+            json!({"steps": [{"scheme": "localhost", "operation": "write", "request": {
+                "path": target, "content": [112, 108, 97, 110]
+            }}]})
+        })
+        .await;
+        let pending = plant
+            .store
+            .create_request(
+                elastos_runtime::session::SessionId(plant.session.clone()),
+                elastos_runtime::capability::ResourceId::new("elastos://availability/status"),
+                elastos_runtime::capability::Action::Read,
+            )
+            .await;
+        let token = plant.manager.grant(
+            &plant.session,
+            pending.resource.clone(),
+            pending.action,
+            elastos_runtime::capability::TokenConstraints::new(0, false, None, None),
+            None,
+        );
+        plant
+            .store
+            .grant_request(
+                pending.id.as_str(),
+                token.clone(),
+                elastos_runtime::capability::pending::GrantDuration::Session,
+            )
+            .await
+            .expect("the grant is pending");
+        let spend_token = token.clone();
+        crate::resource_bridge::park_abandoned_grant_for_test(
+            &plant.id,
+            plant.manager.clone(),
+            plant.store.clone(),
+            token,
+            pending.id.as_str().to_string(),
+        );
+        let path = plant.dir.path().to_path_buf();
+        (
+            plant.dir,
+            path,
+            plant.manager,
+            plant.store,
+            plant.id,
+            spend_token,
+        )
+    });
+    let _keep_dir = dir;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            runtime.block_on(async move {
+                let entered = std::sync::Arc::new(tokio::sync::Notify::new());
+                let release = std::sync::Arc::new(tokio::sync::Notify::new());
+                let holding = store.clone();
+                let entered_hold = std::sync::Arc::clone(&entered);
+                let release_hold = std::sync::Arc::clone(&release);
+                tokio::spawn(async move {
+                    holding
+                        .hold_requests_write_for_test(&entered_hold, &release_hold)
+                        .await;
+                });
+                tokio::time::timeout(std::time::Duration::from_secs(5), entered.notified())
+                    .await
+                    .expect("the write lock was not taken");
+                ready_tx.send(()).expect("the ready signal");
+                super::gateway_inspect_actions::drop_unsettled_dispatch_for_test(&path, &id);
+                let spent =
+                    crate::resource_bridge::spend_plan_grant_for_test(&manager, &spend_token).await;
+                assert!(
+                    spent.is_err(),
+                    "the grant was spendable before revoke: {spent:?}"
+                );
+                let unknown_audits = crate::auth::load_auth_state(&path)
+                    .unwrap()
+                    .audit
+                    .iter()
+                    .filter(|event| {
+                        event.event_type == "agent_plan.dispatch.unknown"
+                            && event.challenge_id.as_deref() == Some(id.as_str())
+                    })
+                    .count();
+                assert_eq!(
+                    unknown_audits, 1,
+                    "the drop wrote more than one unknown audit"
+                );
+                release.notify_one();
+            });
+        }));
+        let message = match outcome {
+            Ok(()) => Ok(()),
+            Err(payload) => Err(panic_text(payload)),
+        };
+        let _ = done_tx.send(message);
+    });
+    ready_rx
+        .recv_timeout(std::time::Duration::from_secs(60))
+        .expect("the current-thread drop did not reach the lock");
+    match done_rx.recv_timeout(std::time::Duration::from_secs(3)) {
+        Ok(Ok(())) => {}
+        Ok(Err(message)) => panic!("{message}"),
+        Err(_) => panic!("the drop did not return while the write lock was held"),
+    }
+}
+
+/// Dropping the dispatch takes the guard that was parked for the flight.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_dropped_dispatch_takes_the_parked_guard() {
+    let plant = plant_approved(88, false, |_, target| {
+        json!({"steps": [{"scheme": "localhost", "operation": "write", "request": {
+            "path": target, "content": [112, 108, 97, 110]
+        }}]})
+    })
+    .await;
+    let guard = crate::runtime::Runtime::try_enter_plan_effect(
+        &plant.runtime.plan_book(),
+        &plant.session,
+        &plant.agent,
+        &plant.id,
+    )
+    .expect("the flight enters");
+    crate::resource_bridge::park_plan_guard_for_test(&plant.id, guard);
+    assert!(
+        crate::resource_bridge::parked_plan_guard_is_held(&plant.id),
+        "the guard was not parked"
+    );
+    super::gateway_inspect_actions::drop_unsettled_dispatch_for_test(plant.dir.path(), &plant.id);
+    assert!(
+        !crate::resource_bridge::parked_plan_guard_is_held(&plant.id),
+        "the drop left the parked guard"
+    );
+}
+
+/// The present check (`count_use: false`) and the counted present
+/// (`use_grant: true`) answer without a provider read. As a plan step, each
+/// ends its flight, and Stop then says stopped.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_present_read_step_leaves_no_flight() {
+    for (n, flag) in [(91, "count_use"), (92, "use_grant")] {
+        let plant = plant_approved(n, false, |_, target| {
+            let mut request = json!({ "path": target });
+            request[flag] = json!(flag == "use_grant");
+            json!({"steps": [{"scheme": "localhost", "operation": "read", "request": request}]})
+        })
+        .await;
+        dispatch_planted(&plant).await.unwrap();
+        let record = read_record(plant.dir.path(), &plant.id);
+        assert_eq!(record["status"], "completed", "{flag} {record}");
+        assert_eq!(std::fs::read(&plant.path).unwrap(), plant.before, "{flag}");
+        assert!(
+            !plant.runtime.plan_effect_inflight(&plant.session),
+            "{flag} left the flight holding the instance"
+        );
+        let (status, body) = stop_plan_agent(plant.runtime.clone(), &plant.agent).await;
+        assert_eq!(status, StatusCode::OK, "{flag} {body}");
+        assert_eq!(body["stopped"][0]["status"], "stopped", "{flag} {body}");
+        assert!(
+            body["stopping"]
+                .as_array()
+                .is_none_or(|rows| rows.is_empty()),
+            "{flag} {body}"
+        );
+    }
+}
+
+fn panic_text(payload: Box<dyn std::any::Any + Send>) -> String {
+    if let Some(message) = payload.downcast_ref::<&str>() {
+        (*message).to_string()
+    } else if let Some(message) = payload.downcast_ref::<String>() {
+        message.clone()
+    } else {
+        "the drop row panicked".to_string()
+    }
+}
+
+/// A concurrent grant of the same pending row is revoked when registration fails.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_grant_registered_by_a_racer_is_revoked() {
+    let plant = plant_approved(83, false, |_, target| {
+        json!({"steps": [{"scheme": "localhost", "operation": "write", "request": {
+            "path": target, "content": [112, 108, 97, 110]
+        }}]})
+    })
+    .await;
+    let pause = crate::resource_bridge::arm_one_use_grant_race(&plant.id);
+    let state = plant.state.clone();
+    let owner = plant.owner.clone();
+    let id = plant.id.clone();
+    let task = tokio::spawn(async move {
+        super::gateway_inspect_actions::dispatch_approved_agent_plan(
+            &state,
+            &dispatch_context(&owner),
+            &id,
+        )
+        .await
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(15), pause.entered.notified())
+        .await
+        .expect("registration did not reach the race");
+    let pending_id = pause.pending_id().expect("the pending id");
+    let pending = plant
+        .store
+        .get_request(&pending_id)
+        .await
+        .expect("the pending row");
+    let token = plant.manager.grant(
+        &plant.session,
+        pending.resource.clone(),
+        pending.action,
+        elastos_runtime::capability::TokenConstraints::new(0, false, None, None),
+        None,
+    );
+    plant
+        .store
+        .grant_request(
+            &pending_id,
+            token,
+            elastos_runtime::capability::pending::GrantDuration::Once,
+        )
+        .await
+        .expect("the racer grants the pending row");
+    drop(pause);
+    let settled = tokio::time::timeout(std::time::Duration::from_secs(15), task)
+        .await
+        .expect("the dispatch did not settle")
+        .expect("the dispatch task");
+    assert!(settled.is_ok(), "{settled:?}");
+    let record = read_record(plant.dir.path(), &plant.id);
+    assert_eq!(record["status"], "refused", "{record}");
+    assert_eq!(record["result"]["code"], "capability_denied", "{record}");
+    let row = plant
+        .store
+        .get_request(&pending_id)
+        .await
+        .expect("the pending row");
+    assert!(
+        matches!(
+            row.status,
+            elastos_runtime::capability::pending::RequestStatus::Denied { ref reason, .. }
+                if reason == "grant not registered"
+        ),
+        "the concurrent grant was left {row:?}"
+    );
+}
+
+async fn register_open_row(runtime: &crate::runtime::Runtime, agent: &str, session: &str) {
+    runtime
+        .register_capsule(crate::runtime::RunningCapsuleInfo {
+            id: session.to_string(),
+            name: "planted".to_string(),
+            status: crate::runtime::CAPSULE_RUNNING.to_string(),
+            capsule_type: elastos_common::CapsuleType::Wasm,
+            handle: None,
+            session_id: session.to_string(),
+            principal: Some(agent.to_string()),
+            cause: None,
+            ended_at: None,
+        })
+        .await;
+    runtime.bind_plan_instance(session, agent);
+}
+
+fn leave_flight(runtime: &crate::runtime::Runtime, session: &str, agent: &str, request: &str) {
+    let guard = crate::runtime::Runtime::try_enter_plan_effect(
+        &runtime.plan_book(),
+        session,
+        agent,
+        request,
+    )
+    .expect("the flight enters");
+    drop(guard);
+}
+
+/// Resolved one second before the row is swept. The name stays, then an
+/// ordinary bind drops it when the retention is reached.
+#[cfg(unix)]
+#[tokio::test]
+async fn an_unknown_resolved_a_second_before_the_sweep_survives_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let runtime = bare_runtime(dir.path()).await;
+    let agent = "agent:r6-sweep";
+    let session = "session-r6-sweep";
+    let start = std::time::Instant::now();
+    runtime.set_plan_clock_for_test(Some(start));
+    register_open_row(&runtime, agent, session).await;
+    leave_flight(&runtime, session, agent, "sweep-step");
+    crate::runtime::resolve_unknown_plan_effect("sweep-step");
+    runtime.set_plan_clock_for_test(Some(start + std::time::Duration::from_secs(1)));
+    runtime.evict_ended_session_for_test(session).await;
+    assert_eq!(
+        runtime.unknown_ids_for_test(agent),
+        vec!["sweep-step".to_string()],
+        "the sweep dropped a name one second old"
+    );
+    runtime.note_plan_instance_ended(session);
+    runtime.set_plan_clock_for_test(Some(
+        start + std::time::Duration::from_secs(1) + crate::runtime::ENDED_CAPSULE_RETENTION,
+    ));
+    runtime.bind_plan_instance("session-r6-sweep-next", agent);
+    assert!(
+        runtime.unknown_ids_for_test(agent).is_empty(),
+        "the name outlived its retention"
+    );
+    runtime.set_plan_clock_for_test(None);
+}
+
+/// Unregister keeps a name inside its retention and drops one that is due.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_watcherless_unregister_keeps_the_unknown_name() {
+    let dir = tempfile::tempdir().unwrap();
+    let runtime = bare_runtime(dir.path()).await;
+    let agent = "agent:r6-unreg";
+    let start = std::time::Instant::now();
+    runtime.set_plan_clock_for_test(Some(start));
+    register_open_row(&runtime, agent, "session-r6-unreg").await;
+    leave_flight(&runtime, "session-r6-unreg", agent, "unreg-step");
+    crate::runtime::resolve_unknown_plan_effect("unreg-step");
+    runtime.unregister_capsule("session-r6-unreg").await;
+    assert_eq!(
+        runtime.unknown_ids_for_test(agent),
+        vec!["unreg-step".to_string()],
+        "unregister dropped a name inside its retention"
+    );
+    register_open_row(&runtime, agent, "session-r6-due").await;
+    leave_flight(&runtime, "session-r6-due", agent, "due-step");
+    crate::runtime::resolve_unknown_plan_effect("due-step");
+    runtime.note_plan_instance_ended("session-r6-unreg");
+    runtime.note_plan_instance_ended("session-r6-due");
+    runtime.set_plan_clock_for_test(Some(start + crate::runtime::ENDED_CAPSULE_RETENTION));
+    runtime.unregister_capsule("session-r6-due").await;
+    let ids = runtime.unknown_ids_for_test(agent);
+    assert!(
+        ids.is_empty(),
+        "an expired name survived unregister: {ids:?}"
+    );
+    runtime.set_plan_clock_for_test(None);
+}
+
+/// After the retention, try_enter drops both names. A later burst keeps 32.
+#[cfg(unix)]
+#[tokio::test]
+async fn unknown_names_leave_after_retention_and_stay_within_thirty_two() {
+    let dir = tempfile::tempdir().unwrap();
+    let runtime = bare_runtime(dir.path()).await;
+    let agent = "agent:r6-cap";
+    let start = std::time::Instant::now();
+    runtime.set_plan_clock_for_test(Some(start));
+    register_open_row(&runtime, agent, "session-r6-cap-sweep").await;
+    leave_flight(&runtime, "session-r6-cap-sweep", agent, "cap-sweep");
+    crate::runtime::resolve_unknown_plan_effect("cap-sweep");
+    runtime.set_plan_clock_for_test(Some(start + std::time::Duration::from_secs(1)));
+    runtime
+        .evict_ended_session_for_test("session-r6-cap-sweep")
+        .await;
+    runtime.set_plan_clock_for_test(Some(start));
+    register_open_row(&runtime, agent, "session-r6-cap-unreg").await;
+    leave_flight(&runtime, "session-r6-cap-unreg", agent, "cap-unreg");
+    crate::runtime::resolve_unknown_plan_effect("cap-unreg");
+    runtime.unregister_capsule("session-r6-cap-unreg").await;
+    assert_eq!(runtime.unknown_ids_for_test(agent).len(), 2);
+    runtime.note_plan_instance_ended("session-r6-cap-sweep");
+    runtime.note_plan_instance_ended("session-r6-cap-unreg");
+    // Both names are due at this clock. The later try_enter is what drops them.
+    register_open_row(&runtime, agent, "session-r6-cap-live").await;
+    runtime.set_plan_clock_for_test(Some(start + crate::runtime::ENDED_CAPSULE_RETENTION));
+    leave_flight(&runtime, "session-r6-cap-live", agent, "cap-probe");
+    assert!(
+        runtime.unknown_ids_for_test(agent).is_empty(),
+        "try_enter left an expired name: {:?}",
+        runtime.unknown_ids_for_test(agent)
+    );
+    runtime.set_plan_clock_for_test(Some(
+        start + crate::runtime::ENDED_CAPSULE_RETENTION + std::time::Duration::from_secs(1),
+    ));
+    for n in 0..33 {
+        let id = format!("cap-{n}");
+        leave_flight(&runtime, "session-r6-cap-live", agent, &id);
+        crate::runtime::resolve_unknown_plan_effect(&id);
+    }
+    let ids = runtime.unknown_ids_for_test(agent);
+    assert_eq!(ids.len(), 32, "{ids:?}");
+    assert!(!ids.iter().any(|id| id == "cap-0"), "{ids:?}");
+    assert!(ids.iter().any(|id| id == "cap-32"), "{ids:?}");
+    runtime.set_plan_clock_for_test(None);
+}
+
+/// The first caller fails while the second is still open. The second cause wins.
+#[cfg(unix)]
+#[tokio::test]
+async fn the_second_callers_cause_wins_when_the_first_fails() {
+    let dir = tempfile::tempdir().unwrap();
+    let runtime = bare_runtime(dir.path()).await;
+    let agent = "agent:r6-cause";
+    let session = "session-r6-cause";
+    runtime.plant_open_agent_stop_for_test(agent, session).await;
+    register_component_handle(&runtime, agent, session).await;
+    let _limit = runtime.limit_stop_wait_for_test(std::time::Duration::from_millis(0));
+    let hold = runtime.arm_provider_stop_hold(session);
+    let first_runtime = runtime.clone();
+    let first = tokio::spawn(async move {
+        first_runtime
+            .stop_capsule_with_reason(session, "alpha")
+            .await
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            if hold.arrived() >= 1 {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the first stop did not reach the provider");
+    let second_runtime = runtime.clone();
+    let second = tokio::spawn(async move {
+        second_runtime
+            .stop_capsule_with_reason(session, "beta")
+            .await
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            if hold.arrived() >= 2 {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the second stop did not reach the provider");
+    assert!(runtime.requested_stop_for_test(session).is_none());
+    runtime.arm_failing_capsule_stop(session);
+    hold.release_oldest();
+    let first = tokio::time::timeout(std::time::Duration::from_secs(5), first)
+        .await
+        .expect("the first stop did not return")
+        .expect("the first stop task");
+    assert!(first.is_err(), "the first stop succeeded: {first:?}");
+    assert!(
+        runtime.requested_stop_for_test(session).is_none(),
+        "the failed caller left its cause"
+    );
+    hold.release_one();
+    let second = tokio::time::timeout(std::time::Duration::from_secs(5), second)
+        .await
+        .expect("the second stop did not return")
+        .expect("the second stop task");
+    assert!(second.is_ok(), "the second stop failed: {second:?}");
+    assert_eq!(
+        runtime.requested_stop_for_test(session).as_deref(),
+        Some("stopped: beta")
+    );
+}
+
+/// The mark is up while Stop is still waiting for the end. Start says stopping.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_stop_dropped_while_waiting_leaves_start_stopping() {
+    let dir = tempfile::tempdir().unwrap();
+    let runtime = bare_runtime(dir.path()).await;
+    let agent = "agent:r6-wait";
+    let session = "session-r6-wait";
+    runtime.plant_open_agent_stop_for_test(agent, session).await;
+    let _limit = runtime.limit_stop_wait_for_test(std::time::Duration::from_secs(5));
+    let stopping = runtime.clone();
+    let task =
+        tokio::spawn(async move { stopping.stop_capsule_with_reason(session, "owner").await });
+    tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        loop {
+            if runtime.stop_requested_for_test(agent) {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the stop mark did not rise before the wait ended");
+    assert!(runtime
+        .get_capsule(session)
+        .await
+        .unwrap()
+        .ended_at
+        .is_none());
+    task.abort();
+    let _ = task.await;
+    assert!(runtime.stop_requested_for_test(agent));
+    let expires = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+        + 3600;
+    let err = runtime
+        .start_agent_once(
+            Path::new("unused"),
+            crate::agent_admission::AdmissionContext::for_test(agent),
+            crate::runtime::AgentStartFacts {
+                agent_id: agent,
+                owner: "person:owner",
+                host_cid: "cid",
+                launch_id: "launch:r6-while-stopping",
+                expires_at: expires,
+                data_dir: dir.path(),
+            },
+        )
+        .await
+        .expect_err("Start accepted an agent whose stop is waiting");
+    let elastos_common::ElastosError::InvalidManifest(message) = err else {
+        panic!("Start returned {err}");
+    };
+    assert_eq!(message, crate::runtime::Runtime::AGENT_STOPPING);
+}
+
+/// The task is aborted before its first poll. The claim settles once.
+#[cfg(unix)]
+#[tokio::test(flavor = "current_thread")]
+async fn an_unpolled_dispatch_settles_unknown_once() {
+    let plant = plant_approved(86, false, |_, target| {
+        json!({"steps": [{"scheme": "localhost", "operation": "write", "request": {
+            "path": target, "content": [112, 108, 97, 110]
+        }}]})
+    })
+    .await;
+    let pending = plant
+        .store
+        .create_request(
+            elastos_runtime::session::SessionId(plant.session.clone()),
+            elastos_runtime::capability::ResourceId::new("elastos://availability/status"),
+            elastos_runtime::capability::Action::Read,
+        )
+        .await;
+    let token = plant.manager.grant(
+        &plant.session,
+        pending.resource.clone(),
+        pending.action,
+        elastos_runtime::capability::TokenConstraints::new(0, false, None, None),
+        None,
+    );
+    plant
+        .store
+        .grant_request(
+            pending.id.as_str(),
+            token.clone(),
+            elastos_runtime::capability::pending::GrantDuration::Session,
+        )
+        .await
+        .expect("the grant is pending");
+    crate::resource_bridge::park_abandoned_grant_for_test(
+        &plant.id,
+        plant.manager.clone(),
+        plant.store.clone(),
+        token,
+        pending.id.as_str().to_string(),
+    );
+    let guard = crate::runtime::Runtime::try_enter_plan_effect(
+        &plant.runtime.plan_book(),
+        &plant.session,
+        &plant.agent,
+        &plant.id,
+    )
+    .expect("the flight enters");
+    drop(guard);
+    assert!(plant.runtime.plan_effect_inflight(&plant.session));
+    super::gateway_inspect_actions::arm_unpolled_dispatch(&plant.id);
+    let settled = super::gateway_inspect_actions::dispatch_approved_agent_plan(
+        &plant.state,
+        &dispatch_context(&plant.owner),
+        &plant.id,
+    )
+    .await;
+    assert!(settled.is_ok(), "{settled:?}");
+    assert!(
+        !super::gateway_inspect_actions::dispatch_was_polled(&plant.id),
+        "the task was polled"
+    );
+    let record = read_record(plant.dir.path(), &plant.id);
+    assert_eq!(record["status"], "unknown", "{record}");
+    assert_eq!(record["result"]["code"], "dispatch_lost", "{record}");
+    let unknown_audits = crate::auth::load_auth_state(plant.dir.path())
+        .unwrap()
+        .audit
+        .iter()
+        .filter(|event| {
+            event.event_type == "agent_plan.dispatch.unknown"
+                && event.challenge_id.as_deref() == Some(plant.id.as_str())
+        })
+        .count();
+    assert_eq!(
+        unknown_audits, 1,
+        "the drop wrote more than one unknown audit"
+    );
+    assert!(!plant.runtime.plan_effect_inflight(&plant.session));
+    let row = plant
+        .store
+        .get_request(pending.id.as_str())
+        .await
+        .expect("the pending row");
+    assert!(
+        matches!(
+            row.status,
+            elastos_runtime::capability::pending::RequestStatus::Denied { ref reason, .. }
+                if reason == "plan dispatch abandoned"
+        ),
+        "the grant was left {row:?}"
+    );
+}
+
+/// The post-effect revoke is still awaiting when the task is dropped. The
+/// grant stays in the guard until that await ends, so the drop leaves it in
+/// the abandoned list. One revoke runs, and the pending store no longer holds
+/// the grant as granted.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_dropped_revoke_revokes_the_grant_once_and_frees_its_place() {
+    let plant = plant_approved(90, false, |_, target| {
+        json!({"steps": [{"scheme": "localhost", "operation": "write", "request": {
+            "path": target, "content": [112, 108, 97, 110]
+        }}]})
+    })
+    .await;
+    let pause = crate::resource_bridge::arm_plan_dispatch_hold(
+        &plant.id,
+        crate::resource_bridge::PlanDispatchPoint::Revoke,
+    );
+    let record = read_record(plant.dir.path(), &plant.id);
+    let id = plant.id.clone();
+    let owner = record["principal_id"].as_str().unwrap().to_string();
+    let requester = record["requester_id"].as_str().unwrap().to_string();
+    let capsule = record["id"].as_str().unwrap().to_string();
+    let session = record["session_id"].as_str().unwrap().to_string();
+    let dir = plant.dir.path().to_path_buf();
+    let step = record["request"].clone();
+    let task = tokio::spawn(async move {
+        crate::resource_bridge::dispatch_agent_plan_step(
+            &id, &owner, &requester, &capsule, &session, &dir, &step,
+        )
+        .await
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(15), pause.entered.notified())
+        .await
+        .expect("the revoke await was not held");
+    task.abort();
+    let dropped = task.await.expect_err("the revoke task kept running");
+    assert!(dropped.is_cancelled(), "{dropped:?}");
+    drop(crate::resource_bridge::take_parked_plan_guard(&plant.id));
+    crate::resource_bridge::revoke_abandoned_plan_grant(&plant.id).await;
+    let revokes = plant
+        .manager
+        .audit_log()
+        .recent_events(40)
+        .into_iter()
+        .filter(|event| {
+            matches!(
+                event,
+                elastos_runtime::primitives::audit::AuditEvent::CapabilityRevoke { reason, .. }
+                    if reason == "plan dispatch abandoned"
+            )
+        })
+        .count();
+    assert_eq!(revokes, 1, "the dropped revoke did not revoke once");
+    let rows = plant.store.list_requests().await;
+    let granted = rows
+        .iter()
+        .filter(|request| request.session_id.as_str() == plant.session && request.is_granted())
+        .count();
+    assert_eq!(granted, 0, "the pending store kept the grant");
+    let freed = rows
+        .iter()
+        .filter(|request| {
+            request.session_id.as_str() == plant.session
+                && matches!(
+                    &request.status,
+                    elastos_runtime::capability::pending::RequestStatus::Denied { reason, .. }
+                        if reason == "plan dispatch abandoned"
+                )
+        })
+        .count();
+    assert_eq!(freed, 1, "the pending place was not freed: {rows:?}");
 }

@@ -11,9 +11,15 @@ use tokio::sync::RwLock;
 use crate::bundle_admission::{self, AcceptedSignature, BundleKind, BundleRefusal};
 use crate::model_budget::{AgentKey, ModelBudget};
 use crate::resource_bridge::{BridgePrincipal, LaunchContent};
-use elastos_bundle_identity::{checked_bundle_within, Budget, CheckedBundle, LabCid};
+use elastos_bundle_identity::{
+    checked_bundle_within, checked_bundle_within_reported, Budget, CheckedBundle, LabCid,
+    WalkReport,
+};
 use elastos_common::{AuthorityBound, CapsuleManifest, CapsuleType, ElastosError, Result};
-use elastos_compute::providers::{BridgeHostcall, ComponentProvider, STOPPED_BEFORE_RUN};
+use elastos_compute::providers::{
+    component_bridge_leg, BridgeHostcall, BridgeHostcallAsync, ComponentBridgeLeg,
+    ComponentProvider, STOPPED_BEFORE_RUN, STOPPED_DURING_START,
+};
 use elastos_compute::{CapsuleHandle, ComputeProvider};
 use elastos_storage::StorageProvider;
 
@@ -77,6 +83,8 @@ pub const CAPSULE_STOPPED: &str = "stopped";
 pub const CAPSULE_FAILED: &str = "failed";
 /// The cause of an activation whose guest's `run` returned success.
 pub const CAUSE_COMPLETED: &str = "completed";
+pub const BOUNDED_V2_REFUSAL: &str =
+    "elastos:bus@2.0.0 is a Home resident: start it with POST /api/capsules";
 
 /// How long an ended activation stays listed, so its session, status and cause
 /// can still be read after the response that started it has long gone. The end
@@ -309,14 +317,16 @@ pub struct Runtime {
     /// end holds the same mutex: it puts the start tuple on the one stop
     /// audit, then drops the record.
     agent_launches: Arc<tokio::sync::Mutex<AgentLaunchState>>,
-    /// Live Stop tokens. A non-empty set is that agent's stopping mark.
-    /// Lock order: `agent_launches`, then this mutex. It is held for a few
-    /// instructions and never across an await. Drop takes only this mutex.
+    /// Live Stop tokens and the committed stop mark. A non-empty token set
+    /// is that agent's stopping mark. Lock order: `agent_launches`, then this
+    /// mutex. It is held for a few instructions and never across an await.
+    /// Drop of a token takes only this mutex. The committed mark is written
+    /// here, in the same hold as the cause, so that write does not await.
     stop_marks: Arc<StdMutex<AgentStopMarks>>,
     /// This Runtime's plan instances and the effects that have reached their
     /// work. Another Runtime has another book, so one end cannot see the
     /// other's session.
-    plan_book: Arc<StdMutex<PlanBook>>,
+    pub(crate) plan_book: Arc<StdMutex<PlanBook>>,
     /// One live run per agent. Set when the run is admitted. Cleared when
     /// that run's ending releases it, and also when the start is dropped
     /// before the ending owns it. The token travels with the start that
@@ -357,6 +367,11 @@ pub struct Runtime {
     /// the heap address of `activation_stops`. Zero is the 40s default.
     #[cfg(test)]
     stop_wait_token: std::sync::atomic::AtomicU64,
+    /// Test only: this plant's data folder. Gates, pauses and holds match it.
+    /// Set once, before the first gate. A runtime with no folder keeps its
+    /// own id so two plants still do not share a gate.
+    #[cfg(test)]
+    plant_key: std::sync::OnceLock<String>,
 }
 
 #[derive(Default)]
@@ -366,25 +381,28 @@ struct AgentLaunchState {
     /// session's one end removes it, whether the owner stopped the guest or
     /// the guest ended on its own.
     sessions: HashMap<String, AgentSessionRecord>,
-    /// Set once Stop has asked a live row to end. Dropping Stop does not
-    /// clear it. Start stays refused while a live row remains, and clears
-    /// it once no live row remains.
-    stop_requested: HashSet<String>,
 }
 
-/// One Stop's tokens. The mark is a non-empty set for that agent.
+/// One Stop's tokens, and the agents whose stop has committed.
+/// The token mark is a non-empty set for that agent. `requested` stays
+/// after the token is cleared, until Start sees no live row.
 #[derive(Default)]
 struct AgentStopMarks {
     tokens: HashMap<String, HashSet<u64>>,
     next: u64,
+    /// Set once a stop has committed for this agent. Dropping the Stop
+    /// token does not clear it. Start stays refused while a live row
+    /// remains, and clears it once no live row remains.
+    requested: HashSet<String>,
 }
 
 /// One Runtime's plan instances, and each effect that has reached its work.
 ///
 /// Lock order: this mutex is never taken while `agent_launches` or
-/// `stop_marks` is held, and it is never held across an await. Start and
-/// Stop take `agent_launches`, then `stop_marks`. The end and `try_enter`
-/// take only this mutex: the check and the mark are one hold of it.
+/// `stop_marks` is held, and it is never held across an await. Start takes
+/// `agent_launches`, then `stop_marks`. A committed stop writes its mark on
+/// `stop_marks` and does not take `agent_launches` again. The end and
+/// `try_enter` take only this mutex: the check and the mark are one hold of it.
 pub(crate) struct PlanBook {
     instances: HashMap<String, PlanInstance>,
     /// Effect id to the session it is working for. Two effects of one session
@@ -397,6 +415,9 @@ pub(crate) struct PlanBook {
     /// flight. The last such effect, settled or unknown, drops the token.
     held_runs: HashMap<String, AgentLiveRun>,
     next: u64,
+    /// A test's instant. Product reads use the real clock.
+    #[cfg(test)]
+    clock: Option<std::time::Instant>,
 }
 
 struct PlanInstance {
@@ -415,6 +436,9 @@ struct UnknownPlanStep {
     session_id: String,
     agent_id: String,
     request_id: String,
+    /// Drop this name at this instant. None while the session is live or a
+    /// flight of it is still in progress. The last flight's departure sets it.
+    purge_at: Option<std::time::Instant>,
 }
 
 /// One step Stop can name after its record was stored as unknown.
@@ -475,7 +499,56 @@ fn new_plan_book() -> Arc<StdMutex<PlanBook>> {
         unknown: Vec::new(),
         held_runs: HashMap::new(),
         next: 1,
+        #[cfg(test)]
+        clock: None,
     }))
+}
+
+type PlanHomeSlot = std::sync::Weak<StdMutex<PlanBook>>;
+
+fn plan_homes() -> &'static StdMutex<HashMap<PathBuf, PlanHomeSlot>> {
+    static HOMES: std::sync::OnceLock<StdMutex<HashMap<PathBuf, PlanHomeSlot>>> =
+        std::sync::OnceLock::new();
+    HOMES.get_or_init(|| StdMutex::new(HashMap::new()))
+}
+
+fn plan_home_key(home: &Path) -> PathBuf {
+    std::fs::canonicalize(home).unwrap_or_else(|_| home.to_path_buf())
+}
+
+/// The plan book already wired for this Home, when that book is still alive.
+/// The agent plane is the only caller, and that plane listens on Unix.
+#[cfg(unix)]
+pub(crate) fn wired_plan_book(home: &Path) -> Option<Arc<StdMutex<PlanBook>>> {
+    let homes = plan_homes().lock().unwrap_or_else(|err| err.into_inner());
+    homes
+        .get(&plan_home_key(home))
+        .and_then(PlanHomeSlot::upgrade)
+}
+
+/// Within one process, one Home has one plan book for dispatch and Stop.
+/// A second live book fails.
+/// The installed two-process path runs no agent today and its proof comes with the package.
+pub(crate) fn wire_home_runtime(home: &Path, book: &Arc<StdMutex<PlanBook>>) {
+    let key = plan_home_key(home);
+    let mut homes = plan_homes().lock().unwrap_or_else(|err| err.into_inner());
+    let live = homes.get(&key).and_then(PlanHomeSlot::upgrade);
+    if let Some(found) = live.as_ref() {
+        if !Arc::ptr_eq(found, book) {
+            panic!("one Home runs plan dispatch and Stop on two Runtimes within one process");
+        }
+        return;
+    }
+    homes.insert(key, Arc::downgrade(book));
+}
+
+/// The next id at or after `start` that `occupied` does not already hold.
+fn fresh_id(start: u64, occupied: impl Fn(u64) -> bool) -> u64 {
+    let mut id = start;
+    while occupied(id) {
+        id = id.wrapping_add(1);
+    }
+    id
 }
 
 /// Request id to the book that holds its flight. Settlement of `unknown`
@@ -519,11 +592,28 @@ fn finish_flight(book: &mut PlanBook, id: u64, as_unknown: bool) {
                 session_id: flight.session_id,
                 agent_id: flight.agent_id,
                 request_id: flight.request_id,
+                purge_at: None,
             },
         );
     }
     reap(book, &session_id);
     release_held_live_run(book, &session_id);
+}
+
+fn book_now(book: &PlanBook) -> std::time::Instant {
+    #[cfg(test)]
+    if let Some(now) = book.clock {
+        return now;
+    }
+    #[cfg(not(test))]
+    let _ = book;
+    std::time::Instant::now()
+}
+
+fn drop_due_unknown(book: &mut PlanBook) {
+    let now = book_now(book);
+    book.unknown
+        .retain(|step| step.purge_at.is_none_or(|due| now < due));
 }
 
 /// Keeps at most [`MAX_UNKNOWN_STEPS_PER_AGENT`] names for one agent.
@@ -548,9 +638,27 @@ fn push_unknown(book: &mut PlanBook, step: UnknownPlanStep) {
     }
 }
 
-/// Drops unknown names for a session whose row has left the registry.
-fn purge_unknown_session(book: &mut PlanBook, session_id: &str) {
-    book.unknown.retain(|step| step.session_id != session_id);
+/// Drops names whose purge time has come. A name has none while its session
+/// is live or a flight of it is in progress. The registry lock is not held.
+fn purge_unknown_session(book: &mut PlanBook, _session_id: &str) {
+    drop_due_unknown(book);
+}
+
+/// The plan instance is gone or already stopping.
+fn session_has_ended(book: &PlanBook, session_id: &str) -> bool {
+    book.instances
+        .get(session_id)
+        .is_none_or(|inst| inst.stopping)
+}
+
+/// Names of this session with no purge time get one retention from now.
+fn stamp_unknown_retention(book: &mut PlanBook, session_id: &str) {
+    let due = book_now(book) + ENDED_CAPSULE_RETENTION;
+    for step in &mut book.unknown {
+        if step.session_id == session_id && step.purge_at.is_none() {
+            step.purge_at = Some(due);
+        }
+    }
 }
 
 /// The last effect of a session drops the live-run token the end parked.
@@ -608,6 +716,9 @@ fn reap(book: &mut PlanBook, session_id: &str) {
     {
         return;
     }
+    if session_has_ended(book, session_id) {
+        stamp_unknown_retention(book, session_id);
+    }
     if book
         .instances
         .get(session_id)
@@ -625,7 +736,7 @@ impl PlanBook {
         reap(self, session_id);
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub(crate) fn close_for_test(&mut self, session_id: &str) {
         self.mark_stopping(session_id);
     }
@@ -678,14 +789,14 @@ pub(crate) struct PlanEndPause {
     pub release: Arc<tokio::sync::Notify>,
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 struct PlanEndGate {
     session_id: String,
     entered: Arc<tokio::sync::Notify>,
     release: Arc<tokio::sync::Notify>,
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 static PLAN_END_GATES: StdMutex<Vec<PlanEndGate>> = StdMutex::new(Vec::new());
 
 #[cfg(all(test, unix))]
@@ -703,7 +814,7 @@ pub(crate) fn arm_after_plan_end_mark(session_id: &str) -> PlanEndPause {
     PlanEndPause { entered, release }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 async fn pause_after_plan_end_mark(session_id: &str) {
     let gate = {
         let mut gates = PLAN_END_GATES.lock().unwrap_or_else(|err| err.into_inner());
@@ -804,11 +915,12 @@ impl InstanceAuthority {
 
 /// Settle one instance. `None` revokes nothing and reports success. `Some`
 /// closes that instance's pending plans, revokes its one-use plan token, and
-/// revokes the grants in its store.
+/// revokes the grants in its store. `guests` hears each revoked grant.
 async fn settle_instance_authority(
     authority: Option<&InstanceAuthority>,
     capsule_id: &str,
     cause: &str,
+    guests: Option<&elastos_compute::providers::ComponentProvider>,
 ) -> std::result::Result<(), String> {
     match authority {
         Some(authority) => {
@@ -823,12 +935,13 @@ async fn settle_instance_authority(
                 capsule_id,
             )
             .await;
-            crate::api::handlers::settle::settle_and_revoke(
+            crate::api::handlers::settle::settle_and_revoke_guests(
                 &authority.pending_store,
                 &authority.capability_manager,
                 authority.revocation_dir(),
                 capsule_id,
                 cause,
+                guests,
             )
             .await
         }
@@ -840,41 +953,95 @@ async fn settle_instance_authority(
 /// the guest's outcome was known.
 const CAUSE_TASK_LOST: &str = "activation task ended before its outcome";
 
-/// One detached activation's stop request (M1-R A10-R). `requested` is the
-/// flag the bridge's wait loop reads, so a guest held inside a call leaves it
-/// within one poll; `cause` is the reason the activation's one end records.
-/// The cause is written before the flag is raised, so an end that sees the
-/// flag always sees its reason.
+/// Open and committed stops. The first cause stays while any caller remains.
+struct StopCalls {
+    cause: Option<String>,
+    open: HashSet<u64>,
+    committed: u64,
+    next: u64,
+}
+
+/// One activation's stop. The cause and the flag are written on commit.
+/// The first commit's cause stays. A ticket that is dropped or fails is withdrawn.
 struct ActivationStop {
     flag: Arc<crate::resource_bridge::ActivationStopFlag>,
-    cause: StdMutex<Option<String>>,
+    calls: StdMutex<StopCalls>,
+    settled: tokio::sync::Notify,
 }
 
 impl ActivationStop {
-    /// Records this stop's reason (`stopped: <reason>`) and raises the flag.
-    /// The first reason recorded is the one the end records: a later stop
-    /// keeps it.
-    fn request(&self, reason: &str) {
-        self.cause
-            .lock()
-            .unwrap_or_else(|err| err.into_inner())
-            .get_or_insert_with(|| format!("{CAPSULE_STOPPED}: {reason}"));
-        self.flag.requested.store(true, Ordering::Release);
-        crate::resource_bridge::notify_plan_waiters();
+    fn new() -> Self {
+        Self {
+            flag: Arc::new(crate::resource_bridge::ActivationStopFlag::default()),
+            calls: StdMutex::new(StopCalls {
+                cause: None,
+                open: HashSet::new(),
+                committed: 0,
+                next: 0,
+            }),
+            settled: tokio::sync::Notify::new(),
+        }
     }
 
-    /// The provider stop failed. The flag comes back down and the cause is
-    /// forgotten, so the live run is not cut off by a stop that did not happen.
-    fn withdraw(&self) {
-        self.flag.requested.store(false, Ordering::Release);
-        *self.cause.lock().unwrap_or_else(|err| err.into_inner()) = None;
+    fn open_id(&self) -> u64 {
+        let mut calls = self.calls.lock().unwrap_or_else(|err| err.into_inner());
+        let id = fresh_id(calls.next, |id| calls.open.contains(&id));
+        calls.next = id.wrapping_add(1);
+        calls.open.insert(id);
+        id
+    }
+
+    /// The first commit writes the cause. A later commit keeps that cause.
+    fn finish(&self, id: u64, reason: &str) {
+        let quiet = {
+            let mut calls = self.calls.lock().unwrap_or_else(|err| err.into_inner());
+            if !calls.open.remove(&id) {
+                return;
+            }
+            calls
+                .cause
+                .get_or_insert_with(|| format!("{CAPSULE_STOPPED}: {reason}"));
+            calls.committed = calls.committed.saturating_add(1);
+            self.flag.requested.store(true, Ordering::Release);
+            calls.open.is_empty()
+        };
+        crate::resource_bridge::notify_plan_waiters();
+        if quiet {
+            self.settled.notify_one();
+        }
+    }
+
+    fn any_open(&self) -> bool {
+        let calls = self.calls.lock().unwrap_or_else(|err| err.into_inner());
+        !calls.open.is_empty()
+    }
+
+    fn withdraw(&self, id: u64) {
+        let mut calls = self.calls.lock().unwrap_or_else(|err| err.into_inner());
+        calls.open.remove(&id);
+        if calls.open.is_empty() && calls.committed == 0 {
+            calls.cause = None;
+            self.flag.requested.store(false, Ordering::Release);
+        }
+        if calls.open.is_empty() {
+            self.settled.notify_one();
+        }
+    }
+
+    /// Records the reason and raises the flag. Tests use this for a stop that
+    /// has no provider call between the two.
+    #[cfg(test)]
+    fn request(&self, reason: &str) {
+        let id = self.open_id();
+        self.finish(id, reason);
     }
 
     /// The reason this stop was requested with, if any.
     fn cause(&self) -> Option<String> {
-        self.cause
+        self.calls
             .lock()
             .unwrap_or_else(|err| err.into_inner())
+            .cause
             .clone()
     }
 
@@ -885,18 +1052,98 @@ impl ActivationStop {
     }
 }
 
-/// Stop-wait bounds for tests. The key is a token stored on the Runtime,
-/// not the heap address of `activation_stops`.
+/// One caller's ticket. Drop withdraws it unless `commit` already ran.
+struct OpenStop {
+    stop: Arc<ActivationStop>,
+    id: u64,
+    reason: String,
+    live: bool,
+}
+
+impl Drop for OpenStop {
+    fn drop(&mut self) {
+        if self.live {
+            self.stop.withdraw(self.id);
+        }
+    }
+}
+
+impl OpenStop {
+    fn stage(stop: &Arc<ActivationStop>, reason: &str) -> Self {
+        Self {
+            stop: Arc::clone(stop),
+            id: stop.open_id(),
+            reason: reason.to_string(),
+            live: true,
+        }
+    }
+
+    fn commit(mut self) {
+        self.live = false;
+        self.stop.finish(self.id, &self.reason);
+    }
+}
+
+/// Stop-wait bounds for tests. The key is the plant folder plus the token
+/// stored on that runtime.
 #[cfg(test)]
-static TEST_STOP_WAITS: StdMutex<Vec<(u64, std::time::Duration)>> = StdMutex::new(Vec::new());
+static TEST_STOP_WAITS: StdMutex<Vec<(String, u64, std::time::Duration)>> =
+    StdMutex::new(Vec::new());
 
 #[cfg(test)]
 static NEXT_STOP_WAIT_TOKEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
-/// First observation of whether Stop had marked this agent before its rows
-/// were read. Keyed by the launch gate so parallel tests stay apart.
+/// Sessions whose watcher is inside the open-stop wait, and how long that
+/// wait lasted once it returned. Keyed by session id.
 #[cfg(test)]
-static STOP_MARK_BEFORE_ROWS: StdMutex<Vec<(usize, String, Option<bool>)>> =
+static STOP_TICKET_WAIT_NOTES: StdMutex<Vec<String>> = StdMutex::new(Vec::new());
+
+#[cfg(test)]
+static STOP_TICKET_WAIT_DONE: StdMutex<Vec<(String, std::time::Duration)>> =
+    StdMutex::new(Vec::new());
+
+#[cfg(test)]
+fn note_stop_ticket_wait(session_id: &str) {
+    let mut notes = STOP_TICKET_WAIT_NOTES
+        .lock()
+        .unwrap_or_else(|err| err.into_inner());
+    if !notes.iter().any(|id| id == session_id) {
+        notes.push(session_id.to_string());
+    }
+}
+
+#[cfg(test)]
+fn note_stop_ticket_wait_done(session_id: &str, waited: std::time::Duration) {
+    STOP_TICKET_WAIT_DONE
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+        .push((session_id.to_string(), waited));
+}
+
+#[cfg(all(test, unix))]
+fn stop_ticket_wait_noted(session_id: &str) -> bool {
+    STOP_TICKET_WAIT_NOTES
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+        .iter()
+        .any(|id| id == session_id)
+}
+
+#[cfg(all(test, unix))]
+fn stop_ticket_wait_done(session_id: &str) -> Option<std::time::Duration> {
+    STOP_TICKET_WAIT_DONE
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+        .iter()
+        .rev()
+        .find(|(id, _)| id == session_id)
+        .map(|(_, waited)| *waited)
+}
+
+/// First observation of whether Stop had marked this agent before its rows
+/// were read. Keyed by the plant folder and the agent id.
+#[cfg(test)]
+static STOP_MARK_BEFORE_ROWS: StdMutex<Vec<(String, String, Option<bool>)>> =
     StdMutex::new(Vec::new());
 
 /// Pauses Stop after its token is set and before the registry is read.
@@ -916,18 +1163,18 @@ struct LiveRunGate {
 }
 
 #[cfg(test)]
-static LIVE_RUN_GATES: StdMutex<Vec<(usize, &'static str, LiveRunGate)>> =
+static LIVE_RUN_GATES: StdMutex<Vec<(String, &'static str, LiveRunGate)>> =
     StdMutex::new(Vec::new());
 
-/// Waits when a test armed `point` for this live-run map. An unarmed point
-/// returns at once. The end uses the same gate as a Start.
+/// Waits when a test armed `point` for this plant. An unarmed point returns
+/// at once. The end uses the same gate as a Start. The key is the data folder.
 #[cfg(test)]
-async fn await_live_run_gate(key: usize, point: &'static str) {
+async fn await_live_run_gate(key: &str, point: &'static str) {
     let gate = {
         let mut gates = LIVE_RUN_GATES.lock().unwrap_or_else(|err| err.into_inner());
         let Some(pos) = gates
             .iter()
-            .rposition(|(stored, name, _)| *stored == key && *name == point)
+            .rposition(|(stored, name, _)| stored == key && *name == point)
         else {
             return;
         };
@@ -941,26 +1188,153 @@ async fn await_live_run_gate(key: usize, point: &'static str) {
 }
 
 #[cfg(test)]
-static REFUSE_AFTER_ADMIT: StdMutex<Vec<usize>> = StdMutex::new(Vec::new());
+static REFUSE_AFTER_ADMIT: StdMutex<Vec<String>> = StdMutex::new(Vec::new());
 
 #[cfg(test)]
-static STOP_ROWS_GATES: StdMutex<Vec<(usize, String, StopRowsGate)>> = StdMutex::new(Vec::new());
+static STOP_ROWS_GATES: StdMutex<Vec<(String, String, StopRowsGate)>> = StdMutex::new(Vec::new());
 
 #[cfg(test)]
-static STOP_PANIC_AFTER_MARK: StdMutex<Vec<(usize, String)>> = StdMutex::new(Vec::new());
+static STOP_PANIC_AFTER_MARK: StdMutex<Vec<(String, String)>> = StdMutex::new(Vec::new());
 
-/// A capsule stop that fails before the row ends. Keyed by the launch gate.
+/// A capsule stop that fails before the row ends. Keyed by the plant folder
+/// and the session id.
 #[cfg(test)]
-static FAIL_CAPSULE_STOP: StdMutex<Vec<(usize, String)>> = StdMutex::new(Vec::new());
+static FAIL_CAPSULE_STOP: StdMutex<Vec<(String, String)>> = StdMutex::new(Vec::new());
 
-/// Provider `stop` calls observed by a test, keyed by the launch gate.
+/// Provider `stop` calls observed by a test, keyed by the plant folder.
 #[cfg(test)]
-static PROVIDER_STOP_CALLS: StdMutex<Vec<usize>> = StdMutex::new(Vec::new());
+static PROVIDER_STOP_CALLS: StdMutex<Vec<String>> = StdMutex::new(Vec::new());
+
+/// Holds provider stops after the reason is staged and before the flag is raised.
+#[cfg(all(test, unix))]
+struct ProviderStopHold {
+    entered: Arc<tokio::sync::Notify>,
+    releases: StdMutex<Vec<Arc<tokio::sync::Notify>>>,
+    arrived: std::sync::atomic::AtomicUsize,
+}
+
+#[cfg(all(test, unix))]
+static PROVIDER_STOP_HOLDS: StdMutex<Vec<(String, String, Arc<ProviderStopHold>)>> =
+    StdMutex::new(Vec::new());
+
+/// The await that used to sit between the provider's `Ok` and the commit.
+#[cfg(all(test, unix))]
+struct CommittedStopGate {
+    key: String,
+    session: String,
+    entered: Arc<tokio::sync::Notify>,
+    release: Arc<tokio::sync::Notify>,
+}
+
+#[cfg(all(test, unix))]
+static COMMITTED_STOP_GATES: StdMutex<Vec<CommittedStopGate>> = StdMutex::new(Vec::new());
+
+/// The await a test puts between the provider's `Ok` and the commit.
+/// Keyed by the plant folder and the session id.
+#[cfg(all(test, unix))]
+static PRE_COMMIT_GATES: StdMutex<Vec<CommittedStopGate>> = StdMutex::new(Vec::new());
+
+/// One armed pause after a stop has committed. Drop lets the stop continue.
+#[cfg(all(test, unix))]
+pub(crate) struct CommittedStopPause {
+    entered: Arc<tokio::sync::Notify>,
+    release: Arc<tokio::sync::Notify>,
+}
+
+#[cfg(all(test, unix))]
+impl CommittedStopPause {
+    pub(crate) async fn entered(&self) {
+        self.entered.notified().await;
+    }
+
+    pub(crate) fn release(&self) {
+        self.release.notify_one();
+    }
+}
+
+#[cfg(all(test, unix))]
+impl Drop for CommittedStopPause {
+    fn drop(&mut self) {
+        self.release.notify_one();
+    }
+}
+
+/// One armed hold. Drop releases any stop still waiting on it.
+#[cfg(all(test, unix))]
+pub(crate) struct ProviderStopPause {
+    key: String,
+    session: String,
+    hold: Arc<ProviderStopHold>,
+}
+
+#[cfg(all(test, unix))]
+impl ProviderStopPause {
+    pub(crate) fn arrived(&self) -> usize {
+        self.hold.arrived.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    pub(crate) async fn entered(&self) {
+        self.hold.entered.notified().await;
+    }
+
+    /// Lets the next waiting stop continue. The last to arrive goes first.
+    pub(crate) fn release_one(&self) {
+        let release = self
+            .hold
+            .releases
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .pop();
+        if let Some(release) = release {
+            release.notify_one();
+        }
+    }
+
+    /// Lets the earliest waiting stop continue.
+    pub(crate) fn release_oldest(&self) {
+        let mut releases = self
+            .hold
+            .releases
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        if releases.is_empty() {
+            return;
+        }
+        let release = releases.remove(0);
+        drop(releases);
+        release.notify_one();
+    }
+}
+
+#[cfg(all(test, unix))]
+impl Drop for ProviderStopPause {
+    fn drop(&mut self) {
+        let mut holds = PROVIDER_STOP_HOLDS
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        if let Some(pos) = holds
+            .iter()
+            .rposition(|(key, session, _)| *key == self.key && session == &self.session)
+        {
+            holds.swap_remove(pos);
+        }
+        drop(holds);
+        let releases = self
+            .hold
+            .releases
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .clone();
+        for release in releases {
+            release.notify_one();
+        }
+    }
+}
 
 /// What a guest does at the first line of its watcher, before it runs.
 /// Keyed by agent id. The launch turn is still held, so the guest's end
 /// cannot pass `hold_launch_turn` until the start returns.
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub(crate) enum GuestOpening {
     /// Tell the test whether the plan instance is open, then run the guest.
     Dispatch(tokio::sync::oneshot::Sender<bool>),
@@ -968,7 +1342,7 @@ pub(crate) enum GuestOpening {
     Exit,
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 static GUEST_OPENING: StdMutex<Vec<(String, GuestOpening)>> = StdMutex::new(Vec::new());
 
 #[cfg(all(test, unix))]
@@ -979,7 +1353,7 @@ pub(crate) fn arm_guest_opening(agent_id: &str, opening: GuestOpening) {
         .push((agent_id.to_string(), opening));
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 fn guest_opening_is_armed(agent_id: &str) -> bool {
     GUEST_OPENING
         .lock()
@@ -988,11 +1362,75 @@ fn guest_opening_is_armed(agent_id: &str) -> bool {
         .any(|(id, _)| id == agent_id)
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 fn take_guest_opening(agent_id: &str) -> Option<GuestOpening> {
     let mut armed = GUEST_OPENING.lock().unwrap_or_else(|err| err.into_inner());
     let pos = armed.iter().rposition(|(id, _)| id == agent_id)?;
     Some(armed.swap_remove(pos).1)
+}
+
+/// Pauses one watcher at a named point. The key is the plant's data folder.
+#[cfg(all(test, unix))]
+struct WatchPause {
+    plant: String,
+    point: &'static str,
+    release: Arc<tokio::sync::Notify>,
+    entered: Arc<tokio::sync::Notify>,
+}
+
+#[cfg(all(test, unix))]
+static WATCH_PAUSES: StdMutex<Vec<WatchPause>> = StdMutex::new(Vec::new());
+
+#[cfg(all(test, unix))]
+pub(crate) struct WatchHold {
+    pub(crate) release: Arc<tokio::sync::Notify>,
+    pub(crate) entered: Arc<tokio::sync::Notify>,
+}
+
+#[cfg(all(test, unix))]
+impl Drop for WatchHold {
+    fn drop(&mut self) {
+        let mut pauses = WATCH_PAUSES.lock().unwrap_or_else(|err| err.into_inner());
+        if let Some(pos) = pauses
+            .iter()
+            .rposition(|pause| Arc::ptr_eq(&pause.release, &self.release))
+        {
+            pauses.swap_remove(pos);
+        }
+        drop(pauses);
+        self.release.notify_one();
+    }
+}
+
+#[cfg(all(test, unix))]
+fn arm_watch_pause(plant: &str, point: &'static str) -> WatchHold {
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    WATCH_PAUSES
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+        .push(WatchPause {
+            plant: plant.to_string(),
+            point,
+            release: Arc::clone(&release),
+            entered: Arc::clone(&entered),
+        });
+    WatchHold { release, entered }
+}
+
+#[cfg(all(test, unix))]
+async fn pause_watch(plant: &str, point: &'static str) {
+    let pause = {
+        let mut pauses = WATCH_PAUSES.lock().unwrap_or_else(|err| err.into_inner());
+        let pos = pauses
+            .iter()
+            .rposition(|pause| pause.plant == plant && pause.point == point);
+        pos.map(|pos| pauses.swap_remove(pos))
+    };
+    if let Some(pause) = pause {
+        pause.entered.notify_one();
+        pause.release.notified().await;
+    }
 }
 
 #[cfg(test)]
@@ -1006,7 +1444,7 @@ pub(crate) struct StopRowsPause {
 pub(crate) struct LiveRunPause {
     pub(crate) entered: Arc<tokio::sync::Notify>,
     pub(crate) release: Arc<tokio::sync::Notify>,
-    key: usize,
+    key: String,
     point: &'static str,
 }
 
@@ -1026,7 +1464,7 @@ impl Drop for LiveRunPause {
 /// Holds one armed refusal after admission. Drop removes it if the start never took it.
 #[cfg(test)]
 pub(crate) struct RefuseAfterAdmit {
-    key: usize,
+    key: String,
 }
 
 #[cfg(test)]
@@ -1043,6 +1481,7 @@ impl Drop for RefuseAfterAdmit {
 
 #[cfg(test)]
 pub(crate) struct StopWaitLimit {
+    plant: String,
     token: u64,
 }
 
@@ -1052,7 +1491,7 @@ impl Drop for StopWaitLimit {
         let mut waits = TEST_STOP_WAITS
             .lock()
             .unwrap_or_else(|err| err.into_inner());
-        waits.retain(|(token, _)| *token != self.token);
+        waits.retain(|(plant, token, _)| plant != &self.plant || *token != self.token);
     }
 }
 
@@ -1094,8 +1533,12 @@ impl AgentLiveRuns {
     }
 
     fn admit(&mut self, agent_id: &str) -> u64 {
-        let token = self.next;
-        self.next = self.next.wrapping_add(1);
+        let token = fresh_id(self.next, |id| {
+            self.tokens
+                .get(agent_id)
+                .is_some_and(|set| set.contains(&id))
+        });
+        self.next = token.wrapping_add(1);
         self.tokens
             .entry(agent_id.to_string())
             .or_default()
@@ -1181,6 +1624,10 @@ struct ActivationContextHeld {
     retention: std::time::Duration,
     /// The end is owed until the registry entry records it.
     armed: bool,
+    /// This plant's data folder, copied when the activation is held, so a
+    /// watcher pause matches the plant that armed it.
+    #[cfg(test)]
+    plant_key: String,
     owed: OwedEnd,
     /// The status and cause the session was settled with, so an end run
     /// again after a lost task records and audits the same ones.
@@ -1202,10 +1649,7 @@ impl ActivationContextHeld {
             .clone();
         // The stop request lives as long as the activation: the bridge looks
         // it up by capsule id on every call, and the stop route by instance id.
-        let stop = Arc::new(ActivationStop {
-            flag: Arc::new(crate::resource_bridge::ActivationStopFlag::default()),
-            cause: StdMutex::new(None),
-        });
+        let stop = Arc::new(ActivationStop::new());
         runtime
             .activation_stops
             .write()
@@ -1231,12 +1675,49 @@ impl ActivationContextHeld {
             owed: OwedEnd::Task,
             settled: None,
             audited: false,
+            #[cfg(test)]
+            plant_key: runtime.plant_key(),
         }
     }
 
     /// The reason a stop was requested with, if it was.
     fn requested_stop(&self) -> Option<String> {
         self.stop.cause()
+    }
+
+    async fn wait_for_open_stops(&self) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        #[cfg(test)]
+        let started = std::time::Instant::now();
+        #[cfg(test)]
+        let mut parked = false;
+        loop {
+            let notified = self.stop.settled.notified();
+            let open = self.stop.any_open();
+            if !open {
+                #[cfg(test)]
+                if parked {
+                    note_stop_ticket_wait_done(&self.id.0, started.elapsed());
+                }
+                return;
+            }
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            if left.is_zero() {
+                #[cfg(test)]
+                note_stop_ticket_wait_done(&self.id.0, started.elapsed());
+                return;
+            }
+            #[cfg(test)]
+            {
+                parked = true;
+                note_stop_ticket_wait(&self.id.0);
+            }
+            if tokio::time::timeout(left, notified).await.is_err() {
+                #[cfg(test)]
+                note_stop_ticket_wait_done(&self.id.0, started.elapsed());
+                return;
+            }
+        }
     }
 
     /// Whether the bridge left the guest's call because of its stop.
@@ -1325,7 +1806,7 @@ impl ActivationContextHeld {
         plan_book(&self.plan_book).mark_stopping(&self.id.0);
         // `release` drops a step's admission. A dispatch after that drop
         // cannot see this mark, so a row reads the refusal in between.
-        #[cfg(test)]
+        #[cfg(all(test, unix))]
         pause_after_plan_end_mark(&self.id.0).await;
         let (status, cause) = match self.settled.clone() {
             Some(settled) => settled,
@@ -1338,8 +1819,13 @@ impl ActivationContextHeld {
                 // An activation that already ended has no entry to stop; an
                 // ending one keeps it until its worker sees the stop flag.
                 let _ = self.component.stop(&self.handle).await;
-                let settled =
-                    settle_instance_authority(self.authority.as_ref(), &self.id.0, cause).await;
+                let settled = settle_instance_authority(
+                    self.authority.as_ref(),
+                    &self.id.0,
+                    cause,
+                    Some(self.component.as_ref()),
+                )
+                .await;
                 let ended = match settled {
                     Ok(()) => (status.to_string(), cause.to_string()),
                     Err(error) => (
@@ -1353,10 +1839,7 @@ impl ActivationContextHeld {
         };
         self.release().await;
         #[cfg(test)]
-        let ended_key = self
-            .live_run
-            .as_ref()
-            .map(|run| std::sync::Arc::as_ptr(&run.runs) as usize);
+        let ended_key = self.live_run.is_some().then(|| self.plant_key.clone());
         let _turn = self.hold_launch_turn().await;
         if let (Some(authority), false) = (&self.authority, self.audited) {
             let record = self
@@ -1407,7 +1890,7 @@ impl ActivationContextHeld {
         // still live. A start that never records a row still drops it here.
         #[cfg(test)]
         if let Some(key) = ended_key {
-            await_live_run_gate(key, "ended").await;
+            await_live_run_gate(&key, "ended").await;
         }
         self.release_live_run_after_end();
 
@@ -1464,6 +1947,8 @@ impl ActivationContextHeld {
             owed: self.owed,
             settled: self.settled.take(),
             audited: self.audited,
+            #[cfg(test)]
+            plant_key: self.plant_key.clone(),
         }
     }
 
@@ -1493,7 +1978,9 @@ fn stop_reason(status: &str, cause: &str) -> elastos_runtime::primitives::audit:
 fn start_ended_by_stop(err: &ElastosError) -> bool {
     match err {
         ElastosError::CapsuleNotFound(_) => true,
-        ElastosError::Compute(message) => message == STOPPED_BEFORE_RUN,
+        ElastosError::Compute(message) => {
+            message == STOPPED_BEFORE_RUN || message == STOPPED_DURING_START
+        }
         _ => false,
     }
 }
@@ -1640,7 +2127,31 @@ pub(crate) struct BridgeTables {
     pub stop: Option<Arc<crate::resource_bridge::ActivationStopFlag>>,
 }
 
+/// The tables both bridge hostcalls read. Built once where those closures
+/// are installed, and captured there. A call looks its own capsule id up
+/// and drops the locks before the bridge runs.
+struct ComponentBridgeTables {
+    registry: Arc<ProviderRegistry>,
+    capability_manager: Arc<elastos_runtime::capability::CapabilityManager>,
+    pending_store: Arc<elastos_runtime::capability::pending::PendingRequestStore>,
+    data_dir: PathBuf,
+    manifest_capabilities: Arc<StdRwLock<HashMap<String, Vec<AuthorityBound>>>>,
+    model_token_ceilings: Arc<StdRwLock<HashMap<String, AgentModelCeiling>>>,
+    model_budget: Arc<ModelBudget>,
+    model_offer_bounds: Arc<StdRwLock<HashMap<String, crate::resource_bridge::ModelOfferBound>>>,
+    activation_stops: Arc<StdRwLock<HashMap<String, Arc<ActivationStop>>>>,
+    launch_contents: Arc<StdRwLock<HashMap<String, Arc<LaunchContent>>>>,
+    v2_guests: Option<Arc<ComponentProvider>>,
+    plan_book: Arc<StdMutex<PlanBook>>,
+}
+
 impl Runtime {
+    /// The v2 guests this runtime hosts. The owner's revoke routes tell them,
+    /// and `elastos serve` hands the same view to the Supervisor.
+    pub fn component_guests(&self) -> Option<Arc<ComponentProvider>> {
+        self.component_provider.clone()
+    }
+
     /// Create a new runtime with a single compute provider (backward compatible)
     pub fn new(storage: Arc<dyn StorageProvider>, compute: Arc<dyn ComputeProvider>) -> Self {
         Self {
@@ -1666,6 +2177,8 @@ impl Runtime {
             page_launches: Default::default(),
             #[cfg(test)]
             stop_wait_token: std::sync::atomic::AtomicU64::new(0),
+            #[cfg(test)]
+            plant_key: std::sync::OnceLock::new(),
         }
     }
 
@@ -1697,7 +2210,23 @@ impl Runtime {
             page_launches: Default::default(),
             #[cfg(test)]
             stop_wait_token: std::sync::atomic::AtomicU64::new(0),
+            #[cfg(test)]
+            plant_key: std::sync::OnceLock::new(),
         }
+    }
+
+    /// Runs one bridge future on `handle`, on this thread. A `spawn_blocking`
+    /// worker whose runtime handle is entered stays on that thread too.
+    pub(crate) fn block_on_component_bridge<T>(
+        handle: &tokio::runtime::Handle,
+        leg: ComponentBridgeLeg,
+        fut: impl std::future::Future<Output = T> + Send,
+    ) -> T
+    where
+        T: Send,
+    {
+        let ComponentBridgeLeg::Caller = leg;
+        handle.block_on(fut)
     }
 
     /// The model account a capsule's bridge calls spend. The key is the agent
@@ -1733,6 +2262,63 @@ impl Runtime {
             offers: offers.clone(),
         });
         (ceiling, budget)
+    }
+
+    /// The ceiling and the launch content for one bridge call, looked up by
+    /// that caller's own capsule id. Both hostcalls use this. The locks end
+    /// here, before the call.
+    fn component_bridge_context(
+        tables: &ComponentBridgeTables,
+        capsule_id: &str,
+        principal_id: Option<&str>,
+    ) -> crate::resource_bridge::BridgeContext {
+        let manifest_capabilities = tables
+            .manifest_capabilities
+            .read()
+            .ok()
+            .and_then(|guard| guard.get(capsule_id).cloned())
+            .unwrap_or_default();
+        // The content this caller was launched with, if it is the program of
+        // a content launch: looked up by its own id, as its ceiling is, and
+        // nobody else's. A poisoned lock still holds the table. The read
+        // guard ends with this statement: it is not held across the call.
+        let launch = tables
+            .launch_contents
+            .read()
+            .unwrap_or_else(|it| it.into_inner())
+            .get(capsule_id)
+            .cloned();
+        let (model_token_ceiling, model_budget) = Self::model_dispatch_budget(
+            capsule_id,
+            &tables.model_token_ceilings,
+            &tables.model_budget,
+            &tables.model_offer_bounds,
+        );
+        let stop = tables
+            .activation_stops
+            .read()
+            .unwrap_or_else(|it| it.into_inner())
+            .get(capsule_id)
+            .map(|stop| stop.flag.clone());
+        crate::resource_bridge::BridgeContext {
+            provider_registry: tables.registry.clone(),
+            capability_manager: tables.capability_manager.clone(),
+            pending_store: tables.pending_store.clone(),
+            capsule_id: capsule_id.to_string(),
+            // The provider minted this id for the one activation, so the
+            // Runtime session is the activation, taken from the hostcall
+            // and never from the Bus identity field the guest reads.
+            session_id: capsule_id.to_string(),
+            principal_id: principal_id.map(ToOwned::to_owned),
+            manifest_capabilities,
+            data_dir: Some(tables.data_dir.clone()),
+            launch,
+            model_token_ceiling,
+            model_budget,
+            stop,
+            v2_guests: tables.v2_guests.clone(),
+            plan_book: Some(Arc::clone(&tables.plan_book)),
+        }
     }
 
     /// Set the provider registry and capability manager for provider dispatch
@@ -1773,6 +2359,9 @@ impl Runtime {
         pending_store: Arc<elastos_runtime::capability::pending::PendingRequestStore>,
         data_dir: std::path::PathBuf,
     ) {
+        wire_home_runtime(&data_dir, &self.plan_book);
+        #[cfg(test)]
+        self.set_plant_dir_for_test(&data_dir);
         self.model_budget.bind_home(data_dir.clone());
         // A detached activation's end settles through this pair, so it is held
         // from here rather than read again at the end.
@@ -1786,78 +2375,54 @@ impl Runtime {
             persist_revocations: true,
         });
         if let Some(ref component) = self.component_provider {
-            let host_reg = registry.clone();
-            let host_cap_mgr = capability_manager.clone();
-            let host_pending = pending_store.clone();
-            let host_data_dir = data_dir.clone();
-            let host_manifest_capabilities = self.bridge_manifest_capabilities.clone();
-            let host_model_token_ceilings = self.bridge_model_token_ceilings.clone();
-            let host_model_budget = self.model_budget.clone();
-            let host_model_offer_bounds = self.model_offer_bounds.clone();
-            let host_activation_stops = self.activation_stops.clone();
-            let host_launch_contents = self.launch_contents.clone();
-            let host_plan_book = Arc::clone(&self.plan_book);
+            let tables = ComponentBridgeTables {
+                registry: registry.clone(),
+                capability_manager: capability_manager.clone(),
+                pending_store: pending_store.clone(),
+                data_dir: data_dir.clone(),
+                manifest_capabilities: self.bridge_manifest_capabilities.clone(),
+                model_token_ceilings: self.bridge_model_token_ceilings.clone(),
+                model_budget: self.model_budget.clone(),
+                model_offer_bounds: self.model_offer_bounds.clone(),
+                activation_stops: self.activation_stops.clone(),
+                launch_contents: self.launch_contents.clone(),
+                v2_guests: Some(component.clone()),
+                plan_book: Arc::clone(&self.plan_book),
+            };
             let host_handle = tokio::runtime::Handle::current();
+            let bridge_call: BridgeHostcallAsync =
+                Arc::new(move |line, capsule_id, principal_id| {
+                    let ctx = Self::component_bridge_context(&tables, capsule_id, principal_id);
+                    let line = line.to_string();
+                    Box::pin(async move {
+                        let response =
+                            crate::resource_bridge::handle_component_resource_request(&line, ctx)
+                                .await
+                                .map_err(|err| err.to_string())?;
+                        serde_json::to_string(&response).map_err(|err| err.to_string())
+                    })
+                        as std::pin::Pin<
+                            Box<
+                                dyn std::future::Future<
+                                        Output = std::result::Result<String, String>,
+                                    > + Send,
+                            >,
+                        >
+                });
+            let bridge_for_v1 = bridge_call.clone();
+            component.set_bus_hostcall_async(bridge_call);
+            // v1 stays on the caller thread. The leg is Caller, so this does
+            // not start a thread. v2 awaits `bridge_call` and never comes here.
             component.set_bus_hostcall(Arc::new(move |line, capsule_id, principal_id| {
                 #[cfg(test)]
                 if take_planted_host_panic() {
                     panic!("planted host panic");
                 }
-                let manifest_capabilities = host_manifest_capabilities
-                    .read()
-                    .ok()
-                    .and_then(|guard| guard.get(capsule_id).cloned())
-                    .unwrap_or_default();
-                // The content this caller was launched with, if it is the
-                // program of a content launch: looked up by its own id, as
-                // its ceiling is, and nobody else's. A poisoned lock still
-                // holds the table, as for the guard. The read guard ends with
-                // this statement: it is not held across the call below, so an
-                // activation's end can take the content away while another
-                // guest is inside the bridge.
-                let launch = host_launch_contents
-                    .read()
-                    .unwrap_or_else(|it| it.into_inner())
-                    .get(capsule_id)
-                    .cloned();
-                let (model_token_ceiling, model_budget) = Self::model_dispatch_budget(
-                    capsule_id,
-                    &host_model_token_ceilings,
-                    &host_model_budget,
-                    &host_model_offer_bounds,
-                );
-                // The stop this activation was asked for, if any: the bridge's
-                // wait loop leaves a long capability wait through it.
-                let stop = host_activation_stops
-                    .read()
-                    .unwrap_or_else(|it| it.into_inner())
-                    .get(capsule_id)
-                    .map(|stop| stop.flag.clone());
-                let ctx = crate::resource_bridge::BridgeContext {
-                    provider_registry: host_reg.clone(),
-                    capability_manager: host_cap_mgr.clone(),
-                    pending_store: host_pending.clone(),
-                    capsule_id: capsule_id.to_string(),
-                    // The provider minted this id for the one activation, so
-                    // the Runtime session is the activation, taken here from
-                    // the Runtime's own hostcall and never from the Bus
-                    // identity field the guest reads.
-                    session_id: capsule_id.to_string(),
-                    principal_id: principal_id.map(ToOwned::to_owned),
-                    manifest_capabilities,
-                    data_dir: Some(host_data_dir.clone()),
-                    launch,
-                    model_token_ceiling,
-                    model_budget,
-                    stop,
-                    plan_book: Some(host_plan_book.clone()),
-                };
-                let response = host_handle
-                    .block_on(crate::resource_bridge::handle_component_resource_request(
-                        line, ctx,
-                    ))
-                    .map_err(|err| err.to_string())?;
-                serde_json::to_string(&response).map_err(|err| err.to_string())
+                Self::block_on_component_bridge(
+                    &host_handle,
+                    component_bridge_leg(),
+                    bridge_for_v1(line, capsule_id, principal_id),
+                )
             }));
             tracing::info!("Component resource bridge configured");
         }
@@ -2148,13 +2713,12 @@ impl Runtime {
         let _turn = turn.lock().await;
         // Read the plan book before `agent_launches`. The plan lock is not
         // taken while that gate is held.
-        let effect_landing = !self.inflight_plan_sessions(facts.agent_id).is_empty();
+        let effect_landing = self.ended_flight_is_landing(facts.agent_id);
         let live_run = {
             let mut state = self.agent_launches.lock().await;
             if Self::refuse_start_for_stop(
                 &self.stop_marks,
                 capsules,
-                &mut state,
                 facts.agent_id,
                 effect_landing,
             ) {
@@ -2206,7 +2770,7 @@ impl Runtime {
         let agent_id = facts.agent_id.to_string();
         // The plan instance was bound before the guest was spawned. Binding
         // again would reopen a session whose end already reaped it.
-        #[cfg(test)]
+        #[cfg(all(test, unix))]
         self.yield_until_guest_opening_runs(facts.agent_id).await;
         let ended = self
             .get_capsule(&session_id)
@@ -2227,14 +2791,14 @@ impl Runtime {
         Ok(started)
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub(crate) fn plan_book(&self) -> Arc<StdMutex<PlanBook>> {
         Arc::clone(&self.plan_book)
     }
 
     /// The component hostcall this Runtime installed. The plan book in that
     /// closure is the one a launched guest dispatches against.
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub(crate) fn call_component_hostcall_for_test(
         &self,
         line: &str,
@@ -2247,10 +2811,11 @@ impl Runtime {
             .call_bus_hostcall_for_test(line, capsule_id, principal_id)
     }
 
-    /// Remember this running instance. An instance that was never bound, or
-    /// that was removed after it ended with nothing in flight, is refused.
+    /// Remember this running instance. A session already marked stopping is
+    /// not reopened. An absent row is a new instance.
     pub(crate) fn bind_plan_instance(&self, session_id: &str, agent_id: &str) {
         let mut book = plan_book(&self.plan_book);
+        drop_due_unknown(&mut book);
         // A session already marked stopping is not reopened. An absent row
         // is a new instance: the late bind that used to insert one after the
         // guest had ended is gone.
@@ -2272,7 +2837,7 @@ impl Runtime {
 
     /// The end takes the plan lock first and marks the instance stopping.
     /// An effect either already holds its mark, or `try_enter` refuses.
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub(crate) fn note_plan_instance_ended(&self, session_id: &str) {
         plan_book(&self.plan_book).mark_stopping(session_id);
     }
@@ -2286,7 +2851,7 @@ impl Runtime {
     }
 
     /// The bound row for `session_id`, or the keys present when it is absent.
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub(crate) fn plan_book_view(book: &Arc<StdMutex<PlanBook>>, session_id: &str) -> String {
         let locked = plan_book(book);
         match locked.instances.get(session_id) {
@@ -2307,6 +2872,7 @@ impl Runtime {
         request_id: &str,
     ) -> std::result::Result<PlanEffectGuard, ()> {
         let mut locked = plan_book(book);
+        drop_due_unknown(&mut locked);
         #[cfg(test)]
         if let Some(hook) = take_plan_decision_hook(session_id) {
             hook(&mut locked);
@@ -2314,8 +2880,8 @@ impl Runtime {
         if !instance_open(&locked, session_id, agent_id) {
             return Err(());
         }
-        let id = locked.next;
-        locked.next = locked.next.wrapping_add(1);
+        let id = fresh_id(locked.next, |id| locked.inflight.contains_key(&id));
+        locked.next = id.wrapping_add(1);
         locked.inflight.insert(
             id,
             PlanFlight {
@@ -2336,6 +2902,7 @@ impl Runtime {
     /// Steps whose record is unknown, for this agent. The book drops them.
     pub(crate) fn take_unknown_plan_steps(&self, agent_id: &str) -> Vec<NamedUnknownStep> {
         let mut book = plan_book(&self.plan_book);
+        drop_due_unknown(&mut book);
         let mut taken = Vec::new();
         book.unknown.retain(|step| {
             if step.agent_id != agent_id {
@@ -2352,8 +2919,9 @@ impl Runtime {
 
     /// The same names as [`Self::take_unknown_plan_steps`], still in the book.
     pub(crate) fn copy_unknown_plan_steps(&self, agent_id: &str) -> Vec<NamedUnknownStep> {
-        plan_book(&self.plan_book)
-            .unknown
+        let mut book = plan_book(&self.plan_book);
+        drop_due_unknown(&mut book);
+        book.unknown
             .iter()
             .filter(|step| step.agent_id == agent_id)
             .map(|step| NamedUnknownStep {
@@ -2368,6 +2936,7 @@ impl Runtime {
     /// in flight is not stopping, and this call removes its names.
     pub(crate) fn plan_stop_decision(&self, session_id: &str, ended: bool) -> PlanStopDecision {
         let mut book = plan_book(&self.plan_book);
+        drop_due_unknown(&mut book);
         let effect_open = book
             .inflight
             .values()
@@ -2397,13 +2966,25 @@ impl Runtime {
         }
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub(crate) fn plan_book_is_empty(&self) -> bool {
-        let book = plan_book(&self.plan_book);
+        let mut book = plan_book(&self.plan_book);
+        drop_due_unknown(&mut book);
         book.instances.is_empty()
             && book.inflight.is_empty()
             && book.unknown.is_empty()
             && book.held_runs.is_empty()
+    }
+
+    /// Instances, flights, and parked live-run tokens. Names are separate.
+    #[cfg(all(test, unix))]
+    pub(crate) fn plan_run_state_for_test(&self) -> (usize, usize, usize) {
+        let book = plan_book(&self.plan_book);
+        (
+            book.instances.len(),
+            book.inflight.len(),
+            book.held_runs.len(),
+        )
     }
 
     pub(crate) fn plan_effect_inflight(&self, session_id: &str) -> bool {
@@ -2415,6 +2996,16 @@ impl Runtime {
 
     pub(crate) fn any_plan_effect_inflight(&self) -> bool {
         !plan_book(&self.plan_book).inflight.is_empty()
+    }
+
+    // A flight whose session has ended or is stopping. A live run's own
+    // step is not this, so Start says already running. Routes, Start, and
+    // the System list all ask this.
+    fn ended_flight_is_landing(&self, agent_id: &str) -> bool {
+        let book = plan_book(&self.plan_book);
+        book.inflight.values().any(|flight| {
+            flight.agent_id == agent_id && session_has_ended(&book, &flight.session_id)
+        })
     }
 
     pub(crate) fn inflight_plan_sessions(&self, agent_id: &str) -> Vec<String> {
@@ -2431,7 +3022,7 @@ impl Runtime {
 
     /// A dispatch test that has no running row still has to bind one. The
     /// book is the one on the bridge context, not a second product path.
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub(crate) fn bind_detached_plan_for_test(
         ctx: &mut crate::resource_bridge::BridgeContext,
         session_id: &str,
@@ -2507,13 +3098,15 @@ impl Runtime {
         let Some(authority) = authority else {
             return;
         };
+        let guests = self.component_guests();
         for session in sessions {
-            let _ = crate::api::handlers::settle::settle_and_revoke(
+            let _ = crate::api::handlers::settle::settle_and_revoke_guests(
                 &authority.pending_store,
                 &authority.capability_manager,
                 authority.revocation_dir(),
                 &session,
                 cause,
+                guests.as_deref(),
             )
             .await;
             crate::resource_bridge::revoke_plan_one_use_tokens(
@@ -2564,8 +3157,13 @@ impl Runtime {
                 .stop_marks
                 .lock()
                 .unwrap_or_else(|err| err.into_inner());
-            let token = marks.next;
-            marks.next = marks.next.wrapping_add(1);
+            let token = fresh_id(marks.next, |id| {
+                marks
+                    .tokens
+                    .get(agent_id)
+                    .is_some_and(|set| set.contains(&id))
+            });
+            marks.next = token.wrapping_add(1);
             let _ = marks
                 .tokens
                 .entry(agent_id.to_string())
@@ -2581,12 +3179,13 @@ impl Runtime {
     }
 
     /// Records that Stop has asked this agent's live rows to end. The drop
-    /// guard does not clear this.
-    pub(crate) async fn note_agent_stop_requested(&self, agent_id: &str) {
-        self.agent_launches
+    /// guard does not clear this. The mark is the synchronous one, so this
+    /// does not take the launch gate.
+    pub(crate) fn note_agent_stop_requested(&self, agent_id: &str) {
+        self.stop_marks
             .lock()
-            .await
-            .stop_requested
+            .unwrap_or_else(|err| err.into_inner())
+            .requested
             .insert(agent_id.to_string());
     }
 
@@ -2604,6 +3203,7 @@ impl Runtime {
         )
     }
 
+    #[cfg(test)]
     fn stop_mark_held(marks: &StdMutex<AgentStopMarks>, agent_id: &str) -> bool {
         marks
             .lock()
@@ -2611,33 +3211,30 @@ impl Runtime {
             .holds(agent_id)
     }
 
-    /// While any Stop token is set, or an effect of this agent is still
-    /// landing, Start is refused and `stop_requested` is left set. The row
-    /// test applies only to `stop_requested` once nothing is in flight. No
-    /// signal does not read the registry. No live row, and no landing
-    /// effect, clears `stop_requested`. Each Stop clears only its own token,
-    /// in [`AgentStopGuard`].
+    /// While any Stop token is set, or a flight of an ended or stopping
+    /// session is still open, Start is refused and the mark is left set. The row
+    /// test applies only to that mark once nothing is in flight. No signal
+    /// does not read the registry. No live row, and no landing effect,
+    /// clears the mark. Each Stop clears only its own token, in
+    /// [`AgentStopGuard`]. The caller holds `agent_launches`.
     fn refuse_start_for_stop(
         marks: &StdMutex<AgentStopMarks>,
         capsules: &RwLock<HashMap<String, RunningCapsuleInfo>>,
-        state: &mut AgentLaunchState,
         agent_id: &str,
         effect_landing: bool,
     ) -> bool {
-        if Self::stop_mark_held(marks, agent_id) {
+        let mut marks = marks.lock().unwrap_or_else(|err| err.into_inner());
+        if marks.holds(agent_id) || effect_landing {
             return true;
         }
         // Settled or unknown: `effect_landing` is false, and a later Start
         // is allowed once no live row remains.
-        if effect_landing {
-            return true;
-        }
-        if !state.stop_requested.contains(agent_id) {
+        if !marks.requested.contains(agent_id) {
             return false;
         }
         match Self::live_row_in(capsules, agent_id) {
             Some(false) => {
-                state.stop_requested.remove(agent_id);
+                marks.requested.remove(agent_id);
                 false
             }
             Some(true) | None => true,
@@ -2645,16 +3242,11 @@ impl Runtime {
     }
 
     pub(crate) async fn agent_is_stopping(&self, agent_id: &str) -> bool {
-        let effect_landing = !self.inflight_plan_sessions(agent_id).is_empty();
+        let effect_landing = self.ended_flight_is_landing(agent_id);
         let capsules = &self.running_capsules;
-        let mut state = self.agent_launches.lock().await;
-        Self::refuse_start_for_stop(
-            &self.stop_marks,
-            capsules,
-            &mut state,
-            agent_id,
-            effect_landing,
-        )
+        // The launch gate first, then `stop_marks`, the same order as Start.
+        let _gate = self.agent_launches.lock().await;
+        Self::refuse_start_for_stop(&self.stop_marks, capsules, agent_id, effect_landing)
     }
 
     /// The start record for this session, if Start stored one and the
@@ -2688,7 +3280,7 @@ impl Runtime {
 
     #[cfg(test)]
     fn note_stop_mark_before_rows(&self, agent_id: &str) {
-        let key = Arc::as_ptr(&self.agent_launches) as usize;
+        let key = self.stop_rows_key();
         let marked = Self::stop_mark_held(&self.stop_marks, agent_id);
         let mut probes = STOP_MARK_BEFORE_ROWS
             .lock()
@@ -2712,16 +3304,12 @@ impl Runtime {
         STOP_MARK_BEFORE_ROWS
             .lock()
             .unwrap_or_else(|err| err.into_inner())
-            .push((
-                Arc::as_ptr(&self.agent_launches) as usize,
-                agent_id.to_string(),
-                None,
-            ));
+            .push((self.stop_rows_key(), agent_id.to_string(), None));
     }
 
     #[cfg(test)]
     pub(crate) fn stop_mark_seen_before_rows(&self, agent_id: &str) -> Option<bool> {
-        let key = Arc::as_ptr(&self.agent_launches) as usize;
+        let key = self.stop_rows_key();
         STOP_MARK_BEFORE_ROWS
             .lock()
             .unwrap_or_else(|err| err.into_inner())
@@ -2731,9 +3319,24 @@ impl Runtime {
             .and_then(|(_, _, seen)| *seen)
     }
 
+    /// This plant's data folder. The first call freezes it. A later set is ignored.
     #[cfg(test)]
-    fn stop_rows_key(&self) -> usize {
-        Arc::as_ptr(&self.agent_launches) as usize
+    pub(crate) fn set_plant_dir_for_test(&self, dir: &Path) {
+        let _ = self
+            .plant_key
+            .set(dir.to_path_buf().to_string_lossy().into_owned());
+    }
+
+    #[cfg(test)]
+    fn plant_key(&self) -> String {
+        self.plant_key
+            .get_or_init(|| format!("rt:{}", Arc::as_ptr(&self.agent_launches) as usize))
+            .clone()
+    }
+
+    #[cfg(test)]
+    fn stop_rows_key(&self) -> String {
+        self.plant_key()
     }
 
     #[cfg(test)]
@@ -2797,7 +3400,7 @@ impl Runtime {
     }
 
     /// The next stop of this session fails before the row ends.
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub(crate) fn arm_failing_capsule_stop(&self, session_id: &str) {
         FAIL_CAPSULE_STOP
             .lock()
@@ -2821,6 +3424,134 @@ impl Runtime {
         true
     }
 
+    /// Pauses the watcher at `point` until the test releases it.
+    /// The pause matches this plant's data folder.
+    #[cfg(all(test, unix))]
+    pub(crate) fn arm_watch_pause_for_test(&self, point: &'static str) -> WatchHold {
+        arm_watch_pause(&self.plant_key(), point)
+    }
+
+    /// Pauses this session's provider stop after the reason is staged.
+    #[cfg(all(test, unix))]
+    pub(crate) fn arm_provider_stop_hold(&self, session_id: &str) -> ProviderStopPause {
+        let hold = Arc::new(ProviderStopHold {
+            entered: Arc::new(tokio::sync::Notify::new()),
+            releases: StdMutex::new(Vec::new()),
+            arrived: std::sync::atomic::AtomicUsize::new(0),
+        });
+        PROVIDER_STOP_HOLDS
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .push((
+                self.stop_rows_key(),
+                session_id.to_string(),
+                Arc::clone(&hold),
+            ));
+        ProviderStopPause {
+            key: self.stop_rows_key(),
+            session: session_id.to_string(),
+            hold,
+        }
+    }
+
+    #[cfg(all(test, unix))]
+    async fn pause_during_provider_stop(&self, id: &str) {
+        let hold = {
+            let holds = PROVIDER_STOP_HOLDS
+                .lock()
+                .unwrap_or_else(|err| err.into_inner());
+            let key = self.stop_rows_key();
+            holds
+                .iter()
+                .rev()
+                .find(|(stored, session, _)| *stored == key && session == id)
+                .map(|(_, _, hold)| Arc::clone(hold))
+        };
+        let Some(hold) = hold else {
+            return;
+        };
+        let release = Arc::new(tokio::sync::Notify::new());
+        hold.releases
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .push(Arc::clone(&release));
+        hold.arrived
+            .fetch_add(1, std::sync::atomic::Ordering::Release);
+        hold.entered.notify_one();
+        release.notified().await;
+    }
+
+    /// Pauses after the stop is committed, where the launch lock used to await.
+    #[cfg(all(test, unix))]
+    pub(crate) fn arm_committed_stop_gate(&self, session_id: &str) -> CommittedStopPause {
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        COMMITTED_STOP_GATES
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .push(CommittedStopGate {
+                key: self.stop_rows_key(),
+                session: session_id.to_string(),
+                entered: Arc::clone(&entered),
+                release: Arc::clone(&release),
+            });
+        CommittedStopPause { entered, release }
+    }
+
+    #[cfg(all(test, unix))]
+    async fn pause_after_committed_stop(&self, id: &str) {
+        let Some(gate) = ({
+            let mut gates = COMMITTED_STOP_GATES
+                .lock()
+                .unwrap_or_else(|err| err.into_inner());
+            let key = self.stop_rows_key();
+            gates
+                .iter()
+                .rposition(|gate| gate.key == key && gate.session == id)
+                .map(|pos| gates.swap_remove(pos))
+        }) else {
+            return;
+        };
+        gate.entered.notify_one();
+        gate.release.notified().await;
+    }
+
+    /// Pauses after the provider's `Ok` and before the commit. Unarmed returns
+    /// at once, so the product path in a test build still does not wait.
+    #[cfg(all(test, unix))]
+    pub(crate) fn arm_pre_commit_stop_gate(&self, session_id: &str) -> CommittedStopPause {
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        PRE_COMMIT_GATES
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .push(CommittedStopGate {
+                key: self.stop_rows_key(),
+                session: session_id.to_string(),
+                entered: Arc::clone(&entered),
+                release: Arc::clone(&release),
+            });
+        CommittedStopPause { entered, release }
+    }
+
+    #[cfg(all(test, unix))]
+    async fn pause_before_stop_commit(&self, id: &str) {
+        let Some(gate) = ({
+            let mut gates = PRE_COMMIT_GATES
+                .lock()
+                .unwrap_or_else(|err| err.into_inner());
+            let key = self.stop_rows_key();
+            gates
+                .iter()
+                .rposition(|gate| gate.key == key && gate.session == id)
+                .map(|pos| gates.swap_remove(pos))
+        }) else {
+            return;
+        };
+        gate.entered.notify_one();
+        gate.release.notified().await;
+    }
+
     /// Await points on an admitted Start, after the live run is set and before
     /// the guest is running. A test cancels at each one.
     #[cfg(test)]
@@ -2834,8 +3565,8 @@ impl Runtime {
     ];
 
     #[cfg(test)]
-    fn live_run_key(&self) -> usize {
-        Arc::as_ptr(&self.live_runs) as usize
+    fn live_run_key(&self) -> String {
+        self.plant_key()
     }
 
     #[cfg(test)]
@@ -2880,7 +3611,8 @@ impl Runtime {
     /// Waits when a test armed this point. An unarmed point returns at once.
     #[cfg(test)]
     async fn live_run_await(&self, point: &'static str) {
-        await_live_run_gate(self.live_run_key(), point).await;
+        let key = self.live_run_key();
+        await_live_run_gate(&key, point).await;
     }
 
     #[cfg(test)]
@@ -2889,7 +3621,7 @@ impl Runtime {
         REFUSE_AFTER_ADMIT
             .lock()
             .unwrap_or_else(|err| err.into_inner())
-            .push(key);
+            .push(key.clone());
         RefuseAfterAdmit { key }
     }
 
@@ -2943,13 +3675,7 @@ impl Runtime {
         self.activation_stops
             .write()
             .unwrap_or_else(|err| err.into_inner())
-            .insert(
-                session_id.to_string(),
-                Arc::new(ActivationStop {
-                    flag: Arc::new(crate::resource_bridge::ActivationStopFlag::default()),
-                    cause: StdMutex::new(None),
-                }),
-            );
+            .insert(session_id.to_string(), Arc::new(ActivationStop::new()));
     }
 
     /// The planted row and the live-run token are one fact. Ending the row
@@ -2988,13 +3714,14 @@ impl Runtime {
 
     #[cfg(test)]
     pub(crate) fn limit_stop_wait_for_test(&self, bound: std::time::Duration) -> StopWaitLimit {
+        let plant = self.plant_key();
         let token = NEXT_STOP_WAIT_TOKEN.fetch_add(1, Ordering::Relaxed);
         TEST_STOP_WAITS
             .lock()
             .unwrap_or_else(|err| err.into_inner())
-            .push((token, bound));
+            .push((plant.clone(), token, bound));
         self.stop_wait_token.store(token, Ordering::Release);
-        StopWaitLimit { token }
+        StopWaitLimit { plant, token }
     }
 
     #[cfg(test)]
@@ -3003,13 +3730,14 @@ impl Runtime {
         if token == 0 {
             return std::time::Duration::from_secs(40);
         }
+        let plant = self.plant_key();
         TEST_STOP_WAITS
             .lock()
             .unwrap_or_else(|err| err.into_inner())
             .iter()
             .rev()
-            .find(|(stored, _)| *stored == token)
-            .map(|(_, bound)| *bound)
+            .find(|(stored_plant, stored, _)| stored_plant == &plant && *stored == token)
+            .map(|(_, _, bound)| *bound)
             .unwrap_or(std::time::Duration::from_secs(40))
     }
 
@@ -3150,14 +3878,6 @@ impl Runtime {
                     "the model-token ceiling is the one admission recorded".into(),
                 ));
             }
-        }
-
-        // The server has no owner or stop route for a resident v2 activation.
-        // Refuse it before loading a component or running any guest code.
-        if manifest.bus_contract.as_deref() == Some(elastos_common::ELASTOS_BUS_V2_CONTRACT) {
-            return Err(ElastosError::InvalidManifest(
-                "Bus v2 contract not yet runnable".into(),
-            ));
         }
 
         // Reject entrypoints that escape the capsule directory
@@ -3518,9 +4238,9 @@ impl Runtime {
         let asked: LabCid = cid
             .parse()
             .map_err(|_| BundleRefusal::CidFormInvalid(cid.to_string()))?;
-        // One budget for the bundle asked for and every bundle pinned below
-        // it: the files and bytes each walk takes in come off what the next
-        // may take.
+        // One start spends one budget over its whole closure. Every listed
+        // entry, a file or a folder, and the file bytes come off what the
+        // next bundle may take.
         let mut left = budget;
         // Who is trusted is read once, here. That one reading judges the
         // bundle asked for and every bundle pinned below it, and it is held
@@ -3721,7 +4441,7 @@ impl Runtime {
     /// the signature beside the slot under `trust` (the start's one reading
     /// of who is trusted), and only then judges the manifest and a program's
     /// imports. Its fields are private to the module that defines the struct.
-    /// What the walk took in comes off `left`.
+    /// Every listed entry and the file bytes come off `left`.
     ///
     /// The walk is not blind to the manifest: to name a bundle it parses
     /// and validates `capsule.json` with the Runtime's reader, before the
@@ -3791,11 +4511,12 @@ impl Runtime {
         }
         // The one walk of the slot. The manifest and the component below
         // come from this value; the slot is not read again.
-        let bundle = checked_bundle_within(&slot, *left).map_err(bundle_admission::walk_refusal)?;
+        let mut report = WalkReport::default();
+        let bundle = checked_bundle_within_reported(&slot, *left, &mut report)
+            .map_err(bundle_admission::walk_refusal)?;
         after_walk(asked);
-        let files = bundle.entries();
-        let bytes: u64 = files.iter().map(|file| file.content.len() as u64).sum();
-        left.max_entries = left.max_entries.saturating_sub(files.len());
+        let bytes = report.bytes;
+        left.max_entries = left.max_entries.saturating_sub(report.entries);
         left.max_total_bytes = left.max_total_bytes.saturating_sub(bytes);
         let signature = bundle_admission::bundle_signature_path(data_dir, asked);
         VerifiedBundle::check(&bundle, asked, &signature, trust)
@@ -3967,14 +4688,19 @@ impl Runtime {
                 crate::agent_admission::NOT_A_COMPONENT.to_string(),
             ));
         }
-        let detached_component =
-            if mode == LaunchMode::Detached && handle.manifest.is_component_capsule() {
-                Some(self.component_provider.clone().ok_or_else(|| {
-                    ElastosError::Compute("No component compute provider is configured".to_string())
-                })?)
-            } else {
-                None
-            };
+        // A v2 component stays up. A folder start uses this detached path,
+        // with the same admission, grants, and limits as a v1 start.
+        let v2_resident = handle.manifest.bus_contract.as_deref()
+            == Some(elastos_common::ELASTOS_BUS_V2_CONTRACT);
+        let detached_component = if (mode == LaunchMode::Detached || v2_resident)
+            && handle.manifest.is_component_capsule()
+        {
+            Some(self.component_provider.clone().ok_or_else(|| {
+                ElastosError::Compute("No component compute provider is configured".to_string())
+            })?)
+        } else {
+            None
+        };
         let mut carried = if model_admission.is_some() {
             live_run.take()
         } else {
@@ -4136,19 +4862,26 @@ impl Runtime {
             .is_some_and(|stop| stop.flag.requested.load(Ordering::Acquire))
     }
 
+    /// The flag the bridge's capability poll reads.
+    #[cfg(all(test, unix))]
+    pub(crate) fn activation_stop_flag_for_test(
+        &self,
+        id: &str,
+    ) -> Option<Arc<crate::resource_bridge::ActivationStopFlag>> {
+        self.activation_stops
+            .read()
+            .unwrap_or_else(|err| err.into_inner())
+            .get(id)
+            .map(|stop| Arc::clone(&stop.flag))
+    }
+
     /// Gives this session a stop request, so a later stop takes the watcher path.
     #[cfg(all(test, unix))]
     pub(crate) fn plant_activation_stop_for_test(&self, id: &str) {
         self.activation_stops
             .write()
             .unwrap_or_else(|err| err.into_inner())
-            .insert(
-                id.to_string(),
-                Arc::new(ActivationStop {
-                    flag: Arc::new(crate::resource_bridge::ActivationStopFlag::default()),
-                    cause: StdMutex::new(None),
-                }),
-            );
+            .insert(id.to_string(), Arc::new(ActivationStop::new()));
     }
 
     #[cfg(test)]
@@ -4183,14 +4916,32 @@ impl Runtime {
                 session_id: session_id.to_string(),
                 agent_id: agent_id.to_string(),
                 request_id: request_id.to_string(),
+                purge_at: None,
             },
         );
     }
 
     #[cfg(all(test, unix))]
-    pub(crate) fn unknown_count_for_test(&self, agent_id: &str) -> usize {
+    pub(crate) fn set_plan_clock_for_test(&self, now: Option<std::time::Instant>) {
+        plan_book(&self.plan_book).clock = now;
+    }
+
+    /// Names still stored, including ones whose purge time has passed.
+    #[cfg(all(test, unix))]
+    pub(crate) fn unknown_ids_for_test(&self, agent_id: &str) -> Vec<String> {
         plan_book(&self.plan_book)
             .unknown
+            .iter()
+            .filter(|step| step.agent_id == agent_id)
+            .map(|step| step.request_id.clone())
+            .collect()
+    }
+
+    #[cfg(all(test, unix))]
+    pub(crate) fn unknown_count_for_test(&self, agent_id: &str) -> usize {
+        let mut book = plan_book(&self.plan_book);
+        drop_due_unknown(&mut book);
+        book.unknown
             .iter()
             .filter(|step| step.agent_id == agent_id)
             .count()
@@ -4213,17 +4964,17 @@ impl Runtime {
     }
 
     #[cfg(all(test, unix))]
-    pub(crate) async fn stop_requested_for_test(&self, agent_id: &str) -> bool {
-        self.agent_launches
+    pub(crate) fn stop_requested_for_test(&self, agent_id: &str) -> bool {
+        self.stop_marks
             .lock()
-            .await
-            .stop_requested
+            .unwrap_or_else(|err| err.into_inner())
+            .requested
             .contains(agent_id)
     }
 
     /// Lets the guest task run its opening while this start still holds the
     /// launch turn. The opening is taken by that task.
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     async fn yield_until_guest_opening_runs(&self, agent_id: &str) {
         let _ = self;
         if !guest_opening_is_armed(agent_id) {
@@ -4259,11 +5010,13 @@ impl Runtime {
         tokio::spawn(async move {
             // A stop that arrived while the activation was still starting: the
             // guest is not run at all, and the stop is its whole end.
+            #[cfg(all(test, unix))]
+            pause_watch(&held.plant_key, "sees-stop").await;
             if let Some(cause) = held.requested_stop() {
                 held.end_instance(CAPSULE_STOPPED, &cause).await;
                 return;
             }
-            #[cfg(test)]
+            #[cfg(all(test, unix))]
             if let Some(agent_id) = held.live_run.as_ref().map(|run| run.agent_id.clone()) {
                 if let Some(opening) = take_guest_opening(&agent_id) {
                     match opening {
@@ -4282,32 +5035,37 @@ impl Runtime {
                     }
                 }
             }
-            let (status, cause) = match component.start_resident(&handle).await {
+            let outcome = match component.start_resident(&handle).await {
                 Ok(mut activation) => {
                     // Only the compute worker's `started` moves the entry from
                     // admission's `starting` to `running`.
                     if let Some(info) = registry.write().await.get_mut(&id.0) {
                         info.status = CAPSULE_RUNNING.to_string();
                     }
-                    match activation.ended().await {
-                        ActivationOutcome::Returned => match held.requested_stop() {
-                            Some(cause) => (CAPSULE_STOPPED, cause),
-                            None => (CAPSULE_STOPPED, CAUSE_COMPLETED.to_string()),
-                        },
-                        // A trap is the guest's own ending unless the stop is
-                        // what ended it: the worker's epoch interrupt, or the
-                        // bridge leaving the guest's call for the stop.
-                        ActivationOutcome::Trapped(message) => match held.requested_stop() {
-                            Some(cause) if held.stop_cancelled_guest() => (CAPSULE_STOPPED, cause),
-                            _ => (CAPSULE_FAILED, message),
-                        },
-                        ActivationOutcome::Stopped => (
-                            CAPSULE_STOPPED,
-                            held.requested_stop()
-                                .unwrap_or_else(|| "stopped by request".to_string()),
-                        ),
-                    }
+                    #[cfg(all(test, unix))]
+                    pause_watch(&held.plant_key, "outcome").await;
+                    Ok(activation.ended().await)
                 }
+                Err(err) => Err(err),
+            };
+            held.wait_for_open_stops().await;
+            let (status, cause) = match outcome {
+                Ok(ActivationOutcome::Returned) => match held.requested_stop() {
+                    Some(cause) => (CAPSULE_STOPPED, cause),
+                    None => (CAPSULE_STOPPED, CAUSE_COMPLETED.to_string()),
+                },
+                // A trap is the guest's own ending unless the stop is
+                // what ended it: the worker's epoch interrupt, or the
+                // bridge leaving the guest's call for the stop.
+                Ok(ActivationOutcome::Trapped(message)) => match held.requested_stop() {
+                    Some(cause) if held.stop_cancelled_guest() => (CAPSULE_STOPPED, cause),
+                    _ => (CAPSULE_FAILED, message),
+                },
+                Ok(ActivationOutcome::Stopped) => (
+                    CAPSULE_STOPPED,
+                    held.requested_stop()
+                        .unwrap_or_else(|| "stopped by request".to_string()),
+                ),
                 Err(err) => match held.requested_stop() {
                     Some(cause) if start_ended_by_stop(&err) => (CAPSULE_STOPPED, cause),
                     _ => (CAPSULE_FAILED, err.to_string()),
@@ -4454,9 +5212,16 @@ impl Runtime {
 
     /// Unregister a capsule from the runtime
     pub async fn unregister_capsule(&self, id: &str) {
-        let mut capsules = self.running_capsules.write().await;
-        if capsules.remove(id).is_some() {
-            tracing::info!("Unregistered capsule: {}", id);
+        let removed = {
+            let mut capsules = self.running_capsules.write().await;
+            let removed = capsules.remove(id).is_some();
+            if removed {
+                tracing::info!("Unregistered capsule: {}", id);
+            }
+            removed
+        };
+        if removed {
+            self.purge_unknown_sessions(&[id.to_string()]);
         }
     }
 
@@ -4496,6 +5261,9 @@ impl Runtime {
     /// List all registered capsules, sorted by id. An entry that ended more
     /// than [`ENDED_CAPSULE_RETENTION`] ago leaves the listing here.
     pub async fn list_capsules(&self) -> Vec<RunningCapsuleInfo> {
+        if let Some(component) = &self.component_provider {
+            component.reap_joined_residents().await;
+        }
         self.list_capsules_pruning_at(std::time::Instant::now())
             .await
     }
@@ -4542,7 +5310,7 @@ impl Runtime {
         info
     }
 
-    /// Drops unknown names for sessions whose registry row has been pruned.
+    /// Drops names whose purge time has come. A live session's name has none.
     /// The registry lock is not held.
     fn purge_unknown_sessions(&self, session_ids: &[String]) {
         if session_ids.is_empty() {
@@ -4552,6 +5320,20 @@ impl Runtime {
         for session_id in session_ids {
             purge_unknown_session(&mut book, session_id);
         }
+    }
+
+    /// The mark, then the cause. Both land before this returns, and nothing
+    /// here awaits. The provider has already answered `Ok`, or there was no
+    /// provider call.
+    fn commit_staged_stop(&self, ticket: OpenStop, agent_id: Option<String>) {
+        let mut marks = self
+            .stop_marks
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        if let Some(agent_id) = agent_id {
+            marks.requested.insert(agent_id);
+        }
+        ticket.commit();
     }
 
     /// Update a capsule's status
@@ -4646,16 +5428,26 @@ impl Runtime {
             }));
         };
 
-        // The reason is recorded before the flag is raised, so the end that
-        // sees the flag records this cause. The provider stop runs after
-        // that. If it fails, the flag and the cause are withdrawn: the run
-        // stays up and can still dispatch. The plan end is `end_instance`,
-        // which runs only when the watcher records the end.
-        stop.request(reason);
+        // The cause and the flag are written when this caller's provider stop
+        // has succeeded. A drop or a failure before that withdraws only this
+        // ticket. The agent's stop mark is stored in that same commit, before
+        // the cause is published and before the wait for the end.
+        let ticket = OpenStop::stage(&stop, reason);
+        // The session is read before the provider answers. The mark itself is
+        // written after `Ok`, under `stop_marks`, with no await between them.
+        let marked_agent = self
+            .agent_launches
+            .lock()
+            .await
+            .sessions
+            .get(id)
+            .map(|record| record.agent_id.clone());
         if let Some((handle, provider)) = provider {
             tracing::info!("Stopping capsule '{}' ({})", info.name, id);
             #[cfg(test)]
             self.note_provider_stop_call();
+            #[cfg(all(test, unix))]
+            self.pause_during_provider_stop(id).await;
             let stopped = provider.stop(handle).await;
             #[cfg(test)]
             let stopped = if stopped.is_ok() && self.take_failing_capsule_stop(id) {
@@ -4663,12 +5455,21 @@ impl Runtime {
             } else {
                 stopped
             };
-            if let Err(error) = stopped {
-                stop.withdraw();
-                return Err(error);
-            }
+            stopped?;
         }
-
+        // A test holds the window after the provider's `Ok` and before the
+        // commit. The product path does not await here.
+        #[cfg(all(test, unix))]
+        self.pause_before_stop_commit(id).await;
+        // The stop mark became synchronous: it lives on `stop_marks`, and
+        // this writes it before the cause. Nothing awaits between the
+        // provider's `Ok` and that commit. Start still takes the launch
+        // gate first, then this mutex.
+        self.commit_staged_stop(ticket, marked_agent);
+        // The old await was the launch lock on this line. The pause is that
+        // await, and the commit above has already run.
+        #[cfg(all(test, unix))]
+        self.pause_after_committed_stop(id).await;
         self.wait_ended(id).await;
         // The end happened, whatever its recorded status and cause: the
         // entry the list serves says which, and a stop whose guest ran to its
@@ -4752,12 +5553,47 @@ fn table_holds<T>(table: &StdRwLock<HashMap<String, T>>, id: &str) -> bool {
 }
 
 #[cfg(test)]
+fn live_thread_count() -> u32 {
+    #[cfg(target_os = "linux")]
+    {
+        std::fs::read_dir("/proc/self/task")
+            .map(|entries| entries.filter(|entry| entry.is_ok()).count() as u32)
+            .unwrap_or(0)
+    }
+    #[cfg(target_os = "macos")]
+    {
+        extern "C" {
+            fn mach_task_self() -> libc::mach_port_t;
+        }
+        // SAFETY: `mach_task_self` is this process. `task_threads` writes a
+        // kernel array that this function releases with `vm_deallocate`.
+        unsafe {
+            let mut list: libc::thread_act_array_t = std::ptr::null_mut();
+            let mut count: libc::mach_msg_type_number_t = 0;
+            let task = mach_task_self();
+            let kr = libc::task_threads(task, &mut list, &mut count);
+            if kr == 0 && !list.is_null() {
+                let bytes =
+                    (count as usize).saturating_mul(std::mem::size_of::<libc::thread_act_t>());
+                libc::vm_deallocate(task, list as libc::vm_address_t, bytes as libc::vm_size_t);
+            }
+            count
+        }
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        0
+    }
+}
+
+#[cfg(test)]
 pub(crate) mod tests {
     use super::*;
     use async_trait::async_trait;
     use elastos_common::{
-        elastos_bus_v1_wit_sha256, CapsuleId, CapsuleManifest, CapsuleRole, CapsuleStatus,
-        CapsuleType, Permissions, ResourceLimits, ELASTOS_BUS_V1_CONTRACT, SCHEMA_V1,
+        elastos_bus_v1_wit_sha256, elastos_bus_v2_wit_sha256, CapsuleId, CapsuleManifest,
+        CapsuleRole, CapsuleStatus, CapsuleType, Permissions, ResourceLimits,
+        ELASTOS_BUS_V1_CONTRACT, ELASTOS_BUS_V2_CONTRACT, SCHEMA_V1,
     };
     use elastos_compute::{CapsuleInfo, ComputeProvider};
     use elastos_runtime::capability::pending::GrantDuration;
@@ -4845,7 +5681,7 @@ pub(crate) mod tests {
             )
             .await
             .unwrap();
-        let unset = super::settle_instance_authority(None, session, "stopped").await;
+        let unset = super::settle_instance_authority(None, session, "stopped", None).await;
         assert!(unset.is_ok(), "{unset:?}");
         assert!(manager.can_still_validate(&token).await);
         let dir = tempfile::tempdir().unwrap();
@@ -4855,7 +5691,8 @@ pub(crate) mod tests {
             data_dir: dir.path().to_path_buf(),
             persist_revocations: true,
         };
-        let set = super::settle_instance_authority(Some(&authority), session, "stopped").await;
+        let set =
+            super::settle_instance_authority(Some(&authority), session, "stopped", None).await;
         assert!(set.is_ok(), "{set:?}");
         assert!(!manager.can_still_validate(&token).await);
     }
@@ -4961,6 +5798,177 @@ pub(crate) mod tests {
             )
             .await;
         assert_eq!(runtime.model_budget.bound_home_for_test(), Some(data_dir));
+    }
+
+    /// Within one process, one Home has one plan book for dispatch and Stop.
+    /// A second live book fails. The installed two-process path runs no agent
+    /// today and its proof comes with the package.
+    #[tokio::test]
+    async fn one_home_refuses_a_second_runtime_for_plan_dispatch_and_stop() {
+        let bridge = include_str!("resource_bridge.rs");
+        assert!(
+            bridge.contains("wire_home_runtime(data_dir, book)"),
+            "plan dispatch does not use this process's plan book"
+        );
+        let server = include_str!("api/server.rs");
+        assert!(
+            server.contains("wire_home_runtime(home, &runtime.plan_book)"),
+            "Stop's router does not use this process's plan book"
+        );
+        let gateway = include_str!("api/gateway_server.rs");
+        assert!(
+            !gateway.contains("wire_home_runtime"),
+            "the gateway process wires a Home runtime"
+        );
+        let limit = "The installed two-process path runs no agent today and its proof comes with the package.";
+        let notes = include_str!("api/routes/tests/instance_storage_rows.rs");
+        assert!(notes.contains(limit) && notes.contains("Within one process"));
+        assert!(!notes.contains("gateway's one Runtime"));
+        let temp = tempfile::tempdir().unwrap();
+        let data_dir = temp.path().join("home");
+        std::fs::create_dir_all(&data_dir).unwrap();
+        let storage = |name: &str| {
+            let path = temp.path().join(name);
+            async move { Arc::new(LocalFSProvider::new(path).await.unwrap()) }
+        };
+        let first =
+            Runtime::with_providers_and_component(storage("storage-a").await, Vec::new(), None);
+        let second =
+            Runtime::with_providers_and_component(storage("storage-b").await, Vec::new(), None);
+        let audit_log = Arc::new(AuditLog::new());
+        let capability_manager = Arc::new(CapabilityManager::new(
+            Arc::new(CapabilityStore::new()),
+            Arc::clone(&audit_log),
+            Arc::new(MetricsManager::new()),
+        ));
+        let pending_store =
+            Arc::new(elastos_runtime::capability::pending::PendingRequestStore::new(audit_log));
+        first
+            .set_provider_registry(
+                Arc::new(ProviderRegistry::new()),
+                capability_manager,
+                pending_store,
+                data_dir.clone(),
+            )
+            .await;
+        wire_home_runtime(&data_dir, &first.plan_book);
+        let split = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            wire_home_runtime(&data_dir, &second.plan_book);
+        }));
+        let err = split.expect_err("a second Runtime was accepted for one Home");
+        let message = err.downcast_ref::<&str>().copied().unwrap_or("");
+        assert!(message.contains("within one process"), "{message}");
+    }
+
+    /// A counter that wraps does not reuse an id a hung call still holds.
+    #[tokio::test]
+    async fn wrapping_ids_skip_occupied_slots() {
+        let stop = ActivationStop::new();
+        {
+            let mut calls = stop.calls.lock().unwrap_or_else(|err| err.into_inner());
+            calls.next = 0;
+            calls.open.insert(0);
+            calls.open.insert(1);
+        }
+        let ticket = stop.open_id();
+        assert_eq!(ticket, 2);
+        stop.withdraw(ticket);
+        {
+            let calls = stop.calls.lock().unwrap_or_else(|err| err.into_inner());
+            assert!(calls.open.contains(&0) && calls.open.contains(&1));
+            assert!(!calls.open.contains(&ticket));
+        }
+
+        let mut runs = AgentLiveRuns {
+            next: 0,
+            ..Default::default()
+        };
+        {
+            let held = runs.tokens.entry("agent".to_string()).or_default();
+            held.insert(0);
+            held.insert(1);
+        }
+        let token = runs.admit("agent");
+        assert_eq!(token, 2);
+        runs.clear("agent", token);
+        let set = runs
+            .tokens
+            .get("agent")
+            .expect("the hung live-run tokens stay");
+        assert!(set.contains(&0) && set.contains(&1));
+        assert!(!set.contains(&token));
+
+        let book = new_plan_book();
+        {
+            let mut locked = plan_book(&book);
+            locked.next = 0;
+            locked.instances.insert(
+                "session".to_string(),
+                PlanInstance {
+                    agent_id: "agent".to_string(),
+                    stopping: false,
+                },
+            );
+            for id in [0_u64, 1] {
+                locked.inflight.insert(
+                    id,
+                    PlanFlight {
+                        session_id: "session".to_string(),
+                        agent_id: "agent".to_string(),
+                        request_id: format!("hung-{id}"),
+                    },
+                );
+            }
+        }
+        let guard = Runtime::try_enter_plan_effect(&book, "session", "agent", "fresh-wrap-r12")
+            .expect("the session is open");
+        let fresh = guard.id;
+        assert_eq!(fresh, 2);
+        guard.release();
+        {
+            let locked = plan_book(&book);
+            assert_eq!(
+                locked
+                    .inflight
+                    .get(&0)
+                    .map(|flight| flight.request_id.as_str()),
+                Some("hung-0")
+            );
+            assert_eq!(
+                locked
+                    .inflight
+                    .get(&1)
+                    .map(|flight| flight.request_id.as_str()),
+                Some("hung-1")
+            );
+            assert!(!locked.inflight.contains_key(&fresh));
+        }
+
+        let (runtime, _dir) = test_runtime().await;
+        let runtime = Arc::new(runtime);
+        {
+            let mut marks = runtime
+                .stop_marks
+                .lock()
+                .unwrap_or_else(|err| err.into_inner());
+            marks.next = 0;
+            let set = marks.tokens.entry("agent".to_string()).or_default();
+            set.insert(0);
+            set.insert(1);
+        }
+        let guard = runtime.begin_agent_stop("agent").await;
+        assert_eq!(guard.token, 2);
+        drop(guard);
+        let marks = runtime
+            .stop_marks
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        let set = marks
+            .tokens
+            .get("agent")
+            .expect("the hung stop tokens stay");
+        assert!(set.contains(&0) && set.contains(&1));
+        assert!(!set.contains(&2));
     }
 
     impl Runtime {
@@ -5087,6 +6095,7 @@ pub(crate) mod tests {
                 model_token_ceiling,
                 model_budget,
                 stop: tables.stop,
+                v2_guests: None,
                 plan_book: Some(Arc::clone(&self.plan_book)),
             }
         }
@@ -6384,6 +7393,7 @@ pub(crate) mod tests {
             Vec::new(),
             Some(Arc::new(ComponentProvider::new())),
         );
+        runtime.set_plant_dir_for_test(temp_dir.path());
         (runtime, temp_dir)
     }
 
@@ -8012,6 +9022,7 @@ pub(crate) mod tests {
             model_token_ceiling: None,
             model_budget: None,
             stop: None,
+            v2_guests: None,
             plan_book: None,
         };
         let line = serde_json::json!({
@@ -8370,10 +9381,7 @@ pub(crate) mod tests {
     /// records; a later stop raises the same flag and changes nothing else.
     #[test]
     fn a_later_stop_keeps_the_first_cause() {
-        let stop = ActivationStop {
-            flag: Arc::new(crate::resource_bridge::ActivationStopFlag::default()),
-            cause: StdMutex::new(None),
-        };
+        let stop = ActivationStop::new();
         assert_eq!(stop.cause(), None);
         stop.request("first");
         assert!(stop.flag.requested.load(Ordering::Acquire));
@@ -8408,6 +9416,262 @@ pub(crate) mod tests {
             own.to_string()
         )));
     }
+
+    fn v2_home_bytes(kind: &str) -> Vec<u8> {
+        let source = include_str!("../../../tests/fixtures/components/v2-resident.wat");
+        let source = match kind {
+            "trap" => source.replacen(
+                "call $new global.set $set\n      call $next)",
+                "call $new global.set $set\n      unreachable)",
+                1,
+            ),
+            "spin" => source.replacen(
+                "call $new global.set $set\n      call $next)",
+                "call $new global.set $set\n      (loop $spin br $spin) i32.const 0)",
+                1,
+            ),
+            _ => source.to_string(),
+        };
+        wat::parse_str(source).expect("v2 home guest")
+    }
+
+    /// Loads a v2 guest, registers it, and lets the watcher start it.
+    async fn start_v2_home(
+        bytes: Vec<u8>,
+        name: &str,
+        panic_start: bool,
+    ) -> (
+        Runtime,
+        Arc<ComponentProvider>,
+        CapsuleHandle,
+        tempfile::TempDir,
+    ) {
+        let temp = tempfile::tempdir().unwrap();
+        let storage = Arc::new(
+            LocalFSProvider::new(temp.path().to_path_buf())
+                .await
+                .unwrap(),
+        );
+        let component = Arc::new(ComponentProvider::new());
+        let runtime =
+            Runtime::with_providers_and_component(storage, Vec::new(), Some(component.clone()));
+        let mut manifest: CapsuleManifest =
+            serde_json::from_str(&component_manifest_json(name)).unwrap();
+        manifest.bus_contract = Some(ELASTOS_BUS_V2_CONTRACT.into());
+        manifest.wit_world_sha256 = Some(elastos_bus_v2_wit_sha256());
+        let handle = component.load_admitted(bytes, manifest).await.unwrap();
+        let id = handle.id.0.clone();
+        runtime
+            .hold_launch_context(&handle, Some("person:local:resident".into()), None)
+            .await;
+        runtime
+            .register_capsule(RunningCapsuleInfo {
+                id: id.clone(),
+                name: name.to_string(),
+                status: CAPSULE_STARTING.to_string(),
+                capsule_type: handle.manifest.capsule_type.clone(),
+                handle: Some(handle.clone()),
+                session_id: id.clone(),
+                principal: Some("person:local:resident".into()),
+                cause: None,
+                ended_at: None,
+            })
+            .await;
+        let held = ActivationContextHeld::new(&runtime, &handle, component.clone(), None);
+        if panic_start {
+            component.panic_next_v2.store(true, Ordering::Release);
+        }
+        runtime.watch_activation(handle.id.clone(), handle.clone(), component.clone(), held);
+        (runtime, component, handle, temp)
+    }
+
+    async fn wait_v2_status(runtime: &Runtime, id: &str, running: bool) -> RunningCapsuleInfo {
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if let Some(entry) = runtime.get_capsule(id).await {
+                    if running && entry.status == CAPSULE_RUNNING {
+                        return entry;
+                    }
+                    if entry.ended_at.is_some() {
+                        return entry;
+                    }
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("v2 resident did not reach its status: {id}"))
+    }
+
+    async fn assert_v2_home_cleared(
+        runtime: &Runtime,
+        component: &ComponentProvider,
+        handle: &CapsuleHandle,
+    ) {
+        assert!(
+            runtime
+                .context_left_for_test(handle.id.as_str())
+                .await
+                .is_empty(),
+            "tokens stay after the end"
+        );
+        assert!(!runtime.provider_entry_for_test(handle).await);
+        assert!(runtime.provider_principal_for_test(handle).await.is_none());
+        assert!(component
+            .read_v2_frame(Some("person:local:resident"), handle.id.as_str())
+            .await
+            .is_none());
+    }
+
+    /// A detached v2 guest stays up, answers stop, and the end clears its
+    /// tokens, frame, and events. The launch record names that stop.
+    #[tokio::test]
+    async fn a_v2_home_resident_stays_up_and_stops() {
+        let (runtime, component, handle, _temp) =
+            start_v2_home(v2_home_bytes("stay"), "stays", false).await;
+        let running = wait_v2_status(&runtime, handle.id.as_str(), true).await;
+        assert_eq!(running.status, CAPSULE_RUNNING);
+        assert_eq!(running.session_id, handle.id.0);
+        assert!(running.cause.is_none());
+        assert!(running.ended_at.is_none());
+        assert_eq!(
+            component.status(&handle).await.unwrap(),
+            CapsuleStatus::Running
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+        assert_eq!(
+            component.status(&handle).await.unwrap(),
+            CapsuleStatus::Running,
+            "the guest stays up"
+        );
+        let ended = runtime
+            .stop_capsule_by_id(handle.id.as_str())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(ended.status, CAPSULE_STOPPED);
+        assert_eq!(ended.cause.as_deref(), Some("stopped: user"));
+        assert!(ended.ended_at.is_some());
+        assert_eq!(ended.session_id, handle.id.0);
+        assert_v2_home_cleared(&runtime, &component, &handle).await;
+    }
+
+    /// A start task that panics, with no stop requested, is the guest's failure.
+    #[tokio::test]
+    async fn a_panic_in_the_v2_start_task_is_recorded_failed() {
+        let (runtime, _component, handle, _temp) =
+            start_v2_home(v2_home_bytes("stay"), "panics", true).await;
+        let ended = wait_v2_status(&runtime, handle.id.as_str(), false).await;
+        assert_eq!(ended.status, CAPSULE_FAILED, "{ended:?}");
+        let cause = ended.cause.unwrap_or_default();
+        assert!(cause.contains("ended without answering"), "{cause}");
+        assert!(!cause.contains(STOPPED_DURING_START), "{cause}");
+    }
+
+    /// A stop while start is still in the publish gap is recorded stopped.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_stop_in_the_v2_publish_gap_is_recorded_stopped() {
+        let temp = tempfile::tempdir().unwrap();
+        let storage = Arc::new(
+            LocalFSProvider::new(temp.path().to_path_buf())
+                .await
+                .unwrap(),
+        );
+        let component = Arc::new(ComponentProvider::new());
+        let runtime =
+            Runtime::with_providers_and_component(storage, Vec::new(), Some(component.clone()));
+        let mut manifest: CapsuleManifest =
+            serde_json::from_str(&component_manifest_json("gap")).unwrap();
+        manifest.bus_contract = Some(ELASTOS_BUS_V2_CONTRACT.into());
+        manifest.wit_world_sha256 = Some(elastos_bus_v2_wit_sha256());
+        let handle = component
+            .load_admitted(v2_home_bytes("stay"), manifest)
+            .await
+            .unwrap();
+        let hold = component.testing_hold_publish(&handle.id).await;
+        let id = handle.id.0.clone();
+        runtime
+            .hold_launch_context(&handle, Some("person:local:resident".into()), None)
+            .await;
+        runtime
+            .register_capsule(RunningCapsuleInfo {
+                id: id.clone(),
+                name: "gap".into(),
+                status: CAPSULE_STARTING.to_string(),
+                capsule_type: handle.manifest.capsule_type.clone(),
+                handle: Some(handle.clone()),
+                session_id: id.clone(),
+                principal: Some("person:local:resident".into()),
+                cause: None,
+                ended_at: None,
+            })
+            .await;
+        let held = ActivationContextHeld::new(&runtime, &handle, component.clone(), None);
+        runtime.watch_activation(handle.id.clone(), handle.clone(), component.clone(), held);
+        tokio::time::timeout(std::time::Duration::from_secs(2), hold.0.notified())
+            .await
+            .expect("start did not reach the publish gap");
+        let stopping = tokio::spawn(async move { runtime.stop_capsule_by_id(&id).await });
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                if component.status(&handle).await.is_err() {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the stop did not take the guest out of the publish gap");
+        hold.1.notify_one();
+        let ended = stopping
+            .await
+            .expect("stop task")
+            .expect("stop")
+            .expect("entry");
+        assert_eq!(ended.status, CAPSULE_STOPPED);
+        assert_eq!(ended.cause.as_deref(), Some("stopped: user"));
+    }
+
+    /// A trap finishes the resident and clears its tokens, frame, and provider entry.
+    #[tokio::test]
+    async fn a_v2_home_resident_trap_end_clears_it() {
+        let (runtime, component, handle, _temp) =
+            start_v2_home(v2_home_bytes("trap"), "traps", false).await;
+        let ended = wait_v2_status(&runtime, handle.id.as_str(), false).await;
+        assert_eq!(ended.status, CAPSULE_FAILED);
+        let cause = ended.cause.unwrap();
+        assert!(cause.contains("unreachable"), "{cause}");
+        assert_eq!(ended.session_id, handle.id.0);
+        assert_v2_home_cleared(&runtime, &component, &handle).await;
+    }
+
+    /// Dropping the runtime that watches the guest is a server shutdown. The
+    /// owed end still runs, and it clears the same state.
+    #[test]
+    fn a_v2_home_resident_shutdown_ends_and_clears() {
+        let local = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let (runtime, component, handle, _temp) = local.block_on(async {
+            let started = start_v2_home(v2_home_bytes("stay"), "shutdown", false).await;
+            let running = wait_v2_status(&started.0, started.2.id.as_str(), true).await;
+            assert_eq!(running.status, CAPSULE_RUNNING);
+            started
+        });
+        drop(local);
+        let poll = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        poll.block_on(async {
+            let ended = wait_v2_status(&runtime, handle.id.as_str(), false).await;
+            assert_eq!(ended.status, CAPSULE_FAILED);
+            assert_eq!(ended.cause.as_deref(), Some(CAUSE_TASK_LOST));
+            assert_v2_home_cleared(&runtime, &component, &handle).await;
+        });
+    }
+
     #[cfg(unix)]
     /// A3-R S3 fix 1. A guard dropped with its end owed hands the end to a
     /// task, and the runtime shuts down before it runs that task, as a
@@ -8566,5 +9830,652 @@ pub(crate) mod tests {
                 "{stops:?}"
             );
         });
+    }
+
+    /// A v1 bridge future runs on the `spawn_blocking` thread that called it.
+    /// That thread has a runtime handle entered, so a choice made by
+    /// `Handle::try_current` would add a thread for the call.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn v1_bridge_on_a_blocking_thread_adds_no_thread() {
+        let handle = tokio::runtime::Handle::current();
+        let joined = tokio::task::spawn_blocking(move || {
+            assert!(
+                tokio::runtime::Handle::try_current().is_ok(),
+                "a spawn_blocking worker has a runtime handle entered"
+            );
+            let caller = std::thread::current().id();
+            let before = super::live_thread_count();
+            let (ran_on, during) = Runtime::block_on_component_bridge(
+                &handle,
+                elastos_compute::providers::ComponentBridgeLeg::Caller,
+                async move {
+                    tokio::task::yield_now().await;
+                    (std::thread::current().id(), super::live_thread_count())
+                },
+            );
+            assert_eq!(
+                during, before,
+                "a v1 bridge on a blocking thread adds no thread"
+            );
+            assert_eq!(ran_on, caller, "a v1 bridge future stays on the caller");
+        })
+        .await;
+        assert!(
+            joined.is_ok(),
+            "the blocking bridge call panicked: {joined:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    async fn start_unsigned_quiet(runtime: &Runtime, dir: &std::path::Path) -> String {
+        runtime
+            .configure_capsule_admission(dir, &[], true)
+            .await
+            .unwrap();
+        let folder = dir.join("quiet");
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(
+            folder.join("capsule.json"),
+            component_manifest_json("quiet"),
+        )
+        .unwrap();
+        std::fs::write(folder.join("app.component.wasm"), quiet_component()).unwrap();
+        let (handle, _) = runtime
+            .start_local_with_signer(&folder, Vec::new(), None, None)
+            .await
+            .expect("the quiet guest starts");
+        handle.id.0
+    }
+
+    #[cfg(unix)]
+    async fn wait_capsule_cause(runtime: &Runtime, id: &str) -> String {
+        tokio::time::timeout(std::time::Duration::from_secs(60), async {
+            loop {
+                if let Some(cause) = runtime.get_capsule(id).await.and_then(|info| info.cause) {
+                    return cause;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the guest did not record an end")
+    }
+
+    /// The guest has already returned. A stop dropped inside the provider stop
+    /// leaves no cause, so the watcher records the natural end.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_stop_dropped_in_the_provider_records_a_natural_end() {
+        let (runtime, dir) = component_runtime().await;
+        let runtime = Arc::new(runtime);
+        let pause = runtime.arm_watch_pause_for_test("outcome");
+        let id = start_unsigned_quiet(&runtime, dir.path()).await;
+        tokio::time::timeout(std::time::Duration::from_secs(60), pause.entered.notified())
+            .await
+            .expect("the watcher did not reach the outcome");
+        let hold = runtime.arm_provider_stop_hold(&id);
+        let stopping = Arc::clone(&runtime);
+        let stop_id = id.clone();
+        let task =
+            tokio::spawn(async move { stopping.stop_capsule_with_reason(&stop_id, "owner").await });
+        tokio::time::timeout(std::time::Duration::from_secs(5), hold.entered())
+            .await
+            .expect("the stop did not reach the provider");
+        assert!(runtime.requested_stop_for_test(&id).is_none());
+        task.abort();
+        let _ = task.await;
+        assert!(
+            runtime.requested_stop_for_test(&id).is_none(),
+            "the dropped stop left a cause"
+        );
+        pause.release.notify_one();
+        assert_eq!(wait_capsule_cause(&runtime, &id).await, CAUSE_COMPLETED);
+    }
+
+    /// A stop that fails while the watcher has not started the guest does not
+    /// become the guest's end. The guest still records a natural return.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_failed_stop_during_start_does_not_end_the_run() {
+        let (runtime, dir) = component_runtime().await;
+        let runtime = Arc::new(runtime);
+        let pause = runtime.arm_watch_pause_for_test("sees-stop");
+        let id = start_unsigned_quiet(&runtime, dir.path()).await;
+        tokio::time::timeout(std::time::Duration::from_secs(60), pause.entered.notified())
+            .await
+            .expect("the watcher did not reach the start");
+        let hold = runtime.arm_provider_stop_hold(&id);
+        runtime.arm_failing_capsule_stop(&id);
+        let stopping = Arc::clone(&runtime);
+        let stop_id = id.clone();
+        let task =
+            tokio::spawn(async move { stopping.stop_capsule_with_reason(&stop_id, "owner").await });
+        tokio::time::timeout(std::time::Duration::from_secs(5), hold.entered())
+            .await
+            .expect("the stop did not reach the provider");
+        assert!(runtime.requested_stop_for_test(&id).is_none());
+        pause.release.notify_one();
+        assert_eq!(wait_capsule_cause(&runtime, &id).await, CAUSE_COMPLETED);
+        hold.release_one();
+        let stopped = tokio::time::timeout(std::time::Duration::from_secs(5), task)
+            .await
+            .expect("the stop did not return")
+            .expect("the stop task");
+        assert!(
+            stopped.is_err(),
+            "the failed stop ended the run: {stopped:?}"
+        );
+        let info = runtime.get_capsule(&id).await.expect("the ended row");
+        assert_eq!(info.cause.as_deref(), Some(CAUSE_COMPLETED));
+    }
+
+    /// A component whose `run` loops until a stop interrupts it.
+    #[cfg(unix)]
+    fn spin_component() -> Vec<u8> {
+        wat::parse_str(
+            r#"(component
+              (import "elastos:bus/types@1.0.0" (instance $types
+                (type $error (variant
+                  (case "denied" string) (case "not-found" string) (case "invalid" string)
+                  (case "unavailable" string) (case "timeout" string) (case "internal" string)))
+                (export "bus-error" (type (eq $error)))))
+              (alias export $types "bus-error" (type $bus-error))
+              (core module $m
+                (memory (export "memory") 1)
+                (func $spin (loop $again (br $again)))
+                (func (export "run") (result i32) (call $spin) (i32.const 0)))
+              (core instance $i (instantiate $m))
+              (func $run (result (result (error $bus-error)))
+                (canon lift (core func $i "run") (memory $i "memory")))
+              (instance $lifecycle (export "run" (func $run)))
+              (export "elastos:bus/lifecycle@1.0.0" (instance $lifecycle)))"#,
+        )
+        .expect("component text")
+    }
+
+    #[cfg(unix)]
+    async fn start_guest(
+        runtime: &Runtime,
+        dir: &std::path::Path,
+        name: &str,
+        bytes: &[u8],
+    ) -> String {
+        runtime
+            .configure_capsule_admission(dir, &[], true)
+            .await
+            .unwrap();
+        let folder = dir.join(name);
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(folder.join("capsule.json"), component_manifest_json(name)).unwrap();
+        std::fs::write(folder.join("app.component.wasm"), bytes).unwrap();
+        let (handle, _) = runtime
+            .start_local_with_signer(&folder, Vec::new(), None, None)
+            .await
+            .expect("the guest starts");
+        handle.id.0
+    }
+
+    #[cfg(unix)]
+    async fn component_entry_is_loaded(runtime: &Runtime, id: &str) -> bool {
+        let provider = runtime
+            .component_provider
+            .as_ref()
+            .expect("component provider");
+        let manifest = serde_json::from_str(&component_manifest_json("guest")).unwrap();
+        provider
+            .status(&CapsuleHandle {
+                id: CapsuleId(id.to_string()),
+                manifest,
+                args: Vec::new(),
+            })
+            .await
+            .is_ok()
+    }
+
+    #[cfg(unix)]
+    enum StopGuest {
+        Loading,
+        V1,
+        V2,
+    }
+
+    /// Starts the guest, stops it as the owner, and parks the stop at the
+    /// await that used to sit between the provider's `Ok` and the commit.
+    /// The returned watch hold is the one the caller releases so the watcher
+    /// can record the end: `sees-stop` for a loading guest, `outcome` for a
+    /// running one.
+    #[cfg(unix)]
+    async fn owner_stop_at_the_old_await(
+        kind: StopGuest,
+    ) -> (
+        Arc<Runtime>,
+        tempfile::TempDir,
+        String,
+        &'static str,
+        CommittedStopPause,
+        tokio::task::JoinHandle<Result<Option<RunningCapsuleInfo>>>,
+        WatchHold,
+    ) {
+        let (runtime, dir) = component_runtime().await;
+        let runtime = Arc::new(runtime);
+        let (agent, bytes, name) = match kind {
+            StopGuest::Loading => ("agent:r8-loading", quiet_component(), "quiet"),
+            StopGuest::V1 => ("agent:r8-v1", spin_component(), "spin"),
+            StopGuest::V2 => ("agent:r8-v2", spin_component(), "spin"),
+        };
+        let early = runtime.arm_watch_pause_for_test("sees-stop");
+        let outcome = if matches!(kind, StopGuest::Loading) {
+            None
+        } else {
+            Some(runtime.arm_watch_pause_for_test("outcome"))
+        };
+        let id = start_guest(&runtime, dir.path(), name, &bytes).await;
+        tokio::time::timeout(std::time::Duration::from_secs(60), early.entered.notified())
+            .await
+            .expect("the watcher did not reach the start");
+        if let Some(outcome) = outcome {
+            assert!(
+                runtime
+                    .component_provider
+                    .as_ref()
+                    .expect("component provider")
+                    .prepare_stop_target_for_test(&CapsuleId(id.clone()), false)
+                    .await,
+                "the loading entry was already gone"
+            );
+            drop(early);
+            tokio::time::timeout(
+                std::time::Duration::from_secs(60),
+                outcome.entered.notified(),
+            )
+            .await
+            .expect("the watcher did not reach the outcome");
+            if matches!(kind, StopGuest::V2) {
+                assert!(
+                    runtime
+                        .component_provider
+                        .as_ref()
+                        .expect("component provider")
+                        .prepare_stop_target_for_test(&CapsuleId(id.clone()), true)
+                        .await,
+                    "the running entry was already gone"
+                );
+            }
+            stop_parked(runtime, dir, id, agent, outcome).await
+        } else {
+            stop_parked(runtime, dir, id, agent, early).await
+        }
+    }
+
+    #[cfg(unix)]
+    async fn stop_parked(
+        runtime: Arc<Runtime>,
+        dir: tempfile::TempDir,
+        id: String,
+        agent: &'static str,
+        watch: WatchHold,
+    ) -> (
+        Arc<Runtime>,
+        tempfile::TempDir,
+        String,
+        &'static str,
+        CommittedStopPause,
+        tokio::task::JoinHandle<Result<Option<RunningCapsuleInfo>>>,
+        WatchHold,
+    ) {
+        runtime
+            .insert_agent_session_for_test(AgentSessionRecord {
+                agent_id: agent.to_string(),
+                owner: "person:owner".to_string(),
+                host_cid: "cid".to_string(),
+                launch_id: format!("launch:{id}"),
+                session_id: id.clone(),
+            })
+            .await;
+        let gate = runtime.arm_committed_stop_gate(&id);
+        let stopping = Arc::clone(&runtime);
+        let stop_id = id.clone();
+        let task =
+            tokio::spawn(async move { stopping.stop_capsule_with_reason(&stop_id, "owner").await });
+        tokio::time::timeout(std::time::Duration::from_secs(30), gate.entered())
+            .await
+            .expect("the stop did not reach the old await");
+        assert_eq!(
+            runtime.requested_stop_for_test(&id).as_deref(),
+            Some("stopped: owner"),
+            "the cause was not committed before the old await"
+        );
+        assert!(
+            runtime.stop_requested_for_test(agent),
+            "the mark was not set before the old await"
+        );
+        (runtime, dir, id, agent, gate, task, watch)
+    }
+
+    #[cfg(unix)]
+    async fn release_and_read_owner_stop(
+        runtime: &Runtime,
+        id: &str,
+        watch: WatchHold,
+        gate: CommittedStopPause,
+    ) -> RunningCapsuleInfo {
+        watch.release.notify_one();
+        gate.release();
+        let info = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+            loop {
+                if let Some(info) = runtime.get_capsule(id).await {
+                    if info.ended_at.is_some() {
+                        return info;
+                    }
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the guest did not record an end");
+        assert_eq!(info.status, CAPSULE_STOPPED, "{info:?}");
+        assert_eq!(info.cause.as_deref(), Some("stopped: owner"), "{info:?}");
+        info
+    }
+
+    /// A loading guest the owner stops is recorded `stopped: owner`, even
+    /// while the stop is parked at the old await.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_loading_guest_the_owner_stops_is_recorded_stopped_owner() {
+        let (runtime, _dir, id, _agent, gate, task, watch) =
+            owner_stop_at_the_old_await(StopGuest::Loading).await;
+        assert!(
+            !component_entry_is_loaded(&runtime, &id).await,
+            "stop left the loading entry"
+        );
+        release_and_read_owner_stop(&runtime, &id, watch, gate).await;
+        task.await.expect("the stop task").expect("the stop");
+    }
+
+    /// A running v1 guest the owner stops is recorded `stopped: owner`.
+    /// The provider leaves the entry for the worker.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_running_v1_guest_the_owner_stops_is_recorded_stopped_owner() {
+        let (runtime, _dir, id, _agent, gate, task, watch) =
+            owner_stop_at_the_old_await(StopGuest::V1).await;
+        assert!(
+            component_entry_is_loaded(&runtime, &id).await,
+            "the v1 stop removed the running entry"
+        );
+        release_and_read_owner_stop(&runtime, &id, watch, gate).await;
+        task.await.expect("the stop task").expect("the stop");
+    }
+
+    /// A running v2 guest the owner stops is recorded `stopped: owner`.
+    /// The provider removes that entry before the old await.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_running_v2_guest_the_owner_stops_is_recorded_stopped_owner() {
+        let (runtime, _dir, id, _agent, gate, task, watch) =
+            owner_stop_at_the_old_await(StopGuest::V2).await;
+        assert!(
+            !component_entry_is_loaded(&runtime, &id).await,
+            "the v2 stop left the running entry"
+        );
+        release_and_read_owner_stop(&runtime, &id, watch, gate).await;
+        task.await.expect("the stop task").expect("the stop");
+    }
+
+    /// A caller dropped at the old await has already committed. The guest
+    /// ends and the mark stays set.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_stop_dropped_at_the_old_await_ends_the_guest_and_keeps_the_mark() {
+        let (runtime, _dir, id, agent, gate, task, watch) =
+            owner_stop_at_the_old_await(StopGuest::Loading).await;
+        task.abort();
+        let _ = task.await;
+        assert!(
+            runtime.stop_requested_for_test(agent),
+            "the dropped caller cleared the mark"
+        );
+        assert_eq!(
+            runtime.requested_stop_for_test(&id).as_deref(),
+            Some("stopped: owner"),
+            "the dropped caller withdrew the cause"
+        );
+        release_and_read_owner_stop(&runtime, &id, watch, gate).await;
+        assert!(
+            runtime.stop_requested_for_test(agent),
+            "the ended guest cleared the mark"
+        );
+    }
+
+    #[cfg(unix)]
+    async fn start_named(runtime: &Runtime, dir: &Path, name: &str, bytes: &[u8]) -> String {
+        let folder = dir.join(name);
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(folder.join("capsule.json"), component_manifest_json(name)).unwrap();
+        std::fs::write(folder.join("app.component.wasm"), bytes).unwrap();
+        runtime
+            .start_local_with_signer(&folder, Vec::new(), None, None)
+            .await
+            .expect("the guest starts")
+            .0
+            .id
+            .0
+    }
+
+    #[cfg(unix)]
+    async fn wait_running(runtime: &Runtime, id: &str) {
+        tokio::time::timeout(std::time::Duration::from_secs(15), async {
+            loop {
+                if runtime
+                    .get_capsule(id)
+                    .await
+                    .is_some_and(|info| info.status == CAPSULE_RUNNING)
+                {
+                    return;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("{id} did not reach running"));
+    }
+
+    /// The watcher has entered the open-stop wait, and the row has no cause yet.
+    #[cfg(unix)]
+    async fn noted_while_the_stop_is_open(runtime: &Runtime, id: &str) {
+        tokio::time::timeout(std::time::Duration::from_secs(8), async {
+            loop {
+                if super::stop_ticket_wait_noted(id) {
+                    let cause = runtime.get_capsule(id).await.and_then(|info| info.cause);
+                    assert!(
+                        cause.is_none(),
+                        "{id} classified before the stop committed: {cause:?}"
+                    );
+                    return;
+                }
+                if let Some(cause) = runtime.get_capsule(id).await.and_then(|info| info.cause) {
+                    panic!("{id} classified before the stop committed: {cause}");
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("{id} did not wait for its open stop"));
+    }
+
+    #[cfg(unix)]
+    async fn cause_is_owner_stop(runtime: &Runtime, id: &str) {
+        let cause = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                if let Some(info) = runtime.get_capsule(id).await {
+                    if info.ended_at.is_some() {
+                        return info.cause.unwrap_or_default();
+                    }
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("{id} did not record an end"));
+        assert_eq!(cause, "stopped: owner", "{id}");
+    }
+
+    /// Starts and stops overlap. The watcher is not paused after the outcome.
+    /// Every end is `stopped: owner`. A ticket dropped before commit releases
+    /// the wait.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn overlapping_owner_stops_record_stopped_owner() {
+        const STOPS: usize = 200;
+        const WAVE: usize = 4;
+        let (runtime, dir) = component_runtime().await;
+        let runtime = Arc::new(runtime);
+        runtime
+            .configure_capsule_admission(dir.path(), &[], true)
+            .await
+            .unwrap();
+        let quiet = Arc::new(quiet_component());
+        let spin = Arc::new(spin_component());
+        let folder = dir.path().to_path_buf();
+
+        for wave in 0..(STOPS / WAVE) {
+            let mut holds = Vec::new();
+            for _ in 0..WAVE {
+                holds.push(runtime.arm_watch_pause_for_test("sees-stop"));
+            }
+            let mut starts = Vec::new();
+            for slot in 0..WAVE {
+                let runtime = Arc::clone(&runtime);
+                let bytes = Arc::clone(&quiet);
+                let folder = folder.clone();
+                let name = format!("load-{wave}-{slot}");
+                starts.push(tokio::spawn(async move {
+                    start_named(&runtime, &folder, &name, &bytes).await
+                }));
+            }
+            let mut ids = Vec::new();
+            for start in starts {
+                ids.push(start.await.expect("the loading start task"));
+            }
+            for hold in &holds {
+                tokio::time::timeout(std::time::Duration::from_secs(30), hold.entered.notified())
+                    .await
+                    .expect("the watcher did not reach the start");
+            }
+            let mut gates = Vec::new();
+            let mut stops = Vec::new();
+            for id in &ids {
+                gates.push(runtime.arm_pre_commit_stop_gate(id));
+                let stopping = Arc::clone(&runtime);
+                let stop_id = id.clone();
+                stops.push(tokio::spawn(async move {
+                    stopping.stop_capsule_with_reason(&stop_id, "owner").await
+                }));
+            }
+            for gate in &gates {
+                tokio::time::timeout(std::time::Duration::from_secs(15), gate.entered())
+                    .await
+                    .expect("the loading stop did not pass the provider");
+            }
+            for hold in &holds {
+                hold.release.notify_one();
+            }
+            for id in &ids {
+                noted_while_the_stop_is_open(&runtime, id).await;
+            }
+            for gate in &gates {
+                gate.release();
+            }
+            for (id, stop) in ids.iter().zip(stops) {
+                cause_is_owner_stop(&runtime, id).await;
+                stop.await
+                    .expect("the loading stop task")
+                    .expect("the stop");
+            }
+        }
+
+        for wave in 0..(STOPS / WAVE) {
+            let mut tasks = Vec::new();
+            for slot in 0..WAVE {
+                let runtime = Arc::clone(&runtime);
+                let bytes = Arc::clone(&spin);
+                let folder = folder.clone();
+                let name = format!("run-{wave}-{slot}");
+                tasks.push(tokio::spawn(async move {
+                    let id = start_named(&runtime, &folder, &name, &bytes).await;
+                    wait_running(&runtime, &id).await;
+                    let gate = runtime.arm_pre_commit_stop_gate(&id);
+                    let stopping = Arc::clone(&runtime);
+                    let stop_id = id.clone();
+                    let stop = tokio::spawn(async move {
+                        stopping.stop_capsule_with_reason(&stop_id, "owner").await
+                    });
+                    tokio::time::timeout(std::time::Duration::from_secs(15), gate.entered())
+                        .await
+                        .expect("the running stop did not pass the provider");
+                    noted_while_the_stop_is_open(&runtime, &id).await;
+                    gate.release();
+                    cause_is_owner_stop(&runtime, &id).await;
+                    stop.await
+                        .expect("the running stop task")
+                        .expect("the stop");
+                }));
+            }
+            for task in tasks {
+                task.await.expect("a running stop overlapped");
+            }
+        }
+
+        let id = start_named(&runtime, &folder, "drop-ticket", &spin).await;
+        wait_running(&runtime, &id).await;
+        let gate = runtime.arm_pre_commit_stop_gate(&id);
+        let stopping = Arc::clone(&runtime);
+        let stop_id = id.clone();
+        let task =
+            tokio::spawn(async move { stopping.stop_capsule_with_reason(&stop_id, "owner").await });
+        tokio::time::timeout(std::time::Duration::from_secs(15), gate.entered())
+            .await
+            .expect("the dropped stop did not pass the provider");
+        noted_while_the_stop_is_open(&runtime, &id).await;
+        task.abort();
+        let _ = task.await;
+        let waited = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            loop {
+                if let Some(waited) = super::stop_ticket_wait_done(&id) {
+                    return waited;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the dropped ticket did not release the wait");
+        assert!(
+            waited < std::time::Duration::from_millis(1800),
+            "the dropped ticket left the watcher on the 2s bound: {waited:?}"
+        );
+        let cause = cause_after_drop(&runtime, &id).await;
+        assert_ne!(
+            cause, "stopped: owner",
+            "{id} recorded a stop that did not commit"
+        );
+        assert_eq!(cause, "stopped by request", "{id} {cause}");
+        drop(gate);
+    }
+
+    #[cfg(unix)]
+    async fn cause_after_drop(runtime: &Runtime, id: &str) -> String {
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if let Some(info) = runtime.get_capsule(id).await {
+                    if let Some(cause) = info.cause {
+                        return cause;
+                    }
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("{id} did not record an end after the drop"))
     }
 }

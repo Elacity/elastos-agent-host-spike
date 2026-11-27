@@ -59,7 +59,7 @@ export function bindAgents(doc, request, confirmStepUp) {
     "#agents-list", "#agents-status", "#agent-form", "#agent-name", "#agent-host", "#agent-create", "#agent-allow", "#agent-retry",
   ].map((id) => doc.querySelector(id));
   if (!listNode || !statusNode || !formNode || !nameInput || !hostInput || !createButton || !allowButton || !retryButton) return { load() {} };
-  let agents = [], pendingId = "", pendingLabel = "", failure = "", retry = null, busy = false, gate = "wait", stopping = new Set(), running = new Set();
+  let agents = [], pendingId = "", pendingLabel = "", failure = "", retry = null, busy = false, gate = "wait", stopping = new Set(), running = new Set(), unknownNotes = new Map();
 
   function paint() {
     const banner = failure || (pendingId === "create" || pendingId === "allow" ? pendingLabel : "");
@@ -85,7 +85,8 @@ export function bindAgents(doc, request, confirmStepUp) {
     createButton.disabled = busy || gate !== "ready";
     const rows = agents.map((agent) => {
       const pending = pendingId === agent.agent_id ? pendingLabel : "";
-      const label = pending || (stopping.has(agent.agent_id) ? "Stopping" : running.has(agent.agent_id) ? "Running" : stateText(agent, ""));
+      const named = unknownNotes.get(agent.agent_id);
+      const label = pending || (named ? `${stopping.has(agent.agent_id) ? "Stopping. " : ""}Unknown step: ${named}` : stopping.has(agent.agent_id) ? "Stopping" : running.has(agent.agent_id) ? "Running" : stateText(agent, ""));
       const state = el(doc, "div", "pc2-card-sublabel", label);
       state.dataset.agentState = agent.agent_id;
       const agentId = el(doc, "div", "pc2-card-sublabel", text(agent.agent_id));
@@ -116,6 +117,11 @@ export function bindAgents(doc, request, confirmStepUp) {
       row.append(copy, actions);
       return row;
     });
+    for (const [id, named] of unknownNotes) {
+      if (agents.some((agent) => agent.agent_id === id)) continue;
+      const state = el(doc, "div", "pc2-card-sublabel", `Unknown step: ${named}`);
+      state.dataset.agentState = id; rows.push(state);
+    }
     if (gate === "ready" && !rows.length && !failure && pendingId !== "create") rows.push(el(doc, "p", "pc2-card-sublabel", "You have no agents on this Home. Agents created on another Home stay there."));
     listNode.replaceChildren(...rows);
   }
@@ -160,6 +166,7 @@ export function bindAgents(doc, request, confirmStepUp) {
     // offered again.
     stopping.clear();
     running.clear();
+    unknownNotes.clear();
   }
 
   function post(id, label, path, body, accept) {
@@ -244,10 +251,13 @@ export function bindAgents(doc, request, confirmStepUp) {
       }
       const stopped = reply && Array.isArray(reply.stopped) ? reply.stopped : [];
       const still = reply && Array.isArray(reply.stopping) ? reply.stopping : [];
-      if (!reply || reply.agent_id !== id || (!stopped.length && !still.length)) {
+      const unknown = reply && Array.isArray(reply.unknown) ? reply.unknown : [];
+      if (!reply || reply.agent_id !== id || (!stopped.length && !still.length && !unknown.length)) {
         throw pageRefusal("The Home did not confirm that change.");
       }
-      await load();
+      const note = unknown.map((step) => `${text(step.request_id)} ${text(step.outcome)}`.trim()).filter(Boolean).join(", ");
+      try { await load(); } catch (error) { if (note) unknownNotes.set(id, note); if (still.length) stopping.add(id); else stopping.delete(id); throw error; }
+      if (note) unknownNotes.set(id, note);
       if (still.length) stopping.add(id);
       else stopping.delete(id);
       running.delete(id);

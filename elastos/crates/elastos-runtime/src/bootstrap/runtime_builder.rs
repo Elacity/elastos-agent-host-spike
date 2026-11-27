@@ -3,20 +3,32 @@
 //! The ElastosRuntime struct ties together all components and provides
 //! a clean interface for starting and stopping the runtime.
 use std::path::PathBuf;
+#[cfg(test)]
 use std::sync::Arc;
 
+#[cfg(test)]
 use elastos_compute::ComputeProvider;
 
+#[cfg(test)]
 use crate::capability::{CapabilityManager, CapabilityStore};
+#[cfg(test)]
 use crate::capsule::CapsuleManager;
+#[cfg(test)]
 use crate::content::{ContentFetcher, ContentResolver, ResolverConfig};
+#[cfg(test)]
 use crate::handler::RequestHandler;
+#[cfg(test)]
 use crate::messaging::MessageChannel;
+#[cfg(test)]
 use crate::primitives::audit::AuditLog;
+#[cfg(test)]
 use crate::primitives::metrics::MetricsManager;
+#[cfg(test)]
 use crate::primitives::time::SecureTimeSource;
 
-use super::shell::{ShellConfig, ShellManager};
+use super::shell::ShellConfig;
+#[cfg(test)]
+use super::shell::ShellManager;
 
 const RUNTIME_VERSION: &str = match option_env!("ELASTOS_RELEASE_VERSION") {
     Some(version) => version,
@@ -159,6 +171,7 @@ impl RuntimeConfig {
 ///
 /// This struct owns all the runtime components and provides
 /// methods for starting, stopping, and interacting with capsules.
+#[cfg(test)]
 pub struct ElastosRuntime {
     /// Configuration
     config: RuntimeConfig,
@@ -186,6 +199,7 @@ pub struct ElastosRuntime {
     started: bool,
 }
 
+#[cfg(test)]
 impl ElastosRuntime {
     /// Build a new runtime with the given configuration, compute provider, and content fetcher.
     ///

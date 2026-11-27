@@ -571,6 +571,118 @@ test("stop posts the agent id and does not ask for the passkey", async () => {
   assert.equal(steps, 0);
 });
 
+test("a stop shows each unknown step by request id and outcome", async () => {
+  const ui = mount((path, init = {}) => {
+    if ((init.method || "GET") === "GET") {
+      return Promise.resolve({
+        agents: [{ agent_id: AGENT_ID, display_name: "Helper", active: true }],
+      });
+    }
+    return Promise.resolve({
+      agent_id: AGENT_ID,
+      stopped: [{ session_id: "session-1", status: "stopped" }],
+      unknown: [
+        { session_id: "session-1", request_id: "step-9", outcome: "unknown" },
+        { session_id: "session-1", request_id: "step-10", outcome: "unknown" },
+      ],
+    });
+  });
+  await ui.load();
+  ui.button("Stop").click();
+  await flush();
+  await flush();
+  assert.equal(ui.state(AGENT_ID), "Unknown step: step-9 unknown, step-10 unknown");
+});
+
+test("a stop keeps the unknown names when the reload fails or comes back empty", async () => {
+  let failedGets = 0;
+  const failed = mount((path, init = {}) => {
+    if ((init.method || "GET") === "GET") {
+      failedGets += 1;
+      if (failedGets > 1) return Promise.reject(new Error("request failed: 500 the list failed"));
+      return Promise.resolve({
+        agents: [{ agent_id: AGENT_ID, display_name: "Helper", active: true }],
+      });
+    }
+    return Promise.resolve({
+      agent_id: AGENT_ID,
+      stopped: [{ session_id: "session-1", status: "stopped" }],
+      unknown: [{ session_id: "session-1", request_id: "step-9", outcome: "unknown" }],
+    });
+  });
+  await failed.load();
+  failed.button("Stop").click();
+  await flush();
+  await flush();
+  assert.equal(failed.state(AGENT_ID), "Unknown step: step-9 unknown");
+
+  let emptyGets = 0;
+  const empty = mount((path, init = {}) => {
+    if ((init.method || "GET") === "GET") {
+      emptyGets += 1;
+      return Promise.resolve({
+        agents: emptyGets > 1 ? [] : [{ agent_id: AGENT_ID, display_name: "Helper", active: true }],
+      });
+    }
+    return Promise.resolve({
+      agent_id: AGENT_ID,
+      stopped: [{ session_id: "session-1", status: "stopped" }],
+      unknown: [{ session_id: "session-1", request_id: "step-9", outcome: "unknown" }],
+    });
+  });
+  await empty.load();
+  empty.button("Stop").click();
+  await flush();
+  await flush();
+  assert.equal(empty.state(AGENT_ID), "Unknown step: step-9 unknown");
+});
+
+test("a stop that is still stopping keeps that mark when the reload throws", async () => {
+  let gets = 0;
+  const ui = mount((path, init = {}) => {
+    if ((init.method || "GET") === "GET") {
+      gets += 1;
+      if (gets > 1) return Promise.reject(new Error("request failed: 500 the list failed"));
+      return Promise.resolve({
+        agents: [{ agent_id: AGENT_ID, display_name: "Helper", active: true }],
+      });
+    }
+    return Promise.resolve({
+      agent_id: AGENT_ID,
+      stopped: [],
+      stopping: [{ session_id: "session-1", status: "stopping" }],
+      unknown: [{ session_id: "session-1", request_id: "step-9", outcome: "unknown" }],
+    });
+  });
+  await ui.load();
+  ui.button("Stop").click();
+  await flush();
+  await flush();
+  assert.equal(ui.state(AGENT_ID), "Stopping. Unknown step: step-9 unknown");
+  assert.equal(ui.button("Start").disabled, true);
+});
+
+test("a stop that is still stopping names the unknown step as well", async () => {
+  const ui = mount((path, init = {}) => {
+    if ((init.method || "GET") === "GET") {
+      return Promise.resolve({
+        agents: [{ agent_id: AGENT_ID, display_name: "Helper", active: true }],
+      });
+    }
+    return Promise.resolve({
+      agent_id: AGENT_ID,
+      stopped: [],
+      stopping: [{ session_id: "session-1", status: "stopping" }],
+      unknown: [{ session_id: "session-1", request_id: "step-9", outcome: "unknown" }],
+    });
+  });
+  await ui.load();
+  ui.button("Stop").click();
+  await flush();
+  await flush();
+  assert.equal(ui.state(AGENT_ID), "Stopping. Unknown step: step-9 unknown");
+});
+
 test("a stop that is still stopping stays Stopping and Start is disabled", async () => {
   const calls = [];
   const ui = mount((path, init = {}) => {
@@ -742,6 +854,37 @@ test("a refresh drops a running id when the row is not active", async () => {
   await ui.load();
   assert.equal(ui.state(AGENT_ID), OFF);
   assert.equal(ui.button("Start"), null);
+});
+
+test("a live step labels the agent Running and a landing step labels it Stopping", async () => {
+  let landing = false;
+  const ui = mount((path, init = {}) => {
+    if ((init.method || "GET") === "GET") {
+      return Promise.resolve({
+        agents: [{ agent_id: AGENT_ID, display_name: "Helper", active: true }],
+      });
+    }
+    return landing
+      ? refusal("agent_stopping", "this agent is stopping")
+      : refusal("agent_already_running", "this agent is already running");
+  }, () => Promise.resolve("step-token"));
+  await ui.load();
+  ui.button("Start").click();
+  await flush();
+  await flush();
+  await flush();
+  assert.equal(ui.state(AGENT_ID), "Running");
+  assert.equal(ui.status.textContent, "this agent is already running");
+  assert.equal(ui.button("Start").disabled, true);
+  landing = true;
+  await ui.load();
+  ui.button("Start").click();
+  await flush();
+  await flush();
+  await flush();
+  assert.equal(ui.state(AGENT_ID), "Stopping");
+  assert.equal(ui.status.textContent, "this agent is stopping");
+  assert.equal(ui.button("Start").disabled, true);
 });
 
 test("a refused Start with the stopping code stays Stopping", async () => {

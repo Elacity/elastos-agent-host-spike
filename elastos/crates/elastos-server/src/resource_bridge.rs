@@ -250,7 +250,14 @@ fn launch_response(
     };
     let window = |key: &str| request.get(key).and_then(|value| value.as_u64());
     let bytes = apply_read_window(bytes, window("offset"), window("length"));
-    provider_ok_result(serde_json::json!({"content": bytes, "size": bytes.len()}))
+    let binary = request
+        .get("check_revision")
+        .and_then(|value| value.as_bool())
+        == Some(true);
+    provider_ok_result(serde_json::json!({
+        "content": read_content_value(&bytes, binary),
+        "size": bytes.len()
+    }))
 }
 
 /// A bridge principal: who a capsule runs for, after verification.
@@ -290,9 +297,8 @@ impl BridgePrincipal {
 }
 
 /// One activation's stop request, shared by its end and the bridge's wait
-/// loop (M1-R A10-R). `requested` is set by the stop route before it waits;
-/// `cancelled` is set by the wait loop when it leaves the guest's call
-/// because of it, so the end can tell this stop's ending from a trap's.
+/// loop (M1-R A10-R). `requested` is set after that caller's provider stop
+/// succeeds. `cancelled` is set when the wait leaves because of that flag.
 #[derive(Debug, Default)]
 pub struct ActivationStopFlag {
     pub requested: std::sync::atomic::AtomicBool,
@@ -330,6 +336,8 @@ pub struct BridgeContext {
     /// instead of waiting out the shell's polls; it records that it left for
     /// the stop, and the activation's own end then denies the request.
     pub stop: Option<Arc<ActivationStopFlag>>,
+    /// The runtime's v2 guests. Capacity retirement consults their GrantBooks.
+    pub v2_guests: Option<Arc<elastos_compute::providers::ComponentProvider>>,
     /// The Runtime book this activation's plan steps decide against. `None`
     /// is an unbound dispatch, and an unbound dispatch is refused.
     pub(crate) plan_book: Option<Arc<std::sync::Mutex<crate::runtime::PlanBook>>>,
@@ -967,7 +975,7 @@ fn current_plan_step() -> Option<PlanStep> {
     PLAN_STEP.try_with(Clone::clone).ok()
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum PlanDispatchPoint {
     BeforeCheck,
@@ -976,9 +984,12 @@ pub(crate) enum PlanDispatchPoint {
     /// The effect has returned and the record is still `dispatching`.
     /// The flight is still held: settlement has not released it.
     BeforeSettle,
+    /// The effect has returned and the one-use grant is still in its guard.
+    /// The revoke of that grant has not run.
+    Revoke,
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 struct PlanHold {
     request_id: String,
     point: PlanDispatchPoint,
@@ -986,7 +997,7 @@ struct PlanHold {
     release: Arc<tokio::sync::Notify>,
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 static PLAN_HOLDS: Mutex<Vec<PlanHold>> = Mutex::new(Vec::new());
 
 #[cfg(all(test, unix))]
@@ -1016,7 +1027,7 @@ pub(crate) fn arm_plan_dispatch_hold(
     PlanDispatchPause { entered, release }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 async fn pause_plan_dispatch(request_id: &str, point: PlanDispatchPoint) {
     let hold = {
         let mut holds = PLAN_HOLDS.lock().unwrap_or_else(|err| err.into_inner());
@@ -1032,7 +1043,7 @@ async fn pause_plan_dispatch(request_id: &str, point: PlanDispatchPoint) {
 }
 
 /// The dispatch task waits here, after the effect and before the record is settled.
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub(crate) async fn pause_plan_dispatch_for_test(request_id: &str, point: PlanDispatchPoint) {
     pause_plan_dispatch(request_id, point).await;
 }
@@ -1064,6 +1075,19 @@ pub(crate) fn take_parked_plan_guard(request_id: &str) -> Option<crate::runtime:
         .lock()
         .unwrap_or_else(|err| err.into_inner())
         .remove(request_id)
+}
+
+#[cfg(all(test, unix))]
+pub(crate) fn park_plan_guard_for_test(request_id: &str, guard: crate::runtime::PlanEffectGuard) {
+    park_plan_guard(request_id, guard);
+}
+
+#[cfg(all(test, unix))]
+pub(crate) fn parked_plan_guard_is_held(request_id: &str) -> bool {
+    parked_plan_guards()
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+        .contains_key(request_id)
 }
 
 fn instance_ended_response() -> serde_json::Value {
@@ -1109,6 +1133,7 @@ async fn register_one_use_grant(
     token: &CapabilityToken,
     resource: &str,
     action: Action,
+    request_id: &str,
 ) -> Result<String, ()> {
     let pending = ctx
         .pending_store
@@ -1119,6 +1144,10 @@ async fn register_one_use_grant(
         )
         .await;
     let id = pending.id.as_str().to_string();
+    #[cfg(all(test, unix))]
+    wait_one_use_grant_race(request_id, &id).await;
+    #[cfg(not(all(test, unix)))]
+    let _ = request_id;
     if ctx
         .pending_store
         .grant_request(
@@ -1137,9 +1166,102 @@ async fn register_one_use_grant(
                 elastos_runtime::capability::pending::Settler::Runtime,
             )
             .await;
+        ctx.pending_store
+            .revoke_request_by(
+                &id,
+                "grant not registered",
+                elastos_runtime::capability::pending::Settler::Runtime,
+            )
+            .await;
         return Err(());
     }
     Ok(id)
+}
+
+#[cfg(all(test, unix))]
+struct OneUseGrantRace {
+    request_id: String,
+    entered: Arc<tokio::sync::Notify>,
+    release: Arc<tokio::sync::Notify>,
+    pending_id: Arc<Mutex<Option<String>>>,
+}
+
+/// One race per request. A second plant's arm does not replace the first.
+#[cfg(all(test, unix))]
+static ONE_USE_GRANT_RACE: Mutex<Vec<OneUseGrantRace>> = Mutex::new(Vec::new());
+
+/// Lets a test grant the pending record before this registration does.
+#[cfg(all(test, unix))]
+pub(crate) struct OneUseGrantPause {
+    pub(crate) entered: Arc<tokio::sync::Notify>,
+    pub(crate) release: Arc<tokio::sync::Notify>,
+    pending_id: Arc<Mutex<Option<String>>>,
+}
+
+#[cfg(all(test, unix))]
+impl OneUseGrantPause {
+    pub(crate) fn pending_id(&self) -> Option<String> {
+        self.pending_id
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .clone()
+    }
+}
+
+#[cfg(all(test, unix))]
+impl Drop for OneUseGrantPause {
+    fn drop(&mut self) {
+        self.release.notify_one();
+        let mut races = ONE_USE_GRANT_RACE
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        if let Some(pos) = races
+            .iter()
+            .rposition(|race| Arc::ptr_eq(&race.pending_id, &self.pending_id))
+        {
+            races.swap_remove(pos);
+        }
+    }
+}
+
+#[cfg(all(test, unix))]
+pub(crate) fn arm_one_use_grant_race(request_id: &str) -> OneUseGrantPause {
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let pending_id = Arc::new(Mutex::new(None));
+    ONE_USE_GRANT_RACE
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+        .push(OneUseGrantRace {
+            request_id: request_id.to_string(),
+            entered: Arc::clone(&entered),
+            release: Arc::clone(&release),
+            pending_id: Arc::clone(&pending_id),
+        });
+    OneUseGrantPause {
+        entered,
+        release,
+        pending_id,
+    }
+}
+
+#[cfg(all(test, unix))]
+async fn wait_one_use_grant_race(request_id: &str, pending_id: &str) {
+    let race = {
+        let mut races = ONE_USE_GRANT_RACE
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        let Some(pos) = races.iter().rposition(|race| race.request_id == request_id) else {
+            return;
+        };
+        races.swap_remove(pos)
+    };
+    *race
+        .pending_id
+        .lock()
+        .unwrap_or_else(|err| err.into_inner()) = Some(pending_id.to_string());
+    race.entered.notify_one();
+    race.release.notified().await;
 }
 
 struct AbandonedPlanGrant {
@@ -1147,6 +1269,11 @@ struct AbandonedPlanGrant {
     store: Arc<elastos_runtime::capability::pending::PendingRequestStore>,
     token: CapabilityToken,
     pending_id: String,
+    /// Set when the dispatch is dropped. The spend path refuses this token
+    /// until the revoke below removes the entry.
+    refused: bool,
+    revoking: bool,
+    ready: Arc<tokio::sync::watch::Sender<u8>>,
 }
 
 /// The one-use grant for a dispatch that has not finished. Dropping the
@@ -1166,9 +1293,10 @@ impl HeldPlanGrant {
 
 impl Drop for HeldPlanGrant {
     fn drop(&mut self) {
-        let Some(grant) = self.grant.take() else {
+        let Some(mut grant) = self.grant.take() else {
             return;
         };
+        grant.refused = true;
         abandoned_plan_grants()
             .lock()
             .unwrap_or_else(|err| err.into_inner())
@@ -1179,6 +1307,12 @@ impl Drop for HeldPlanGrant {
 fn abandoned_plan_grants() -> &'static Mutex<HashMap<String, AbandonedPlanGrant>> {
     static GRANTS: OnceLock<Mutex<HashMap<String, AbandonedPlanGrant>>> = OnceLock::new();
     GRANTS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn abandoned_grants() -> std::sync::MutexGuard<'static, HashMap<String, AbandonedPlanGrant>> {
+    abandoned_plan_grants()
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
 }
 
 async fn revoke_plan_grant(
@@ -1200,22 +1334,226 @@ async fn revoke_plan_grant(
 
 /// Revoke the grant a dropped or panicked dispatch left behind. A dispatch
 /// that finished revokes its own, or keeps it, and this finds nothing.
-pub(crate) async fn revoke_abandoned_plan_grant(request_id: &str) {
-    let Some(grant) = abandoned_plan_grants()
+#[cfg(all(test, unix))]
+pub(crate) fn park_abandoned_grant_for_test(
+    request_id: &str,
+    manager: Arc<CapabilityManager>,
+    store: Arc<elastos_runtime::capability::pending::PendingRequestStore>,
+    token: CapabilityToken,
+    pending_id: String,
+) {
+    abandoned_plan_grants()
         .lock()
         .unwrap_or_else(|err| err.into_inner())
-        .remove(request_id)
-    else {
-        return;
+        .insert(
+            request_id.to_string(),
+            AbandonedPlanGrant {
+                manager,
+                store,
+                token,
+                pending_id,
+                refused: false,
+                revoking: false,
+                ready: Arc::new(tokio::sync::watch::channel(0).0),
+            },
+        );
+}
+
+/// The dispatch is gone. A spend of this grant is refused before the revoke runs.
+pub(crate) fn refuse_abandoned_plan_grant(request_id: &str) {
+    if let Some(grant) = abandoned_plan_grants()
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+        .get_mut(request_id)
+    {
+        grant.refused = true;
+    }
+}
+
+fn plan_grant_spend_is_refused(token_id: &elastos_runtime::capability::token::TokenId) -> bool {
+    abandoned_plan_grants()
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+        .values()
+        .any(|grant| grant.refused && grant.token.id() == token_id)
+}
+
+#[cfg(all(test, unix))]
+struct AbandonedRevokeGate {
+    entered: Arc<std::sync::atomic::AtomicUsize>,
+    waiting: Arc<std::sync::atomic::AtomicUsize>,
+    progress: Arc<tokio::sync::Notify>,
+    release: Arc<tokio::sync::Notify>,
+}
+
+#[cfg(all(test, unix))]
+static ABANDONED_REVOKE_GATE: Mutex<Vec<(String, AbandonedRevokeGate)>> = Mutex::new(Vec::new());
+
+/// Holds the first revoke open so a second caller is measured against it.
+#[cfg(all(test, unix))]
+pub(crate) struct AbandonedRevokePause {
+    pub(crate) entered: Arc<std::sync::atomic::AtomicUsize>,
+    pub(crate) waiting: Arc<std::sync::atomic::AtomicUsize>,
+    pub(crate) progress: Arc<tokio::sync::Notify>,
+    release: Arc<tokio::sync::Notify>,
+}
+
+#[cfg(all(test, unix))]
+impl AbandonedRevokePause {
+    pub(crate) fn release_for_test(&self) {
+        self.release.notify_waiters();
+    }
+}
+
+#[cfg(all(test, unix))]
+pub(crate) fn arm_abandoned_revoke_overlap(request_id: &str) -> AbandonedRevokePause {
+    let entered = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let waiting = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let progress = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    ABANDONED_REVOKE_GATE
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+        .push((
+            request_id.to_string(),
+            AbandonedRevokeGate {
+                entered: Arc::clone(&entered),
+                waiting: Arc::clone(&waiting),
+                progress: Arc::clone(&progress),
+                release: Arc::clone(&release),
+            },
+        ));
+    AbandonedRevokePause {
+        entered,
+        waiting,
+        progress,
+        release,
+    }
+}
+
+#[cfg(all(test, unix))]
+impl Drop for AbandonedRevokePause {
+    fn drop(&mut self) {
+        self.release.notify_waiters();
+    }
+}
+
+#[cfg(all(test, unix))]
+fn note_abandoned_revoke_waiting(request_id: &str) {
+    let gates = ABANDONED_REVOKE_GATE
+        .lock()
+        .unwrap_or_else(|err| err.into_inner());
+    if let Some((_, gate)) = gates.iter().find(|(id, _)| id == request_id) {
+        gate.waiting
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        gate.progress.notify_waiters();
+    }
+}
+
+#[cfg(all(test, unix))]
+async fn pause_abandoned_revoke(request_id: &str) {
+    let (entered, progress, release) = {
+        let gates = ABANDONED_REVOKE_GATE
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        let Some((_, gate)) = gates.iter().find(|(id, _)| id == request_id) else {
+            return;
+        };
+        (
+            Arc::clone(&gate.entered),
+            Arc::clone(&gate.progress),
+            Arc::clone(&gate.release),
+        )
     };
+    let waiting = release.notified();
+    entered.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    progress.notify_waiters();
+    waiting.await;
+}
+
+struct ClearRevoking(String, Arc<tokio::sync::watch::Sender<u8>>);
+
+impl Drop for ClearRevoking {
+    fn drop(&mut self) {
+        if let Some(grant) = abandoned_grants().get_mut(&self.0) {
+            grant.revoking = false;
+        }
+        let next = self.1.borrow().wrapping_add(1);
+        let _ = self.1.send(next);
+    }
+}
+
+pub(crate) async fn revoke_abandoned_plan_grant(request_id: &str) {
+    let (held, ready) = loop {
+        let (mut watch, seen) = {
+            let mut grants = abandoned_grants();
+            let Some(grant) = grants.get_mut(request_id) else {
+                return;
+            };
+            if !grant.revoking {
+                grant.revoking = true;
+                grant.refused = true;
+                let held = (
+                    Arc::clone(&grant.manager),
+                    Arc::clone(&grant.store),
+                    grant.token.clone(),
+                    grant.pending_id.clone(),
+                );
+                let ready = Arc::clone(&grant.ready);
+                break (held, ready);
+            }
+            let watch = grant.ready.subscribe();
+            let seen = *watch.borrow();
+            (watch, seen)
+        };
+        #[cfg(all(test, unix))]
+        note_abandoned_revoke_waiting(request_id);
+        let _ = watch.wait_for(|value| *value != seen).await;
+    };
+    let _mark = ClearRevoking(request_id.to_string(), ready);
+    #[cfg(all(test, unix))]
+    pause_abandoned_revoke(request_id).await;
     revoke_plan_grant(
-        &grant.manager,
-        &grant.store,
-        &grant.token,
-        &grant.pending_id,
+        &held.0,
+        &held.1,
+        &held.2,
+        &held.3,
         "plan dispatch abandoned",
     )
     .await;
+    abandoned_grants().remove(request_id);
+}
+
+/// The product spend of a bridge token. A dropped dispatch's grant is refused
+/// here before `validate` counts a use.
+async fn spend_invoked_capability(
+    manager: &CapabilityManager,
+    token: &CapabilityToken,
+    caller: &str,
+    action: Action,
+    resource: &ResourceId,
+) -> Result<(), elastos_runtime::capability::manager::ValidationError> {
+    if plan_grant_spend_is_refused(token.id()) {
+        return Err(elastos_runtime::capability::manager::ValidationError::TokenRevoked);
+    }
+    manager
+        .validate(token, caller, action, resource, None)
+        .await
+}
+
+#[cfg(all(test, unix))]
+pub(crate) async fn spend_plan_grant_for_test(
+    manager: &CapabilityManager,
+    token: &CapabilityToken,
+) -> Result<(), elastos_runtime::capability::manager::ValidationError> {
+    spend_invoked_capability(
+        manager,
+        token,
+        token.capsule(),
+        token.action(),
+        token.resource(),
+    )
+    .await
 }
 
 fn plan_effect_succeeded(response: &serde_json::Value) -> bool {
@@ -1262,7 +1600,7 @@ async fn admit_plan_effect(
     if take_plan_panic(&step.request_id) {
         panic!("plan dispatch panic seam");
     }
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pause_plan_dispatch(&step.request_id, PlanDispatchPoint::InEffect).await;
     Ok((guard, AdmittedEffect::admit()))
 }
@@ -1307,6 +1645,9 @@ pub(crate) async fn dispatch_agent_plan_step(
         return resource_error_response("admission_missing", "agent plan admission is unavailable");
     };
     let ctx = held.context;
+    if let Some(book) = ctx.plan_book.as_ref() {
+        crate::runtime::wire_home_runtime(data_dir, book);
+    }
     // The book is read before the stop flag. Once the instance is marked
     // ending, the refusal is `instance ended`. The flag is the earlier
     // window, while the instance is still open: the step was stopped before
@@ -1342,7 +1683,7 @@ pub(crate) async fn dispatch_agent_plan_step(
     // The admission is already removed. Refuse unless this instance is still
     // running and not stopping. The same check runs again immediately before
     // the write.
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pause_plan_dispatch(request_id, PlanDispatchPoint::BeforeCheck).await;
     if let Some(refusal) = plan_step_refusal(
         data_dir,
@@ -1446,8 +1787,14 @@ pub(crate) async fn dispatch_agent_plan_step(
         token
     };
     let registered = if own_root {
-        match register_one_use_grant(&ctx, &token, &dispatch.resource, dispatch.required_action)
-            .await
+        match register_one_use_grant(
+            &ctx,
+            &token,
+            &dispatch.resource,
+            dispatch.required_action,
+            request_id,
+        )
+        .await
         {
             Ok(pending_id) => Some((token.clone(), pending_id)),
             Err(()) => {
@@ -1474,9 +1821,12 @@ pub(crate) async fn dispatch_agent_plan_step(
             store: Arc::clone(&ctx.pending_store),
             token,
             pending_id,
+            refused: false,
+            revoking: false,
+            ready: Arc::new(tokio::sync::watch::channel(0).0),
         }),
     });
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pause_plan_dispatch(request_id, PlanDispatchPoint::AfterToken).await;
     let request = serde_json::json!({
         "uri": uri,
@@ -1495,8 +1845,13 @@ pub(crate) async fn dispatch_agent_plan_step(
     let response = PLAN_STEP
         .scope(step, authorize_and_dispatch_resource_invoke(&request, &ctx))
         .await;
-    if let Some(mut held) = held {
-        if let Some(grant) = held.grant.take() {
+    if let Some(held) = held {
+        // The grant stays in the guard across this await. A timeout or abort
+        // while it is running still drops the guard, so the grant is abandoned
+        // and revoked once.
+        if let Some(grant) = held.grant.as_ref() {
+            #[cfg(all(test, unix))]
+            pause_plan_dispatch(request_id, PlanDispatchPoint::Revoke).await;
             if plan_effect_succeeded(&response) {
                 // The token was counted by validate. The pending record must
                 // leave Granted: Stop's settle writes every still-granted
@@ -1689,6 +2044,7 @@ struct ResourceInvokeDispatch {
     request: serde_json::Value,
     resource: String,
     required_action: Action,
+    use_spent: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1757,13 +2113,13 @@ fn resource_invoke_dispatch(
                 .into(),
         );
     }
-    let uri = scope_current_user_alias(uri, principal_id, data_dir)?;
-
     let operation = request["operation"]
         .as_str()
         .filter(|value| !value.is_empty())
-        .ok_or_else(|| "resource_invoke missing operation".to_string())?
-        .to_string();
+        .ok_or_else(|| "resource_invoke missing operation".to_string())?;
+    refuse_unoffered_v2_read(operation, request, uri, principal_id, data_dir)?;
+    let operation = operation.to_string();
+    let uri = scope_current_user_alias(uri, principal_id, data_dir)?;
 
     let scheme = provider_scheme_for_resource_uri(&uri)?;
     let mut body = request
@@ -1839,6 +2195,7 @@ fn resource_invoke_dispatch(
         request: body,
         resource,
         required_action,
+        use_spent: false,
     })
 }
 
@@ -1940,6 +2297,9 @@ fn finish_component_invoke(
             "audit".to_string(),
             serde_json::Value::String(audit_id.to_string()),
         );
+        if dispatch.use_spent {
+            object.insert("use_spent".into(), serde_json::Value::Bool(true));
+        }
     }
     response
 }
@@ -2046,7 +2406,7 @@ async fn authorize_and_dispatch_resource_invoke(
     bridge_ctx: &BridgeContext,
 ) -> serde_json::Value {
     let CheckedInvoke {
-        dispatch,
+        mut dispatch,
         audit_id,
         token,
     } = match checks_before_plan_admit(request, bridge_ctx).await {
@@ -2064,17 +2424,31 @@ async fn authorize_and_dispatch_resource_invoke(
         }
     };
     let resource_id = ResourceId::new(&dispatch.resource);
-    if bridge_ctx
-        .capability_manager
-        .validate(
-            &token,
-            &bridge_ctx.capsule_id,
-            dispatch.required_action,
-            &resource_id,
-            None,
-        )
-        .await
-        .is_err()
+    if dispatch.operation == "read" && dispatch.request["count_use"].as_bool() == Some(false) {
+        let ready = token.action() == dispatch.required_action
+            && resource_id.matches(token.resource())
+            && !plan_grant_spend_is_refused(token.id())
+            && bridge_ctx
+                .capability_manager
+                .can_still_validate_for_caller(&token, &bridge_ctx.capsule_id)
+                .await;
+        let response = match ready {
+            true => serde_json::json!({"type": "resource_result", "result": {"status": "ok"}}),
+            false => resource_error_response("capability_denied", "Capability validation failed"),
+        };
+        let outcome = if ready { "ok" } else { "denied" };
+        guard.release();
+        return finish_component_invoke(bridge_ctx, &audit_id, &dispatch, outcome, response);
+    }
+    if spend_invoked_capability(
+        &bridge_ctx.capability_manager,
+        &token,
+        &bridge_ctx.capsule_id,
+        dispatch.required_action,
+        &resource_id,
+    )
+    .await
+    .is_err()
     {
         guard.release();
         return finish_component_invoke(
@@ -2085,12 +2459,17 @@ async fn authorize_and_dispatch_resource_invoke(
             resource_error_response("capability_denied", "Capability validation failed"),
         );
     }
-    if let Some(refusal) = agents_area_dispatch_refusal(&dispatch) {
-        guard.release();
-        return finish_component_invoke(bridge_ctx, &audit_id, &dispatch, "denied", refusal);
-    }
-    let response =
-        dispatch_admitted_effect(&effect, request, bridge_ctx, dispatch, &audit_id, &token).await;
+    dispatch.use_spent = dispatch.operation == "read";
+    let response = if dispatch.use_spent && dispatch.request["use_grant"].as_bool() == Some(true) {
+        let ok = serde_json::json!({"type": "resource_result", "result": {"status": "ok"}});
+        finish_component_invoke(bridge_ctx, &audit_id, &dispatch, "ok", ok)
+    } else {
+        if let Some(refusal) = agents_area_dispatch_refusal(&dispatch) {
+            guard.release();
+            return finish_component_invoke(bridge_ctx, &audit_id, &dispatch, "denied", refusal);
+        }
+        dispatch_admitted_effect(&effect, request, bridge_ctx, dispatch, &audit_id, &token).await
+    };
     if let Some(step) = current_plan_step() {
         // Settlement holds this flight until the record is written, then
         // releases it. A timeout drops the future before this park, and the
@@ -2322,6 +2701,45 @@ fn submit_agent_plan_response(
     }
 }
 
+/// A Bus v2 read is a read whose body sets `check_revision`. Called once.
+#[rustfmt::skip]
+fn is_v2_read(operation: &str, request: &serde_json::Value) -> bool {
+    operation == "read" && request["body"]["check_revision"].as_bool() == Some(true)
+}
+
+/// The stored root of this launch, after `self` is resolved. Anything else is not.
+#[rustfmt::skip]
+fn caller_owns(resource: &str, principal_id: Option<&str>, data_dir: Option<&Path>) -> bool {
+    let Some(id) = principal_id else { return false };
+    let Ok(own) = crate::auth::principal_stored_localhost_root(data_dir, id) else { return false };
+    let Ok(scoped) = scope_current_user_alias(resource, Some(id), data_dir) else { return false };
+    scoped == own || scoped.starts_with(&format!("{own}/"))
+}
+
+/// Own root, then the name. The name still runs before the protected path.
+#[rustfmt::skip]
+fn refuse_unoffered_v2_read(operation: &str, request: &serde_json::Value, uri: &str, principal_id: Option<&str>, data_dir: Option<&Path>) -> Result<(), ResourceInvokeError> {
+    if !is_v2_read(operation, request) { return Ok(()); }
+    let named = request["body"]["path"].as_str().unwrap_or(uri);
+    for resource in [named, uri] {
+        if caller_owns(resource, principal_id, data_dir) { continue; }
+        if let Some(root) = unoffered_v2_read_root(resource) {
+            return Err(ResourceInvokeError::new("root_not_offered", format!("{root} is not offered")));
+        }
+    }
+    Ok(())
+}
+
+/// Local, Public, and Users are offered. Any other root is named.
+fn unoffered_v2_read_root(resource: &str) -> Option<&str> {
+    let (root, _) = elastos_common::localhost::parse_localhost_uri(resource)?;
+    if elastos_common::localhost::v2_read_offers(root) {
+        None
+    } else {
+        Some(root)
+    }
+}
+
 fn protected_principal_root_resource_response(
     bridge_ctx: &BridgeContext,
     operation: &str,
@@ -2366,8 +2784,12 @@ fn protected_principal_root_resource_response(
     }
     let agent_path = crate::provider_resource::in_agents_area(&rooted);
     let agent_journal = operation == "write" && agent_path;
-    match crate::auth::load_principal_root_protection(data_dir, principal_id, &localhost_root) {
-        Ok(Some(_)) => {}
+    let protection = match crate::auth::load_principal_root_protection(
+        data_dir,
+        principal_id,
+        &localhost_root,
+    ) {
+        Ok(Some(protection)) => protection,
         Ok(None) if agent_path => {
             return Some(resource_error_response(
                 "principal_root_protection_required",
@@ -2387,7 +2809,7 @@ fn protected_principal_root_resource_response(
                 &err.to_string(),
             ));
         }
-    }
+    };
 
     let Some(path) = rooted_localhost_fs_path(data_dir, &rooted) else {
         return Some(resource_error_response(
@@ -2398,6 +2820,39 @@ fn protected_principal_root_resource_response(
 
     match operation {
         "read" => {
+            let offset = request.get("offset").and_then(|value| value.as_u64());
+            let length = request.get("length").and_then(|value| value.as_u64());
+            let check_revision = request
+                .get("check_revision")
+                .and_then(|value| value.as_bool())
+                == Some(true);
+            // v2 sets `check_revision`. The cap is `length`, one past the
+            // guest's cap. A v1 window is `length` too, and a larger object
+            // is still read and sliced. The bound comes from the object's
+            // head and tail. Over that cap, the body stays unread.
+            if check_revision {
+                if let Some(length) = length {
+                    let bound = match crate::auth::principal_root_object_content_bound(
+                        data_dir,
+                        principal_id,
+                        &localhost_root,
+                        &rooted,
+                        &path,
+                        Some(protection.data_key_id.as_str()),
+                    ) {
+                        Ok(bound) => bound,
+                        Err(err) => {
+                            return Some(provider_error_result("read_failed", &err.to_string()))
+                        }
+                    };
+                    if bound > offset.unwrap_or(0).saturating_add(length) {
+                        return Some(provider_error_result(
+                            "invalid",
+                            "object is over the read cap",
+                        ));
+                    }
+                }
+            }
             let bytes = match crate::auth::read_principal_root_object(
                 data_dir,
                 principal_id,
@@ -2408,15 +2863,48 @@ fn protected_principal_root_resource_response(
                 Ok(bytes) => bytes,
                 Err(err) => return Some(provider_error_result("read_failed", &err.to_string())),
             };
+            // `length` is one past the guest's cap. The pre-check let the tag
+            // and a byte of padding through. The plaintext stops at the cap.
+            if let Some(asked) = length.filter(|_| check_revision) {
+                let cap = offset.unwrap_or(0).saturating_add(asked.saturating_sub(1));
+                if (bytes.len() as u64) > cap {
+                    return Some(provider_error_result(
+                        "invalid",
+                        "object is over the read cap",
+                    ));
+                }
+            }
             let revision =
                 crate::auth::principal_root_object_revision(principal_id, &rooted, &bytes);
-            let bytes = apply_read_window(
-                bytes,
-                request.get("offset").and_then(|value| value.as_u64()),
-                request.get("length").and_then(|value| value.as_u64()),
-            );
+            // A v2 read sets this. The object is read again. A change between
+            // the two reads is a conflict, so the call ends as an error.
+            if check_revision {
+                #[cfg(test)]
+                run_read_revision_gap(data_dir);
+                let again = match crate::auth::read_principal_root_object(
+                    data_dir,
+                    principal_id,
+                    &localhost_root,
+                    &rooted,
+                    &path,
+                ) {
+                    Ok(again) => again,
+                    Err(err) => {
+                        return Some(provider_error_result("read_failed", &err.to_string()))
+                    }
+                };
+                let again_revision =
+                    crate::auth::principal_root_object_revision(principal_id, &rooted, &again);
+                if again != bytes || again_revision != revision {
+                    return Some(provider_error_result(
+                        "revision_conflict",
+                        "the object changed during the read",
+                    ));
+                }
+            }
+            let bytes = apply_read_window(bytes, offset, length);
             Some(provider_ok_result(serde_json::json!({
-                "content": bytes,
+                "content": read_content_value(&bytes, check_revision),
                 "size": bytes.len(),
                 "revision": revision,
             })))
@@ -2614,6 +3102,37 @@ fn request_content_bytes(request: &serde_json::Value) -> Result<Vec<u8>, String>
     }
     serde_json::from_value::<Vec<u8>>(value.clone())
         .map_err(|err| format!("write content must be bytes or string: {err}"))
+}
+
+#[cfg(test)]
+type ReadGap = (std::path::PathBuf, Box<dyn FnMut() + Send>);
+#[cfg(test)]
+static READ_REVISION_GAP: std::sync::Mutex<Option<ReadGap>> = std::sync::Mutex::new(None);
+
+#[cfg(test)]
+fn run_read_revision_gap(data_dir: &std::path::Path) {
+    // Only a read in the Home that set the hook runs it: tests share this slot.
+    if let Some((dir, hook)) = READ_REVISION_GAP.lock().expect("revision gap").as_mut() {
+        if dir == data_dir {
+            hook();
+        }
+    }
+}
+
+#[cfg(test)]
+fn set_read_revision_gap(hook: Option<ReadGap>) {
+    *READ_REVISION_GAP.lock().expect("revision gap") = hook;
+}
+
+/// v2 sends bytes as base64. v1 keeps a JSON array of numbers.
+fn read_content_value(bytes: &[u8], binary: bool) -> serde_json::Value {
+    if binary {
+        serde_json::json!({
+            "b64": base64::Engine::encode(&base64::engine::general_purpose::STANDARD, bytes)
+        })
+    } else {
+        serde_json::json!(bytes)
+    }
 }
 
 fn apply_read_window(bytes: Vec<u8>, offset: Option<u64>, length: Option<u64>) -> Vec<u8> {
@@ -3168,7 +3687,7 @@ async fn handle_request(line: &str, ctx: &Option<BridgeContext>) -> Result<serde
                                 None,
                             );
                             let token = encode_bridge_capability_token(&token);
-                            serde_json::json!({"type": "capability_token", "token": token})
+                            capability_token_response(&token)
                         }
                         false => resource_error_response("not_found", NO_LAUNCH),
                     };
@@ -3194,6 +3713,7 @@ async fn handle_request(line: &str, ctx: &Option<BridgeContext>) -> Result<serde
                 let pending = crate::api::handlers::capability::create_request_retiring(
                     &ctx.pending_store,
                     &ctx.capability_manager,
+                    ctx.v2_guests.as_deref(),
                     elastos_runtime::session::SessionId(ctx.capsule_id.clone()),
                     resource_id.clone(),
                     action,
@@ -3300,10 +3820,7 @@ async fn handle_request(line: &str, ctx: &Option<BridgeContext>) -> Result<serde
                             resource,
                             ctx.capsule_id,
                         );
-                        serde_json::json!({
-                            "type": "capability_token",
-                            "token": token_b64,
-                        })
+                        capability_token_response(&token_b64)
                     } else {
                         tracing::warn!(
                             "bridge: capability request timed out {} {} for capsule '{}'",
@@ -3367,6 +3884,32 @@ fn encode_bridge_capability_token(
     token: &elastos_runtime::capability::token::CapabilityToken,
 ) -> String {
     token.to_base64().unwrap_or_default()
+}
+
+/// The guest's grant line. A once grant carries `max_uses`. An expiring
+/// grant carries `expires_at_ms`. A session grant stays the two-field line.
+fn capability_token_response(token_b64: &str) -> serde_json::Value {
+    let mut response = serde_json::Map::new();
+    response.insert(
+        "type".into(),
+        serde_json::Value::String("capability_token".into()),
+    );
+    response.insert(
+        "token".into(),
+        serde_json::Value::String(token_b64.to_string()),
+    );
+    if let Ok(token) = elastos_runtime::capability::token::CapabilityToken::from_base64(token_b64) {
+        if let Some(uses) = token.constraints().max_uses() {
+            response.insert("max_uses".into(), serde_json::json!(uses));
+        }
+        if let Some(expiry) = token.expiry() {
+            response.insert(
+                "expires_at_ms".into(),
+                serde_json::json!(expiry.unix_secs.saturating_mul(1_000)),
+            );
+        }
+    }
+    serde_json::Value::Object(response)
 }
 
 pub async fn handle_remote_request(
@@ -3711,10 +4254,7 @@ pub async fn handle_remote_request_with_audit_dir(
             let body: serde_json::Value = resp.json().await?;
 
             if let Some(token) = body.get("token").and_then(|t| t.as_str()) {
-                serde_json::json!({
-                    "type": "capability_token",
-                    "token": token,
-                })
+                capability_token_response(token)
             } else {
                 match body.get("status").and_then(|s| s.as_str()) {
                     Some("denied") | Some("auto_denied") | Some("expired") => {
@@ -3767,10 +4307,7 @@ pub async fn handle_remote_request_with_audit_dir(
 
                 let token = token
                     .ok_or_else(|| anyhow::anyhow!("capability request still pending after 30s"))?;
-                serde_json::json!({
-                    "type": "capability_token",
-                    "token": token,
-                })
+                capability_token_response(&token)
             }
         }
         "ping" => serde_json::json!({"type": "pong"}),
@@ -3869,6 +4406,88 @@ pub(crate) mod tests {
     };
     use std::sync::Arc;
     use tokio::sync::Mutex;
+
+    #[test]
+    fn a_v2_read_names_every_localhost_root_this_path_does_not_offer() {
+        assert_eq!(unoffered_v2_read_root("localhost://Local/a"), None);
+        assert_eq!(
+            unoffered_v2_read_root("localhost://MyWebSite/a"),
+            Some("MyWebSite")
+        );
+        assert_eq!(unoffered_v2_read_root("localhost://Public/a"), None);
+        assert_eq!(unoffered_v2_read_root("localhost://Users/self/a"), None);
+        for root in ["ElastOS", "AppCapsules", "UsersAI", "WebSpaces"] {
+            assert_eq!(
+                unoffered_v2_read_root(&format!("localhost://{root}/a")),
+                Some(root),
+                "{root} is named"
+            );
+        }
+        assert_eq!(unoffered_v2_read_root("https://example/a"), None);
+    }
+
+    /// UsersAI is refused by name on a v2 read before the protected path,
+    /// with a principal and without one. Users stays offered.
+    #[tokio::test]
+    async fn a_v2_read_of_users_ai_is_refused_by_name_with_or_without_a_principal() {
+        let read = |id: u64, uri: &str, revision: bool| {
+            let mut body = serde_json::json!({"path": uri});
+            if revision {
+                body["check_revision"] = serde_json::Value::Bool(true);
+            }
+            serde_json::json!({
+                "id": id,
+                "request": {
+                    "type": "resource_invoke",
+                    "uri": uri,
+                    "operation": "read",
+                    "token": "tok",
+                    "body": body,
+                }
+            })
+            .to_string()
+        };
+        let code = |response: serde_json::Value| {
+            response["response"]["code"]
+                .as_str()
+                .unwrap_or("")
+                .to_string()
+        };
+        let users_ai = "localhost://UsersAI/self/note.txt";
+        let open = handle_request(&read(1, users_ai, true), &Some(bridge_context()))
+            .await
+            .expect("bridge");
+        assert_eq!(code(open.clone()), "root_not_offered", "{open}");
+        assert_eq!(
+            open["response"]["message"], "UsersAI is not offered",
+            "{open}"
+        );
+
+        let mut protected = bridge_context();
+        protected.principal_id = Some("person:local:active".into());
+        protected.data_dir = Some(std::env::temp_dir());
+        protected.manifest_capabilities = any_action(vec![format!("{users_ai}")]);
+        let closed = handle_request(&read(2, users_ai, true), &Some(protected))
+            .await
+            .expect("bridge");
+        assert_eq!(code(closed.clone()), "root_not_offered", "{closed}");
+        assert_eq!(
+            closed["response"]["message"], "UsersAI is not offered",
+            "{closed}"
+        );
+
+        let v1 = handle_request(&read(3, users_ai, false), &Some(bridge_context()))
+            .await
+            .expect("bridge");
+        assert_ne!(code(v1.clone()), "root_not_offered", "{v1}");
+        let users = handle_request(
+            &read(4, "localhost://Users/self/note.txt", true),
+            &Some(bridge_context()),
+        )
+        .await
+        .expect("bridge");
+        assert_ne!(code(users.clone()), "root_not_offered", "{users}");
+    }
 
     #[cfg(unix)]
     #[tokio::test]
@@ -4100,6 +4719,7 @@ pub(crate) mod tests {
             model_token_ceiling: None,
             model_budget: None,
             stop: None,
+            v2_guests: None,
             plan_book: None,
         }
     }
@@ -5264,6 +5884,307 @@ pub(crate) mod tests {
         found
     }
 
+    /// `BridgeContext {` where it builds a value. A return type
+    /// (`-> path::BridgeContext {`) is not a construction.
+    fn bridge_context_construction_counts() -> Vec<(String, usize)> {
+        let crates = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+        let mut files = Vec::new();
+        production_files(crates, &mut files);
+        let mut found = Vec::new();
+        for file in files {
+            let text = production_text(&std::fs::read_to_string(&file).unwrap());
+            let count = text
+                .lines()
+                .filter(|line| {
+                    let trimmed = line.trim_start();
+                    !(trimmed.starts_with("struct ")
+                        || trimmed.starts_with("pub struct ")
+                        || trimmed.starts_with("pub(crate) struct "))
+                })
+                .map(|line| {
+                    line.match_indices("BridgeContext {")
+                        .filter(|(start, _)| {
+                            let before = line[..*start].chars().next_back();
+                            let ident =
+                                before.is_some_and(|ch| ch.is_ascii_alphanumeric() || ch == '_');
+                            !ident && !return_type_before(line, *start)
+                        })
+                        .count()
+                })
+                .sum();
+            if count > 0 {
+                let name = file
+                    .strip_prefix(crates)
+                    .unwrap()
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                found.push((name, count));
+            }
+        }
+        found.sort();
+        found
+    }
+
+    /// True when `->` introduces the type that ends at `start`.
+    fn return_type_before(line: &str, start: usize) -> bool {
+        let before = line[..start].trim_end();
+        let before = before
+            .trim_end_matches(|ch: char| ch.is_ascii_alphanumeric() || ch == '_' || ch == ':');
+        before.trim_end().ends_with("->")
+    }
+
+    /// A `type` alias or a `use ... as` alias of `BridgeContext`, including one
+    /// written across more than one line.
+    fn bridge_context_alias_lines() -> Vec<String> {
+        let crates = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+        let mut files = Vec::new();
+        production_files(crates, &mut files);
+        let mut found = Vec::new();
+        for file in files {
+            let text = production_text(&std::fs::read_to_string(&file).unwrap());
+            for statement in collapsed_statements(&text) {
+                if !bridge_context_alias_line(&statement) {
+                    continue;
+                }
+                let name = file
+                    .strip_prefix(crates)
+                    .unwrap()
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                found.push(format!("{name}: {statement}"));
+            }
+        }
+        found.sort();
+        found
+    }
+
+    fn collapse_ws(text: &str) -> String {
+        let mut out = String::new();
+        let mut pending = false;
+        for ch in text.chars() {
+            if ch.is_whitespace() {
+                pending = !out.is_empty();
+                continue;
+            }
+            if pending {
+                out.push(' ');
+                pending = false;
+            }
+            out.push(ch);
+        }
+        out
+    }
+
+    /// Statements split on `;` outside strings, character literals, and comments.
+    fn collapsed_statements(text: &str) -> Vec<String> {
+        let mut statements = Vec::new();
+        let mut current = String::new();
+        let mut rest = text;
+        let push = |current: &mut String, statements: &mut Vec<String>| {
+            let collapsed = collapse_ws(current);
+            current.clear();
+            if !collapsed.is_empty() {
+                statements.push(collapsed);
+            }
+        };
+        while let Some(ch) = rest.chars().next() {
+            if rest.starts_with("/*") {
+                let end = rest.find("*/").map(|at| at + 2).unwrap_or(rest.len());
+                rest = &rest[end..];
+                current.push(' ');
+                continue;
+            }
+            if rest.starts_with("//") {
+                let end = rest.find('\n').unwrap_or(rest.len());
+                rest = &rest[end..];
+                current.push(' ');
+                continue;
+            }
+            let width = ch.len_utf8();
+            if ch == '\'' && !char_literal(rest) {
+                current.push(ch);
+                rest = &rest[width..];
+                continue;
+            }
+            let raw_at = if rest.starts_with("br") || rest.starts_with("cr") {
+                1
+            } else if rest.starts_with('r') {
+                0
+            } else {
+                usize::MAX
+            };
+            if raw_at != usize::MAX {
+                if let Some(end) = raw_string_end(rest, raw_at) {
+                    current.push(' ');
+                    rest = &rest[end..];
+                    continue;
+                }
+            }
+            if ch == '"' || ch == '\'' {
+                current.push(ch);
+                rest = &rest[width..];
+                let mut escaped = false;
+                while let Some(inner) = rest.chars().next() {
+                    let inner_width = inner.len_utf8();
+                    current.push(inner);
+                    rest = &rest[inner_width..];
+                    if escaped {
+                        escaped = false;
+                        continue;
+                    }
+                    if inner == '\\' {
+                        escaped = true;
+                        continue;
+                    }
+                    if inner == ch {
+                        break;
+                    }
+                }
+                continue;
+            }
+            if ch == ';' {
+                push(&mut current, &mut statements);
+                rest = &rest[width..];
+                continue;
+            }
+            current.push(ch);
+            rest = &rest[width..];
+        }
+        push(&mut current, &mut statements);
+        statements
+    }
+
+    /// `'a'` and `'\n'` are character literals. `'static` and `'a` are lifetimes.
+    fn char_literal(text: &str) -> bool {
+        let mut chars = text.chars();
+        if chars.next() != Some('\'') {
+            return false;
+        }
+        match chars.next() {
+            Some('\\') => true,
+            Some(ch) if ch != '\'' => chars.next() == Some('\''),
+            _ => false,
+        }
+    }
+
+    #[test]
+    fn a_generic_alias_is_seen_and_a_raw_string_does_not_hide_one() {
+        let text = concat!(
+            "type Alias<T> = BridgeContext;\n",
+            "type Spaced < T > = path::BridgeContext;\n",
+            "type Miss = r#\"type Hidden = BridgeContext;\"#;\n",
+            "let raw = r##\"a; type Other = BridgeContext;\"##;\n",
+            "let bytes = br#\"type Byte = BridgeContext;\"#;\n",
+            "type Also<T> = BridgeContext<T>;\n",
+        );
+        let found: Vec<_> = collapsed_statements(text)
+            .into_iter()
+            .filter(|line| bridge_context_alias_line(line))
+            .collect();
+        assert_eq!(found.len(), 3, "{found:?}");
+        assert!(found.iter().any(|line| line.contains("Alias")));
+        assert!(found.iter().any(|line| line.contains("Spaced")));
+        assert!(found.iter().any(|line| line.contains("Also")));
+        assert!(found.iter().all(|line| !line.contains("Hidden")));
+        assert!(found.iter().all(|line| !line.contains("Other")));
+        assert!(found.iter().all(|line| !line.contains("Byte")));
+    }
+
+    #[test]
+    fn a_parenthesised_alias_and_self_inside_the_impl_are_seen() {
+        let text = concat!(
+            "type Paren = (BridgeContext);\n",
+            "type Nested = ((path::BridgeContext));\n",
+            "impl BridgeContext { type Same = Self; }\n",
+            "impl BridgeContext { type Wrapped = (Self); }\n",
+            "impl Other { type Same = Self; }\n",
+            "fn f(value: (BridgeContext)) {}\n",
+        );
+        let found: Vec<_> = collapsed_statements(text)
+            .into_iter()
+            .filter(|line| bridge_context_alias_line(line))
+            .collect();
+        assert_eq!(found.len(), 4, "{found:?}");
+        assert!(found.iter().any(|line| line.contains("Paren")));
+        assert!(found.iter().any(|line| line.contains("Nested")));
+        assert!(found
+            .iter()
+            .any(|line| line.contains("Same") && line.contains("BridgeContext")));
+        assert!(found.iter().any(|line| line.contains("Wrapped")));
+        assert!(found.iter().all(|line| !line.contains("Other")));
+        assert!(found.iter().all(|line| !line.contains("fn f")));
+    }
+
+    #[test]
+    fn a_split_bridge_context_alias_is_one_statement() {
+        let text = "fn f<'a>(value: &'a BridgeContext) -> &'a BridgeContext { value }\nuse crate::bus::{\n    BridgeContext as Hidden\n};\ntype Alias =\n    BridgeContext;\n";
+        let found: Vec<_> = collapsed_statements(text)
+            .into_iter()
+            .filter(|line| bridge_context_alias_line(line))
+            .collect();
+        assert_eq!(found.len(), 2, "{found:?}");
+    }
+
+    fn bridge_context_alias_line(statement: &str) -> bool {
+        let padded = format!(" {statement}");
+        if type_alias_of_bridge(&padded) {
+            return true;
+        }
+        use_alias_of_bridge(&padded)
+    }
+
+    fn bridge_alias_head(rhs: &str) -> &str {
+        let mut rhs = rhs.trim_start();
+        while let Some(stripped) = rhs.strip_prefix('(') {
+            rhs = stripped.trim_start();
+        }
+        rhs.split(|ch: char| [';', '{', '<', ' ', ')'].contains(&ch))
+            .next()
+            .unwrap_or("")
+    }
+
+    fn type_alias_of_bridge(padded: &str) -> bool {
+        let mut rest = padded;
+        while let Some(at) = rest.find(" type ") {
+            let after = rest[at + " type ".len()..].trim_start();
+            let Some(eq) = after.find('=') else {
+                rest = &rest[at + 6..];
+                continue;
+            };
+            let name = after[..eq].trim();
+            let name = name.split('<').next().unwrap_or(name).trim();
+            let named = !name.is_empty()
+                && name
+                    .chars()
+                    .all(|ch| ch.is_ascii_alphanumeric() || ch == '_');
+            let rhs = after[eq + 1..].trim_start();
+            let head = bridge_alias_head(rhs);
+            let bridge = head == "BridgeContext" || head.ends_with("::BridgeContext");
+            let self_bridge = (head == "Self" || head.ends_with("::Self"))
+                && padded.contains("impl")
+                && padded.contains("BridgeContext");
+            if named && (bridge || self_bridge) {
+                return true;
+            }
+            rest = &rest[at + 6..];
+        }
+        false
+    }
+
+    fn use_alias_of_bridge(padded: &str) -> bool {
+        let mut rest = padded;
+        while let Some(at) = rest.find(" use ") {
+            let after = &rest[at + 1..];
+            let end = after.find('{').map(|brace| brace + 1).unwrap_or(0);
+            let tail = if end == 0 { after } else { &after[end - 1..] };
+            if tail.contains("BridgeContext as") {
+                return true;
+            }
+            rest = &rest[at + 5..];
+        }
+        false
+    }
+
     /// The end (exclusive) of the item a preceding `#[cfg(test)]` applies to.
     /// Scans to the matching block end or to a statement-ending semicolon,
     /// skipping string literals.
@@ -5571,15 +6492,21 @@ pub(crate) mod tests {
             ]),
             "into_bridge_principal_string uses"
         );
-        // The bridge field stays a String and is filled at exactly two
-        // production literals; `BridgeContext`'s definition is not one.
+        // Constructions, not a return type whose brace shares the line.
+        // A type alias or a `use ... as` alias of BridgeContext is refused:
+        // either one could construct the struct under another name.
+        assert!(
+            bridge_context_alias_lines().is_empty(),
+            "BridgeContext alias: {:?}",
+            bridge_context_alias_lines()
+        );
         assert_eq!(
-            production_counts("BridgeContext {"),
+            bridge_context_construction_counts(),
             expected_counts(&[
                 ("elastos-server/src/runtime.rs", 1),
                 ("elastos-server/src/supervisor.rs", 1),
             ]),
-            "BridgeContext literals"
+            "BridgeContext constructions"
         );
     }
 
@@ -5995,6 +6922,180 @@ pub(crate) mod tests {
             None,
         );
         encode_bridge_capability_token(&token)
+    }
+
+    fn once_read_token(ctx: &BridgeContext, resource: &str) -> (CapabilityToken, String) {
+        let token = ctx.capability_manager.grant(
+            &ctx.capsule_id,
+            ResourceId::new(resource),
+            Action::Read,
+            TokenConstraints::new(0, false, None, Some(1)),
+            None,
+        );
+        let encoded = encode_bridge_capability_token(&token);
+        (token, encoded)
+    }
+
+    fn capability_use_successes(ctx: &BridgeContext, token_id: &str) -> usize {
+        ctx.capability_manager
+            .audit_log()
+            .recent_events(64)
+            .into_iter()
+            .filter(|event| {
+                matches!(
+                    event,
+                    elastos_runtime::primitives::audit::AuditEvent::CapabilityUse {
+                        token_id: id,
+                        success: true,
+                        ..
+                    } if id == token_id
+                )
+            })
+            .count()
+    }
+
+    async fn read_invoke(
+        ctx: &BridgeContext,
+        uri: &str,
+        token: &str,
+        use_grant: bool,
+    ) -> serde_json::Value {
+        let mut body = serde_json::json!({"path": uri});
+        if use_grant {
+            body["use_grant"] = serde_json::Value::Bool(true);
+        }
+        let line = serde_json::json!({
+            "id": 1,
+            "request": {
+                "type": "resource_invoke",
+                "uri": uri,
+                "operation": "read",
+                "token": token,
+                "body": body,
+            }
+        })
+        .to_string();
+        handle_request(&line, &Some(ctx.clone()))
+            .await
+            .expect("the bridge answers")
+    }
+
+    /// One counted grant is one CapabilityUse. A read that fails after validate
+    /// has spent it, and a present of that same grant is the same check.
+    #[tokio::test]
+    async fn a_once_grant_records_exactly_one_capability_use() {
+        let ctx = bridge_context();
+        let uri = "localhost://Local/SharedByLocalUsersAndBots/Home/pic.png";
+        let (token, encoded) = once_read_token(&ctx, uri);
+        let failed = read_invoke(&ctx, uri, &encoded, false).await;
+        assert_eq!(failed["response"]["use_spent"], true, "{failed}");
+        assert_ne!(failed["response"]["type"], "resource_result", "{failed}");
+        assert_eq!(capability_use_successes(&ctx, &token.id().to_string()), 1);
+        assert!(!ctx.capability_manager.can_still_validate(&token).await);
+        let again = read_invoke(&ctx, uri, &encoded, false).await;
+        assert_eq!(again["response"]["code"], "capability_denied", "{again}");
+        assert_eq!(capability_use_successes(&ctx, &token.id().to_string()), 1);
+
+        let (shown, shown_encoded) = once_read_token(&ctx, uri);
+        let present = read_invoke(&ctx, uri, &shown_encoded, true).await;
+        assert_eq!(present["response"]["type"], "resource_result", "{present}");
+        assert_eq!(present["response"]["result"]["status"], "ok", "{present}");
+        assert_eq!(present["response"]["use_spent"], true, "{present}");
+        assert_eq!(capability_use_successes(&ctx, &shown.id().to_string()), 1);
+        assert!(!ctx.capability_manager.can_still_validate(&shown).await);
+        let after = read_invoke(&ctx, uri, &shown_encoded, false).await;
+        assert_eq!(after["response"]["code"], "capability_denied", "{after}");
+        assert_eq!(capability_use_successes(&ctx, &shown.id().to_string()), 1);
+    }
+
+    /// The present check is the read-only form of the same grant. It does not
+    /// count. The following `use_grant` read is the one CapabilityUse.
+    #[tokio::test]
+    async fn a_present_check_does_not_count_and_the_use_grant_does() {
+        let ctx = bridge_context();
+        let uri = "localhost://Local/SharedByLocalUsersAndBots/Home/pic.png";
+        let (token, encoded) = once_read_token(&ctx, uri);
+        let body = serde_json::json!({"path": uri, "count_use": false});
+        let line = serde_json::json!({
+            "id": 1,
+            "request": {
+                "type": "resource_invoke",
+                "uri": uri,
+                "operation": "read",
+                "token": &encoded,
+                "body": &body,
+            }
+        })
+        .to_string();
+        let checked = handle_request(&line, &Some(ctx.clone()))
+            .await
+            .expect("check");
+        assert_eq!(checked["response"]["type"], "resource_result", "{checked}");
+        assert!(checked["response"].get("use_spent").is_none(), "{checked}");
+        assert_eq!(capability_use_successes(&ctx, &token.id().to_string()), 0);
+        assert!(ctx.capability_manager.can_still_validate(&token).await);
+        let spent = read_invoke(&ctx, uri, &encoded, true).await;
+        assert_eq!(spent["response"]["use_spent"], true, "{spent}");
+        assert_eq!(capability_use_successes(&ctx, &token.id().to_string()), 1);
+        assert!(!ctx.capability_manager.can_still_validate(&token).await);
+        let again = serde_json::json!({
+            "id": 2,
+            "request": {
+                "type": "resource_invoke",
+                "uri": uri,
+                "operation": "read",
+                "token": &encoded,
+                "body": &body,
+            }
+        })
+        .to_string();
+        let denied = handle_request(&again, &Some(ctx.clone()))
+            .await
+            .expect("spent check");
+        assert_eq!(denied["response"]["code"], "capability_denied", "{denied}");
+        assert_eq!(capability_use_successes(&ctx, &token.id().to_string()), 1);
+    }
+
+    /// A plan grant whose dispatch was dropped is refused for the present
+    /// check as well as for the counted present. Neither counts a use.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_present_check_of_a_refused_plan_grant_is_denied() {
+        let ctx = bridge_context();
+        let uri = "localhost://Local/SharedByLocalUsersAndBots/Home/pic.png";
+        let (token, encoded) = once_read_token(&ctx, uri);
+        let request_id = format!("refused-check-{}", token.id());
+        park_abandoned_grant_for_test(
+            &request_id,
+            ctx.capability_manager.clone(),
+            ctx.pending_store.clone(),
+            token.clone(),
+            "pending-refused-check".to_string(),
+        );
+        refuse_abandoned_plan_grant(&request_id);
+        let line = serde_json::json!({
+            "id": 1,
+            "request": {
+                "type": "resource_invoke",
+                "uri": uri,
+                "operation": "read",
+                "token": &encoded,
+                "body": {"path": uri, "count_use": false},
+            }
+        })
+        .to_string();
+        let checked = handle_request(&line, &Some(ctx.clone()))
+            .await
+            .expect("check");
+        let spent = read_invoke(&ctx, uri, &encoded, true).await;
+        abandoned_grants().remove(&request_id);
+        assert_eq!(
+            checked["response"]["code"], "capability_denied",
+            "{checked}"
+        );
+        assert_eq!(spent["response"]["code"], "capability_denied", "{spent}");
+        assert_eq!(capability_use_successes(&ctx, &token.id().to_string()), 0);
+        assert!(ctx.capability_manager.can_still_validate(&token).await);
     }
 
     #[test]
@@ -7726,6 +8827,196 @@ pub(crate) mod tests {
     }
 
     #[cfg(unix)]
+    fn journal_checked_read_line(id: u64, uri: &str, token: String) -> String {
+        serde_json::json!({
+            "id": id,
+            "request": {
+                "type": "resource_invoke",
+                "uri": uri,
+                "operation": "read",
+                "token": token,
+                "body": { "check_revision": true, "offset": 0, "length": 64 },
+            }
+        })
+        .to_string()
+    }
+
+    #[cfg(unix)]
+    fn journal_window_line(
+        id: u64,
+        uri: &str,
+        token: String,
+        check_revision: bool,
+        length: u64,
+    ) -> String {
+        serde_json::json!({
+            "id": id,
+            "request": {
+                "type": "resource_invoke",
+                "uri": uri,
+                "operation": "read",
+                "token": token,
+                "body": { "check_revision": check_revision, "offset": 0, "length": length },
+            }
+        })
+        .to_string()
+    }
+
+    /// A v1 window slices a larger protected object. The same length with the
+    /// v2 check refuses it before the body is read.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_v1_window_of_a_protected_object_is_not_the_v2_cap() {
+        let (temp, ctx, object_uri) = journal_context("person:local:journal-owner");
+        let written = journal_write(
+            &ctx,
+            &object_uri,
+            JOURNAL_SELF_URI,
+            b"0123456789abcdefghij",
+            serde_json::json!({ "create_only": true }),
+        )
+        .await;
+        assert_eq!(written["response"]["result"]["status"], "ok");
+        let token = bridge_token(&ctx, &object_uri, Action::Read);
+        let v1 = handle_request(
+            &journal_window_line(80, JOURNAL_SELF_URI, token.clone(), false, 4),
+            &Some(ctx.clone()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(v1["response"]["result"]["status"], "ok", "{v1}");
+        assert_eq!(
+            v1["response"]["result"]["data"]["content"],
+            serde_json::json!([48, 49, 50, 51]),
+            "a v1 window stays a byte array"
+        );
+        let path = journal_path(&temp, &object_uri);
+        let body_reads = || {
+            crate::auth::principal_object_io::reads(temp.path())
+                .iter()
+                .filter(|read| read.as_path() == path)
+                .count()
+        };
+        let before = body_reads();
+        let v2 = handle_request(
+            &journal_window_line(81, JOURNAL_SELF_URI, token, true, 4),
+            &Some(ctx),
+        )
+        .await
+        .unwrap();
+        assert_eq!(v2["response"]["result"]["code"], "invalid", "{v2}");
+        assert_eq!(
+            v2["response"]["result"]["message"],
+            "object is over the read cap"
+        );
+        assert_eq!(
+            body_reads(),
+            before,
+            "the over-cap refusal reads no object body"
+        );
+    }
+
+    /// Exact plaintext at 64 KiB and at 16 MiB is read. One byte over is refused.
+    /// Users/self and UsersAI/self both. An older, non-canonical head keeps
+    /// the three-quarter ceiling.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_protected_read_allows_the_exact_cap_and_refuses_one_byte_over() {
+        const KIB: usize = 1024;
+        let caps = [64 * KIB, 16 * KIB * KIB];
+        let human = "person:local:exact-cap";
+        let agent = crate::auth::valid_agent::ID;
+        for (principal, root_of, alias) in [
+            (
+                human,
+                crate::auth::principal_localhost_root(human),
+                "localhost://Users/self",
+            ),
+            (
+                agent,
+                crate::auth::valid_agent::ROOT.to_string(),
+                "localhost://UsersAI/self",
+            ),
+        ] {
+            let temp = tempfile::tempdir().unwrap();
+            if principal == agent {
+                crate::auth::valid_agent::plant(temp.path());
+                crate::auth::store_test_principal_root_protection_for(
+                    temp.path(),
+                    principal,
+                    &root_of,
+                );
+            } else {
+                crate::auth::store_test_principal_root_protection(temp.path(), principal);
+                crate::auth::store_test_human_principal(temp.path(), principal);
+            }
+            let mut ctx = bridge_context();
+            ctx.principal_id = Some(principal.to_string());
+            ctx.data_dir = Some(temp.path().to_path_buf());
+            ctx.manifest_capabilities = any_action(vec![format!("{root_of}/*")]);
+            for cap in caps {
+                let name = format!("Documents/cap-{cap}.bin");
+                let object = format!("{root_of}/{name}");
+                let alias_uri = format!("{alias}/{name}");
+                let path = rooted_localhost_fs_path(temp.path(), &object).unwrap();
+                let exact = vec![b'a'; cap];
+                crate::auth::write_principal_root_object(
+                    temp.path(),
+                    principal,
+                    &root_of,
+                    &object,
+                    &path,
+                    &exact,
+                )
+                .unwrap();
+                let token = bridge_token(&ctx, &object, Action::Read);
+                let read = handle_request(
+                    &journal_window_line(90, &alias_uri, token.clone(), true, cap as u64 + 1),
+                    &Some(ctx.clone()),
+                )
+                .await
+                .unwrap();
+                assert_eq!(
+                    read["response"]["result"]["status"], "ok",
+                    "{alias} {cap}: {read}"
+                );
+                let b64 = read["response"]["result"]["data"]["content"]["b64"]
+                    .as_str()
+                    .unwrap();
+                let got = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, b64)
+                    .unwrap();
+                assert_eq!(got.len(), cap, "{alias}");
+                assert_eq!(got[0], b'a');
+                assert_eq!(got[cap - 1], b'a');
+                let over = vec![b'b'; cap + 1];
+                crate::auth::write_principal_root_object(
+                    temp.path(),
+                    principal,
+                    &root_of,
+                    &object,
+                    &path,
+                    &over,
+                )
+                .unwrap();
+                let refused = handle_request(
+                    &journal_window_line(91, &alias_uri, token, true, cap as u64 + 1),
+                    &Some(ctx.clone()),
+                )
+                .await
+                .unwrap();
+                assert_eq!(
+                    refused["response"]["result"]["code"], "invalid",
+                    "{refused}"
+                );
+                assert_eq!(
+                    refused["response"]["result"]["message"],
+                    "object is over the read cap"
+                );
+            }
+        }
+    }
+
+    #[cfg(unix)]
     async fn journal_write(
         ctx: &BridgeContext,
         object_uri: &str,
@@ -8938,6 +10229,93 @@ pub(crate) mod tests {
         )
         .await;
         assert_eq!(next["response"]["result"]["status"], "ok");
+    }
+
+    /// A read that asks for the check reads the object twice. A change
+    /// between those reads ends as `revision_conflict`.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_change_during_a_checked_read_does_not_end_ok() {
+        struct ClearGap;
+        impl Drop for ClearGap {
+            fn drop(&mut self) {
+                super::set_read_revision_gap(None);
+            }
+        }
+        let _clear = ClearGap;
+        let (temp, ctx, object_uri) = journal_context("person:local:journal-owner");
+        let written = journal_write(
+            &ctx,
+            &object_uri,
+            JOURNAL_SELF_URI,
+            b"journal v1",
+            serde_json::json!({ "create_only": true }),
+        )
+        .await;
+        assert_eq!(written["response"]["result"]["status"], "ok");
+        let path = journal_path(&temp, &object_uri);
+        let journal_reads = |path: &std::path::Path| {
+            crate::auth::principal_object_io::reads(temp.path())
+                .iter()
+                .filter(|read| read.as_path() == path)
+                .count()
+        };
+        let before = journal_reads(&path);
+        let token = bridge_token(&ctx, &object_uri, Action::Read);
+        let plain = handle_request(
+            &journal_read_line(70, JOURNAL_SELF_URI, token.clone()),
+            &Some(ctx.clone()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(plain["response"]["result"]["status"], "ok");
+        assert_eq!(
+            journal_reads(&path) - before,
+            1,
+            "a read without the check reads the object once"
+        );
+        let before = journal_reads(&path);
+        let checked = handle_request(
+            &journal_checked_read_line(71, JOURNAL_SELF_URI, token.clone()),
+            &Some(ctx.clone()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(checked["response"]["result"]["status"], "ok");
+        assert_eq!(
+            journal_reads(&path) - before,
+            2,
+            "the check reads the object and reads it again"
+        );
+        let data_dir = temp.path().to_path_buf();
+        let gap_uri = object_uri.clone();
+        let gap_path = path.clone();
+        super::set_read_revision_gap(Some((
+            temp.path().to_path_buf(),
+            Box::new(move || {
+                crate::auth::write_principal_root_object(
+                    &data_dir,
+                    "person:local:journal-owner",
+                    &crate::auth::principal_localhost_root("person:local:journal-owner"),
+                    &gap_uri,
+                    &gap_path,
+                    b"journal v2",
+                )
+                .expect("the object changes between the two reads");
+            }),
+        )));
+        let changed = handle_request(
+            &journal_checked_read_line(72, JOURNAL_SELF_URI, token),
+            &Some(ctx),
+        )
+        .await
+        .unwrap();
+        assert_eq!(changed["response"]["result"]["status"], "error");
+        assert_eq!(changed["response"]["result"]["code"], "revision_conflict");
+        assert_eq!(
+            changed["response"]["result"]["message"],
+            "the object changed during the read"
+        );
     }
 
     /// Bytes cross the bridge as a JSON number array: up to four characters per
@@ -10633,7 +12011,9 @@ fn after() {
                 ("elastos-server/src/api/auth_gateway.rs", 3),
                 ("elastos-server/src/api/gateway_home_external_link.rs", 1),
                 ("elastos-server/src/api/gateway_home_shared_content.rs", 2),
-                ("elastos-server/src/api/gateway_home_system.rs", 2),
+                // /api/apps/home/frame is the third caller. /api/residents/frame
+                // admits an attach shell and does not call this gate.
+                ("elastos-server/src/api/gateway_home_system.rs", 3),
                 ("elastos-server/src/api/gateway_home_token.rs", 3),
                 ("elastos-server/src/api/gateway_home_cli_mint.rs", 1),
                 ("elastos-server/src/api/gateway_passkey_step_up.rs", 3),
@@ -10770,11 +12150,19 @@ fn after() {
             !checks.contains(".validate("),
             "validate consumes a one-use grant and stays after admit"
         );
+        assert_eq!(authorize.matches("spend_invoked_capability(").count(), 1);
         let admit_at = authorize.find("admit_plan_effect(").expect("admit");
-        let validate_at = authorize.find(".validate(").expect("validate");
+        let spend_at = authorize.find("spend_invoked_capability(").expect("spend");
         assert!(
-            admit_at < validate_at,
+            admit_at < spend_at,
             "admit runs before the one-use grant is counted"
+        );
+        let spend = function_body(&source, "spend_invoked_capability");
+        let refusal_at = spend.find("plan_grant_spend_is_refused(").expect("refusal");
+        let validate_at = spend.find(".validate(").expect("validate");
+        assert!(
+            refusal_at < validate_at,
+            "the refusal check runs before validate counts a use"
         );
         assert!(!checks.contains("admit_plan_effect("));
         assert!(!checks.contains("dispatch_admitted_effect("));

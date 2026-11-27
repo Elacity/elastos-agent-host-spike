@@ -2728,7 +2728,7 @@ mod tests {
     #[test]
     fn append_home_launch_token_keeps_authority_out_of_the_request_url() {
         let dir = tempfile::tempdir().unwrap();
-        let context = local_home_launch_token_context(dir.path()).unwrap();
+        let context = bind_device_session_grant(dir.path(), &[HOME_CAPSULE_ID]).unwrap();
         let mut query = BTreeMap::new();
         query.insert("home_token".to_string(), "attacker".to_string());
         query.insert("capsule".to_string(), "documents".to_string());

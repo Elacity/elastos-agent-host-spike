@@ -78,6 +78,20 @@ impl Supervisor {
         _store: Arc<elastos_runtime::capability::pending::PendingRequestStore>,
     ) {
     }
+    pub fn set_v2_guests(
+        &mut self,
+        _v2_guests: Option<Arc<elastos_compute::providers::ComponentProvider>>,
+    ) {
+    }
+    pub(crate) fn microvm_bridge_context(
+        &self,
+        _registry: Arc<ProviderRegistry>,
+        _name: &str,
+        _principal_id: Option<crate::resource_bridge::BridgePrincipal>,
+        _manifest: &elastos_common::CapsuleManifest,
+    ) -> Option<crate::resource_bridge::BridgeContext> {
+        None
+    }
 
     #[cfg(test)]
     pub(crate) fn test_collaboration_chat_product_port(
