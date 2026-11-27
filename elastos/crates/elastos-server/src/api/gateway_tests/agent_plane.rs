@@ -3482,9 +3482,17 @@ async fn listener_gone_stop_reports_a_failed_stop() {
     let gateway = Gateway::start(&home.data).await;
     let runtime = crate::api::agent_plane::plane_runtime(&home.data).expect("runtime");
     let session = "session-stop-fails";
-    runtime
-        .register_capsule(planted_capsule(session, &agent, false))
-        .await;
+    let manifest: elastos_common::CapsuleManifest = serde_json::from_str(
+        &crate::runtime::tests::component_manifest_json("listener-stop"),
+    )
+    .unwrap();
+    let mut guest = planted_capsule(session, &agent, false);
+    guest.handle = Some(elastos_compute::CapsuleHandle {
+        id: elastos_common::CapsuleId(session.to_string()),
+        manifest,
+        args: Vec::new(),
+    });
+    runtime.register_capsule(guest).await;
     let ask = plant_pending(&home, session, &agent).await;
     runtime.arm_failing_capsule_stop(session);
     assert!(crate::api::agent_plane::end_live_listener_for_test(

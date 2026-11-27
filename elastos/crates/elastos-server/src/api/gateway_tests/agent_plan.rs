@@ -1947,6 +1947,57 @@ impl elastos_compute::ComputeProvider for IdleCompute {
     }
 }
 
+/// A MicroVM provider whose `stop` fails. A launcher row registers one of
+/// these handles, so the failed stop is that provider's own result.
+struct LauncherStopFails;
+
+#[async_trait::async_trait]
+impl elastos_compute::ComputeProvider for LauncherStopFails {
+    async fn load(
+        &self,
+        _: &std::path::Path,
+        _: elastos_common::CapsuleManifest,
+    ) -> elastos_common::Result<elastos_compute::CapsuleHandle> {
+        Err(elastos_common::ElastosError::Compute(
+            "launcher provider stop failed".into(),
+        ))
+    }
+
+    async fn start(&self, _: &elastos_compute::CapsuleHandle) -> elastos_common::Result<()> {
+        Err(elastos_common::ElastosError::Compute(
+            "launcher provider stop failed".into(),
+        ))
+    }
+
+    async fn stop(&self, _: &elastos_compute::CapsuleHandle) -> elastos_common::Result<()> {
+        Err(elastos_common::ElastosError::Compute(
+            "launcher provider stop failed".into(),
+        ))
+    }
+
+    async fn status(
+        &self,
+        _: &elastos_compute::CapsuleHandle,
+    ) -> elastos_common::Result<elastos_common::CapsuleStatus> {
+        Err(elastos_common::ElastosError::Compute(
+            "launcher provider stop failed".into(),
+        ))
+    }
+
+    async fn info(
+        &self,
+        _: &elastos_compute::CapsuleHandle,
+    ) -> elastos_common::Result<elastos_compute::CapsuleInfo> {
+        Err(elastos_common::ElastosError::Compute(
+            "launcher provider stop failed".into(),
+        ))
+    }
+
+    fn supports(&self, capsule_type: &elastos_common::CapsuleType) -> bool {
+        matches!(capsule_type, elastos_common::CapsuleType::MicroVM)
+    }
+}
+
 fn plan_bytes(dir: &Path, agent: &str, root: &str, target: &str) -> Vec<u8> {
     let path = elastos_common::localhost::rooted_localhost_fs_path(dir, target).unwrap();
     crate::auth::read_principal_root_object(dir, agent, root, target, &path).unwrap()
@@ -2357,7 +2408,7 @@ async fn bare_runtime(dir: &std::path::Path) -> Arc<crate::runtime::Runtime> {
                 .await
                 .unwrap(),
         ),
-        vec![Arc::new(IdleCompute)],
+        vec![Arc::new(IdleCompute), Arc::new(LauncherStopFails)],
         Some(Arc::new(
             elastos_compute::providers::ComponentProvider::new(),
         )),
@@ -3502,8 +3553,8 @@ async fn a_missing_stop_leaves_the_run_able_to_dispatch() {
     assert_the_run_can_still_dispatch(&plant).await;
 }
 
-/// A launcher row has no stop ticket. A stop that fails marks that row
-/// stopping and refuses a later dispatch.
+/// A launcher row has no stop ticket. Its provider's stop fails, and that
+/// failure marks the row stopping and refuses a later dispatch.
 #[cfg(unix)]
 #[tokio::test]
 async fn a_failed_stop_without_a_ticket_marks_stopping_and_refuses_dispatch() {
@@ -3513,6 +3564,36 @@ async fn a_failed_stop_without_a_ticket_marks_stopping_and_refuses_dispatch() {
         }}]})
     })
     .await;
+    let manifest: elastos_common::CapsuleManifest = serde_json::from_str(
+        r#"{
+            "schema": "elastos.capsule/v1",
+            "version": "0.1.0",
+            "name": "launcher-stop",
+            "role": "app",
+            "type": "microvm",
+            "entrypoint": "rootfs.ext4"
+        }"#,
+    )
+    .unwrap();
+    let handle = elastos_compute::CapsuleHandle {
+        id: elastos_common::CapsuleId(plant.session.clone()),
+        manifest,
+        args: Vec::new(),
+    };
+    plant
+        .runtime
+        .register_capsule(crate::runtime::RunningCapsuleInfo {
+            id: plant.session.clone(),
+            name: "launcher".to_string(),
+            status: crate::runtime::CAPSULE_RUNNING.to_string(),
+            capsule_type: elastos_common::CapsuleType::MicroVM,
+            handle: Some(handle),
+            session_id: plant.session.clone(),
+            principal: Some(plant.agent.clone()),
+            cause: None,
+            ended_at: None,
+        })
+        .await;
     assert!(
         plant
             .runtime
@@ -3520,9 +3601,16 @@ async fn a_failed_stop_without_a_ticket_marks_stopping_and_refuses_dispatch() {
             .is_none(),
         "the launcher row held a stop ticket"
     );
-    plant.runtime.arm_failing_capsule_stop(&plant.session);
     let (status, body) = stop_plan_agent(plant.runtime.clone(), &plant.agent).await;
     assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{body}");
+    assert!(
+        body.to_string().contains("launcher provider stop failed"),
+        "the provider's own stop error did not come back: {body}"
+    );
+    assert!(
+        plant.runtime.provider_stop_count_for_test() >= 1,
+        "the provider stop was not called"
+    );
     assert!(
         !crate::runtime::Runtime::plan_instance_is_open(
             &plant.runtime.plan_book(),
@@ -3542,69 +3630,6 @@ async fn a_failed_stop_without_a_ticket_marks_stopping_and_refuses_dispatch() {
     assert_eq!(record["status"], "refused", "{record}");
     assert_eq!(record["result"]["code"], "instance ended", "{record}");
     assert_eq!(std::fs::read(&plant.path).unwrap(), plant.before);
-}
-
-/// A watcher row holds a stop ticket. A provider stop that fails withdraws
-/// that ticket and leaves the run able to dispatch.
-#[cfg(unix)]
-#[tokio::test]
-async fn a_failed_stop_on_the_ticket_watcher_branch_leaves_the_run_able_to_dispatch() {
-    let plant = plant_approved(91, false, |_, target| {
-        json!({"steps": [{"scheme": "localhost", "operation": "write", "request": {
-            "path": target, "content": [112, 108, 97, 110]
-        }}]})
-    })
-    .await;
-    let manifest: elastos_common::CapsuleManifest = serde_json::from_str(
-        &crate::runtime::tests::component_manifest_json("ticket-stop"),
-    )
-    .unwrap();
-    let handle = elastos_compute::CapsuleHandle {
-        id: elastos_common::CapsuleId(plant.session.clone()),
-        manifest,
-        args: Vec::new(),
-    };
-    plant
-        .runtime
-        .register_capsule(crate::runtime::RunningCapsuleInfo {
-            id: plant.session.clone(),
-            name: "watched".to_string(),
-            status: crate::runtime::CAPSULE_RUNNING.to_string(),
-            capsule_type: elastos_common::CapsuleType::Wasm,
-            handle: Some(handle),
-            session_id: plant.session.clone(),
-            principal: Some(plant.agent.clone()),
-            cause: None,
-            ended_at: None,
-        })
-        .await;
-    plant.runtime.plant_activation_stop_for_test(&plant.session);
-    assert!(
-        plant
-            .runtime
-            .activation_stop_flag_for_test(&plant.session)
-            .is_some(),
-        "the watcher branch had no stop ticket"
-    );
-    plant.runtime.arm_failing_capsule_stop(&plant.session);
-    let (status, body) = stop_plan_agent(plant.runtime.clone(), &plant.agent).await;
-    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{body}");
-    assert!(
-        plant.runtime.provider_stop_count_for_test() >= 1,
-        "the provider stop was not called"
-    );
-    assert!(
-        !plant
-            .runtime
-            .activation_stop_requested_for_test(&plant.session),
-        "a failed provider stop left the flag up"
-    );
-    assert!(crate::runtime::Runtime::plan_instance_is_open(
-        &plant.runtime.plan_book(),
-        &plant.session,
-        &plant.agent
-    ));
-    assert_the_run_can_still_dispatch(&plant).await;
 }
 
 /// Dropping the Stop request before it ends the row leaves the run able to dispatch.
@@ -4018,7 +4043,8 @@ async fn unknown_steps_are_capped_and_stay_with_their_agent() {
     assert_eq!(plant.runtime.unknown_count_for_test(&plant.agent), 32);
 }
 
-/// A provider stop that fails, on a detached run, leaves the run able to act.
+/// A detached run holds a stop ticket. A provider stop that fails withdraws
+/// that ticket and leaves the run able to act.
 #[cfg(unix)]
 #[tokio::test]
 async fn a_failed_provider_stop_leaves_the_detached_run_able_to_dispatch() {
@@ -4052,6 +4078,13 @@ async fn a_failed_provider_stop_leaves_the_detached_run_able_to_dispatch() {
         })
         .await;
     plant.runtime.plant_activation_stop_for_test(&plant.session);
+    assert!(
+        plant
+            .runtime
+            .activation_stop_flag_for_test(&plant.session)
+            .is_some(),
+        "the watcher branch had no stop ticket"
+    );
     plant.runtime.arm_failing_capsule_stop(&plant.session);
     let (status, body) = stop_plan_agent(plant.runtime.clone(), &plant.agent).await;
     assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{body}");

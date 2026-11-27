@@ -3399,7 +3399,7 @@ impl Runtime {
         true
     }
 
-    /// The next stop of this session fails before the row ends.
+    /// The next provider stop of this session is reported as a failure.
     #[cfg(all(test, unix))]
     pub(crate) fn arm_failing_capsule_stop(&self, session_id: &str) {
         FAIL_CAPSULE_STOP
@@ -5406,14 +5406,18 @@ impl Runtime {
             // and take its entry away, as before. A stop that fails still
             // closes the plan instance: the owner asked to stop, so a later
             // dispatch cannot run under that failed stop.
-            #[cfg(test)]
-            if self.take_failing_capsule_stop(id) {
-                plan_book(&self.plan_book).mark_stopping(id);
-                return Err(ElastosError::Compute("capsule stop failed".into()));
-            }
             if let Some((handle, provider)) = provider {
                 tracing::info!("Stopping capsule '{}' ({})", info.name, id);
-                if let Err(error) = provider.stop(handle).await {
+                #[cfg(test)]
+                self.note_provider_stop_call();
+                let stopped = provider.stop(handle).await;
+                #[cfg(test)]
+                let stopped = if stopped.is_ok() && self.take_failing_capsule_stop(id) {
+                    Err(ElastosError::Compute("provider stop failed".into()))
+                } else {
+                    stopped
+                };
+                if let Err(error) = stopped {
                     plan_book(&self.plan_book).mark_stopping(id);
                     return Err(error);
                 }
