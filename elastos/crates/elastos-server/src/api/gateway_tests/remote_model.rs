@@ -2124,7 +2124,7 @@ mod denial_authority {
                 &token,
                 &[HOME_CAPSULE_ID],
                 parent_did.clone(),
-                fx.owner.path(),
+                parent.path(),
             )
             .expect("a parent-signed device token verifies for the subordinate gateway");
         let context = verified.context;

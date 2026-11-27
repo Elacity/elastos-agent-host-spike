@@ -994,7 +994,7 @@ pub(crate) mod tests {
     fn principal_launch_rejects_raw_principal_id_even_with_grant() {
         let dir = tempfile::tempdir().unwrap();
         let capsule_dir = write_test_capsule(dir.path(), "chat-wasm");
-        let context = gateway::local_home_launch_token_context(dir.path()).unwrap();
+        let context = gateway::bind_device_session_grant(dir.path(), &["chat-wasm"]).unwrap();
         let grant =
             gateway::issue_home_launch_token_with_context(dir.path(), "chat-wasm", &context)
                 .unwrap();
@@ -1039,7 +1039,7 @@ pub(crate) mod tests {
     fn principal_launch_rejects_grant_without_runtime_data_dir() {
         let dir = tempfile::tempdir().unwrap();
         let capsule_dir = write_test_capsule(dir.path(), "chat-wasm");
-        let context = gateway::local_home_launch_token_context(dir.path()).unwrap();
+        let context = gateway::bind_device_session_grant(dir.path(), &["chat-wasm"]).unwrap();
         let grant =
             gateway::issue_home_launch_token_with_context(dir.path(), "chat-wasm", &context)
                 .unwrap();

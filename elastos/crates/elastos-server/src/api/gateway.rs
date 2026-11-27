@@ -194,6 +194,8 @@ pub(super) use gateway_home_token::issue_home_launch_token_with_context;
 #[cfg(unix)]
 #[cfg(test)]
 pub(super) use gateway_home_token::launch_principal_root;
+#[cfg(all(test, unix))]
+pub(super) use gateway_home_token::sign_direct_launch_for_test;
 pub(super) use gateway_home_token::HomeLaunchTokenContext;
 pub(crate) use gateway_home_token::RuntimeWalletAuthority;
 pub(crate) use gateway_home_token::VerifiedLaunchGrant;
@@ -228,7 +230,9 @@ use gateway_home_cli_mint::{
 };
 #[cfg(unix)]
 #[cfg(test)]
-pub(in crate::api) use gateway_home_token::issue_expired_home_launch_token_with_context;
+pub(in crate::api) use gateway_home_token::{
+    issue_expired_home_launch_token_with_context, issue_expired_home_projection_token_with_context,
+};
 #[cfg(test)]
 pub(in crate::api) use gateway_home_token::{
     issue_home_launch_token, local_home_launch_token_context, set_test_home_launch_auth_data_dir,

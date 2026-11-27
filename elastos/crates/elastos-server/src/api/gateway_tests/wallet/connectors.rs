@@ -4,7 +4,7 @@ use super::super::*;
 #[tokio::test]
 async fn test_wallet_connector_route_requires_connector_launch_token() {
     let dir = tempfile::tempdir().unwrap();
-    let context = local_home_launch_token_context(dir.path()).unwrap();
+    let context = bind_device_session_grant(dir.path(), &[SYSTEM_CAPSULE_ID]).unwrap();
     let system_token =
         issue_home_launch_token_with_context(dir.path(), SYSTEM_CAPSULE_ID, &context).unwrap();
     let provider = MockWalletProvider::default();
