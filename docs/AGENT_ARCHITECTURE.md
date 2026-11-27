@@ -426,7 +426,11 @@ the guest runs. Unknown steps are capped at 32 per agent. A name has no purge
 time while its session is live or any flight of that session is still in
 progress, so a row sweep does not start the limit. Its one capsule retention
 starts when that session's last flight is gone, and then the name is dropped.
-A provider stop that fails leaves the run able to act. Unknown steps are
+The serve command registers a MicroVM row and stores no stop ticket. A
+provider stop that fails on that launcher branch marks the plan row stopping
+and refuses a later dispatch. A watcher stores a stop ticket for the session
+it watches. A provider stop that fails on that ticket branch withdraws the
+uncommitted ticket and leaves the run able to act. Unknown steps are
 carried through the Runtime hop to the owner. A one-use grant is counted only
 after the plan admit. A one-use grant the effect spent is settled in the
 pending store, so a later Stop can still save that session's revocations. A

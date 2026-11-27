@@ -2731,7 +2731,8 @@ async fn stop_capsule_says_stopping_while_an_effect_is_in_flight() {
 }
 
 /// A plan step cannot submit another plan. The refusal is the step itself,
-/// before any record exists.
+/// before any record exists. A nested submit therefore writes no second
+/// plan file: there is no plan file at all.
 #[cfg(unix)]
 #[tokio::test]
 async fn a_plan_step_cannot_submit_agent_plan() {
@@ -2758,7 +2759,15 @@ async fn a_plan_step_cannot_submit_agent_plan() {
             .contains("a plan step cannot submit_agent_plan"),
         "{error}"
     );
-    assert!(!dir.path().join("inspect-actions").exists());
+    let actions = dir.path().join("inspect-actions");
+    let written = std::fs::read_dir(&actions)
+        .map(|entries| entries.filter_map(|entry| entry.ok()).count())
+        .unwrap_or(0);
+    assert_eq!(
+        written, 0,
+        "no second plan file is written: the refusal is before any record"
+    );
+    assert!(!actions.exists(), "no second plan file is written");
 }
 
 /// A refusal after the one-use token is registered revokes it and leaves no
@@ -3493,17 +3502,24 @@ async fn a_missing_stop_leaves_the_run_able_to_dispatch() {
     assert_the_run_can_still_dispatch(&plant).await;
 }
 
-/// A stop that fails before the row ends still closes the plan instance, so
-/// a later dispatch cannot run under that failed stop.
+/// A launcher row has no stop ticket. A stop that fails marks that row
+/// stopping and refuses a later dispatch.
 #[cfg(unix)]
 #[tokio::test]
-async fn a_failed_stop_leaves_the_run_unable_to_dispatch() {
+async fn a_failed_stop_without_a_ticket_marks_stopping_and_refuses_dispatch() {
     let plant = plant_approved(45, false, |_, target| {
         json!({"steps": [{"scheme": "localhost", "operation": "write", "request": {
             "path": target, "content": [112, 108, 97, 110]
         }}]})
     })
     .await;
+    assert!(
+        plant
+            .runtime
+            .activation_stop_flag_for_test(&plant.session)
+            .is_none(),
+        "the launcher row held a stop ticket"
+    );
     plant.runtime.arm_failing_capsule_stop(&plant.session);
     let (status, body) = stop_plan_agent(plant.runtime.clone(), &plant.agent).await;
     assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{body}");
@@ -3526,6 +3542,69 @@ async fn a_failed_stop_leaves_the_run_unable_to_dispatch() {
     assert_eq!(record["status"], "refused", "{record}");
     assert_eq!(record["result"]["code"], "instance ended", "{record}");
     assert_eq!(std::fs::read(&plant.path).unwrap(), plant.before);
+}
+
+/// A watcher row holds a stop ticket. A provider stop that fails withdraws
+/// that ticket and leaves the run able to dispatch.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_failed_stop_on_the_ticket_watcher_branch_leaves_the_run_able_to_dispatch() {
+    let plant = plant_approved(91, false, |_, target| {
+        json!({"steps": [{"scheme": "localhost", "operation": "write", "request": {
+            "path": target, "content": [112, 108, 97, 110]
+        }}]})
+    })
+    .await;
+    let manifest: elastos_common::CapsuleManifest = serde_json::from_str(
+        &crate::runtime::tests::component_manifest_json("ticket-stop"),
+    )
+    .unwrap();
+    let handle = elastos_compute::CapsuleHandle {
+        id: elastos_common::CapsuleId(plant.session.clone()),
+        manifest,
+        args: Vec::new(),
+    };
+    plant
+        .runtime
+        .register_capsule(crate::runtime::RunningCapsuleInfo {
+            id: plant.session.clone(),
+            name: "watched".to_string(),
+            status: crate::runtime::CAPSULE_RUNNING.to_string(),
+            capsule_type: elastos_common::CapsuleType::Wasm,
+            handle: Some(handle),
+            session_id: plant.session.clone(),
+            principal: Some(plant.agent.clone()),
+            cause: None,
+            ended_at: None,
+        })
+        .await;
+    plant.runtime.plant_activation_stop_for_test(&plant.session);
+    assert!(
+        plant
+            .runtime
+            .activation_stop_flag_for_test(&plant.session)
+            .is_some(),
+        "the watcher branch had no stop ticket"
+    );
+    plant.runtime.arm_failing_capsule_stop(&plant.session);
+    let (status, body) = stop_plan_agent(plant.runtime.clone(), &plant.agent).await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{body}");
+    assert!(
+        plant.runtime.provider_stop_count_for_test() >= 1,
+        "the provider stop was not called"
+    );
+    assert!(
+        !plant
+            .runtime
+            .activation_stop_requested_for_test(&plant.session),
+        "a failed provider stop left the flag up"
+    );
+    assert!(crate::runtime::Runtime::plan_instance_is_open(
+        &plant.runtime.plan_book(),
+        &plant.session,
+        &plant.agent
+    ));
+    assert_the_run_can_still_dispatch(&plant).await;
 }
 
 /// Dropping the Stop request before it ends the row leaves the run able to dispatch.
