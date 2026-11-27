@@ -4476,6 +4476,7 @@ fn custody_probe_request_log(data_dir: &Path) -> PathBuf {
 /// `mock-custody-provider.status`. When `mock-custody-provider.block-status`
 /// is present, the status reply waits until `mock-custody-provider.status.release`
 /// contains a byte, after writing `mock-custody-provider.status.signal`.
+/// The wait is `poll` with a timeout. The custody filter denies `nanosleep`.
 #[cfg(unix)]
 fn custody_probe_binary() -> PathBuf {
     static BIN: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
@@ -4484,7 +4485,9 @@ fn custody_probe_binary() -> PathBuf {
 
 #[cfg(unix)]
 fn compile_custody_probe() -> PathBuf {
-    let dir = std::env::temp_dir().join("elastos-custody-probe");
+    // One directory per test process. Two `cargo test` processes must not
+    // rewrite one shared probe while the other execs it.
+    let dir = std::env::temp_dir().join(format!("elastos-custody-probe-{}", std::process::id()));
     fs::create_dir_all(&dir).unwrap();
     let source_path = dir.join("probe.rs");
     let binary = dir.join("custody-probe");
@@ -4538,7 +4541,20 @@ fn block_for_status(root: &std::path::Path) {{
         if ready {{
             break;
         }}
-        std::thread::sleep(std::time::Duration::from_millis(10));
+        // `poll` is on the custody baseline. `nanosleep` is not, and std
+        // sleep panics when that call returns EACCES.
+        let waited = unsafe {{
+            extern "C" {{
+                fn poll(fds: *mut u8, nfds: usize, timeout: i32) -> i32;
+            }}
+            poll(std::ptr::null_mut(), 0, 10)
+        }};
+        if waited < 0 {{
+            let err = std::io::Error::last_os_error();
+            if err.kind() != std::io::ErrorKind::Interrupted {{
+                panic!("custody probe poll: {{err}}");
+            }}
+        }}
     }}
 }}
 fn main() {{
