@@ -3401,6 +3401,199 @@ async fn stop_of_one_agent_leaves_the_other_when_the_listener_is_gone() {
     gateway.shutdown().await;
 }
 
+/// Listener gone, Stop agent A. The answer and the signed row are the settle
+/// stop: the waiting ask is denied, the unknown step is named, and B stays up.
+#[tokio::test]
+async fn listener_gone_stop_of_agent_a_is_the_settled_stop() {
+    let (home, dir) = live_home();
+    let cid = sign_probe(&dir);
+    let agent_a = home.create_agent("A", &cid);
+    let agent_b = home.create_agent("B", &cid);
+    let gateway = Gateway::start(&home.data).await;
+    let session_a = home.launch(&agent_a, &dir).await;
+    let session_b = home.launch(&agent_b, &dir).await;
+    let ask = plant_pending(&home, &session_a, &agent_a).await;
+    let runtime = crate::api::agent_plane::plane_runtime(&home.data).expect("runtime");
+    runtime.remember_unknown_for_test(&session_a, &agent_a, "step-unknown-a");
+    assert!(crate::api::agent_plane::end_live_listener_for_test(
+        &home.data
+    ));
+    port_closed(&gateway.agent_url).await;
+    let (status, body) = post_json(
+        &gateway.addr,
+        &system_token(&home),
+        "/api/apps/system/agents/stop",
+        &json!({ "agent_id": agent_a }).to_string(),
+    )
+    .await;
+    assert!(status == 200 || status == 202, "{status} {body}");
+    let reply: Value = serde_json::from_str(&body).unwrap();
+    let named = reply["unknown"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .any(|step| step["request_id"] == "step-unknown-a" && step["session_id"] == session_a);
+    assert!(named, "the unknown step was dropped: {body}");
+    let in_stopped = reply["stopped"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .any(|row| row["session_id"] == session_a);
+    let in_stopping = reply["stopping"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .any(|row| row["session_id"] == session_a);
+    assert!(
+        in_stopped || in_stopping,
+        "stop did not report A's session: {body}"
+    );
+    let (store, _, _) = runtime.instance_authority_plane().unwrap();
+    let request = store.get_request(&ask).await.unwrap();
+    let elastos_runtime::capability::RequestStatus::Denied { reason, .. } = &request.status else {
+        panic!("the waiting ask stayed open: {:?}", request.status);
+    };
+    assert!(
+        reason.contains(&agent_a),
+        "the denial did not name the agent: {reason}"
+    );
+    let b_live = runtime.live_sessions_for_agent(&agent_b).await;
+    assert!(
+        b_live.iter().any(|id| id == &session_b),
+        "stopping A ended B: {b_live:?}"
+    );
+    let signed: Vec<_> = stopped_rows(&home.data)
+        .into_iter()
+        .filter(|row| row.session_id.as_deref() == Some(session_a.as_str()))
+        .collect();
+    assert_eq!(signed.len(), 1, "{signed:?}");
+    let expected = if in_stopping { "stopping" } else { "ok" };
+    assert_eq!(signed[0].result, expected, "{signed:?}");
+    gateway.shutdown().await;
+}
+
+/// A failed settle is an error and a `failed` row. It is not signed as stopping.
+#[tokio::test]
+async fn listener_gone_stop_reports_a_failed_stop() {
+    let (home, dir) = live_home();
+    let agent = home.create_agent("Fail", &sign_probe(&dir));
+    let gateway = Gateway::start(&home.data).await;
+    let runtime = crate::api::agent_plane::plane_runtime(&home.data).expect("runtime");
+    let session = "session-stop-fails";
+    runtime
+        .register_capsule(planted_capsule(session, &agent, false))
+        .await;
+    let ask = plant_pending(&home, session, &agent).await;
+    runtime.arm_failing_capsule_stop(session);
+    assert!(crate::api::agent_plane::end_live_listener_for_test(
+        &home.data
+    ));
+    port_closed(&gateway.agent_url).await;
+    let (status, body) = post_json(
+        &gateway.addr,
+        &system_token(&home),
+        "/api/apps/system/agents/stop",
+        &json!({ "agent_id": agent }).to_string(),
+    )
+    .await;
+    assert_eq!(status, 500, "{body}");
+    assert!(
+        !body.contains("so it was stopped"),
+        "a failed stop was reported as stopped: {body}"
+    );
+    let still = runtime.get_capsule(session).await.expect("guest");
+    assert!(still.ended_at.is_none(), "the failed stop ended the guest");
+    let (store, _, _) = runtime.instance_authority_plane().unwrap();
+    assert!(
+        store.get_request(&ask).await.unwrap().is_denied(),
+        "the waiting ask stayed open"
+    );
+    let failed: Vec<_> = stopped_rows(&home.data)
+        .into_iter()
+        .filter(|row| row.result == "failed" && row.reason.contains(&agent))
+        .collect();
+    assert_eq!(failed.len(), 1, "{failed:?}");
+    gateway.shutdown().await;
+}
+
+/// The cause on a dead-listener stop is the reason the ask is denied.
+#[tokio::test]
+async fn listener_gone_stop_denies_the_ask_with_the_cause() {
+    let (home, dir) = live_home();
+    let agent = home.create_agent("Cause", &sign_probe(&dir));
+    let gateway = Gateway::start(&home.data).await;
+    let runtime = crate::api::agent_plane::plane_runtime(&home.data).expect("runtime");
+    let session = "session-cause";
+    runtime
+        .register_capsule(planted_capsule(session, &agent, false))
+        .await;
+    let ask = plant_pending(&home, session, &agent).await;
+    assert!(crate::api::agent_plane::end_live_listener_for_test(
+        &home.data
+    ));
+    port_closed(&gateway.agent_url).await;
+    super::super::gateway_home_runtime::stop_runtime_agent_for_cause(
+        &home.data,
+        &agent,
+        "owner demoted",
+    )
+    .await
+    .expect("the settle stop");
+    let (store, _, _) = runtime.instance_authority_plane().unwrap();
+    let request = store.get_request(&ask).await.unwrap();
+    let elastos_runtime::capability::RequestStatus::Denied { reason, .. } = &request.status else {
+        panic!("the waiting ask stayed open: {:?}", request.status);
+    };
+    assert!(
+        reason.contains("owner demoted") && reason.contains(&agent),
+        "the cause was dropped: {reason}"
+    );
+    gateway.shutdown().await;
+}
+
+#[tokio::test]
+async fn stop_refuses_an_invalid_agent_id_before_a_denial_row() {
+    let (home, _dir) = live_home();
+    let gateway = Gateway::start(&home.data).await;
+    let before = crate::auth::load_auth_state(&home.data)
+        .unwrap()
+        .audit
+        .len();
+    let ids = [
+        format!("agent:v2:{}", "a".repeat(4_096)),
+        "agent:v2:ABCDEF0123456789ABCDEF0123456789".to_string(),
+        "agent:v2:abc".to_string(),
+        format!("agent:v2:{}", "\u{0001}".repeat(32)),
+    ];
+    for agent_id in &ids {
+        let (status, body) = post_json(
+            &gateway.addr,
+            &system_token(&home),
+            "/api/apps/system/agents/stop",
+            &json!({ "agent_id": agent_id }).to_string(),
+        )
+        .await;
+        assert_eq!(status, 409, "{body}");
+        assert!(body.contains("invalid agent id"), "{body}");
+        assert!(!body.contains(agent_id), "{body}");
+    }
+    let state = crate::auth::load_auth_state(&home.data).unwrap();
+    assert_eq!(
+        state.audit.len(),
+        before,
+        "a denial row was recorded for an invalid agent id"
+    );
+    let stored = std::fs::read(crate::auth::auth_state_path(&home.data).unwrap()).unwrap();
+    let stored = String::from_utf8_lossy(&stored);
+    for agent_id in &ids {
+        assert!(
+            !stored.contains(agent_id),
+            "the invalid agent id was written into auth state"
+        );
+    }
+    gateway.shutdown().await;
+}
+
 fn planted_capsule(id: &str, agent: &str, ended: bool) -> crate::runtime::RunningCapsuleInfo {
     crate::runtime::RunningCapsuleInfo {
         id: id.to_string(),
@@ -3438,6 +3631,15 @@ async fn retire_waits_while_a_guest_is_still_stopping() {
     let session = "session-still-stopping";
     runtime
         .register_capsule(planted_capsule(session, &agent, false))
+        .await;
+    runtime
+        .insert_agent_session_for_test(crate::runtime::AgentSessionRecord {
+            agent_id: agent.clone(),
+            owner: home.owner.clone(),
+            host_cid: REGISTRY_CID.to_string(),
+            launch_id: "launch-still-stopping".to_string(),
+            session_id: session.to_string(),
+        })
         .await;
     runtime.plant_activation_stop_for_test(session);
     let _limit = runtime.limit_stop_wait_for_test(Duration::ZERO);

@@ -906,48 +906,54 @@ pub(super) async fn stop_runtime_agent_session(
     stop_runtime_agent_rows(data_dir, agent_id, Some(session_id), None).await
 }
 
-/// Stop this agent's guests after the listener has ended. Another agent's
-/// guests stay up. The caller owes and signs this result.
-async fn stop_guest_held_without_listener(
+/// The listener is gone. Stop this agent through `stop_and_settle`. Sessions
+/// the panic path already ended stay in the result when that stop finds none.
+async fn stop_held_plane(
     data_dir: &FsPath,
     agent_id: &str,
     session_id: Option<&str>,
-) -> anyhow::Result<Option<RuntimeAgentStop>> {
-    if !crate::api::agent_plane::serves(Some(data_dir)) {
-        return Ok(None);
-    }
-    let Some(runtime) = crate::api::agent_plane::plane_runtime(data_dir) else {
-        return Ok(None);
-    };
-    let mut sessions = runtime.live_sessions_for_agent(agent_id).await;
-    for id in runtime.inflight_plan_sessions(agent_id) {
-        if !sessions.iter().any(|held| held == &id) {
-            sessions.push(id);
+    cause: Option<&str>,
+    gone: anyhow::Error,
+) -> anyhow::Result<RuntimeAgentStop> {
+    let body = serde_json::to_vec(&RuntimeAgentStopRequest {
+        agent_id,
+        session_id,
+        cause,
+    })?;
+    let task_ended = gone.to_string() == crate::api::agent_plane::TASK_ENDED;
+    let answer = crate::api::agent_plane::stop_on_retiring(data_dir, body).await;
+    let missed = answer
+        .as_ref()
+        .is_none_or(|response| response.status() == StatusCode::NOT_FOUND);
+    if task_ended && missed {
+        let remembered = panic_ended_for(data_dir, agent_id, session_id);
+        if !remembered.stopped.is_empty() || !remembered.stopping.is_empty() {
+            return Ok(remembered);
         }
-    }
-    if let Some(wanted) = session_id {
-        sessions.retain(|id| id == wanted);
-    }
-    if sessions.is_empty() {
-        return Ok(None);
-    }
-    let mut guests = Vec::new();
-    for id in sessions {
-        let (status, ended) = match runtime.stop_capsule_with_reason(&id, "owner").await {
-            Ok(Some(row)) => (row.status, row.ended_at.is_some()),
-            Ok(None) => ("stopped".to_string(), true),
-            Err(_) => ("stopping".to_string(), false),
-        };
-        let effect_inflight = runtime.plan_effect_inflight(&id);
-        guests.push(crate::api::agent_plane::EndedGuest {
-            agent_id: agent_id.to_string(),
-            session_id: id,
-            status,
-            ended,
-            effect_inflight,
+        return Ok(RuntimeAgentStop {
+            already: Some("ended".to_string()),
+            ..RuntimeAgentStop::default()
         });
     }
-    Ok(Some(runtime_stop_from_guests(agent_id, session_id, guests)))
+    stop_answer(answer.ok_or(gone)?).await
+}
+
+fn panic_ended_for(
+    data_dir: &FsPath,
+    agent_id: &str,
+    session_id: Option<&str>,
+) -> RuntimeAgentStop {
+    let runtime = crate::api::agent_plane::plane_runtime(data_dir);
+    let guests = crate::api::agent_plane::ended_guests(data_dir)
+        .into_iter()
+        .map(|mut guest| {
+            if let Some(runtime) = runtime.as_ref() {
+                guest.effect_inflight = runtime.plan_effect_inflight(&guest.session_id);
+            }
+            guest
+        })
+        .collect();
+    runtime_stop_from_guests(agent_id, session_id, guests)
 }
 
 async fn stop_runtime_agent_rows(
@@ -958,30 +964,11 @@ async fn stop_runtime_agent_rows(
 ) -> anyhow::Result<RuntimeAgentStop> {
     let coords = match live_agent_coords(data_dir).await {
         Ok(coords) => coords,
-        Err(error) if error.to_string() == crate::api::agent_plane::TASK_ENDED => {
-            if let Some(outcome) =
-                stop_guest_held_without_listener(data_dir, agent_id, session_id).await?
-            {
-                return Ok(outcome);
-            }
-            return Ok(RuntimeAgentStop {
-                already: Some("ended".to_string()),
-                ..RuntimeAgentStop::default()
-            });
-        }
-        Err(error) if error.to_string() == "agent runtime is not running" => {
-            if let Some(outcome) =
-                stop_guest_held_without_listener(data_dir, agent_id, session_id).await?
-            {
-                return Ok(outcome);
-            }
-            let body = serde_json::to_vec(&RuntimeAgentStopRequest {
-                agent_id,
-                session_id,
-                cause,
-            })?;
-            let answer = crate::api::agent_plane::stop_on_retiring(data_dir, body).await;
-            return stop_answer(answer.ok_or(error)?).await;
+        Err(error)
+            if error.to_string() == crate::api::agent_plane::TASK_ENDED
+                || error.to_string() == "agent runtime is not running" =>
+        {
+            return stop_held_plane(data_dir, agent_id, session_id, cause, error).await;
         }
         Err(error) => return Err(error),
     };

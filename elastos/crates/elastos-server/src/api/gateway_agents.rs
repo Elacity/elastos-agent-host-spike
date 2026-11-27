@@ -1743,6 +1743,11 @@ async fn stop_agent(
     let targeted = serde_json::from_slice::<AgentStopRequest>(body)
         .ok()
         .map(|request| request.agent_id);
+    if let Some(agent_id) = targeted.as_deref() {
+        if let Err(reason) = crate::auth::validate_agent_id(agent_id) {
+            return Err(Refused(reason.to_string()).into());
+        }
+    }
     let caller = match owner_may_stop(state, headers, None) {
         Ok(owner) => owner,
         Err(error) => {

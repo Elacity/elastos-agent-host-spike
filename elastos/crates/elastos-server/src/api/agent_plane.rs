@@ -800,9 +800,10 @@ async fn stop_and_settle(
         .await
 }
 
-/// The retiring plane's stop, in process: Agents Off removed its coordinates.
+/// `stop_and_settle` on the plane this process still holds. A dead listener
+/// leaves that plane live. Agents Off leaves it retiring.
 pub(crate) async fn stop_on_retiring(dir: &Path, body: Vec<u8>) -> Option<reqwest::Response> {
-    let runtime = retiring_runtime(dir)?;
+    let runtime = plane_runtime(dir)?;
     let (pending, _, _) = runtime.instance_authority_plane()?;
     let (audit, held) = (Extension(Arc::new(AuditLog::new())), Extension(pending));
     let answer = stop_and_settle(Extension(runtime), audit, held, body.into()).await;
@@ -1079,7 +1080,7 @@ fn ended_guest_memory() -> &'static Mutex<HashMap<PathBuf, Vec<EndedGuest>>> {
     ENDED_GUESTS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-fn ended_guests(data_dir: &Path) -> Vec<EndedGuest> {
+pub(crate) fn ended_guests(data_dir: &Path) -> Vec<EndedGuest> {
     ended_guest_memory()
         .lock()
         .unwrap_or_else(|err| err.into_inner())
