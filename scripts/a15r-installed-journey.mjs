@@ -2192,22 +2192,35 @@ async function main() {
     ))
     : [];
   const stoppedLive = stopRows.length ? stopRows[stopRows.length - 1] : null;
-  const stillLive = (await capsules()).json?.capsules?.filter((row) => (
-    row.status === "starting" || row.status === "running"
-  )) || [];
+  // Agents Off stops the runtime, so the coords file can be gone. A missing
+  // file is no live session. A file that is still there must list none.
+  let stillLive = [];
+  let liveAfterNote = "runtime coords are gone";
+  if (fs.existsSync(path.join(data, LIVE_SESSION_COORDS))) {
+    try {
+      stillLive = (await capsules()).json?.capsules?.filter((row) => (
+        row.status === "starting" || row.status === "running"
+      )) || [];
+      liveAfterNote = "";
+    } catch (error) {
+      stillLive = null;
+      liveAfterNote = String(error.message || error);
+    }
+  }
   const stopOk = stopRows.length > 0 && stopRows.every((event) => event.result !== "failed");
-  if (liveBeforeOff.length === 1 && off.status === 200 && again.status !== 200 && again.text.includes("not turned on") && stopOk && stillLive.length === 0) {
+  if (stillLive && liveBeforeOff.length === 1 && off.status === 200 && again.status !== 200 && again.text.includes("not turned on") && stopOk && stillLive.length === 0) {
     pass("agents_off_during_run", {
       off: off.status,
       session_id: stoppedLive.session_id,
       result: stoppedLive.result,
       live_after: 0,
+      note: liveAfterNote,
       start: again.status,
     });
   } else {
     mark("agents_off_during_run", "fail", {
       live: liveBeforeOff.length,
-      live_after: stillLive.length,
+      live_after: stillLive ? stillLive.length : liveAfterNote,
       off: off.status,
       start: again.status,
       body: again.text.slice(0, 180),
