@@ -5,7 +5,9 @@
 //! When an encryption key is provided, files are encrypted at rest with AES-256-GCM.
 
 use elastos_guest::prelude::*;
-use localhost_provider::{encrypt_bytes, encrypt_file_key_bytes, read_sealed_localhost_file};
+use localhost_provider::{
+    decrypt_bytes, encrypt_bytes, encrypt_file_key_bytes, read_sealed_localhost_file,
+};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::{self, BufRead, Read, Write};
@@ -166,6 +168,20 @@ impl LocalProvider {
         parse_localhost_path(trimmed)
             .map(|(root, _)| is_plaintext_root(root))
             .unwrap_or(false)
+    }
+
+    /// An address that is not a file-key envelope still opens with the old
+    /// reader. A plain file and a lookalike fail that read.
+    fn address_uses_the_old_envelope(path: &str, full_path: &Path) -> io::Result<bool> {
+        if parse_localhost_uri(path).is_none() {
+            return Ok(false);
+        }
+        let mut file = fs::File::open(full_path)?;
+        let mut header = [0u8; 64];
+        let read = file.read(&mut header)?;
+        Ok(!localhost_provider::header_is_file_key_envelope(
+            &header[..read],
+        ))
     }
 
     /// Create a new provider with configuration
@@ -419,11 +435,22 @@ impl LocalProvider {
                 return Ok(buffer);
             }
 
-            let read_span = || localhost_provider::read_plain_localhost_range(&full_path, path, offset.unwrap_or(0), length);
-            if (offset.is_some() || length.is_some()) && localhost_provider::is_plain_localhost_file(&full_path)? {
-                return read_span();
-            }
-            let plaintext = read_sealed_localhost_file(key, &full_path, path)?;
+            let plaintext = if Self::address_uses_the_old_envelope(path, &full_path)? {
+                let raw = fs::read(&full_path)?;
+                decrypt_bytes(key, &raw)?
+            } else {
+                if (offset.is_some() || length.is_some())
+                    && localhost_provider::is_plain_localhost_file(&full_path)?
+                {
+                    return localhost_provider::read_plain_localhost_range(
+                        &full_path,
+                        path,
+                        offset.unwrap_or(0),
+                        length,
+                    );
+                }
+                read_sealed_localhost_file(key, &full_path, path)?
+            };
 
             let off = offset.unwrap_or(0) as usize;
             if off >= plaintext.len() {
@@ -505,8 +532,12 @@ impl LocalProvider {
             }
 
             let plaintext = if append && full_path.exists() {
-                // Read-decrypt-append-re-encrypt
-                let mut existing = read_sealed_localhost_file(key, &full_path, path)?;
+                let mut existing = if Self::address_uses_the_old_envelope(path, &full_path)? {
+                    let raw = fs::read(&full_path)?;
+                    decrypt_bytes(key, &raw)?
+                } else {
+                    read_sealed_localhost_file(key, &full_path, path)?
+                };
                 existing.extend_from_slice(content);
                 existing
             } else {
@@ -1796,6 +1827,7 @@ mod tests {
             encoding: None,
             offset: Some(marker_at),
             length: Some(4),
+            check_revision: false,
         });
         let slice = match slice {
             ProviderResponse::Ok { data: Some(data) } => data,
@@ -2297,6 +2329,7 @@ mod tests {
             allowed_paths: vec!["*".to_string()],
             read_only: false,
             encryption_key: String::new(),
+            extra: serde_json::Value::Null,
         })
         .unwrap()
     }
