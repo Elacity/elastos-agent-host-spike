@@ -519,7 +519,7 @@ fn claim_request(
         &gateway_home_token::HomeLaunchContext::projection("home-launch", HOME_CLI_SHELL_ID),
         &context,
         issued_at,
-        Some(issued_at.saturating_add(EXPORT_TTL_SECS)),
+        gateway_home_token::LaunchExpiry::Cap(issued_at.saturating_add(EXPORT_TTL_SECS)),
     )?;
     let request_id = mark_delivered(&record.request_id, nonce)?;
     ticket.disarm();

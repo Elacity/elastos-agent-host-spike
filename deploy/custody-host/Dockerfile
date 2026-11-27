@@ -278,11 +278,17 @@ ARG APP_GID=10001
 # reinstalling the package here. libdl.so.2 is the 5th binary's (kubo's
 # amd64 build) sole extra shared-library need beyond what's already here --
 # see the builder stage's case statement for why.
-COPY --from=builder /tmp/libgcc_s.so.1 /lib/libgcc_s.so.1
-COPY --from=builder /tmp/libdl.so.2 /lib/libdl.so.2
+# Root-owned and not group-writable: the fence admits a loader library only
+# then. BuildKit can keep the builder uid on COPY --from, and that uid is not
+# the trusted root uid, so the copy names root and mode 0644 itself.
+COPY --from=builder --chown=root:root --chmod=0644 /tmp/libgcc_s.so.1 /lib/libgcc_s.so.1
+COPY --from=builder --chown=root:root --chmod=0644 /tmp/libdl.so.2 /lib/libdl.so.2
 COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 
-RUN addgroup -g "${APP_GID}" custody \
+RUN chmod 0755 / /lib \
+    && chown root:root /lib/libgcc_s.so.1 /lib/libdl.so.2 \
+    && chmod 0644 /lib/libgcc_s.so.1 /lib/libdl.so.2 \
+    && addgroup -g "${APP_GID}" custody \
     && adduser -D -u "${APP_UID}" -G custody -h /home/custody -s /bin/sh custody \
     && chown root:root /home \
     && mkdir -p /shared \

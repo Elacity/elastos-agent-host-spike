@@ -4212,6 +4212,50 @@ fn reply_revision(data: &serde_json::Value) -> Option<String> {
         .map(str::to_string)
 }
 
+/// A v1 read sends a JSON array of bytes. A v2 read sends `{"b64": ...}`.
+#[cfg(any(test, target_arch = "wasm32"))]
+fn reply_content(content: &serde_json::Value) -> Option<Vec<u8>> {
+    match content.as_object() {
+        Some(object) if object.len() == 1 => decode_standard_base64(object.get("b64")?.as_str()?),
+        Some(_) => None,
+        None => serde_json::from_value(content.clone()).ok(),
+    }
+}
+
+#[cfg(any(test, target_arch = "wasm32"))]
+fn decode_standard_base64(text: &str) -> Option<Vec<u8>> {
+    const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let bytes = text.as_bytes();
+    if !bytes.len().is_multiple_of(4) {
+        return None;
+    }
+    let mut out = Vec::new();
+    let count = bytes.len() / 4;
+    for (index, chunk) in bytes.chunks(4).enumerate() {
+        let pad = chunk.iter().rev().take_while(|byte| **byte == b'=').count();
+        if pad > 2 || (pad > 0 && index + 1 != count) {
+            return None;
+        }
+        let mut bits = 0u32;
+        for (place, byte) in chunk.iter().copied().enumerate() {
+            let value = if place < 4 - pad {
+                let index = ALPHABET.iter().position(|item| *item == byte)?;
+                u32::from(u8::try_from(index).ok()?)
+            } else if byte == b'=' {
+                0
+            } else {
+                return None;
+            };
+            bits |= value << [18, 12, 6, 0][place];
+        }
+        if (bits & [0u32, 0xc0, 0xf000][pad]) != 0 {
+            return None;
+        }
+        out.extend_from_slice(&bits.to_be_bytes()[1..4 - pad]);
+    }
+    Some(out)
+}
+
 /// The grant is needed only to dispatch. After that the step drops it, so
 /// nothing that prints or keeps the journal holds it.
 #[cfg(any(test, target_arch = "wasm32"))]
@@ -4352,10 +4396,7 @@ fn read_stored_journal(
     let Some(ProviderReply::Ok(data)) = provider_reply(&reply) else {
         return Err(None);
     };
-    let content: Vec<u8> = data
-        .get("content")
-        .and_then(|content| serde_json::from_value(content.clone()).ok())
-        .ok_or(None)?;
+    let content = data.get("content").and_then(reply_content).ok_or(None)?;
     let revision = reply_revision(&data).ok_or(None)?;
     // The checked decoder is the one decode path for a stored journal.
     let (stored, _, head) = decode_checked(&content).map_err(|miss| match miss {
@@ -16622,6 +16663,8 @@ mod tests {
         drop_write: bool,
         /// Refuse every grant request.
         refuse_grants: bool,
+        /// A v2 read: `content` is standard base64. A v1 read sends a byte array.
+        binary_content: bool,
     }
 
     impl ResourceBus for FakeRuntime {
@@ -16697,14 +16740,21 @@ mod tests {
                         return Err(BusFailure::Denied);
                     }
                     match &self.stored {
-                        Some(bytes) => serde_json::json!({
-                            "status": "ok",
-                            "data": {
-                                "content": bytes,
-                                "size": bytes.len(),
-                                "revision": fake_revision(bytes),
-                            },
-                        }),
+                        Some(bytes) => {
+                            let content = if self.binary_content {
+                                serde_json::json!({ "b64": encode_standard_base64(bytes) })
+                            } else {
+                                serde_json::json!(bytes)
+                            };
+                            serde_json::json!({
+                                "status": "ok",
+                                "data": {
+                                    "content": content,
+                                    "size": bytes.len(),
+                                    "revision": fake_revision(bytes),
+                                },
+                            })
+                        }
                         None => serde_json::json!({ "status": "error", "code": "read_failed" }),
                     }
                 }
@@ -16723,6 +16773,7 @@ mod tests {
             lose_reply: false,
             drop_write: false,
             refuse_grants: false,
+            binary_content: false,
         };
         (runtime, cursor)
     }
@@ -17387,7 +17438,8 @@ mod tests {
     }
 
     /// The guest's request and reply shapes are the ones the bridge reads and
-    /// writes. A rename on either side fails here.
+    /// writes. A rename on either side fails here. The read body is the fixture
+    /// that `read_content_value`'s own test checks, and `reply_content` decodes it.
     #[test]
     fn the_write_body_is_what_the_bridge_reads() {
         assert_eq!(
@@ -17403,7 +17455,10 @@ mod tests {
             r#"request.get("content")"#,
             r#"request.get("create_only")"#,
             r#"request.get("if_revision")"#,
-            r#""content": bytes,"#,
+            r#""content": read_content_value(&bytes, binary),"#,
+            r#""content": read_content_value(&bytes, check_revision),"#,
+            r#""b64": base64::Engine::encode(&base64::engine::general_purpose::STANDARD, bytes)"#,
+            r#"serde_json::json!(bytes)"#,
             r#""revision": revision,"#,
             r#""revision": crate::auth::principal_root_object_revision("#,
             r#""data": data,"#,
@@ -17415,6 +17470,98 @@ mod tests {
         let host =
             include_str!("../../../elastos/crates/elastos-compute/src/providers/component.rs");
         assert!(host.contains("let body = serde_json::to_vec(&result)"));
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("../bridge-read-content.json"))
+                .expect("bridge read fixture");
+        for row in fixture.as_array().expect("bridge read rows") {
+            let bytes: Vec<u8> = serde_json::from_value(row["bytes"].clone()).expect("bytes");
+            assert_eq!(reply_content(&row["content"]), Some(bytes));
+        }
+    }
+
+    fn encode_standard_base64(bytes: &[u8]) -> String {
+        const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        let mut out = String::new();
+        for chunk in bytes.chunks(3) {
+            let mut bits = 0u32;
+            for (place, byte) in chunk.iter().copied().enumerate() {
+                bits |= u32::from(byte) << [16, 8, 0][place];
+            }
+            let symbols = chunk.len() + 1;
+            for shift in [18, 12, 6, 0].into_iter().take(symbols) {
+                let index = usize::try_from((bits >> shift) & 0x3f).expect("digit");
+                out.push(char::from(ALPHABET[index]));
+            }
+            for _ in symbols..4 {
+                out.push('=');
+            }
+        }
+        out
+    }
+
+    /// A stored read accepts a byte array and canonical standard base64.
+    /// Padding only in the final chunk, nothing after `=`, a multiple of four
+    /// characters, and zero unused bits. Anything else is not a journal.
+    #[test]
+    fn a_stored_read_accepts_the_byte_array_and_the_base64_body() {
+        assert_eq!(encode_standard_base64(&[0, 255]), "AP8=");
+        assert_eq!(encode_standard_base64(b"a"), "YQ==");
+        let rows: [(&str, Option<&[u8]>); 5] = [
+            ("YQ==YQ==", None),
+            ("YQ==", Some(b"a".as_slice())),
+            ("YWI=", Some(b"ab".as_slice())),
+            ("", Some(b"".as_slice())),
+            ("YR==", None),
+        ];
+        for (text, want) in rows {
+            assert_eq!(
+                reply_content(&serde_json::json!({"b64": text})),
+                want.map(ToOwned::to_owned),
+                "{text}"
+            );
+        }
+        assert_eq!(
+            reply_content(&serde_json::json!([0, 255])),
+            Some(vec![0, 255])
+        );
+        assert_eq!(
+            reply_content(&serde_json::json!({"b64": "AP8="})),
+            Some(vec![0, 255])
+        );
+        assert_eq!(reply_content(&serde_json::json!({"b64": "AP9="})), None);
+        assert_eq!(reply_content(&serde_json::json!({"b64": "YQ"})), None);
+        assert_eq!(
+            reply_content(&serde_json::json!({"b64": "AP8=", "n": 1})),
+            None
+        );
+        for binary in [false, true] {
+            let (mut runtime, mut cursor) = fake_runtime();
+            runtime.binary_content = binary;
+            runtime.lose_reply = true;
+            let mut journal = two_turns();
+            assert_eq!(
+                append_journal(
+                    &mut runtime,
+                    &mut journal,
+                    &mut cursor,
+                    Some(&write_grant())
+                ),
+                AppendOutcome::Unknown,
+                "{binary}"
+            );
+            assert_eq!(
+                resume_journal(&mut runtime, &mut journal, &mut cursor, Some(&read_grant())),
+                ResumeOutcome::Written,
+                "{binary}"
+            );
+            let stored = runtime.stored.clone().unwrap();
+            assert_eq!(
+                cursor.revision.as_deref(),
+                Some(fake_revision(&stored).as_str()),
+                "{binary}"
+            );
+            assert!(cursor.pending.is_none(), "{binary}");
+        }
     }
 
     /// Gives one fixed reply to every call, after the write it was asked for.

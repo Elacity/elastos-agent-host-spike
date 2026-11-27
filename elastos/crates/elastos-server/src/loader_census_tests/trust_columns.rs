@@ -136,12 +136,13 @@ fn columns() -> Vec<TrustColumn> {
             evidence: ["Command::new", "(prepared.exec_path())"].concat(),
             os_path: "",
         },
-        // The macOS confined start checks the storage root's identity and
-        // wraps the provider in a Seatbelt profile. Neither checks the
-        // executable's bytes; the caller's admission does that.
+        // C2 round 2 (6448d2257) moved Command::new(launcher) into
+        // macos_sandbox_command. That function clears the environment and
+        // runs /usr/bin/sandbox-exec. It does not check the executable bytes.
+        // The caller admits the binary first. macos_command only forwards.
         TrustColumn {
             file: "elastos-runtime/src/provider/os_entry.rs",
-            function: "macos_command",
+            function: "macos_sandbox_command",
             call: "command",
             class: "n/a",
             trust_root: "none",
@@ -149,9 +150,12 @@ fn columns() -> Vec<TrustColumn> {
             evidence: ["Command::new", "(launcher)"].concat(),
             os_path: "",
         },
+        // C2 round 2 (6448d2257) moved .spawn() into macos_launch.
+        // macos_start checks the storage directory and builds the command.
+        // This function spawns it and does not check the executable bytes.
         TrustColumn {
             file: "elastos-runtime/src/provider/os_entry.rs",
-            function: "macos_start",
+            function: "macos_launch",
             call: "spawn()",
             class: "n/a",
             trust_root: "none",
@@ -721,14 +725,42 @@ fn columns() -> Vec<TrustColumn> {
             evidence: ["ProviderBr", "idge::spawn; verified via setup_server_infrastructure_impl; not verified via ProviderPlane::register"].concat(),
             os_path: "",
         },
+        // Unix is spawn_path_allow. Windows is ProviderBridge::spawn.
+        // Both re-check the CheckedExecutable's pinned release digest in
+        // verify_at_spawn before the process starts. The scanner's label is
+        // ProviderBridge::spawn because spawn_path_allow starts with that prefix.
+        TrustColumn {
+            file: "elastos-server/src/server_infra.rs",
+            function: "spawn_allow_listed_provider",
+            call: "ProviderBridge::spawn",
+            class: "n/a",
+            trust_root: "release-signature",
+            verified_when: "at-every-start",
+            evidence: ["ProviderBr", "idge::spawn"].concat(),
+            os_path: "",
+        },
+        // Chain restart calls spawn_path_allow again. The scanner's label is
+        // ProviderBridge::spawn because that name is the prefix. verify_at_spawn
+        // checks the pinned digest before the new process starts.
+        TrustColumn {
+            file: "elastos-runtime/src/provider/chain_resolver.rs",
+            function: "restart_once",
+            call: "ProviderBridge::spawn",
+            class: "n/a",
+            trust_root: "release-signature",
+            verified_when: "at-every-start",
+            evidence: ["ProviderBr", "idge::spawn"].concat(),
+            os_path: "",
+        },
+        // spawn_path_allow calls verify_at_spawn before the chain process starts.
         TrustColumn {
             file: "elastos-server/src/server_infra.rs",
             function: "register_chain_provider_plane",
             call: "ProviderBridge::spawn",
             class: "n/a",
-            trust_root: "none",
-            verified_when: "never",
-            evidence: ["ProviderBr", "idge::spawn; separate verified spawn via setup_server_infrastructure_impl; not verified via ProviderPlane::register"].concat(),
+            trust_root: "release-signature",
+            verified_when: "at-every-start",
+            evidence: ["ProviderBr", "idge::spawn"].concat(),
             os_path: "",
         },
         TrustColumn {
@@ -1591,7 +1623,11 @@ fn trust_columns_cover_each_loader_and_bind_to_source() {
         (
             "elastos-server/src/server_infra.rs",
             "setup_server_infrastructure_impl",
-            ["ProviderBridge::", "spawn(&binary_path, config)"].concat(),
+            [
+                "spawn_allow_listed_provider(",
+                "\"localhost-provider\", &binary_path, &data_dir, config)",
+            ]
+            .concat(),
             1,
         ),
         (
@@ -1615,7 +1651,11 @@ fn trust_columns_cover_each_loader_and_bind_to_source() {
         (
             "elastos-server/src/server_infra.rs",
             "setup_server_infrastructure_impl",
-            ["ProviderBridge::", "spawn(&path, object_config)"].concat(),
+            [
+                "spawn_allow_listed_provider(",
+                "\"object-provider\", &path, &data_dir, object_config)",
+            ]
+            .concat(),
             1,
         ),
         (
@@ -1633,7 +1673,11 @@ fn trust_columns_cover_each_loader_and_bind_to_source() {
         (
             "elastos-server/src/server_infra.rs",
             "setup_server_infrastructure_impl",
-            ["ProviderBridge::", "spawn(&path, generic_chain_config)"].concat(),
+            [
+                "spawn_allow_listed_provider(",
+                "\"chain-provider\", &path, &data_dir, chain_config)",
+            ]
+            .concat(),
             1,
         ),
         (
@@ -1736,9 +1780,23 @@ fn trust_column_counts_and_chokepoint_queue() {
                 && matches!(column.trust_root, "none" | "components-json-in-data-dir")
         })
         .count();
+    // Counts are the columns() list on this merged tree.
+    // The fence rows stay: spawn_allow_listed_provider and restart_once are
+    // class n/a, trust root release-signature, verified at-every-start, and
+    // register_chain_provider_plane stays on that same pair.
+    // S8 drops launch_internal's compute.load and compute.start. Both calls
+    // sit on cfg(test) items, and each column was class n/a, trust root none,
+    // verified never. Those two columns are not in this list.
+    // Five signed-start rows (three own-command, two managed-runtime) are
+    // release-signature and at-every-start on Unix. On Windows those five
+    // keep trust root none and their own verified-when text, so they leave
+    // never and do not join at-every-start.
+    // release-signature is only that exact root. The separate root
+    // "release-signature or source Home dev-pinned image" stays one row
+    // and is not added into this number.
     println!("loader trust rows={} classes={classes:?} roots={roots:?} verified_when={times:?} to_gate={to_gate}", columns.len());
-    assert_eq!(columns.len(), 103);
-    assert_eq!(classes.get("n/a"), Some(&54));
+    assert_eq!(columns.len(), 105);
+    assert_eq!(classes.get("n/a"), Some(&56));
     assert_eq!(classes.get("os-tool"), Some(&2));
     assert_eq!(classes.get("other"), Some(&37));
     assert_eq!(classes.get("own-binary"), Some(&5));
@@ -1748,13 +1806,13 @@ fn trust_column_counts_and_chokepoint_queue() {
     assert_eq!(roots.get("publisher-did-signature"), Some(&2));
     #[cfg(not(windows))]
     {
-        assert_eq!(roots.get("none"), Some(&49));
-        assert_eq!(roots.get("release-signature"), Some(&29));
+        assert_eq!(roots.get("none"), Some(&48));
+        assert_eq!(roots.get("release-signature"), Some(&32));
     }
     #[cfg(windows)]
     {
-        assert_eq!(roots.get("none"), Some(&54));
-        assert_eq!(roots.get("release-signature"), Some(&24));
+        assert_eq!(roots.get("none"), Some(&53));
+        assert_eq!(roots.get("release-signature"), Some(&27));
     }
     assert_eq!(
         roots.get("release-signature or source Home dev-pinned image"),
@@ -1762,16 +1820,16 @@ fn trust_column_counts_and_chokepoint_queue() {
     );
     assert_eq!(roots.get("staged-cid"), Some(&8));
     #[cfg(not(windows))]
-    assert_eq!(times.get("at-every-start"), Some(&38));
+    assert_eq!(times.get("at-every-start"), Some(&41));
     #[cfg(windows)]
     {
-        assert_eq!(times.get("at-every-start"), Some(&33));
+        assert_eq!(times.get("at-every-start"), Some(&36));
         assert_eq!(times.get(own_command_verified_when()), Some(&3));
         assert_eq!(times.get(managed_runtime_verified_when()), Some(&2));
     }
     assert_eq!(times.get("at-install-only"), Some(&7));
     assert_eq!(times.get("at-stage-and-start"), Some(&9));
-    assert_eq!(times.get("never"), Some(&49));
+    assert_eq!(times.get("never"), Some(&48));
     assert_eq!(to_gate, 31);
 }
 

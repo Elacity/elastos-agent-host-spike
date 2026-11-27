@@ -1,6 +1,4 @@
 use super::*;
-use std::env;
-
 pub(super) fn default_networks() -> Vec<ChainNetwork> {
     vec![
         ChainNetwork {
@@ -42,8 +40,7 @@ pub(super) fn default_networks() -> Vec<ChainNetwork> {
             provider: "Base".to_string(),
             mainnet: true,
             explorer_url: Some("https://basescan.org".to_string()),
-            rpc_url: env::var("BASE_RPC_URL")
-                .unwrap_or_else(|_| "https://mainnet.base.org".to_string()),
+            rpc_url: "https://mainnet.base.org".to_string(),
             rights_methods: Vec::new(),
             protected_content_creator_mint: None,
             protected_content_market: None,
@@ -58,8 +55,7 @@ pub(super) fn default_networks() -> Vec<ChainNetwork> {
             provider: "mempool.space".to_string(),
             mainnet: true,
             explorer_url: Some("https://mempool.space".to_string()),
-            rpc_url: env::var("BITCOIN_REST_URL")
-                .unwrap_or_else(|_| "https://mempool.space/api".to_string()),
+            rpc_url: "https://mempool.space/api".to_string(),
             rights_methods: Vec::new(),
             protected_content_creator_mint: None,
             protected_content_market: None,
@@ -289,7 +285,7 @@ fn canonicalize_protected_content_evidence_rpc_url(
     ))
 }
 
-fn validate_rpc_url_value(
+pub(super) fn validate_rpc_url_value(
     network_id: &str,
     url: &str,
     allow_empty_loopback_only: bool,

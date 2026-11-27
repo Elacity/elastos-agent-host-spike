@@ -702,10 +702,7 @@ jobs:
           cache-directories: ${{ env.SCCACHE_DIR }}
           save-if: ${{ (github.event_name == 'push' && (github.ref == 'refs/heads/spike/agent-host' || github.ref == 'refs/heads/develop')) || (github.event_name == 'schedule' && github.ref == 'refs/heads/spike/agent-host') }}
       - name: build provider process binaries for tests
-        run: |
-          cargo build --release --manifest-path capsules/protected-content-protect-provider/Cargo.toml --target-dir capsules/protected-content-protect-provider/target
-          cargo build --release --manifest-path capsules/protected-content-decrypt-provider/Cargo.toml --target-dir capsules/protected-content-decrypt-provider/target
-          cargo build --release --manifest-path capsules/custody-provider/Cargo.toml --target-dir capsules/custody-provider/target
+        run: bash scripts/prepare-providers.sh
       - name: cargo test
         working-directory: elastos
         env:
@@ -1319,6 +1316,20 @@ jobs:
             test ! -L "$directory"
             mkdir -m 700 "$directory"
           done
+      # Helper fence rows on the ubuntu-22.04-arm runner, and only after a
+      # merge: push, schedule and workflow_dispatch. A pull request skips
+      # them. The Mac source-home job measured about 70 minutes for this
+      # cold shape (25 localhost, 20 object, 5 chain, 20 tests). That figure
+      # is the Mac measurement, not a time measured on this ARM runner. The
+      # x86_64 job does not run this step, so its source-home rows stay on
+      # every pull request. The script uses its own target directories and
+      # does not replace the job's fresh build artifacts.
+      - name: helper fence rows
+        if: matrix.os == 'ubuntu-22.04-arm' && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+        timeout-minutes: 100
+        env:
+          CARGO_BUILD_JOBS: "3"
+        run: bash scripts/helper-fence-rows.sh
       - name: prepare apt archive cache permissions
         run: |
           sudo install -d -o "$(id -u)" -g "$(id -g)" -m 755 /var/cache/apt/archives /var/cache/apt/ci-lists
@@ -1548,7 +1559,11 @@ jobs:
     runs-on: ${{ matrix.os }}
     # Lane PRs (spark/*) run only the quick checks; the full CI runs on the twice-daily batch PR (batch/*).
     if: (needs.installed-app-paths.outputs.run != 'false') && !(github.event_name == 'pull_request' && startsWith(github.head_ref, 'spark/'))
-    timeout-minutes: 90
+    # A pull request runs the source-home journey and skips the helper fence
+    # rows, so it keeps the 90 minute cap from before those rows. Push,
+    # schedule and workflow_dispatch run the rows (about 70 minutes on the
+    # Mac measurement) and keep 180 for the journey beside them.
+    timeout-minutes: ${{ (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && 180 || 90 }}
     needs: [installed-app-paths, engine-llama-arm64]
     env:
       CI_APT_PACKAGES: coturn e2fsprogs ffmpeg musl-tools nasm pkg-config
@@ -1571,7 +1586,12 @@ jobs:
     # routed back to the lane whose PR caused it by the orchestrator.
     if: ${{ github.event_name == 'push' || github.event_name == 'schedule' }}
     # The two hop builds have a 70-minute step budget and the update journey 75.
-    timeout-minutes: 150
+    # The helper fence rows add about 70 minutes: 25 for the cold
+    # localhost-provider debug build (the 25m04s B4-R shape, run 44658596104),
+    # about 20 for the cold object-provider workspace, about 5 for chain on
+    # that same target, and about 20 for the fence-row test build on the
+    # localhost target once those dependencies exist.
+    timeout-minutes: 220
     # cancel-on-failure never runs after merge, so the gate's verdict is what
     # spares about 80 macOS minutes when it fails; macOS is off the PR path.
     needs: source-gate
@@ -1656,6 +1676,17 @@ jobs:
           cargo test --locked -p elastos-server --lib --features prototype-agents hosted_agent_rows:: -- --test-threads=8 | tee "$log"
           grep -Eq '^test result: ok\. 7 passed; 0 failed;' "$log" \
             || { echo "::error::hosted agent rows did not pass 7 tests"; exit 1; }
+      # Helper fence rows on this Mac runner. The three debug binaries are the
+      # ones those rows spawn. The cold localhost-provider build is the same
+      # shape as the 25m04s B4-R debug build above (run 44658596104); object
+      # and chain share one target after that. Added time is about 70 minutes.
+      # The test compile reuses the localhost target. It must not create the
+      # job CARGO_TARGET_DIR: the freshness step below requires that path absent.
+      - name: helper fence rows
+        timeout-minutes: 100
+        env:
+          CARGO_BUILD_JOBS: "3"
+        run: bash scripts/helper-fence-rows.sh
       - name: reserve hosted Mac build and fixture capacity
         timeout-minutes: 10
         run: python3 scripts/update-hop-compare.py prepare-ci-disk
@@ -2181,7 +2212,7 @@ jobs:
     runs-on: ubuntu-24.04
     # Lane PRs (spark/*) run only the quick checks; the full CI runs on the twice-daily batch PR (batch/*).
     if: (needs.installed-app-paths.outputs.run != 'false') && !(github.event_name == 'pull_request' && startsWith(github.head_ref, 'spark/'))
-    timeout-minutes: 45
+    timeout-minutes: 75
     needs: [installed-app-paths, fork-gate]
     env:
       # musl-tools is the only host package the musl release check needs.
@@ -2206,13 +2237,16 @@ jobs:
       - name: check native musl release crates
         timeout-minutes: 30
         run: bash scripts/check-release-musl.sh x86_64-unknown-linux-musl
+      - name: start musl helpers under the fence
+        timeout-minutes: 30
+        run: bash scripts/musl-helper-fence.sh x86_64-unknown-linux-musl
 
   musl-check-linux-arm64:
     name: musl-check-linux-arm64
     runs-on: ubuntu-22.04-arm
     # Lane PRs (spark/*) run only the quick checks; the full CI runs on the twice-daily batch PR (batch/*).
     if: (needs.installed-app-paths.outputs.run != 'false') && !(github.event_name == 'pull_request' && startsWith(github.head_ref, 'spark/'))
-    timeout-minutes: 45
+    timeout-minutes: 75
     needs: [installed-app-paths, fork-gate]
     env:
       # musl-tools is the only host package the musl release check needs.
@@ -2237,6 +2271,9 @@ jobs:
       - name: check native musl release crates
         timeout-minutes: 30
         run: bash scripts/check-release-musl.sh aarch64-unknown-linux-musl
+      - name: start musl helpers under the fence
+        timeout-minutes: 30
+        run: bash scripts/musl-helper-fence.sh aarch64-unknown-linux-musl
 
   # The one check that sums up the run, for branch protection to require: it fails
   # unless every job succeeded or was skipped by its own guard for a reason pinned

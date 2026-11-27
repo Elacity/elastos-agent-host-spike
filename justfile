@@ -29,13 +29,10 @@ list-capsules:
 check crate="elastos-server":
     cd elastos && cargo check -p {{crate}}
 
-# --target-dir is pinned so the binary paths below stay correct even when the
-# environment sets a global CARGO_TARGET_DIR.
-# Build the provider process binaries the protected-content process tests spawn
+# Build the provider binaries the process tests spawn. The script is also the
+# CI step, so the workspace run and CI stay equal. It pins each target dir.
 prepare-providers:
-    cd capsules/protected-content-protect-provider && cargo build --release --target-dir target
-    cd capsules/protected-content-decrypt-provider && cargo build --release --target-dir target
-    cd capsules/custody-provider && cargo build --release --target-dir target
+    bash scripts/prepare-providers.sh
 
 # Run workspace tests (provider process tests need the capsule binaries)
 test-elastos *args: prepare-providers
@@ -102,9 +99,7 @@ ci-test-elastos:
         apt-get update -qq >/dev/null && apt-get install -y -qq nodejs >/dev/null && node --version && \
         useradd -m ci && chown -R ci:ci /w && \
         su -s /bin/bash ci -c "export PATH=/usr/local/cargo/bin:\$PATH RUSTUP_HOME=/usr/local/rustup CARGO_HOME=/home/ci/.cargo RUSTFLAGS=\"-D warnings\" && cd /w && \
-        cargo build --release --manifest-path capsules/protected-content-protect-provider/Cargo.toml --target-dir capsules/protected-content-protect-provider/target && \
-        cargo build --release --manifest-path capsules/protected-content-decrypt-provider/Cargo.toml --target-dir capsules/protected-content-decrypt-provider/target && \
-        cargo build --release --manifest-path capsules/custody-provider/Cargo.toml --target-dir capsules/custody-provider/target && \
+        bash scripts/prepare-providers.sh && \
         cd elastos && \
         ELASTOS_TEST_PROTECT_PROVIDER_BIN=/w/capsules/protected-content-protect-provider/target/release/protected-content-protect-provider \
         ELASTOS_TEST_DECRYPT_PROVIDER_BIN=/w/capsules/protected-content-decrypt-provider/target/release/protected-content-decrypt-provider \

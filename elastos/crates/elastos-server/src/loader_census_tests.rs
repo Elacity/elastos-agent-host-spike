@@ -83,6 +83,15 @@ fn rows() -> Vec<Row> {
             1,
         ),
         row(
+            "elastos-runtime/src/provider/chain_resolver.rs",
+            "restart_once",
+            "ProviderBridge::spawn",
+            "native provider",
+            "admitted rights+checked directory+bound executable",
+            "P2-8",
+            1,
+        ),
+        row(
             "elastos-server/src/setup/verified_executable.rs",
             "attach_std",
             "libc::fexecve",
@@ -127,18 +136,28 @@ fn rows() -> Vec<Row> {
             "P2-8",
             1,
         ),
+        // C2 round 2 (6448d2257) moved Command::new(launcher) out of
+        // macos_command into macos_sandbox_command. Both the single-root
+        // start and the path-allow start call that function. It clears the
+        // environment and runs /usr/bin/sandbox-exec. It does not check the
+        // executable bytes; the caller admits the binary first.
         row(
             "elastos-runtime/src/provider/os_entry.rs",
-            "macos_command",
+            "macos_sandbox_command",
             "command",
             "native provider",
             "none",
             "P2-8",
             1,
         ),
+        // C2 round 2 (6448d2257) moved .spawn() out of macos_start into
+        // macos_launch. macos_start still checks the storage directory and
+        // builds the Seatbelt command. macos_launch sets the child's
+        // descriptors and spawns that command. The spawn does not check the
+        // executable bytes.
         row(
             "elastos-runtime/src/provider/os_entry.rs",
-            "macos_start",
+            "macos_launch",
             "spawn()",
             "native provider",
             "checked storage+Seatbelt profile",
@@ -674,7 +693,20 @@ fn rows() -> Vec<Row> {
             "native provider",
             "checksum",
             "P2-8",
-            15,
+            12,
+        ),
+        // Unix calls spawn_path_allow. Windows calls ProviderBridge::spawn.
+        // The scanner labels both ProviderBridge::spawn, because
+        // spawn_path_allow starts with that prefix. The start census already
+        // counts these two arms.
+        row(
+            "elastos-server/src/server_infra.rs",
+            "spawn_allow_listed_provider",
+            "ProviderBridge::spawn",
+            "native provider",
+            "admitted rights+checked directory+bound executable",
+            "P2-8",
+            2,
         ),
         row(
             "elastos-server/src/server_infra.rs",
@@ -1160,8 +1192,13 @@ fn native_provider_spawn_routes_keep_the_checked_executable() {
         ),
         (
             "elastos-runtime/src/provider/failure_record.rs",
+            "start",
+            "with_launch_fd(_hold_verified.fd(), ||",
+        ),
+        (
+            "elastos-runtime/src/provider/failure_record.rs",
             "launch",
-            "verify_at_spawn()\n        .map_err(LaunchError::BeforeFork)",
+            ".verify_at_spawn()\n            .map_err(LaunchError::BeforeFork)",
         ),
         (
             "elastos-runtime/src/provider/failure_record.rs",
@@ -1198,7 +1235,12 @@ fn native_provider_spawn_routes_keep_the_checked_executable() {
         (
             "elastos-server/src/server_infra.rs",
             "register_chain_provider_plane",
-            "checked_native_provider_with_data_dir(data_dir, binary_path)",
+            "admit_path(data_dir, \"chain-provider\", binary_path)",
+        ),
+        (
+            "elastos-server/src/server_infra.rs",
+            "register_chain_provider_plane",
+            "checked_executable(data_dir)",
         ),
         (
             "elastos-server/src/protected_content_runtime.rs",
