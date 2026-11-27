@@ -61,6 +61,7 @@ pub(super) enum RuntimeProviderId {
     Localhost,
     Object,
     Chain,
+    Custody,
 }
 
 impl RuntimeProviderId {
@@ -83,6 +84,7 @@ impl RuntimeProviderId {
             "localhost-provider" => Some(Self::Localhost),
             "object-provider" => Some(Self::Object),
             "chain-provider" => Some(Self::Chain),
+            "custody-provider" => Some(Self::Custody),
             _ => None,
         }
     }
@@ -92,7 +94,7 @@ impl RuntimeProviderId {
             Self::Did => DID_RIGHT_IDS,
             Self::Wallet => WALLET_RIGHT_IDS,
             Self::Model => MODEL_RIGHT_IDS,
-            Self::Localhost | Self::Object | Self::Chain => HELPER_RIGHT_IDS,
+            Self::Localhost | Self::Object | Self::Chain | Self::Custody => HELPER_RIGHT_IDS,
         }
     }
 
@@ -139,6 +141,7 @@ impl RuntimeProviderId {
             Self::Localhost => "munmap readlink rmdir set_tid_address stat lstat",
             Self::Object => "flock getpid munmap readlink rename renameat rmdir set_tid_address stat lstat",
             Self::Chain => "connect recvfrom sendmmsg epoll_create1 epoll_ctl epoll_pwait epoll_wait eventfd2 exit munmap rseq rt_sigprocmask rename renameat set_tid_address stat lstat",
+            Self::Custody => "flock geteuid lstat munmap rename renameat set_tid_address stat",
             Self::Did | Self::Wallet | Self::Model => "",
         }
     }

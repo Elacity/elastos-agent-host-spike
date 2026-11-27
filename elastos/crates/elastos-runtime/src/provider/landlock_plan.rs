@@ -1207,6 +1207,7 @@ mod tests {
             Localhost => "LOCALHOST_PROVIDER",
             Object => "OBJECT_PROVIDER",
             Chain => "CHAIN_PROVIDER",
+            Custody => "CUSTODY_PROVIDER",
         };
         if users.contains(name) {
             result.extend(paths(lab_section(
@@ -1329,6 +1330,7 @@ mod tests {
                 Localhost => "localhost-provider",
                 Object => "object-provider",
                 Chain => "chain-provider",
+                Custody => "custody-provider",
             };
             let fixture = format!(
                 "{}/../../../capsules/{name}/tests/fixtures/confine/declared-rights.json",

@@ -65,6 +65,7 @@ fn provider_label(provider: RuntimeProviderId) -> &'static str {
         RuntimeProviderId::Localhost => "localhost-provider",
         RuntimeProviderId::Object => "object-provider",
         RuntimeProviderId::Chain => "chain-provider",
+        RuntimeProviderId::Custody => "custody-provider",
     }
 }
 
@@ -125,7 +126,15 @@ pub(super) fn git_show(spec: &str) -> std::process::Output {
 #[cfg(test)]
 #[rustfmt::skip]
 pub(super) fn admit_committed(provider: RuntimeProviderId) -> AdmittedRights {
-    let name = match provider { RuntimeProviderId::Did => "did-provider", RuntimeProviderId::Wallet => "wallet-provider", RuntimeProviderId::Model => "model-provider", RuntimeProviderId::Localhost => "localhost-provider", RuntimeProviderId::Object => "object-provider", RuntimeProviderId::Chain => "chain-provider" };
+    let name = match provider {
+        RuntimeProviderId::Did => "did-provider",
+        RuntimeProviderId::Wallet => "wallet-provider",
+        RuntimeProviderId::Model => "model-provider",
+        RuntimeProviderId::Localhost => "localhost-provider",
+        RuntimeProviderId::Object => "object-provider",
+        RuntimeProviderId::Chain => "chain-provider",
+        RuntimeProviderId::Custody => "custody-provider",
+    };
     let path = format!("{}/../../../capsules/{name}/capsule.json", env!("CARGO_MANIFEST_DIR"));
     let json = std::fs::read_to_string(&path).unwrap_or_else(|err| panic!("{path}: {err}"));
     let manifest: elastos_common::CapsuleManifest = serde_json::from_str(&json).unwrap_or_else(|err| panic!("{path}: {err}"));

@@ -49,7 +49,8 @@ pub(super) fn declared_linux_names(
         RuntimeProviderId::Did
         | RuntimeProviderId::Localhost
         | RuntimeProviderId::Object
-        | RuntimeProviderId::Chain => {}
+        | RuntimeProviderId::Chain
+        | RuntimeProviderId::Custody => {}
         RuntimeProviderId::Wallet => names.extend(["rename", "renameat"]),
         RuntimeProviderId::Model => names.extend(MODEL.split_whitespace()),
     }
@@ -171,7 +172,15 @@ mod tests {
     ];
 
     fn slug(provider: RuntimeProviderId) -> &'static str {
-        match provider { RuntimeProviderId::Did => "did", RuntimeProviderId::Wallet => "wallet", RuntimeProviderId::Model => "model", RuntimeProviderId::Localhost => "localhost", RuntimeProviderId::Object => "object", RuntimeProviderId::Chain => "chain" }
+        match provider {
+            RuntimeProviderId::Did => "did",
+            RuntimeProviderId::Wallet => "wallet",
+            RuntimeProviderId::Model => "model",
+            RuntimeProviderId::Localhost => "localhost",
+            RuntimeProviderId::Object => "object",
+            RuntimeProviderId::Chain => "chain",
+            RuntimeProviderId::Custody => "custody",
+        }
     }
     fn same_arch(left: AuditArch, right: AuditArch) -> bool {
         matches!((left, right), (AuditArch::X86_64, AuditArch::X86_64) | (AuditArch::Aarch64, AuditArch::Aarch64))

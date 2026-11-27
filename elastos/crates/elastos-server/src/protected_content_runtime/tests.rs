@@ -4371,7 +4371,7 @@ fn mint_draft_for_composition_journal_test_with_policy(
 
 #[cfg(unix)]
 fn inactive_custody_state_root(data_dir: &Path) -> PathBuf {
-    data_dir.join("protected-content/custody-provider/inactive")
+    data_dir.join(elastos_runtime::provider::CUSTODY_STATE_ROOT_RELATIVE)
 }
 
 #[cfg(unix)]
@@ -4459,18 +4459,133 @@ impl ProtectedStartupProvider {
 }
 
 #[cfg(unix)]
-fn write_mock_custody_provider(root: &Path) -> (PathBuf, PathBuf, PathBuf) {
-    let binary = root.join("mock-custody-provider.sh");
-    let request_log = root.join("mock-custody-provider.requests");
-    let pid_file = root.join("mock-custody-provider.pid");
-    let script = format!(
-        "#!/bin/sh\nset -eu\nprintf '%s\\n' \"$$\" >> '{}'\nwhile IFS= read -r line; do\n  printf '%s\\n' \"$line\" >> '{}'\n  case \"$line\" in\n    *'\"op\":\"shutdown\"'*) printf '%s\\n' '{{\"status\":\"ok\"}}'; exit 0 ;;\n    *'\"unexpected\"'* ) printf '%s\\n' '{{\"status\":\"error\",\"code\":\"invalid_request\"}}' ;;\n    *'\"op\":\"status\"'*) printf '%s\\n' '{}' ;;\n    *'\"op\":\"release_contribution\"'*) printf '%s\\n' '{{\"status\":\"ok\",\"data\":{{\"echo\":\"custody\"}}}}' ;;\n    *) printf '%s\\n' '{{\"status\":\"ok\",\"data\":{{\"echo\":\"init\"}}}}' ;;\n  esac\ndone\n",
-        pid_file.display(),
-        request_log.display(),
-        ProtectedStartupProvider::Custody.status(),
+fn custody_probe_pid_file(data_dir: &Path) -> PathBuf {
+    inactive_custody_state_root(data_dir).join("mock-custody-provider.pid")
+}
+
+#[cfg(unix)]
+fn custody_probe_request_log(data_dir: &Path) -> PathBuf {
+    inactive_custody_state_root(data_dir).join("mock-custody-provider.requests")
+}
+
+/// One native probe for the custody fence. A shell fixture cannot exec inside
+/// `spawn_path_allow`: Linux refuses a non-ELF interpreter, and macOS would
+/// exec `/bin/sh`, which is not the provider executable.
+#[cfg(unix)]
+fn custody_probe_binary() -> PathBuf {
+    static BIN: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    BIN.get_or_init(compile_custody_probe).clone()
+}
+
+#[cfg(unix)]
+fn compile_custody_probe() -> PathBuf {
+    let dir = std::env::temp_dir().join("elastos-custody-probe");
+    fs::create_dir_all(&dir).unwrap();
+    let source_path = dir.join("probe.rs");
+    let binary = dir.join("custody-probe");
+    let status = rust_string_literal(&ProtectedStartupProvider::Custody.status().to_string());
+    let source = format!(
+        r#"use std::io::{{BufRead, Write}};
+const STATUS: &str = {status};
+fn own_pid() -> u32 {{
+    #[cfg(target_os = "linux")]
+    unsafe {{
+        extern "C" {{
+            fn syscall(number: isize, ...) -> isize;
+        }}
+        let number: isize = if cfg!(target_arch = "aarch64") {{ 96 }} else {{ 218 }};
+        let tid = syscall(number, std::ptr::null_mut::<u8>());
+        if tid > 0 {{
+            return tid as u32;
+        }}
+    }}
+    std::process::id()
+}}
+fn base_path(line: &str) -> Option<String> {{
+    let key = "\"base_path\":\"";
+    let start = line.find(key)? + key.len();
+    let rest = &line[start..];
+    let end = rest.find('"')?;
+    Some(rest[..end].to_string())
+}}
+fn main() {{
+    let stdin = std::io::stdin();
+    let mut out = std::io::stdout();
+    let mut log = None;
+    for line in stdin.lock().lines() {{
+        let Ok(line) = line else {{ break }};
+        if log.is_none() {{
+            if let Some(path) = base_path(&line) {{
+                let root = std::path::Path::new(&path);
+                let pid_path = root.join("mock-custody-provider.pid");
+                if let Ok(mut file) = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(&pid_path)
+                {{
+                    let _ = writeln!(file, "{{}}", own_pid());
+                }}
+                log = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(root.join("mock-custody-provider.requests"))
+                    .ok();
+            }}
+        }}
+        if let Some(file) = log.as_mut() {{
+            let _ = writeln!(file, "{{line}}");
+            let _ = file.flush();
+        }}
+        let response = if line.contains("\"op\":\"shutdown\"") {{
+            "{{\"status\":\"ok\"}}"
+        }} else if line.contains("\"unexpected\"") {{
+            "{{\"status\":\"error\",\"code\":\"invalid_request\"}}"
+        }} else if line.contains("\"op\":\"status\"") {{
+            STATUS
+        }} else if line.contains("\"op\":\"release_contribution\"") {{
+            "{{\"status\":\"ok\",\"data\":{{\"echo\":\"custody\"}}}}"
+        }} else {{
+            "{{\"status\":\"ok\",\"data\":{{\"echo\":\"init\"}}}}"
+        }};
+        if writeln!(out, "{{response}}").is_err() || out.flush().is_err() {{
+            break;
+        }}
+        if line.contains("\"op\":\"shutdown\"") {{
+            break;
+        }}
+    }}
+}}
+"#
     );
-    crate::test_support::write_from_child(&binary, &script, 0o700);
-    (binary, pid_file, request_log)
+    fs::write(&source_path, source).unwrap();
+    let built = Command::new("rustc")
+        .args(["--edition", "2021", "-o"])
+        .arg(&binary)
+        .arg(&source_path)
+        .output()
+        .unwrap_or_else(|err| panic!("rustc: {err}"));
+    assert!(
+        built.status.success(),
+        "custody probe did not compile: {}",
+        String::from_utf8_lossy(&built.stderr)
+    );
+    binary
+}
+
+#[cfg(unix)]
+fn rust_string_literal(value: &str) -> String {
+    let mut literal = String::from("\"");
+    for ch in value.chars() {
+        match ch {
+            '\\' | '"' => {
+                literal.push('\\');
+                literal.push(ch);
+            }
+            _ => literal.push(ch),
+        }
+    }
+    literal.push('"');
+    literal
 }
 
 #[cfg(unix)]
@@ -6118,7 +6233,8 @@ async fn inactive_custody_registration_passes_only_base_path_and_no_extra_truth(
     owner_only_dir(&data_dir);
     let state_root = inactive_custody_state_root(&data_dir);
     owner_only_dir(&state_root);
-    let (binary, _pid_file, request_log) = write_mock_custody_provider(temp.path());
+    let binary = custody_probe_binary();
+    let request_log = custody_probe_request_log(&data_dir);
     let registry = Arc::new(ProviderRegistry::new());
 
     register_inactive_custody_provider(&registry, &binary, &data_dir)
@@ -6151,7 +6267,13 @@ async fn inactive_custody_registration_passes_only_base_path_and_no_extra_truth(
     assert_eq!(init["op"], "init");
     assert_eq!(
         init["config"]["base_path"],
-        Value::String(state_root.to_string_lossy().to_string())
+        Value::String(
+            fs::canonicalize(&data_dir)
+                .unwrap()
+                .join(elastos_runtime::provider::CUSTODY_STATE_ROOT_RELATIVE)
+                .to_string_lossy()
+                .into_owned()
+        )
     );
     assert_eq!(init["config"]["allowed_paths"], json!([]));
     assert_eq!(init["config"]["read_only"], false);
@@ -6172,7 +6294,8 @@ async fn inactive_custody_wrapper_rejects_public_private_op_and_evidence_injecti
     let data_dir = temp.path().join("data");
     owner_only_dir(&data_dir);
     owner_only_dir(&inactive_custody_state_root(&data_dir));
-    let (binary, _pid_file, request_log) = write_mock_custody_provider(temp.path());
+    let binary = custody_probe_binary();
+    let request_log = custody_probe_request_log(&data_dir);
     let registry = Arc::new(ProviderRegistry::new());
 
     register_inactive_custody_provider(&registry, &binary, &data_dir)
@@ -6251,7 +6374,7 @@ async fn inactive_custody_wrapper_status_surface_matches_public_dispatch() {
     let data_dir = temp.path().join("data");
     owner_only_dir(&data_dir);
     owner_only_dir(&inactive_custody_state_root(&data_dir));
-    let (binary, _pid_file, _request_log) = write_mock_custody_provider(temp.path());
+    let binary = custody_probe_binary();
     let registry = Arc::new(ProviderRegistry::new());
 
     register_inactive_custody_provider(&registry, &binary, &data_dir)
@@ -6336,18 +6459,23 @@ async fn spawn_inactive_custody_wrapper_for_test(
     binary: &Path,
     data_dir: &Path,
 ) -> InactiveCustodyProvider {
-    let state_root = inactive_custody_state_root(data_dir);
-    let bridge = ProviderBridge::spawn(
-        &crate::test_support::fixture_executable(binary),
-        ProviderConfig {
-            base_path: state_root.to_str().unwrap().to_owned(),
-            ..Default::default()
-        },
+    let authority = elastos_common::ProviderAuthority {
+        reason: "runtime grant".to_string(),
+        capabilities: Vec::new(),
+        audit_events: Vec::new(),
+        rights: Vec::new(),
+    };
+    let confined = ProviderBridge::spawn_path_allow(
+        "custody-provider",
+        &authority,
+        &crate::binaries::checked_native_provider_with_data_dir(data_dir, binary),
+        data_dir,
+        ProviderConfig::default(),
     )
     .await
     .unwrap();
     InactiveCustodyProvider::new(
-        Arc::new(bridge),
+        Arc::clone(confined.bridge()),
         Arc::downgrade(&Arc::new(ProviderRegistry::new())),
     )
 }
@@ -6359,7 +6487,8 @@ async fn inactive_custody_wrapper_accepts_local_and_carrier_envelopes() {
     let data_dir = temp.path().join("data");
     owner_only_dir(&data_dir);
     owner_only_dir(&inactive_custody_state_root(&data_dir));
-    let (binary, _pid_file, request_log) = write_mock_custody_provider(temp.path());
+    let binary = custody_probe_binary();
+    let request_log = custody_probe_request_log(&data_dir);
     let provider = spawn_inactive_custody_wrapper_for_test(&binary, &data_dir).await;
 
     for transport in ["runtime-local-provider-plane", "carrier-provider-plane"] {
@@ -6398,7 +6527,7 @@ async fn inactive_custody_wrapper_rejects_invalid_transport_and_injected_carrier
     let data_dir = temp.path().join("data");
     owner_only_dir(&data_dir);
     owner_only_dir(&inactive_custody_state_root(&data_dir));
-    let (binary, _pid_file, _request_log) = write_mock_custody_provider(temp.path());
+    let binary = custody_probe_binary();
     let provider = spawn_inactive_custody_wrapper_for_test(&binary, &data_dir).await;
 
     let invalid_transport = provider
@@ -6722,6 +6851,12 @@ async fn runtime_custody_registry_adapter_process_happy_path_uses_public_provisi
     authenticated
         .verify_node_contribution(&contribution, &node_set, verification_now)
         .unwrap();
+    let replay = state_root.join("data/replay/node-replay-claims.v1");
+    assert!(
+        replay.is_file(),
+        "the fenced custody provider wrote replay state inside its root"
+    );
+    assert!(replay.starts_with(&state_root));
 
     let chain_requests = chain.requests().await;
     assert_eq!(chain_requests.len(), 1);
@@ -7858,7 +7993,9 @@ async fn inactive_custody_registration_rejects_missing_or_unsafe_root_before_pro
     let temp = tempfile::tempdir().unwrap();
     let data_dir = temp.path().join("missing-data");
     owner_only_dir(&data_dir);
-    let (binary, pid_file, request_log) = write_mock_custody_provider(temp.path());
+    let binary = custody_probe_binary();
+    let pid_file = custody_probe_pid_file(&data_dir);
+    let request_log = custody_probe_request_log(&data_dir);
     let registry = Arc::new(ProviderRegistry::new());
 
     let error = register_inactive_custody_provider(&registry, &binary, &data_dir)
@@ -7881,6 +8018,8 @@ async fn inactive_custody_registration_rejects_missing_or_unsafe_root_before_pro
     assert!(!error.to_string().contains(temp.path().to_str().unwrap()));
     assert!(!request_log.exists());
     assert!(!pid_file.exists());
+    assert!(!custody_probe_request_log(&unsafe_data_dir).exists());
+    assert!(!custody_probe_pid_file(&unsafe_data_dir).exists());
 }
 
 #[cfg(unix)]
@@ -7890,7 +8029,8 @@ async fn inactive_custody_registry_unregisters_shutdowns_and_restarts_bridge() {
     let data_dir = temp.path().join("data");
     owner_only_dir(&data_dir);
     owner_only_dir(&inactive_custody_state_root(&data_dir));
-    let (binary, pid_file, _request_log) = write_mock_custody_provider(temp.path());
+    let binary = custody_probe_binary();
+    let pid_file = custody_probe_pid_file(&data_dir);
     let registry = Arc::new(ProviderRegistry::new());
 
     register_inactive_custody_provider(&registry, &binary, &data_dir)
@@ -7933,7 +8073,8 @@ async fn inactive_custody_duplicate_registration_rejects_and_settles_rejected_ch
     let data_dir = temp.path().join("data");
     owner_only_dir(&data_dir);
     owner_only_dir(&inactive_custody_state_root(&data_dir));
-    let (binary, pid_file, _request_log) = write_mock_custody_provider(temp.path());
+    let binary = custody_probe_binary();
+    let pid_file = custody_probe_pid_file(&data_dir);
     let registry = Arc::new(ProviderRegistry::new());
 
     register_inactive_custody_provider(&registry, &binary, &data_dir)

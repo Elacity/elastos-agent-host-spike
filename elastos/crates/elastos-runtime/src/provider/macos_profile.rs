@@ -78,7 +78,8 @@ pub(super) fn render_macos_profile(
         | RuntimeProviderId::Wallet
         | RuntimeProviderId::Localhost
         | RuntimeProviderId::Object
-        | RuntimeProviderId::Chain => "(allow file-read* (literal \"/\"))",
+        | RuntimeProviderId::Chain
+        | RuntimeProviderId::Custody => "(allow file-read* (literal \"/\"))",
     });
     forms.push("(allow sysctl-read)");
     for row in admitted

@@ -85,11 +85,15 @@ pub(super) fn program(
         let nr = number(name, arch).expect("listed syscall needs an architecture number");
         code.extend([jump(0x15, nr, 0, 1), stmt(6, ALLOW)]);
     }
-    // Localhost, object, and chain already allow `openat`. x86_64 musl issues
-    // `open` for the same calls. Did, wallet, and model do not get this row.
+    // Localhost, object, chain, and custody already allow `openat`. x86_64
+    // musl issues `open` for the same calls. Did, wallet, and model do not
+    // get this row.
     if matches!(
         provider,
-        RuntimeProviderId::Localhost | RuntimeProviderId::Object | RuntimeProviderId::Chain
+        RuntimeProviderId::Localhost
+            | RuntimeProviderId::Object
+            | RuntimeProviderId::Chain
+            | RuntimeProviderId::Custody
     ) {
         code.extend(musl_open_rule(arch));
     }

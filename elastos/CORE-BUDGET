@@ -70,4 +70,8 @@
 # RequestHandler, CapsuleIoBridge, prepare_fetched_capsule). Measured 27 Nov 2026.
 # Merge of origin/spike/agent-host 75616ff93 (#1871) into the P2-4 fences. Both notes stay. Measured 27 Nov 2026.
 # +7: round 39 shares one close-range step, which close_except calls. Measured 27 Nov 2026.
-13568
+# +42: P2-4 slice P1 starts the custody provider on its path allow-list. The
+# Runtime table gains the custody id, its state root, the two metadata
+# parents, the Init base path, and the syscall and profile arms. Measured
+# 27 Nov 2026.
+13610
