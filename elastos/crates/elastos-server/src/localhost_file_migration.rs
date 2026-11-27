@@ -43,10 +43,13 @@
 //! (`main.rs`), which walks and does not take the host lock. `elastos capsule`
 //! attaches to a running runtime and does not walk. `elastos run`, `elastos open`,
 //! and a host can therefore overlap.
-//! After the migration lock is held, and again before pass 2, the walk reads
-//! `update_can_roll_back`. An update that began while the walk waited for the
-//! lock, or while pass 1 read, defers with the pending-update sentence. No
-//! file is rewritten and no marker is written.
+//! After the migration lock is held, again after pass 1, and again immediately
+//! before the done marker, the walk reads `update_can_roll_back`. An update
+//! that began while the walk waited for the lock, or while pass 1 read, defers
+//! with the pending-update sentence, including when pass 1 held no old file.
+//! No file is rewritten and no marker is written. The background check does
+//! not keep the device key while it waits. The next tick reads
+//! `identity/device.key` again.
 //! They cannot mix keys: on Unix the file key is HKDF-SHA256 of the device key
 //! (info `elastos-localhost-file-v1`), and the migration lock lets one walk
 //! write at a time. On Windows the helper still receives the device key, and
@@ -104,6 +107,9 @@ thread_local! {
     #[cfg(test)]
     static BEFORE_WALK: std::cell::RefCell<Option<Box<dyn Fn()>>> =
         std::cell::RefCell::new(None);
+    #[cfg(test)]
+    static DURING_WALK: std::cell::RefCell<Option<Box<dyn Fn()>>> =
+        std::cell::RefCell::new(None);
     static PROGRESS_CLOCK: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
     static BYTES_READ: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
     static OPENS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
@@ -152,6 +158,12 @@ pub(crate) fn set_localhost_migration_before_rename(hook: Option<MigrationReplac
 #[cfg(all(unix, test))]
 pub(crate) fn set_localhost_migration_before_walk(hook: Option<Box<dyn Fn()>>) {
     BEFORE_WALK.with(|slot| *slot.borrow_mut() = hook);
+}
+
+/// Runs while pass 1 is reading a file, after the pre-walk rollback check.
+#[cfg(all(unix, test))]
+pub(crate) fn set_localhost_migration_during_walk(hook: Option<Box<dyn Fn()>>) {
+    DURING_WALK.with(|slot| *slot.borrow_mut() = hook);
 }
 
 /// Sets the progress clock. `None` uses the wall clock. A test moves this
@@ -256,6 +268,15 @@ fn run_before_walk() {
     if let Some(hook) = hook {
         hook();
         BEFORE_WALK.with(|slot| *slot.borrow_mut() = Some(hook));
+    }
+}
+
+#[cfg(all(unix, test))]
+fn run_during_walk() {
+    let hook = DURING_WALK.with(|slot| slot.borrow_mut().take());
+    if let Some(hook) = hook {
+        hook();
+        DURING_WALK.with(|slot| *slot.borrow_mut() = Some(hook));
     }
 }
 
@@ -407,6 +428,8 @@ fn localhost_write_refused(path: &Path, io_text: &str) -> anyhow::Error {
 
 #[cfg(unix)]
 fn note_progress() {
+    #[cfg(test)]
+    run_during_walk();
     PROGRESS_AT.with(|slot| {
         let (count, last) = slot.get();
         let count = count + 1;
@@ -1212,8 +1235,9 @@ fn migrate_localhost_files_to_file_key(
     if matches!(plan, MarkerPlan::Keep) {
         return Ok(());
     }
-    // The lock is held. An update that started while this run waited, or
-    // while pass 1 read, still defers before any rewrite and before the marker.
+    // The lock is held. Recheck after pass 1, before any rewrite, and again
+    // immediately before the marker. An update that starts in those gaps
+    // defers, including when pass 1 held no old file.
     #[cfg(test)]
     run_before_walk();
     if elastos_server::update_controller::update_can_roll_back(data_dir) {
@@ -1253,14 +1277,17 @@ fn migrate_localhost_files_to_file_key(
         Ok(())
     };
     walk()?;
+    if elastos_server::update_controller::update_can_roll_back(data_dir) {
+        return Err(anyhow::anyhow!(LOCALHOST_FILES_PENDING_UPDATE));
+    }
     if HELD.with(|slot| slot.get()) {
-        if elastos_server::update_controller::update_can_roll_back(data_dir) {
-            return Err(anyhow::anyhow!(LOCALHOST_FILES_PENDING_UPDATE));
-        }
         PASS_TWO.with(|slot| slot.set(true));
         walk()?;
     }
     if matches!(plan, MarkerPlan::Write) {
+        if elastos_server::update_controller::update_can_roll_back(data_dir) {
+            return Err(anyhow::anyhow!(LOCALHOST_FILES_PENDING_UPDATE));
+        }
         write_localhost_marker(&marker, &localhost_marker_record(&file_key))?;
     }
     Ok(())

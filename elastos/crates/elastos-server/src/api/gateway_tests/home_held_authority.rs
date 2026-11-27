@@ -1430,6 +1430,18 @@ fn rows() -> Vec<HeldRow> {
     ),
     row(
         "elastos-server/src/server_infra.rs",
+        "refuse_localhost",
+        "load_or_create_device_key",
+        1,
+        mark(
+            "home-own",
+            "device key",
+            "Home",
+            "A later file-move check reads identity/device.key again. The check does not keep the key while it sleeps.",
+        ),
+    ),
+    row(
+        "elastos-server/src/server_infra.rs",
         "did_provider_bridge_config",
         "encryption_key: device_key_hex",
         1,
