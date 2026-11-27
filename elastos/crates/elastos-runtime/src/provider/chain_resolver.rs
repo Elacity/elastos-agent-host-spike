@@ -771,12 +771,21 @@ mod tests {
             let id = extra["accepted_id"].as_str().unwrap().to_string();
             let accepted = format!("http://127.0.0.1:{}/accepted", hits.port);
             extra["accepted_rpc_url"] = serde_json::json!(&accepted);
-            extra["protected_content_network"]["rpc_url"] = serde_json::json!(&accepted);
+            // The caller names this settings section in the fixture.
+            let section = extra["accepted_section"].as_str().unwrap().to_string();
+            assert!(
+                extra
+                    .get(section.as_str())
+                    .is_some_and(serde_json::Value::is_object),
+                "the Init settings section is missing"
+            );
+            extra[section.as_str()]["rpc_url"] = serde_json::json!(&accepted);
             let accepted_name = extra["accepted_display_name"].as_str().unwrap().to_string();
             let object = extra.as_object_mut().unwrap();
             object.remove("accepted_id");
             object.remove("accepted_rpc_url");
             object.remove("accepted_display_name");
+            object.remove("accepted_section");
             let started = start(Some(b"nameserver 127.0.0.1\n")).await;
             let first = status_text(&started.bridge, &id).await;
             assert!(

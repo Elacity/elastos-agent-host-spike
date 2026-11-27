@@ -2,6 +2,7 @@
   "accepted_id": "base-mainnet",
   "accepted_rpc_url": "https://127.0.0.1:9",
   "accepted_display_name": "Accepted network",
+  "accepted_section": "protected_content_network",
   "protected_content_runtime_issuer": "__ISSUER__",
   "protected_content_network": {
     "id": "base-mainnet",
