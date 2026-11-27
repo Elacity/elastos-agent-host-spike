@@ -77,6 +77,22 @@ pub use bridge::{
 #[cfg(any(windows, target_os = "macos"))]
 pub use checked_executable::recover_verified_copies;
 pub use checked_executable::CheckedExecutable;
+/// Inactive custody state, relative to the Home data directory.
+pub const CUSTODY_STATE_ROOT_RELATIVE: &str = "protected-content/custody-provider/inactive";
+
+/// The base path Init receives. Custody's root is its state directory.
+/// Every other path-allow provider receives the data directory.
+#[cfg(unix)]
+fn init_base_path(
+    provider: rights_table::RuntimeProviderId,
+    data_dir: &std::path::Path,
+) -> std::path::PathBuf {
+    match provider {
+        rights_table::RuntimeProviderId::Custody => data_dir.join(CUSTODY_STATE_ROOT_RELATIVE),
+        _ => data_dir.to_path_buf(),
+    }
+}
+
 pub use registry::{
     decode_provider_stream_payload, EntryType, LocalIpfsCapacityObservation, Provider,
     ProviderByteRange, ProviderCarrierInvoker, ProviderCarrierRoute, ProviderError,

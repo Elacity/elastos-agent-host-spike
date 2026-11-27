@@ -13,8 +13,8 @@ const NUMBERS: &str = concat!(
     "ftruncate:77:46 futex:202:98 getdents64:217:61 geteuid:107:175 getrandom:318:278 linkat:265:37 ",
     "lseek:8:62 mkdir:83:- mkdirat:258:34 mmap:9:222 mprotect:10:226 munmap:11:215 ",
     // `set_tid_address` is musl 1.2.5 `__init_tp` on both arches. It stores this
-    // thread's clear_child_tid and returns the thread id. Localhost, object, and
-    // chain list it. Did, wallet, and model do not, so their goldens stay put.
+    // thread's clear_child_tid and returns the thread id. Localhost, object,
+    // chain, and custody list it. Did, wallet, and model do not, so their goldens stay put.
     "set_tid_address:218:96 ",
     "newfstatat:262:79 openat:257:56 openat2:437:437 poll:7:- ppoll:271:73 pread64:17:67 ",
     "prlimit64:302:261 pwrite64:18:68 read:0:63 readlinkat:267:78 readv:19:65 rename:82:- ",
@@ -85,11 +85,15 @@ pub(super) fn program(
         let nr = number(name, arch).expect("listed syscall needs an architecture number");
         code.extend([jump(0x15, nr, 0, 1), stmt(6, ALLOW)]);
     }
-    // Localhost, object, and chain already allow `openat`. x86_64 musl issues
-    // `open` for the same calls. Did, wallet, and model do not get this row.
+    // Localhost, object, chain, and custody already allow `openat`. x86_64
+    // musl issues `open` for the same calls. Did, wallet, and model do not
+    // get this row.
     if matches!(
         provider,
-        RuntimeProviderId::Localhost | RuntimeProviderId::Object | RuntimeProviderId::Chain
+        RuntimeProviderId::Localhost
+            | RuntimeProviderId::Object
+            | RuntimeProviderId::Chain
+            | RuntimeProviderId::Custody
     ) {
         code.extend(musl_open_rule(arch));
     }
@@ -309,10 +313,20 @@ mod tests {
     fn all_provider_programs_equal_committed_instruction_numbers() {
         macro_rules! check {
             ($file:literal, $arch:ident, $provider:ident) => {
-                assert_eq!(program(RuntimeProviderId::$provider,
-                    &admit_committed(RuntimeProviderId::$provider), AuditArch::$arch),
-                    golden(include_str!(concat!(env!("CARGO_MANIFEST_DIR"),
-                        "/../../../capsules/wallet-provider/tests/", $file))), $file);
+                assert_eq!(
+                    program(
+                        RuntimeProviderId::$provider,
+                        &admit_committed(RuntimeProviderId::$provider)
+                            .expect("committed capsule authority"),
+                        AuditArch::$arch,
+                    ),
+                    golden(include_str!(concat!(
+                        env!("CARGO_MANIFEST_DIR"),
+                        "/../../../capsules/wallet-provider/tests/",
+                        $file
+                    ))),
+                    $file
+                );
             };
         }
         check!("did-seccomp-x86_64.golden", X86_64, Did);
@@ -371,7 +385,11 @@ mod tests {
         ];
         for arch in [AuditArch::X86_64, AuditArch::Aarch64] {
             let audit = match arch { AuditArch::X86_64 => 0xc000_003e, AuditArch::Aarch64 => 0xc000_00b7 };
-            let prog = program(RuntimeProviderId::Model, &admit_committed(RuntimeProviderId::Model), arch);
+            let prog = program(
+                RuntimeProviderId::Model,
+                &admit_committed(RuntimeProviderId::Model).expect("committed capsule authority"),
+                arch,
+            );
             for (label, name, args, allow) in cases {
                 let nr = number(name, arch).expect(name);
                 let got = interpret(&prog, nr, args, audit);
@@ -681,12 +699,12 @@ mod tests {
         }
     }
 
-    /// x86_64 musl `open` for the three helpers. `O_PATH` and `__O_TMPFILE`
-    /// stay denied. `O_CREAT` stays allowed because Landlock checks it.
-    /// aarch64 has no `open`. Did does not get the row. `stat` and `lstat`
-    /// are the older metadata calls and are not on Did.
+    /// x86_64 musl `open` for localhost, object, chain, and custody. `O_PATH`
+    /// and `__O_TMPFILE` stay denied. `O_CREAT` stays allowed because Landlock
+    /// checks it. aarch64 has no `open`. Did does not get the row. `stat` and
+    /// `lstat` are the older metadata calls and are not on Did.
     #[test]
-    fn musl_open_stat_and_lstat_are_only_the_three_helpers() {
+    fn musl_open_stat_and_lstat_are_only_the_four_helpers() {
         const O_CLOEXEC: u64 = 0x80000;
         const O_CREAT: u64 = 0x40;
         const O_PATH: u64 = 0x200000;
@@ -708,6 +726,7 @@ mod tests {
             RuntimeProviderId::Localhost,
             RuntimeProviderId::Object,
             RuntimeProviderId::Chain,
+            RuntimeProviderId::Custody,
         ] {
             let admitted = super::super::rights::admit_runtime_grant(provider);
             let prog = program(provider, &admitted, AuditArch::X86_64);
@@ -746,12 +765,12 @@ mod tests {
     }
 
     /// `set_tid_address` records this thread's id. `munmap` returns this
-    /// process's mappings. Both are localhost, object, and chain, on both
-    /// arches. Deleting either name from those three `measured_syscalls`
+    /// process's mappings. Both are localhost, object, chain, and custody, on
+    /// both arches. Deleting either name from those four `measured_syscalls`
     /// turns the allow red. Did, wallet, and model goldens do not gain
     /// `set_tid_address`. Model already has `munmap`.
     #[test]
-    fn helper_set_tid_address_and_munmap_are_only_the_three_helpers() {
+    fn helper_set_tid_address_and_munmap_are_only_the_four_helpers() {
         for arch in [AuditArch::X86_64, AuditArch::Aarch64] {
             let audit = match arch {
                 AuditArch::X86_64 => 0xc000_003e,
@@ -767,6 +786,7 @@ mod tests {
                 RuntimeProviderId::Localhost,
                 RuntimeProviderId::Object,
                 RuntimeProviderId::Chain,
+                RuntimeProviderId::Custody,
             ] {
                 let admitted = super::super::rights::admit_runtime_grant(provider);
                 let prog = program(provider, &admitted, arch);

@@ -295,10 +295,13 @@ pub(super) fn prepare_path_allow(
     // Each helper's filter comes from the admitted grant. Did's list is not reused.
     if !matches!(
         provider,
-        RuntimeProviderId::Localhost | RuntimeProviderId::Object | RuntimeProviderId::Chain
+        RuntimeProviderId::Localhost
+            | RuntimeProviderId::Object
+            | RuntimeProviderId::Chain
+            | RuntimeProviderId::Custody
     ) {
         return Err(
-            "provider start is refused: the path allow-list filter is only for localhost, object, and chain"
+            "provider start is refused: the path allow-list filter is only for localhost, object, chain, and custody"
                 .into(),
         );
     }

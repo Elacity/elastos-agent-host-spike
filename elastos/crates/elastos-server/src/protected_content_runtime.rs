@@ -338,7 +338,7 @@ const PROTECTED_CONTENT_DECRYPT_PROVIDER_OPERATIONS: &[&str] = &[
     "shutdown",
 ];
 const WALLET_PROVIDER_ID: &str = "wallet";
-const INACTIVE_CUSTODY_ROOT: &str = "protected-content/custody-provider/inactive";
+const INACTIVE_CUSTODY_ROOT: &str = elastos_runtime::provider::CUSTODY_STATE_ROOT_RELATIVE;
 const PROVIDER_INVOCATION_SCHEMA_V1: &str = "elastos.provider.invocation/v1";
 const CHAIN_PROTECTED_CONTENT_POLICY_OP: &str = "resolve_protected_content_policy";
 const CHAIN_PROTECTED_CONTENT_POLICY_SCHEMA_V1: &str = "elastos.chain.protected-content-policy/v1";
@@ -1296,26 +1296,47 @@ pub async fn register_inactive_custody_provider(
 
     let state_root = inactive_custody_state_root(data_dir);
     validate_inactive_custody_state_root(&state_root)?;
-    let base_path = state_root
-        .to_str()
-        .ok_or_else(|| {
-            invalid_inactive_custody_config("inactive custody provider root must be valid UTF-8")
-        })?
-        .to_owned();
-    let bridge_config = ProviderConfig {
-        base_path,
-        ..Default::default()
-    };
-    let bridge = Arc::new(
-        // Admit against the signed release of the Home whose custody state
-        // this provider serves, not whichever Home the default path names.
-        elastos_runtime::provider::ProviderBridge::spawn(
-            &checked_native_provider_with_data_dir(data_dir, binary_path),
-            bridge_config,
+    // Admit against the signed release of the Home whose custody state this
+    // provider serves, not whichever Home the default path names.
+    let checked = checked_native_provider_with_data_dir(data_dir, binary_path);
+    #[cfg(unix)]
+    let bridge = {
+        let authority = elastos_common::ProviderAuthority {
+            reason: "runtime grant".to_string(),
+            capabilities: Vec::new(),
+            audit_events: Vec::new(),
+            rights: Vec::new(),
+        };
+        let confined = ProviderBridge::spawn_path_allow(
+            "custody-provider",
+            &authority,
+            &checked,
+            data_dir,
+            ProviderConfig::default(),
         )
         .await
-        .map_err(|error| anyhow::anyhow!("failed to spawn inactive custody provider: {error}"))?,
-    );
+        .map_err(|error| anyhow::anyhow!("failed to spawn inactive custody provider: {error}"))?;
+        Arc::clone(confined.bridge())
+    };
+    #[cfg(not(unix))]
+    let bridge = {
+        let base_path = state_root.to_str().ok_or_else(|| {
+            invalid_inactive_custody_config("inactive custody provider root must be valid UTF-8")
+        })?;
+        Arc::new(
+            ProviderBridge::spawn(
+                &checked,
+                ProviderConfig {
+                    base_path: base_path.to_owned(),
+                    ..Default::default()
+                },
+            )
+            .await
+            .map_err(|error| {
+                anyhow::anyhow!("failed to spawn inactive custody provider: {error}")
+            })?,
+        )
+    };
     let startup = async {
         let status =
             request_protected_provider_startup_status(&bridge, "inactive custody provider").await?;

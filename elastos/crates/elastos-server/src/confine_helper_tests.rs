@@ -1076,7 +1076,7 @@ fn argument_is_object(head: &str) -> bool {
 }
 
 /// Release musl helpers, started by `spawn_path_allow` on Linux. The CI step
-/// sets `ELASTOS_MUSL_HELPER_FENCE` and the three binary paths. A normal
+/// sets `ELASTOS_MUSL_HELPER_FENCE` and the four binary paths. A normal
 /// `cargo test` leaves the flag unset and does not look for those binaries.
 #[cfg(all(
     not(elastos_unsupported_os_check),
@@ -1451,6 +1451,51 @@ async fn musl_release_helpers_start_under_the_fence() {
     }
     chain.bridge().shutdown().await.unwrap();
     recovery_kit_round_trip(&object_bin).await;
+
+    // Custody is provisioned outside the fence, then started inside it. Init
+    // loads the state root, so a missing `geteuid` or metadata call fails here.
+    let custody_bin = binary("ELASTOS_MUSL_CUSTODY");
+    let custody_parent = data.join("protected-content/custody-provider");
+    std::fs::create_dir_all(&custody_parent).unwrap();
+    for path in [data.join("protected-content"), custody_parent.clone()] {
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let state = custody_parent.join("inactive");
+    let signing = ed25519_dalek::SigningKey::from_bytes(&[0x11; 32]);
+    let mut issuer = String::from("0x");
+    for byte in signing.verifying_key().to_bytes() {
+        issuer.push_str(&format!("{byte:02x}"));
+    }
+    let provisioned = std::process::Command::new(&custody_bin)
+        .args([
+            "provision",
+            "--base-path",
+            state.to_str().unwrap(),
+            "--trusted-runtime-issuer",
+            &issuer,
+        ])
+        .output()
+        .unwrap_or_else(|err| panic!("musl custody provision: {err}"));
+    assert!(
+        provisioned.status.success(),
+        "musl custody provision failed: {} {}",
+        String::from_utf8_lossy(&provisioned.stdout),
+        String::from_utf8_lossy(&provisioned.stderr)
+    );
+    let custody = elastos_runtime::provider::ProviderBridge::spawn_path_allow(
+        "custody-provider",
+        &authority(),
+        &pinned(&custody_bin, &data),
+        &data,
+        elastos_runtime::provider::BridgeProviderConfig::default(),
+    )
+    .await
+    .unwrap_or_else(|err| panic!("musl custody init failed: {err}"));
+    let status = exchange(custody.bridge(), serde_json::json!({"op": "status"})).await;
+    assert_eq!(status["status"], "ok", "{status}");
+    assert_eq!(status["data"]["provider"], "custody", "{status}");
+    assert_eq!(status["data"]["configured"], true, "{status}");
+    custody.bridge().shutdown().await.unwrap();
     eprintln!("musl helper fence: started");
 }
 

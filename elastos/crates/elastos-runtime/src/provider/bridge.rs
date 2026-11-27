@@ -1970,7 +1970,7 @@ impl ProviderBridge {
         Ok(())
     }
 
-    /// Start localhost, object, or chain on that provider's path allow-list.
+    /// Start localhost, object, chain, or custody on that provider's path allow-list.
     ///
     /// There is no single storage root. A refusal starts nothing. Chain keeps
     /// the start inputs beside this bridge so a resolver change can start the
@@ -2010,7 +2010,15 @@ impl ProviderBridge {
         // A symlinked data directory is the real directory it names. The fence
         // and the helper both use that directory, so a read matches the grant.
         let data_dir = &std::fs::canonicalize(data_dir).map_err(BridgeError::Io)?;
-        config.base_path = data_dir.to_string_lossy().into_owned();
+        let provider = super::rights_table::RuntimeProviderId::path_allow(component_key)
+            .ok_or_else(|| {
+                BridgeError::Refused(
+                    "provider start is refused: component key has no path allow-list".to_string(),
+                )
+            })?;
+        config.base_path = super::init_base_path(provider, data_dir)
+            .to_string_lossy()
+            .into_owned();
         if component_key == "chain-provider" {
             Self::ensure_chain_provider_root(data_dir)?;
             // Closed list from this process. The helper applies it in Init.

@@ -43,8 +43,8 @@ pub(super) static RIGHTS: &[RightRow] = &[
 const DID_RIGHT_IDS: &[&str] = &["storage", "bound-executable"];
 const WALLET_RIGHT_IDS: &[&str] = &["storage", "bound-executable"];
 const MODEL_RIGHT_IDS: &[&str] = &["storage", "bound-executable", "model-gpu"];
-/// Localhost, object, and chain use the same file and exec rows. A helper's
-/// extra calls live in `measured_syscalls`, not in a second storage root.
+/// Localhost, object, chain, and custody use the same file and exec rows.
+/// A helper's extra calls live in `measured_syscalls`, not in a second storage root.
 const HELPER_RIGHT_IDS: &[&str] = DID_RIGHT_IDS;
 
 /// The caller derives this id from the Runtime's `components.json` key,
@@ -61,6 +61,7 @@ pub(super) enum RuntimeProviderId {
     Localhost,
     Object,
     Chain,
+    Custody,
 }
 
 impl RuntimeProviderId {
@@ -71,18 +72,19 @@ impl RuntimeProviderId {
             "did-provider" => Some(Self::Did),
             "wallet-provider" => Some(Self::Wallet),
             "model-provider" => Some(Self::Model),
-            // These three use the path allow-list, not the single storage root.
+            // Localhost, object, chain, and custody use the path allow-list.
             _ => None,
         }
     }
 
-    /// Localhost, object, and chain. `from_component_key` stays empty for them
-    /// so `spawn_confined` cannot start them on one storage root.
+    /// Localhost, object, chain, and custody. `from_component_key` stays empty
+    /// for them so `spawn_confined` cannot start them on one storage root.
     pub(super) fn path_allow(key: &str) -> Option<Self> {
         match key {
             "localhost-provider" => Some(Self::Localhost),
             "object-provider" => Some(Self::Object),
             "chain-provider" => Some(Self::Chain),
+            "custody-provider" => Some(Self::Custody),
             _ => None,
         }
     }
@@ -92,7 +94,7 @@ impl RuntimeProviderId {
             Self::Did => DID_RIGHT_IDS,
             Self::Wallet => WALLET_RIGHT_IDS,
             Self::Model => MODEL_RIGHT_IDS,
-            Self::Localhost | Self::Object | Self::Chain => HELPER_RIGHT_IDS,
+            Self::Localhost | Self::Object | Self::Chain | Self::Custody => HELPER_RIGHT_IDS,
         }
     }
 
@@ -120,7 +122,7 @@ impl RuntimeProviderId {
     /// its Linux run already passed, so `readlink` stays off the chain row.
     ///
     /// `stat` and `lstat` are the x86_64 musl 1.2.5 forms of `statx` and
-    /// `newfstatat`, which these three helpers already allow. On x86_64,
+    /// `newfstatat`, which these four helpers already allow. On x86_64,
     /// `kstat.st_atime_sec` is `long` (the same width as `time_t`), so
     /// `fstatat` does not try `statx` first and `fstatat_kstat` issues
     /// `SYS_stat` or `SYS_lstat`. They let metadata and realpath see a path.
@@ -134,11 +136,18 @@ impl RuntimeProviderId {
     /// it a helper that stays up keeps every large allocation. The call
     /// unmaps only an address in this process. Both numbers exist on x86_64
     /// and aarch64. Did, wallet, and model do not gain either name here.
+    ///
+    /// Custody adds `geteuid` (the owner check), `flock` (the store lock), and
+    /// `rename`/`renameat` (the replay replace). `stat` and `lstat` are the
+    /// x86_64 musl 1.2.5 metadata calls already in the number table. On
+    /// aarch64, musl 1.2.3 `stat` and `lstat` tail-call `fstatat`, and that
+    /// path issues `newfstatat`, so those two names drop there.
     pub(super) fn measured_syscalls(self) -> &'static str {
         match self {
             Self::Localhost => "munmap readlink rmdir set_tid_address stat lstat",
             Self::Object => "flock getpid munmap readlink rename renameat rmdir set_tid_address stat lstat",
             Self::Chain => "connect recvfrom sendmmsg epoll_create1 epoll_ctl epoll_pwait epoll_wait eventfd2 exit munmap rseq rt_sigprocmask rename renameat set_tid_address stat lstat",
+            Self::Custody => "flock geteuid lstat munmap rename renameat set_tid_address stat",
             Self::Did | Self::Wallet | Self::Model => "",
         }
     }

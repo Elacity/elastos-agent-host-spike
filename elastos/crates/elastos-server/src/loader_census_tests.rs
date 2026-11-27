@@ -371,14 +371,17 @@ fn rows() -> Vec<Row> {
             "P2-8",
             1,
         ),
+        // Unix calls spawn_path_allow. Windows calls ProviderBridge::spawn.
+        // The scanner labels both ProviderBridge::spawn, because
+        // spawn_path_allow starts with that prefix.
         row(
             "elastos-server/src/protected_content_runtime.rs",
             "register_inactive_custody_provider",
             "ProviderBridge::spawn",
             "native provider",
             "checksum",
-            "P2-8",
-            1,
+            "P2-4",
+            2,
         ),
         row(
             "elastos-server/src/protected_content_runtime.rs",
@@ -1089,7 +1092,7 @@ fn every_executable_loader_has_an_authority_row() {
     let found = found(&sources);
     let mut listed = BTreeSet::new();
     for row in rows() {
-        assert!(matches!(row.check_id, "P2-2" | "P2-8" | "B3 S10"));
+        assert!(matches!(row.check_id, "P2-2" | "P2-4" | "P2-8" | "B3 S10"));
         assert!(matches!(
             row.checks,
             "CID+DID+closure"

@@ -65,6 +65,7 @@ fn provider_label(provider: RuntimeProviderId) -> &'static str {
         RuntimeProviderId::Localhost => "localhost-provider",
         RuntimeProviderId::Object => "object-provider",
         RuntimeProviderId::Chain => "chain-provider",
+        RuntimeProviderId::Custody => "custody-provider",
     }
 }
 
@@ -122,15 +123,39 @@ pub(super) fn git_show(spec: &str) -> std::process::Output {
 }
 
 /// The committed capsule authority, through the same gate `start_provider` uses.
+///
+/// Custody has no `capsule.json`. Calling this with `Custody` returns a
+/// refusal. Its grant is `admit_runtime_grant`.
 #[cfg(test)]
-#[rustfmt::skip]
-pub(super) fn admit_committed(provider: RuntimeProviderId) -> AdmittedRights {
-    let name = match provider { RuntimeProviderId::Did => "did-provider", RuntimeProviderId::Wallet => "wallet-provider", RuntimeProviderId::Model => "model-provider", RuntimeProviderId::Localhost => "localhost-provider", RuntimeProviderId::Object => "object-provider", RuntimeProviderId::Chain => "chain-provider" };
-    let path = format!("{}/../../../capsules/{name}/capsule.json", env!("CARGO_MANIFEST_DIR"));
+pub(super) fn admit_committed(provider: RuntimeProviderId) -> Result<AdmittedRights, String> {
+    let name = match provider {
+        RuntimeProviderId::Did => "did-provider",
+        RuntimeProviderId::Wallet => "wallet-provider",
+        RuntimeProviderId::Model => "model-provider",
+        RuntimeProviderId::Localhost => "localhost-provider",
+        RuntimeProviderId::Object => "object-provider",
+        RuntimeProviderId::Chain => "chain-provider",
+        RuntimeProviderId::Custody => {
+            return Err(
+                "custody provider authority is refused: custody has no committed capsule.json"
+                    .to_string(),
+            );
+        }
+    };
+    let path = format!(
+        "{}/../../../capsules/{name}/capsule.json",
+        env!("CARGO_MANIFEST_DIR")
+    );
     let json = std::fs::read_to_string(&path).unwrap_or_else(|err| panic!("{path}: {err}"));
-    let manifest: elastos_common::CapsuleManifest = serde_json::from_str(&json).unwrap_or_else(|err| panic!("{path}: {err}"));
-    let authority = manifest.authority.unwrap_or_else(|| panic!("{path}: provider authority is missing"));
-    check_rights_against_runtime_templates(provider, &authority, rights_table::RIGHTS).unwrap_or_else(|err| panic!("{name} committed authority: {err}"))
+    let manifest: elastos_common::CapsuleManifest =
+        serde_json::from_str(&json).unwrap_or_else(|err| panic!("{path}: {err}"));
+    let authority = manifest
+        .authority
+        .unwrap_or_else(|| panic!("{path}: provider authority is missing"));
+    Ok(
+        check_rights_against_runtime_templates(provider, &authority, rights_table::RIGHTS)
+            .unwrap_or_else(|err| panic!("{name} committed authority: {err}")),
+    )
 }
 
 /// Resolve declared rights to the rows the OS entry installs.
@@ -570,5 +595,18 @@ mod tests {
             gate(&authority),
             Err("provider authority right \"storage\" is declared more than once".to_string())
         );
+    }
+
+    #[test]
+    fn custody_committed_authority_is_refused() {
+        match super::admit_committed(RuntimeProviderId::Custody) {
+            Err(error) => {
+                assert!(
+                    error.contains("refused") && error.contains("capsule.json"),
+                    "{error}"
+                );
+            }
+            Ok(_) => panic!("custody committed authority was admitted"),
+        }
     }
 }

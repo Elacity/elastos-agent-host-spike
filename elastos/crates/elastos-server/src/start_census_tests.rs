@@ -394,8 +394,8 @@ fn places() -> Vec<Place> {
             "elastos-server/src/protected_content_runtime.rs",
             "register_inactive_custody_provider",
             spawn.clone(),
-            1,
-            P2_2,
+            2,
+            "custody path allow-list; Windows P2-11 parked",
         ),
         place(
             "elastos-server/src/protected_content_runtime.rs",

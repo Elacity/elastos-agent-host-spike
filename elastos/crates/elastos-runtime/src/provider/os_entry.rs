@@ -101,7 +101,7 @@ pub(super) fn start_provider(
     dispatch(provider, &admitted, executable, checked, stdio)
 }
 
-/// The signed-authority gate for localhost, object, and chain. Both OS arms
+/// The signed-authority gate for localhost, object, chain, and custody. Both OS arms
 /// start from this result. Linux does not admit a second grant.
 pub(crate) fn admit_path_allow(
     component_key: &str,
@@ -121,7 +121,7 @@ pub(crate) fn admit_path_allow(
     Ok((provider, admitted))
 }
 
-/// Start localhost, object, or chain under that provider's path allow-list.
+/// Start localhost, object, chain, or custody under that provider's path allow-list.
 ///
 /// The data directory is not a storage root. `identity/device.key` stays
 /// outside the Seatbelt parameters and the Landlock rules. Admission is the
@@ -230,9 +230,9 @@ fn start_path_allow_os(
 /// child uses it. A symlink at that path does not grant its target. A real
 /// directory swapped onto the path is readable, including a file moved into
 /// it. `identity/device.key` is not under any allowed root, so that path
-/// stays unread. The three helpers do not compare the device and
-/// inode again after the profile is on. sandbox-exec resolved the rules by
-/// name, so a same-user swap after that is the helper's own read.
+/// stays unread. Localhost, object, chain, and custody do not compare the
+/// device and inode again after the profile is on. sandbox-exec resolved the
+/// rules by name, so a same-user swap after that is the helper's own read.
 ///
 /// `plan.root_dev` lines up with the storage roots, which are the first rules.
 /// The executable, loader, and resolver paths are not roots. Metadata literals
@@ -839,7 +839,8 @@ mod tests {
         let storage = Path::new("/private/fixture/data/did");
         let profile = super::super::macos_profile::render_macos_profile(
             RuntimeProviderId::Did,
-            &super::super::rights::admit_committed(RuntimeProviderId::Did),
+            &super::super::rights::admit_committed(RuntimeProviderId::Did)
+                .expect("committed capsule authority"),
         );
         let command = macos_command(
             Path::new("/usr/bin/sandbox-exec"),
@@ -903,7 +904,8 @@ mod tests {
         let storage = Path::new("/private/fixture/data/did");
         let profile = super::super::macos_profile::render_macos_profile(
             RuntimeProviderId::Did,
-            &super::super::rights::admit_committed(RuntimeProviderId::Did),
+            &super::super::rights::admit_committed(RuntimeProviderId::Did)
+                .expect("committed capsule authority"),
         );
         let command = macos_command(
             Path::new("/usr/bin/sandbox-exec"),
@@ -1031,7 +1033,12 @@ mod tests {
             );
             assert!(RuntimeProviderId::from_component_key(key).is_some());
         }
-        for key in ["localhost-provider", "object-provider", "chain-provider"] {
+        for key in [
+            "localhost-provider",
+            "object-provider",
+            "chain-provider",
+            "custody-provider",
+        ] {
             assert!(RuntimeProviderId::from_component_key(key).is_none());
             assert!(RuntimeProviderId::path_allow(key).is_some());
         }
@@ -2399,6 +2406,440 @@ fn main() {
                 panic!("path-allow probe {pid} did not exit");
             }
             std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    }
+
+    #[cfg(all(
+        not(elastos_unsupported_os_check),
+        any(
+            target_os = "macos",
+            all(
+                target_os = "linux",
+                any(target_arch = "x86_64", target_arch = "aarch64")
+            )
+        )
+    ))]
+    fn custody_provider_binary() -> PathBuf {
+        let repo =
+            std::fs::canonicalize(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../.."))
+                .expect("repo root");
+        let binary = repo.join("target/provider-fence-tests/debug/custody-provider");
+        if !binary.is_file() {
+            panic!(
+                "custody-provider is not at {}. Run `just prepare-providers` before these tests. That command builds the helper binaries; the tests do not download crates.",
+                binary.display()
+            );
+        }
+        binary
+    }
+
+    #[cfg(all(
+        not(elastos_unsupported_os_check),
+        any(
+            target_os = "macos",
+            all(
+                target_os = "linux",
+                any(target_arch = "x86_64", target_arch = "aarch64")
+            )
+        )
+    ))]
+    fn owner_only(path: &Path) {
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+
+    /// The custody probe can open its own state file. It cannot open
+    /// `identity/device.key` or write `protected-content/custody-composition.json`.
+    #[cfg(all(
+        not(elastos_unsupported_os_check),
+        any(
+            target_os = "macos",
+            all(
+                target_os = "linux",
+                any(target_arch = "x86_64", target_arch = "aarch64")
+            )
+        )
+    ))]
+    #[test]
+    fn custody_provider_cannot_leave_its_root() {
+        let temp = tempfile::tempdir().unwrap();
+        owner_only(temp.path());
+        let data = std::fs::canonicalize(temp.path().join("data")).unwrap_or_else(|_| {
+            std::fs::create_dir(temp.path().join("data")).unwrap();
+            std::fs::canonicalize(temp.path().join("data")).unwrap()
+        });
+        owner_only(&data);
+        let state = data.join(super::super::CUSTODY_STATE_ROOT_RELATIVE);
+        std::fs::create_dir_all(&state).unwrap();
+        for path in [
+            data.join("protected-content"),
+            data.join("protected-content/custody-provider"),
+            state.clone(),
+        ] {
+            owner_only(&path);
+        }
+        let own = state.join("own.txt");
+        std::fs::write(&own, b"own").unwrap();
+        let identity = data.join("identity");
+        std::fs::create_dir(&identity).unwrap();
+        let device_key = identity.join("device.key");
+        std::fs::write(&device_key, b"secret").unwrap();
+        let composition = data.join("protected-content/custody-composition.json");
+        let report_path = state.join("report.txt");
+        let source = temp.path().join("custody-probe.rs");
+        let binary = temp.path().join("custody-probe");
+        let own_lit = format!("{:?}", own.display().to_string());
+        let device_lit = format!("{:?}", device_key.display().to_string());
+        let composition_lit = format!("{:?}", composition.display().to_string());
+        let report_lit = format!("{:?}", report_path.display().to_string());
+        let probe = format!(
+            "fn main() {{\n    let mut report = String::new();\n    let own = match std::fs::File::open({own_lit}) {{\n        Ok(_) => \"open\".to_string(),\n        Err(err) => err.raw_os_error().unwrap_or(-1).to_string(),\n    }};\n    let device = match std::fs::File::open({device_lit}) {{\n        Ok(_) => \"open\".to_string(),\n        Err(err) => err.raw_os_error().unwrap_or(-1).to_string(),\n    }};\n    let device_stat = match std::fs::symlink_metadata({device_lit}) {{\n        Ok(_) => \"stat\".to_string(),\n        Err(err) => err.raw_os_error().unwrap_or(-1).to_string(),\n    }};\n    let denied = match std::fs::write({composition_lit}, b\"x\") {{\n        Ok(_) => \"ok\".to_string(),\n        Err(err) => err.raw_os_error().unwrap_or(-1).to_string(),\n    }};\n    report.push_str(\"own=\");\n    report.push_str(&own);\n    report.push('\\n');\n    report.push_str(\"device=\");\n    report.push_str(&device);\n    report.push('\\n');\n    report.push_str(\"device_stat=\");\n    report.push_str(&device_stat);\n    report.push('\\n');\n    report.push_str(\"denied=\");\n    report.push_str(&denied);\n    report.push('\\n');\n    if std::fs::write({report_lit}, report).is_err() {{\n        std::process::exit(91);\n    }}\n}}\n",
+        );
+        std::fs::write(&source, probe).unwrap();
+        let compiled = std::process::Command::new("rustc")
+            .args(["--edition", "2021", "-o"])
+            .arg(&binary)
+            .arg(&source)
+            .status()
+            .unwrap_or_else(|err| panic!("rustc: {err}"));
+        assert!(compiled.success(), "custody probe did not compile");
+        let (pipes, child_in, child_out) = probe_stdio();
+        let started = start_path_allow(
+            "custody-provider",
+            &full_grant(),
+            &super::super::CheckedExecutable::for_test(&binary),
+            &data,
+            pipes,
+        );
+        unsafe {
+            libc::close(child_in);
+            libc::close(child_out);
+        }
+        let launched = started.unwrap_or_else(|err| panic!("custody probe did not start: {err}"));
+        let status = reap_probe(launched.pid, &launched.from_child);
+        drop(launched);
+        let report = std::fs::read_to_string(&report_path).unwrap_or_else(|err| {
+            panic!(
+                "custody probe wrote no report ({}): {err}",
+                wait_text(status)
+            )
+        });
+        let line = |name: &str| {
+            report
+                .lines()
+                .find_map(|entry| entry.strip_prefix(&format!("{name}=")))
+                .unwrap_or_else(|| panic!("report missing {name}: {report}"))
+                .to_string()
+        };
+        assert_eq!(line("own"), "open", "{report}");
+        #[cfg(target_os = "linux")]
+        {
+            assert_eq!(line("device"), "13", "{report}");
+            assert_eq!(line("device_stat"), "stat", "{report}");
+            assert_eq!(line("denied"), "13", "{report}");
+        }
+        #[cfg(target_os = "macos")]
+        {
+            assert_eq!(line("device"), "1", "{report}");
+            assert_eq!(line("device_stat"), "1", "{report}");
+            assert_eq!(line("denied"), "1", "{report}");
+        }
+        assert!(
+            !composition.exists(),
+            "the refused write left {}",
+            composition.display()
+        );
+        assert_eq!(std::fs::read(&device_key).unwrap(), b"secret");
+    }
+
+    /// The real custody binary, started by `start_path_allow`.
+    ///
+    /// Provision runs outside the fence. Init and status run inside it.
+    /// A missing binary, or a Linux kernel below Landlock ABI 3, panics.
+    #[cfg(all(
+        not(elastos_unsupported_os_check),
+        any(
+            target_os = "macos",
+            all(
+                target_os = "linux",
+                any(target_arch = "x86_64", target_arch = "aarch64")
+            )
+        )
+    ))]
+    #[test]
+    fn custody_provider_binary_answers_inside_its_fence() {
+        use sha2::{Digest, Sha256};
+
+        #[cfg(target_os = "linux")]
+        if let Err(reason) = super::super::landlock_plan::kernel_abi() {
+            panic!("custody-provider real-binary proof did not run: {reason}");
+        }
+        let bin = custody_provider_binary();
+        let binary_bytes = std::fs::read(&bin).unwrap();
+        eprintln!("custody binary sha256 {:x}", Sha256::digest(&binary_bytes));
+        let arch = if cfg!(target_arch = "x86_64") {
+            super::super::seccomp_list::AuditArch::X86_64
+        } else {
+            super::super::seccomp_list::AuditArch::Aarch64
+        };
+        let admitted = super::super::rights::admit_runtime_grant(
+            super::super::rights_table::RuntimeProviderId::Custody,
+        );
+        let prog = super::super::seccomp_program::program(
+            super::super::rights_table::RuntimeProviderId::Custody,
+            &admitted,
+            arch,
+        );
+        let mut words = Vec::with_capacity(prog.len() * 16);
+        for instruction in &prog {
+            for word in instruction {
+                words.extend_from_slice(&word.to_le_bytes());
+            }
+        }
+        eprintln!(
+            "custody seccomp program sha256 {:x} ({} instructions)",
+            Sha256::digest(&words),
+            prog.len()
+        );
+        match super::super::landlock_plan::kernel_abi() {
+            Ok(abi) => eprintln!("landlock abi {abi}"),
+            Err(_) => eprintln!("macOS, no Landlock"),
+        }
+
+        let temp = tempfile::tempdir().unwrap();
+        owner_only(temp.path());
+        let data = std::fs::canonicalize(temp.path()).unwrap();
+        owner_only(&data);
+        let parent = data.join("protected-content/custody-provider");
+        std::fs::create_dir_all(&parent).unwrap();
+        owner_only(&data.join("protected-content"));
+        owner_only(&parent);
+        let state = parent.join("inactive");
+        let identity = data.join("identity");
+        std::fs::create_dir(&identity).unwrap();
+        let device_key = identity.join("device.key");
+        std::fs::write(&device_key, b"device-key-sentinel").unwrap();
+        let signing = ed25519_dalek::SigningKey::from_bytes(&[0x11; 32]);
+        let issuer = format!(
+            "0x{}",
+            signing
+                .verifying_key()
+                .to_bytes()
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>()
+        );
+        let provisioned = std::process::Command::new(&bin)
+            .args([
+                "provision",
+                "--base-path",
+                state.to_str().unwrap(),
+                "--trusted-runtime-issuer",
+                &issuer,
+            ])
+            .output()
+            .unwrap_or_else(|err| panic!("provision: {err}"));
+        assert!(
+            provisioned.status.success(),
+            "provision outside the fence failed: {} {}",
+            String::from_utf8_lossy(&provisioned.stdout),
+            String::from_utf8_lossy(&provisioned.stderr)
+        );
+
+        fn write_line(fd: i32, line: &str) {
+            let mut bytes = line.as_bytes().to_vec();
+            bytes.push(b'\n');
+            let mut sent = 0;
+            while sent < bytes.len() {
+                let n =
+                    unsafe { libc::write(fd, bytes[sent..].as_ptr().cast(), bytes.len() - sent) };
+                assert!(
+                    n > 0,
+                    "write to custody helper: {}",
+                    std::io::Error::last_os_error()
+                );
+                sent += n as usize;
+            }
+        }
+        fn read_line(fd: i32, pending: &mut Vec<u8>, timeout: std::time::Duration) -> String {
+            let start = std::time::Instant::now();
+            loop {
+                if let Some(at) = pending.iter().position(|byte| *byte == b'\n') {
+                    let line: Vec<u8> = pending.drain(..=at).collect();
+                    return String::from_utf8(line).unwrap();
+                }
+                if start.elapsed() > timeout {
+                    panic!(
+                        "custody helper sent no line: {}",
+                        String::from_utf8_lossy(pending)
+                    );
+                }
+                let mut pollfd = libc::pollfd {
+                    fd,
+                    events: libc::POLLIN,
+                    revents: 0,
+                };
+                let left = timeout
+                    .saturating_sub(start.elapsed())
+                    .as_millis()
+                    .min(1_000) as i32;
+                let ready = unsafe { libc::poll(&mut pollfd, 1, left.max(1)) };
+                assert!(ready >= 0, "poll: {}", std::io::Error::last_os_error());
+                if ready == 0 {
+                    continue;
+                }
+                let mut chunk = [0u8; 4096];
+                let n = unsafe { libc::read(fd, chunk.as_mut_ptr().cast(), chunk.len()) };
+                assert!(n >= 0, "read: {}", std::io::Error::last_os_error());
+                if n == 0 {
+                    panic!(
+                        "custody helper closed stdout: {}",
+                        String::from_utf8_lossy(pending)
+                    );
+                }
+                pending.extend_from_slice(&chunk[..n as usize]);
+            }
+        }
+        let (pipes, child_in, child_out) = probe_stdio();
+        let started = start_path_allow(
+            "custody-provider",
+            &full_grant(),
+            &super::super::CheckedExecutable::for_test(&bin),
+            &data,
+            pipes,
+        );
+        unsafe {
+            libc::close(child_in);
+            libc::close(child_out);
+        }
+        let launched =
+            started.unwrap_or_else(|err| panic!("custody-provider did not start: {err}"));
+        let init = serde_json::json!({
+            "op": "init",
+            "config": {
+                "base_path": state.display().to_string(),
+                "allowed_paths": [],
+                "read_only": false,
+                "encryption_key": ""
+            }
+        });
+        let mut pending = Vec::new();
+        let quick = std::time::Duration::from_secs(20);
+        write_line(launched.to_child.as_raw_fd(), &init.to_string());
+        let init_text = read_line(launched.from_child.as_raw_fd(), &mut pending, quick);
+        let inited: serde_json::Value = serde_json::from_str(init_text.trim())
+            .unwrap_or_else(|err| panic!("{err} in {init_text}"));
+        assert_eq!(inited["status"], "ok", "{inited}");
+        assert_eq!(inited["data"]["configured"], true, "{inited}");
+        assert!(
+            !inited.to_string().contains("device-key-sentinel"),
+            "{inited}"
+        );
+        write_line(launched.to_child.as_raw_fd(), "{\"op\":\"status\"}");
+        let status_text = read_line(launched.from_child.as_raw_fd(), &mut pending, quick);
+        let status_value: serde_json::Value = serde_json::from_str(status_text.trim())
+            .unwrap_or_else(|err| panic!("{err} in {status_text}"));
+        assert_eq!(status_value["status"], "ok", "{status_value}");
+        assert_eq!(status_value["data"]["configured"], true, "{status_value}");
+        assert!(
+            !status_value.to_string().contains("device-key-sentinel"),
+            "{status_value}"
+        );
+        write_line(launched.to_child.as_raw_fd(), "{\"op\":\"shutdown\"}");
+        let _ = read_line(launched.from_child.as_raw_fd(), &mut pending, quick);
+        let exit_status = reap_probe(launched.pid, &launched.from_child);
+        drop(launched);
+        assert!(
+            libc::WIFEXITED(exit_status) && libc::WEXITSTATUS(exit_status) == 0,
+            "custody helper {}",
+            wait_text(exit_status)
+        );
+        assert_eq!(std::fs::read(&device_key).unwrap(), b"device-key-sentinel");
+    }
+
+    /// A custody root swapped after render and before the re-check is refused.
+    #[cfg(all(target_os = "macos", not(elastos_unsupported_os_check)))]
+    #[test]
+    fn a_custody_root_swapped_between_render_and_sandbox_exec_is_refused_and_starts_nothing() {
+        let temp = tempfile::tempdir().unwrap();
+        owner_only(temp.path());
+        let data = std::fs::canonicalize(temp.path()).unwrap();
+        let root = data.join(super::super::CUSTODY_STATE_ROOT_RELATIVE);
+        std::fs::create_dir_all(&root).unwrap();
+        for path in [
+            data.join("protected-content"),
+            data.join("protected-content/custody-provider"),
+            root.clone(),
+        ] {
+            owner_only(&path);
+        }
+        let marker = root.join("started");
+        let relative = format!("{}/started", super::super::CUSTODY_STATE_ROOT_RELATIVE);
+        let source = temp.path().join("probe.rs");
+        let mut probe = String::from(
+            "use std::io::{BufRead, Write};\nfn main() {\n    let _ = std::fs::write(",
+        );
+        probe.push_str(&format!("{:?}", relative));
+        probe.push_str(
+            ", b\"started\");\n    let stdin = std::io::stdin();\n    let mut out = std::io::stdout();\n    for line in stdin.lock().lines() {\n        if line.is_err() { break; }\n        if out.write_all(b\"{\\\"status\\\":\\\"ok\\\"}\\n\").is_err() { break; }\n        let _ = out.flush();\n    }\n}\n",
+        );
+        std::fs::write(&source, probe).unwrap();
+        let binary = temp.path().join("probe");
+        let built = std::process::Command::new("rustc")
+            .args(["--edition", "2021", "-o"])
+            .arg(&binary)
+            .arg(&source)
+            .output()
+            .unwrap();
+        assert!(
+            built.status.success(),
+            "probe build failed: {}",
+            String::from_utf8_lossy(&built.stderr)
+        );
+        let admitted = super::super::rights::admit_runtime_grant(
+            super::super::rights_table::RuntimeProviderId::Custody,
+        );
+        let (confinement, plan) = super::super::path_allow::render_with_plan(
+            super::super::rights_table::RuntimeProviderId::Custody,
+            &admitted,
+            &data,
+            &binary,
+            5,
+        )
+        .unwrap_or_else(|err| panic!("render before the swap: {err}"));
+        let parked = data.join("parked-root");
+        std::fs::rename(&root, &parked).unwrap();
+        std::fs::create_dir_all(&root).unwrap();
+        owner_only(&root);
+        let (stdio, child_in, child_out) = probe_stdio();
+        let started = super::launch_macos_path_allow(
+            &confinement,
+            &plan,
+            &super::super::CheckedExecutable::for_test(&binary),
+            &data,
+            stdio,
+        );
+        unsafe {
+            libc::close(child_in);
+            libc::close(child_out);
+        }
+        match started {
+            Err(error) => {
+                assert!(error.contains("Custody"), "{error}");
+                assert!(error.contains("changed"), "{error}");
+                assert!(
+                    !marker.exists(),
+                    "a refused start wrote {}",
+                    marker.display()
+                );
+            }
+            Ok(launched) => {
+                unsafe {
+                    libc::kill(launched.pid, libc::SIGKILL);
+                    let mut status = 0;
+                    libc::waitpid(launched.pid, &mut status, 0);
+                }
+                panic!("a root swapped before the re-check started a process");
+            }
         }
     }
 }

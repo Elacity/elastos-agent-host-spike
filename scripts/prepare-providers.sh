@@ -55,3 +55,9 @@ CARGO_TARGET_DIR="$helpers" \
     --manifest-path capsules/chain-provider/Cargo.toml \
     --bin chain-provider \
     --target-dir "$helpers"
+CARGO_TARGET_DIR="$helpers" \
+  CARGO_BUILD_BUILD_DIR="$helpers/build" \
+  cargo build --locked \
+    --manifest-path capsules/custody-provider/Cargo.toml \
+    --bin custody-provider \
+    --target-dir "$helpers"

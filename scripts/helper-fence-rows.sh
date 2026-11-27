@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Helper fence rows for the source-home jobs.
 #
-# The three debug binaries are the ones those rows spawn. Each build sets
+# The debug binaries are the ones those rows spawn. Each build sets
 # its own target directory, so this file does not create the job's Cargo
 # target directory. The freshness step requires that path to be absent.
 # macOS runs the sandbox-exec rows. Linux runs the /proc rows. A zero match
@@ -33,6 +33,12 @@ CARGO_TARGET_DIR="$helpers" \
   cargo build --locked \
     --manifest-path capsules/chain-provider/Cargo.toml \
     --bin chain-provider \
+    --target-dir "$helpers"
+CARGO_TARGET_DIR="$helpers" \
+  CARGO_BUILD_BUILD_DIR="$helpers/build" \
+  cargo build --locked \
+    --manifest-path capsules/custody-provider/Cargo.toml \
+    --bin custody-provider \
     --target-dir "$helpers"
 
 # One invocation in elastos/. The subcommand is an argument so the build
@@ -70,6 +76,9 @@ case "$(uname -s)" in
       provider::os_entry::tests::a_symlink_subpath_resolves_outside_and_the_device_key_stays_unread
       provider::os_entry::tests::localhost_object_and_chain_cannot_open_device_key
       provider::os_entry::tests::chain_provider_binary_answers_inside_its_fence
+      provider::os_entry::tests::custody_provider_binary_answers_inside_its_fence
+      provider::os_entry::tests::custody_provider_cannot_leave_its_root
+      provider::os_entry::tests::a_custody_root_swapped_between_render_and_sandbox_exec_is_refused_and_starts_nothing
       provider::landlock_plan::tests::both_builders_use_the_resolved_loader_not_the_static_list
       provider::root_pin::tests::a_loader_swapped_to_another_file_or_a_directory_is_refused
     )
@@ -78,6 +87,8 @@ case "$(uname -s)" in
     names=(
       provider::os_entry::tests::localhost_object_and_chain_cannot_open_device_key
       provider::os_entry::tests::chain_provider_binary_answers_inside_its_fence
+      provider::os_entry::tests::custody_provider_binary_answers_inside_its_fence
+      provider::os_entry::tests::custody_provider_cannot_leave_its_root
       provider::landlock_plan::tests::both_builders_use_the_resolved_loader_not_the_static_list
       provider::root_pin::tests::a_loader_swapped_to_another_file_or_a_directory_is_refused
       provider::os_entry::failure_record::tests::an_unconfined_child_is_refused_by_name_and_killed

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Start the release musl localhost, object, and chain helpers under the real
-# path-allow fence. Run this after scripts/check-release-musl.sh on the same
-# target. The step fails when a helper cannot be started.
+# Start the release musl localhost, object, chain, and custody helpers under
+# the real path-allow fence. Run this after scripts/check-release-musl.sh on
+# the same target. The step fails when a helper cannot be started.
 set -euo pipefail
 
 target="${1:?usage: musl-helper-fence.sh <target>}"
@@ -23,8 +23,9 @@ build_one() {
 localhost="$(build_one "$root/elastos" localhost-provider localhost-provider)"
 object="$(build_one "$root/capsules/object-provider" object-provider object-provider)"
 chain="$(build_one "$root/capsules/chain-provider" chain-provider chain-provider)"
+custody="$(build_one "$root/capsules/custody-provider" custody-provider custody-provider)"
 
-for binary in "$localhost" "$object" "$chain"; do
+for binary in "$localhost" "$object" "$chain" "$custody"; do
   if [ ! -f "$binary" ]; then
     echo "musl helper fence: missing $binary" >&2
     exit 1
@@ -37,6 +38,7 @@ set +e
   cd "$root/elastos"
   export ELASTOS_MUSL_HELPER_FENCE=1 ELASTOS_MUSL_LOCALHOST="$localhost"
   export ELASTOS_MUSL_OBJECT="$object" ELASTOS_MUSL_CHAIN="$chain"
+  export ELASTOS_MUSL_CUSTODY="$custody"
   cargo test --locked -p elastos-server --lib -- --exact --nocapture confine_helper_tests::musl_release_helpers_start_under_the_fence
 ) >"$log" 2>&1
 status=$?

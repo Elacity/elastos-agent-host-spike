@@ -4,7 +4,7 @@
 //! `identity/device.key`. Each helper gets its own child directories instead.
 //! Each of those directories must already exist, be owned by the current user,
 //! and must not be a symlink. `spawn_path_allow` starts localhost, object,
-//! and chain. Chain's resolver files are read-only and are not a storage
+//! chain, and custody. Chain's resolver files are read-only and are not a storage
 //! root. The single-root `spawn_confined` does not start these helpers.
 
 use super::rights::AdmittedRights;
@@ -74,6 +74,7 @@ fn root_specs(provider: RuntimeProviderId) -> Vec<(&'static str, &'static str)> 
             .collect(),
         RuntimeProviderId::Object => OBJECT_ROOTS.to_vec(),
         RuntimeProviderId::Chain => CHAIN_ROOTS.iter().map(|name| (*name, *name)).collect(),
+        RuntimeProviderId::Custody => vec![("Custody", super::CUSTODY_STATE_ROOT_RELATIVE)],
         RuntimeProviderId::Did | RuntimeProviderId::Wallet | RuntimeProviderId::Model => Vec::new(),
     }
 }
@@ -302,6 +303,19 @@ pub(super) fn render_with_plan(
     } else {
         metadata_literals(data_dir)?
     };
+    // Custody lstats `protected-content` and `custody-provider` on the way to
+    // its state root. Those directories are not the root. A metadata literal
+    // lets that walk see them. It does not grant their other children.
+    if storage && matches!(provider, RuntimeProviderId::Custody) {
+        let mut relative = super::CUSTODY_STATE_ROOT_RELATIVE;
+        while let Some((parent, _)) = relative.rsplit_once('/') {
+            let path = data_dir.join(parent);
+            if !metadata.iter().any(|seen| seen == &path) {
+                metadata.push(path);
+            }
+            relative = parent;
+        }
+    }
     if matches!(provider, RuntimeProviderId::Object) && storage {
         // The auth-state walk stats `ElastOS` on the way to `ElastOS/System/Auth`.
         // That directory is not a root. A metadata literal lets the walk reject
@@ -458,7 +472,8 @@ mod tests {
             super::super::rights_table::RuntimeProviderId::Did,
             &super::super::rights::admit_committed(
                 super::super::rights_table::RuntimeProviderId::Did,
-            ),
+            )
+            .expect("committed capsule authority"),
             &super::super::landlock_plan::Bindings {
                 storage_root: "/provider/Did".into(),
                 provider_executable: "/bin/Did".into(),
@@ -740,7 +755,8 @@ mod tests {
             super::super::rights_table::RuntimeProviderId::Wallet,
             &super::super::rights::admit_committed(
                 super::super::rights_table::RuntimeProviderId::Wallet,
-            ),
+            )
+            .expect("committed capsule authority"),
         );
         assert_eq!(
             wallet, WALLET_PROFILE,
@@ -1179,5 +1195,71 @@ mod tests {
             "{error}"
         );
         assert!(error.contains("start Home again"), "{error}");
+    }
+
+    #[test]
+    fn custody_profile_has_one_root_no_network() {
+        use std::os::unix::fs::PermissionsExt;
+        let held = tempfile::tempdir().unwrap();
+        let data_dir = std::fs::canonicalize(held.path()).unwrap();
+        std::fs::set_permissions(&data_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let state = data_dir.join(crate::provider::CUSTODY_STATE_ROOT_RELATIVE);
+        std::fs::create_dir_all(&state).unwrap();
+        for path in [
+            data_dir.join("protected-content"),
+            data_dir.join("protected-content/custody-provider"),
+            state,
+        ] {
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let confinement = render("custody-provider", &data_dir, Path::new(EXE), 5)
+            .unwrap_or_else(|err| panic!("custody profile: {err}"));
+        let roots = confinement
+            .seatbelt
+            .lines()
+            .filter(|line| line.contains("(subpath (param \"Custody\"))"))
+            .count();
+        assert_eq!(roots, 1, "{}", confinement.seatbelt);
+        assert!(
+            !confinement.seatbelt.contains("network-outbound"),
+            "{}",
+            confinement.seatbelt
+        );
+        assert!(
+            !confinement.seatbelt.contains("STORAGE_ROOT"),
+            "{}",
+            confinement.seatbelt
+        );
+        assert!(confinement
+            .metadata
+            .iter()
+            .any(|path| path == &data_dir.join("protected-content")));
+        assert!(confinement
+            .metadata
+            .iter()
+            .any(|path| path == &data_dir.join("protected-content/custody-provider")));
+        let provider = crate::provider::rights_table::RuntimeProviderId::Custody;
+        let admitted = crate::provider::rights::admit_runtime_grant(provider);
+        for arch in [
+            crate::provider::seccomp_list::AuditArch::X86_64,
+            crate::provider::seccomp_list::AuditArch::Aarch64,
+        ] {
+            let names =
+                crate::provider::seccomp_list::linux_seccomp_list(provider, &admitted, arch);
+            assert!(names.contains(&"flock"), "{arch:?} {names:?}");
+            assert!(names.contains(&"geteuid"), "{arch:?} {names:?}");
+            assert!(!names.contains(&"socket"), "{arch:?} {names:?}");
+            assert!(!names.contains(&"connect"), "{arch:?} {names:?}");
+            match arch {
+                crate::provider::seccomp_list::AuditArch::X86_64 => {
+                    assert!(names.contains(&"rename"), "{names:?}");
+                    assert!(!names.contains(&"renameat"), "{names:?}");
+                }
+                crate::provider::seccomp_list::AuditArch::Aarch64 => {
+                    assert!(names.contains(&"renameat"), "{names:?}");
+                    assert!(!names.contains(&"rename"), "{names:?}");
+                }
+            }
+        }
     }
 }

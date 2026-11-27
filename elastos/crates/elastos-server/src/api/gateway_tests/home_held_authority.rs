@@ -1294,7 +1294,7 @@ fn rows() -> Vec<HeldRow> {
         "register_inactive_custody_provider",
         "require_isolated_provider",
         1,
-        mark("dkm", "custody spawn", "custody provider", "The custody provider is spawned through the generic bridge"),
+        mark("dkm", "custody spawn", "custody provider", "The custody provider starts inside its declared path allow-list; the device key stays outside it."),
     ),
     row(
         "elastos-server/src/protected_content_runtime.rs",
