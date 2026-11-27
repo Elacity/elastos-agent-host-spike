@@ -4239,8 +4239,8 @@ mod tests {
     }
 
     // `cat` holds the writer and exits before the rename. A writer fd in this
-    // process is inherited by any fork, even with CLOEXEC, and Linux exec of
-    // that inode returns ETXTBSY until the child closes it or exits.
+    // process is inherited by any fork, and Linux exec of that inode returns
+    // ETXTBSY until that child reaches exec.
     #[cfg(unix)]
     fn write_executable_closed(path: &Path, body: &str) {
         let staged = path.with_extension("writing");
@@ -4257,11 +4257,6 @@ mod tests {
             child.wait().unwrap().success(),
             "executable fixture write failed"
         );
-        // Sync through a read-only handle, then close it before publishing.
-        // Sibling forks can inherit this handle without keeping a writer live.
-        let written = std::fs::File::open(&staged).unwrap();
-        written.sync_all().unwrap();
-        drop(written);
         std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o700)).unwrap();
         std::fs::rename(&staged, path).unwrap();
     }
@@ -4433,10 +4428,12 @@ mod tests {
         let checked = CheckedExecutable::for_test(&binary);
         let marker = temp.path().join("substituted-ran");
         let replacement = temp.path().join("substitute");
-        write_executable_closed(
+        std::fs::write(
             &replacement,
-            &format!("#!/bin/sh\nprintf bad > '{}'\n", marker.display()),
-        );
+            format!("#!/bin/sh\nprintf bad > '{}'\n", marker.display()),
+        )
+        .unwrap();
+        std::fs::set_permissions(&replacement, std::fs::Permissions::from_mode(0o700)).unwrap();
         let original = temp.path().join("verified-original");
         AFTER_VERIFY_SWAP.with(|slot| {
             *slot.borrow_mut() = Some(Box::new({
