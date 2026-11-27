@@ -2377,9 +2377,9 @@ function coordsPid() {
   }
 }
 
-// The gateway starts serve from a private copy outside the Home. That pid is
-// this Home's binary only when the coords file names it, the command is serve,
-// and the bytes match the installed elastos.
+// The coords file names a pid in this Home. The first runtime is `serve`.
+// After a gateway restart the same file names the `gateway` process. Either
+// one counts when its bytes are the installed elastos.
 function verifiedServePid(executables, commands, binary) {
   const pid = coordsPid();
   if (!pid) return { state: "absent" };
@@ -2387,7 +2387,9 @@ function verifiedServePid(executables, commands, binary) {
   if (!row) return { state: "dead" };
   const exe = realExe(row.exe);
   const sub = elastosSubcommand(commands.get(String(pid)) || "", [row.exe, exe, binary, serveBin]);
-  if (sub !== "serve") return { state: "unverified", reason: "coords pid is not an elastos serve" };
+  if (sub !== "serve" && sub !== "gateway") {
+    return { state: "unverified", reason: `coords pid command is ${sub || "unrecognised"}` };
+  }
   if (exe === binary) return { state: "serve", pid };
   let same = false;
   try { same = sha256File(exe) === installedSha(); } catch { same = false; }
