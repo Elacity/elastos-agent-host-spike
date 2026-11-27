@@ -1075,6 +1075,61 @@ fn argument_is_object(head: &str) -> bool {
     rest.starts_with("\"object\"")
 }
 
+/// Deleting `AttachedRequest::new`, `ObjectAuthorityV1::attach`, or
+/// `attach_object_authority` before an object send turns this red. The
+/// confined registration has to name `AuthorityAttachingProvider` too.
+#[test]
+fn every_object_dispatch_path_carries_the_envelope() {
+    let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut misses = Vec::new();
+    scan_object_authority(&root, &mut misses);
+    assert!(
+        misses.is_empty(),
+        "object send without an authority envelope: {misses:?}"
+    );
+    let registration = std::fs::read_to_string(root.join("server_infra.rs")).unwrap();
+    assert!(
+        registration.contains("AuthorityAttachingProvider::new"),
+        "confined object registration does not attach an authority envelope"
+    );
+}
+
+fn scan_object_authority(dir: &std::path::Path, misses: &mut Vec<String>) {
+    for entry in std::fs::read_dir(dir).unwrap() {
+        let path = entry.unwrap().path();
+        if path.is_dir() {
+            scan_object_authority(&path, misses);
+            continue;
+        }
+        if path.extension().is_none_or(|ext| ext != "rs") {
+            continue;
+        }
+        let text = std::fs::read_to_string(&path).unwrap();
+        let mut from = 0;
+        while let Some(at) = text[from..].find("send_raw(") {
+            let start = from + at;
+            let end = text.floor_char_boundary(text.len().min(start + 2400));
+            let window = &text[start..end];
+            let head = window.find(')').map(|end| &window[..end]).unwrap_or(window);
+            let literal = argument_is_object(head);
+            let scheme = head.contains("&scheme") || head.contains("&dispatch.scheme");
+            let object_scheme = scheme && window.contains("== \"object\"");
+            let back = start.saturating_sub(2500);
+            if (literal || object_scheme) && !carries_object_authority(&text[back..start]) {
+                let line = text[..start].lines().count();
+                misses.push(format!("{}:{line}", path.display()));
+            }
+            from = start + "send_raw(".len();
+        }
+    }
+}
+
+fn carries_object_authority(before: &str) -> bool {
+    before.contains("ObjectAuthorityV1::attach")
+        || before.contains("AttachedRequest::new")
+        || before.contains("attach_object_authority(")
+}
+
 /// Release musl helpers, started by `spawn_path_allow` on Linux. The CI step
 /// sets `ELASTOS_MUSL_HELPER_FENCE` and the three binary paths. A normal
 /// `cargo test` leaves the flag unset and does not look for those binaries.

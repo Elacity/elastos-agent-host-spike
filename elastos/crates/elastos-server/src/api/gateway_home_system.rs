@@ -7292,7 +7292,19 @@ async fn home_desktop_objects_summary(
         "principal_id": context.principal_id(),
         "uri": uri,
     });
-    let response = match registry.send_raw("object", &request).await {
+    let attached = match crate::object_authority::AttachedRequest::new(&state.data_dir, &request) {
+        Ok(attached) => attached,
+        Err(err) => {
+            return HomeDesktopObjectsSummary {
+                schema: HOME_DESKTOP_OBJECTS_SCHEMA.to_string(),
+                uri,
+                objects: Vec::new(),
+                stale: true,
+                error: Some(err.to_string()),
+            }
+        }
+    };
+    let response = match registry.send_raw("object", attached.value()).await {
         Ok(mut response) => {
             crate::library::fill_fenced_library_fields(&state.data_dir, &mut response);
             response
@@ -7363,7 +7375,8 @@ async fn home_trash_desktop_object(
         "op": "roots",
         "principal_id": context.principal_id(),
     });
-    let mut response = registry.send_raw("object", &request).await.ok()?;
+    let attached = crate::object_authority::AttachedRequest::new(&state.data_dir, &request).ok()?;
+    let mut response = registry.send_raw("object", attached.value()).await.ok()?;
     crate::library::fill_fenced_library_fields(&state.data_dir, &mut response);
     if response.get("status").and_then(serde_json::Value::as_str) != Some("ok") {
         return None;
@@ -7425,7 +7438,11 @@ async fn home_desktop_events_signature(
             "uri": uri,
             "limit": 32,
         });
-        let Ok(mut response) = registry.send_raw("object", &request).await else {
+        let Ok(attached) = crate::object_authority::AttachedRequest::new(&state.data_dir, &request)
+        else {
+            continue;
+        };
+        let Ok(mut response) = registry.send_raw("object", attached.value()).await else {
             continue;
         };
         crate::library::fill_fenced_library_fields(&state.data_dir, &mut response);

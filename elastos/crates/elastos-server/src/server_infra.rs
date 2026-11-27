@@ -1328,7 +1328,13 @@ async fn setup_server_infrastructure_impl(
                 match object_bridge.await {
                     Ok(bridge) => {
                         let object_provider: Arc<dyn provider::Provider> = Arc::new(
-                            provider::CapsuleProvider::with_scheme(bridge.clone(), "object"),
+                            elastos_server::object_authority::AuthorityAttachingProvider::new(
+                                data_dir.clone(),
+                                Arc::new(provider::CapsuleProvider::with_scheme(
+                                    bridge.clone(),
+                                    "object",
+                                )),
+                            ),
                         );
                         if let Err(e) = provider_registry
                             .register_sub_provider("object", object_provider)
@@ -2986,9 +2992,18 @@ mod tests {
             let registry = registry.clone();
             let data_dir = data_dir.clone();
             async move {
+                let mut request = match elastos_server::object_authority::attach_object_authority(
+                    &data_dir, &request,
+                ) {
+                    Ok(request) => request,
+                    Err(error) => {
+                        return serde_json::json!({"status": "error", "message": error.to_string()});
+                    }
+                };
                 let mut reply = registry.send_raw("object", &request).await.unwrap_or_else(
                     |error| serde_json::json!({"status": "error", "message": error.to_string()}),
                 );
+                elastos_server::object_authority::wipe_object_authority(&mut request);
                 elastos_server::library::fill_fenced_library_fields(&data_dir, &mut reply);
                 reply
             }
@@ -3175,9 +3190,12 @@ fn main() {
         let mut infrastructure = setup_server_infrastructure()
             .await
             .unwrap_or_else(|error| panic!("Home did not start: {error:#}"));
+        let mut status = serde_json::json!({"op": "status"});
+        status = elastos_server::object_authority::attach_object_authority(&data_dir, &status)
+            .unwrap_or(status);
         let object = match infrastructure
             .provider_registry
-            .send_raw("object", &serde_json::json!({"op": "status"}))
+            .send_raw("object", &status)
             .await
         {
             Ok(mut value) => {
@@ -3186,6 +3204,7 @@ fn main() {
             }
             Err(error) => error.to_string(),
         };
+        elastos_server::object_authority::wipe_object_authority(&mut status);
         let chain = match infrastructure
             .provider_registry
             .send_raw("chain", &serde_json::json!({"op": "status"}))

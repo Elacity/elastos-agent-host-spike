@@ -487,9 +487,9 @@ impl Provider for ObjectProvider {
     }
 
     async fn send_raw(&self, request: &Value) -> Result<Value, ProviderError> {
-        let request = match serde_json::from_value::<ObjectProviderRequest>(request.clone()) {
+        let request = match taken_object_request(request) {
             Ok(request) => request,
-            Err(err) => return Ok(provider_error("invalid_request", &err.to_string())),
+            Err(err) => return Ok(err),
         };
 
         let data_dir = self.data_dir.clone();
@@ -580,6 +580,14 @@ impl Provider for ObjectProvider {
     }
 }
 
+/// Remove a runtime envelope, then parse the object request. A missing
+/// envelope is still a request. This slice does not read the envelope.
+fn taken_object_request(request: &Value) -> Result<ObjectProviderRequest, Value> {
+    let mut owned = request.clone();
+    crate::object_authority::accept_envelope(&mut owned);
+    serde_json::from_value(owned).map_err(|err| provider_error("invalid_request", &err.to_string()))
+}
+
 /// Handle one raw object provider request inside an isolated provider process.
 ///
 /// The standalone provider owns principal-root object storage and Library event
@@ -587,9 +595,9 @@ impl Provider for ObjectProvider {
 /// because the current stdio provider ABI has no provider-to-provider
 /// invocation channel.
 pub fn handle_object_provider_raw_request(data_dir: &Path, request: &Value) -> Value {
-    let request = match serde_json::from_value::<ObjectProviderRequest>(request.clone()) {
+    let request = match taken_object_request(request) {
         Ok(request) => request,
-        Err(err) => return provider_error("invalid_request", &err.to_string()),
+        Err(err) => return err,
     };
 
     let result = match request {
@@ -774,9 +782,9 @@ pub(crate) async fn handle_object_provider_runtime_request_with_gateway(
         &crate::api::gateway::RuntimeWalletAuthority,
     )>,
 ) -> Value {
-    let request = match serde_json::from_value::<ObjectProviderRequest>(request.clone()) {
+    let request = match taken_object_request(request) {
         Ok(request) => request,
-        Err(err) => return provider_error("invalid_request", &err.to_string()),
+        Err(err) => return err,
     };
 
     let data_dir = data_dir.to_path_buf();

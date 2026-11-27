@@ -2160,9 +2160,41 @@ async fn dispatch_admitted_effect(
         }
     }
 
+    let attached = if dispatch.scheme == "object" {
+        let Some(data_dir) = bridge_ctx.data_dir.as_deref() else {
+            return finish_component_invoke(
+                bridge_ctx,
+                audit_id,
+                &dispatch,
+                "error",
+                resource_error_response(
+                    "library_error",
+                    "object authority requires a runtime data directory",
+                ),
+            );
+        };
+        match crate::object_authority::AttachedRequest::new(data_dir, &dispatch.request) {
+            Ok(attached) => Some(attached),
+            Err(err) => {
+                return finish_component_invoke(
+                    bridge_ctx,
+                    audit_id,
+                    &dispatch,
+                    "error",
+                    resource_error_response("library_error", &err.to_string()),
+                );
+            }
+        }
+    } else {
+        None
+    };
+    let outbound = attached
+        .as_ref()
+        .map(crate::object_authority::AttachedRequest::value)
+        .unwrap_or(&dispatch.request);
     match bridge_ctx
         .provider_registry
-        .send_raw(&dispatch.scheme, &dispatch.request)
+        .send_raw(&dispatch.scheme, outbound)
         .await
     {
         Ok(mut result) => {

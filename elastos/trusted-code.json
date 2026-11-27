@@ -34,6 +34,7 @@
     "elastos/crates/elastos-server/src/api/handlers/settle.rs",
     "elastos/crates/elastos-server/src/api/handlers/supervisor_api.rs",
     "elastos/crates/elastos-server/src/auth.rs",
+    "elastos/crates/elastos-server/src/object_authority.rs",
     "elastos/crates/elastos-server/src/auth_state_files.rs",
     "elastos/crates/elastos-server/src/crypto.rs",
     "elastos/crates/elastos-server/src/auth/envelope_bound.rs",

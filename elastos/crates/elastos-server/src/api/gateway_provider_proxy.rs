@@ -2037,32 +2037,53 @@ pub(super) async fn gateway_provider_proxy(
         )
         .await
     } else {
-        match registry.send_raw(&scheme, &request).await {
-            Ok(value)
-                if scheme == "net"
-                    && value.get("status").and_then(|v| v.as_str()) == Some("error") =>
-            {
-                let message = value
-                    .get("message")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("net provider unavailable");
-                return gateway_provider_error_response(
-                    &scheme,
-                    anyhow::anyhow!("net provider unavailable: {}", message),
-                );
+        let attached = if scheme == "object" {
+            match crate::object_authority::AttachedRequest::new(&state.data_dir, &request) {
+                Ok(attached) => Ok(Some(attached)),
+                Err(err) => Err(err.to_string()),
             }
-            Ok(value) => value,
-            Err(err) if scheme == "net" => {
-                return gateway_provider_error_response(
-                    &scheme,
-                    anyhow::anyhow!("net provider unavailable: {}", err),
-                )
-            }
-            Err(err) => serde_json::json!({
-            "status": "error",
-            "code": "provider_error",
-                "message": err.to_string(),
+        } else {
+            Ok(None)
+        };
+        match attached {
+            Err(message) => serde_json::json!({
+                "status": "error",
+                "code": "library_error",
+                "message": message,
             }),
+            Ok(attached) => {
+                let outbound = attached
+                    .as_ref()
+                    .map(crate::object_authority::AttachedRequest::value)
+                    .unwrap_or(&request);
+                match registry.send_raw(&scheme, outbound).await {
+                    Ok(value)
+                        if scheme == "net"
+                            && value.get("status").and_then(|v| v.as_str()) == Some("error") =>
+                    {
+                        let message = value
+                            .get("message")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("net provider unavailable");
+                        return gateway_provider_error_response(
+                            &scheme,
+                            anyhow::anyhow!("net provider unavailable: {}", message),
+                        );
+                    }
+                    Ok(value) => value,
+                    Err(err) if scheme == "net" => {
+                        return gateway_provider_error_response(
+                            &scheme,
+                            anyhow::anyhow!("net provider unavailable: {}", err),
+                        )
+                    }
+                    Err(err) => serde_json::json!({
+                        "status": "error",
+                        "code": "provider_error",
+                        "message": err.to_string(),
+                    }),
+                }
+            }
         }
     };
     // The fenced object helper cannot read components.json, capsules, or
@@ -4501,15 +4522,16 @@ async fn library_events_since_cursor(
     principal_id: &str,
     cursor: &str,
 ) -> anyhow::Result<(Vec<serde_json::Value>, String)> {
+    let attached = crate::object_authority::AttachedRequest::new(
+        data_dir,
+        &serde_json::json!({
+            "op": "events",
+            "principal_id": principal_id,
+            "limit": 256,
+        }),
+    )?;
     let response = registry
-        .send_raw(
-            "object",
-            &serde_json::json!({
-                "op": "events",
-                "principal_id": principal_id,
-                "limit": 256,
-            }),
-        )
+        .send_raw("object", attached.value())
         .await
         .map_err(|err| anyhow::anyhow!("object provider unavailable: {err}"))?;
     let mut response = response;
