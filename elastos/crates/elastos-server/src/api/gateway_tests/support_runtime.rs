@@ -616,6 +616,7 @@ fn passkey_authority_with_name_role_credential(
     }
 }
 
+#[cfg(unix)]
 fn launch_token_for_authority_context(
     data_dir: &std::path::Path,
     app: &str,
@@ -690,6 +691,15 @@ fn app_token_for_authority(
     app: &str,
     authority: &TestPasskeyAuthority,
 ) -> String {
+    app_token_for_authority_apps(data_dir, app, authority, &[app])
+}
+
+fn app_token_for_authority_apps(
+    data_dir: &std::path::Path,
+    app: &str,
+    authority: &TestPasskeyAuthority,
+    apps: &[&str],
+) -> String {
     let now = crate::auth::now_ts();
     let grant = AuthSessionGrantV1 {
         schema: AuthSessionGrantV1::SCHEMA.to_string(),
@@ -699,7 +709,7 @@ fn app_token_for_authority(
         proof_binding_id: authority.proof_binding_id.clone(),
         issued_at: now,
         expires_at: now + 12 * 60 * 60,
-        apps: vec![app.to_string()],
+        apps: apps.iter().copied().map(str::to_string).collect(),
     };
     crate::auth::store_session_grant(data_dir, grant.clone()).unwrap();
     issue_home_launch_token_for_auth_grant(data_dir, app, &grant).unwrap()
@@ -835,9 +845,18 @@ async fn start_fake_runtime_configured(
         )
         .route("/api/audit", get(fake_runtime_audit_log))
         .route("/api/provider/:scheme/:op", post(fake_runtime_provider))
-        .route("/api/launch/:id/output/:name", get(fake_runtime_kept_launch_read))
-        .route("/api/launch/:id/content/*path", get(fake_runtime_kept_launch_read))
-        .route("/api/launch/:id/page/*path", get(fake_runtime_kept_launch_read))
+        .route(
+            "/api/launch/:id/output/:name",
+            get(fake_runtime_kept_launch_read),
+        )
+        .route(
+            "/api/launch/:id/content/*path",
+            get(fake_runtime_kept_launch_read),
+        )
+        .route(
+            "/api/launch/:id/page/*path",
+            get(fake_runtime_kept_launch_read),
+        )
         .route("/api/launch/open", post(fake_runtime_open_launch))
         .fallback(fake_runtime_unmatched)
         .with_state(state.clone());
@@ -883,7 +902,12 @@ async fn fake_runtime_open_launch(
     headers: HeaderMap,
     AxumJson(body): AxumJson<serde_json::Value>,
 ) -> Response {
-    let header = |name: &str| headers.get(name).and_then(|v| v.to_str().ok()).map(str::to_string);
+    let header = |name: &str| {
+        headers
+            .get(name)
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_string)
+    };
     state.kept_launch_reads.lock().await.push(json!({
         "path": "/api/launch/open",
         "bearer": header("authorization"),
@@ -974,7 +998,12 @@ async fn fake_runtime_kept_launch_read(
     uri: axum::http::Uri,
     headers: HeaderMap,
 ) -> Response {
-    let header = |name: &str| headers.get(name).and_then(|v| v.to_str().ok()).map(str::to_string);
+    let header = |name: &str| {
+        headers
+            .get(name)
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_string)
+    };
     state.kept_launch_reads.lock().await.push(json!({
         "path": uri.path(),
         "bearer": header("authorization"),

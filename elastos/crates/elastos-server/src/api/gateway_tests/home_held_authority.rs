@@ -625,7 +625,7 @@ fn rows() -> Vec<HeldRow> {
         "local_home_launch_token_context",
         "HomeLaunchTokenContext::resolved",
         1,
-        mark("home-own", "device launch context", "home and home-cli", "The device context stores a grant for home and home-cli, and the issuer looks that grant up"),
+        mark("home-own", "device launch context", "home and home-cli", "The device context stores one grant file outside auth-state sessions, and the issuer looks that grant up"),
     ),
     row(
         "elastos-server/src/api/gateway_home_token.rs",

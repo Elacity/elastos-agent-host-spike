@@ -2675,6 +2675,15 @@ async fn direct_home_cli_token_rejects_home_owned_grant_authority() {
             .unwrap_err()
             .to_string();
     assert!(err.contains("not authorized for app"), "{err}");
+    let direct = sign_direct_launch_for_test(dir.path(), HOME_CLI_CAPSULE_ID_FOR_TEST, &context);
+    let verified =
+        require_carried_home_launch_token(dir.path(), &direct, &[HOME_CLI_CAPSULE_ID_FOR_TEST])
+            .unwrap_err()
+            .to_string();
+    assert!(
+        verified.contains("authority context mismatch"),
+        "{verified}"
+    );
 }
 #[cfg(unix)]
 #[tokio::test]
