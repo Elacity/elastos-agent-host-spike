@@ -1048,6 +1048,18 @@ async fn stop_by_another_owner_or_a_guest_is_refused() {
             && live_principal(&rows, &world.agent_a) == 1,
         "other={other_status} {other_body} guest={guest_status} {guest_body} rows={rows:?}"
     );
+    let guest_denial = crate::auth::load_auth_state(&world.home.data)
+        .unwrap()
+        .audit
+        .into_iter()
+        .find(|event| {
+            event.event_type == "agent.stop.denied"
+                && event.principal_id.as_deref() == Some(world.guest.principal_id.as_str())
+        })
+        .expect("guest denial");
+    let reason: Value = serde_json::from_str(&guest_denial.reason).unwrap();
+    assert_eq!(reason["agent_id"], world.agent_a);
+    assert!(!guest_denial.signature.unwrap_or_default().is_empty());
 }
 
 #[tokio::test]

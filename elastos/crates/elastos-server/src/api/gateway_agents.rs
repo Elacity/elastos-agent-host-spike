@@ -1545,8 +1545,8 @@ pub(super) async fn agents_stop(
     }
 }
 
-/// The owner gate. With no agent id this is the admin check, and it runs
-/// before the body is read. With an agent id it is that check plus "this
+/// The owner gate. With no agent id this is the admin check. With an agent
+/// id it is that check plus "this
 /// owner owns this agent", or the owner is no longer an admin and this
 /// caller is. The agent may be off or retired, and the Home may have turned
 /// agents off. A guest fails the admin check. Another admin of a still-admin
@@ -1740,14 +1740,20 @@ async fn stop_agent(
     headers: &HeaderMap,
     body: &Bytes,
 ) -> anyhow::Result<AgentStopResponse> {
+    let targeted = serde_json::from_slice::<AgentStopRequest>(body)
+        .ok()
+        .map(|request| request.agent_id);
     let caller = match owner_may_stop(state, headers, None) {
         Ok(owner) => owner,
         Err(error) => {
-            record_caller_denial(state, headers, "agent.stop.denied", None);
+            record_caller_denial(state, headers, "agent.stop.denied", targeted.as_deref());
             return Err(error);
         }
     };
-    let request: AgentStopRequest = agents_request(body)?;
+    let request = match targeted {
+        Some(agent_id) => AgentStopRequest { agent_id },
+        None => agents_request(body)?,
+    };
     let owner = match owner_may_stop(state, headers, Some(&request.agent_id)) {
         Ok(owner) => owner,
         Err(error) => {
