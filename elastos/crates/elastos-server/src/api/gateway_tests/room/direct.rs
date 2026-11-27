@@ -193,7 +193,7 @@ async fn direct_api_auth_list_and_message_projection_are_bounded_and_redacted() 
             }
         );
     }
-    let expired_token = issue_expired_home_launch_token_with_context(
+    let expired_token = issue_expired_home_projection_token_with_context(
         fixture.dir.path(),
         CHAT_ROOM_CAPSULE_ID,
         &fixture.chat_context,

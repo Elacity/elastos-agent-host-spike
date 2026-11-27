@@ -372,7 +372,7 @@ async fn test_chat_contact_request_refuses_callers_without_a_chat_session() {
     let (status, body) = home.request(None, &participant_ref).await;
     assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
 
-    let expired = issue_expired_home_launch_token_with_context(
+    let expired = issue_expired_home_projection_token_with_context(
         home.dir.path(),
         CHAT_ROOM_CAPSULE_ID,
         &home.chat_context,

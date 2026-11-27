@@ -480,7 +480,12 @@ async fn esp_generic_invocation_executes_only_explicit_runtime_bindings() {
     assert_eq!(binding("runtime.approval-required")["executable"], false);
 
     let authority = passkey_authority_with_name(dir.path(), Some("esp-invoker"));
-    let token = app_token_for_authority(dir.path(), ESP_INVOKE_CAPSULE, &authority);
+    let token = app_token_for_authority_apps(
+        dir.path(),
+        ESP_INVOKE_CAPSULE,
+        &authority,
+        &[ESP_INVOKE_CAPSULE, HOME_CAPSULE_ID],
+    );
     let (status, body) = invoke_esp_method(&app, &token, "runtime.catalog").await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["status"], "ok");
