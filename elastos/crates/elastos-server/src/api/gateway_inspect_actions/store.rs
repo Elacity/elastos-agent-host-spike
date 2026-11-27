@@ -1433,12 +1433,17 @@ mod tests {
 
     /// A plan that ends `not_sent` or `stale` answers the agent already waiting
     /// on it, and that wait drops its permit. The park clock is long, so this
-    /// passes only when the write wakes the wait.
+    /// passes only when the write wakes the wait. A dispatch claim that returns
+    /// `AgentPlanClaimStale` is the same answer, and it drops the plan authority.
     #[cfg(unix)]
     #[test]
     fn a_not_sent_and_stale_plan_answer_the_waiting_agent_at_once() {
         let mut misses = Vec::new();
-        for status in ["not_sent", "stale"] {
+        for (case, status) in [
+            ("not_sent", "not_sent"),
+            ("card", "stale"),
+            ("dispatch", "stale"),
+        ] {
             let dir = tempfile::tempdir().unwrap();
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -1510,7 +1515,7 @@ mod tests {
                 );
                 std::thread::sleep(std::time::Duration::from_millis(5));
             }
-            if status == "not_sent" {
+            if case == "not_sent" {
                 super::super::settle_plan_through_dispatch_for_test(
                     dir.path(),
                     &request_id,
@@ -1518,6 +1523,24 @@ mod tests {
                     serde_json::json!({"status": "not_sent", "code": "claim_audit_error"}),
                 )
                 .unwrap();
+            } else if case == "dispatch" {
+                let mut record =
+                    super::read_inspect_action_record(dir.path(), &request_id).unwrap();
+                record.status = "approved".to_string();
+                record.operation = "changed".to_string();
+                super::write_inspect_action_record(dir.path(), &record).unwrap();
+                super::super::rebind_agent_plan_for_test(dir.path(), &request_id).unwrap();
+                let error = super::claim_approved_agent_plan_for_dispatch(
+                    dir.path(),
+                    &request_id,
+                    owner,
+                    now,
+                )
+                .expect_err("a changed binding leaves the dispatch stale");
+                assert!(
+                    error.downcast_ref::<super::AgentPlanClaimStale>().is_some(),
+                    "{error}"
+                );
             } else {
                 let mut card = created["request_binding"].clone();
                 card["sha256"] = serde_json::json!("ab".repeat(32));
@@ -1536,24 +1559,24 @@ mod tests {
             let answered = rx.recv_timeout(std::time::Duration::from_secs(2));
             crate::api::gateway::seams::set_plan_park_ms(dir.path(), 0);
             let Ok(answer) = answered else {
-                misses.push(format!("{status} did not answer the waiting agent at once"));
+                misses.push(format!("{case} did not answer the waiting agent at once"));
                 continue;
             };
             if answer["result"]["data"]["status"] != status
                 || answer["result"]["data"]["schema"] != "elastos.agent-plan.result/v1"
             {
-                misses.push(format!("{status} answered {answer}"));
+                misses.push(format!("{case} answered {answer}"));
                 continue;
             }
             if crate::resource_bridge::plan_waits_block_another_start(dir.path()) {
-                misses.push(format!("{status} did not release the permit"));
+                misses.push(format!("{case} did not release the permit"));
             }
             if crate::resource_bridge::agent_plan_authority_is_held(&request_id) {
-                misses.push(format!("{status} kept the plan authority"));
+                misses.push(format!("{case} kept the plan authority"));
             }
             match super::super::agent_plan_approval_block(dir.path(), &request_id) {
                 Some(block) if block.contains(status) && block.contains("cannot be approved") => {}
-                other => misses.push(format!("{status} can still be approved: {other:?}")),
+                other => misses.push(format!("{case} can still be approved: {other:?}")),
             }
         }
         assert!(misses.is_empty(), "{misses:?}");

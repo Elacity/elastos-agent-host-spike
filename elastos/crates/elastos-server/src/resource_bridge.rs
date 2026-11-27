@@ -629,6 +629,7 @@ fn plan_park_waiting_homes() -> &'static Mutex<HashMap<PathBuf, usize>> {
 }
 
 /// The park loop is inside its condition wait for this Home.
+#[cfg(unix)]
 #[cfg(test)]
 pub(crate) fn plan_park_is_waiting(home: &Path) -> bool {
     plan_park_waiting_homes()
@@ -657,6 +658,7 @@ fn set_plan_park_waiting(home: &Path, waiting: bool) {
     }
 }
 
+#[cfg(unix)]
 #[cfg(test)]
 fn plan_wait_bridge(
     data_dir: &Path,
@@ -689,6 +691,7 @@ fn plan_wait_bridge(
 }
 
 /// Park the same way a guest status read does. The caller is the waiting agent.
+#[cfg(unix)]
 #[cfg(test)]
 pub(crate) fn park_agent_plan_result_for_test(
     data_dir: &Path,
@@ -702,6 +705,7 @@ pub(crate) fn park_agent_plan_result_for_test(
     park_for_agent_plan_result(&bridge_ctx, data_dir, request_id, owner_id, requester_id)
 }
 
+#[cfg(unix)]
 #[cfg(test)]
 pub(crate) fn plan_wait_bridge_for_test(
     data_dir: &Path,
