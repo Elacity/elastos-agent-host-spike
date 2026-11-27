@@ -431,21 +431,9 @@ impl CarrierUnderTest for CurrentCarrier {
         let answer =
             crate::carrier::send_did_message(&self.sender_registry, &self.receiver_did, bytes)
                 .await?;
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-        let message = loop {
-            let found = {
-                let locked = inbox.lock().expect("DID message inbox");
-                locked.get(before).cloned()
-            };
-            if let Some(message) = found {
-                break message;
-            }
-            assert!(
-                tokio::time::Instant::now() < deadline,
-                "DID message was not recorded"
-            );
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        };
+        let recorded = inbox.lock().expect("DID message inbox");
+        assert_eq!(recorded.len(), before + 1, "DID message was not recorded");
+        let message = recorded.last().expect("DID message");
         assert_eq!(message.bytes, bytes);
         assert_eq!(
             answer["data"]["sender_did"].as_str().unwrap_or(""),

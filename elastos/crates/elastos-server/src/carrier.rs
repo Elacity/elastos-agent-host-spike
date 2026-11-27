@@ -14316,7 +14316,9 @@ pub(crate) mod tests {
         assert_eq!(piece, weights[..4]);
         let logged_by = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
         loop {
-            if silent_requests.lock().unwrap().len() == 1 {
+            let count = silent_requests.lock().unwrap().len();
+            assert!(count <= 1, "expected 1 silent request, got {count}");
+            if count == 1 {
                 break;
             }
             assert!(
