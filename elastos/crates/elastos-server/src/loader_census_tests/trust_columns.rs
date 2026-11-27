@@ -1624,8 +1624,8 @@ fn trust_columns_cover_each_loader_and_bind_to_source() {
             "elastos-server/src/server_infra.rs",
             "apply",
             [
-                "spawn_allow_listed_provider(\n",
-                "                        \"localhost-provider\"",
+                "spawn_allow_listed_provider(",
+                "\"localhost-provider\", helper, data_dir, config)",
             ]
             .concat(),
             1,
@@ -1652,8 +1652,11 @@ fn trust_columns_cover_each_loader_and_bind_to_source() {
             "elastos-server/src/server_infra.rs",
             "setup_server_infrastructure_impl",
             [
-                "spawn_allow_listed_provider(",
-                "\"object-provider\", &path, &data_dir, object_config)",
+                "spawn_allow_listed_provider(\n",
+                "                        \"object-provider\",\n",
+                "                        &path,\n",
+                "                        &data_dir,\n",
+                "                        object_config,\n",
             ]
             .concat(),
             1,

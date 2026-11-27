@@ -115,8 +115,8 @@ pub fn clear_local_apps_refusals() {
         .clear();
 }
 
-/// A refused prepare has not made `ElastOS`. The auth check must not make it.
-pub(crate) fn refusal_leaves_elastos_unmade(data_dir: &Path) -> bool {
+/// A refused prepare has not made `ElastOS`. Startup must not make it.
+pub fn refusal_leaves_elastos_unmade(data_dir: &Path) -> bool {
     LOCAL_APPS_REFUSAL
         .lock()
         .expect("local apps refusal")

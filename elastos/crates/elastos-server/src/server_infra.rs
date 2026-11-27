@@ -749,17 +749,22 @@ async fn register_media_provider(
 /// While an update is in progress and files need moving, each tick reads that state again.
 const LOCALHOST_UPDATE_TICK: Duration = Duration::from_secs(1);
 
-#[rustfmt::skip]
 async fn lc_check(
     registry: &Arc<provider::ProviderRegistry>,
     data_dir: &Path,
     device_key: &[u8; 32],
     helper: Option<provider::CheckedExecutable>,
 ) {
-    refuse_localhost(registry, data_dir, device_key, crate::localhost_file_migration::LOCALHOST_FILES_CHECKING.to_string(), helper).await;
+    refuse_localhost(
+        registry,
+        data_dir,
+        device_key,
+        crate::localhost_file_migration::LOCALHOST_FILES_CHECKING.to_string(),
+        helper,
+    )
+    .await;
 }
 
-#[rustfmt::skip]
 async fn refuse_localhost(
     registry: &Arc<provider::ProviderRegistry>,
     data_dir: &Path,
@@ -767,16 +772,34 @@ async fn refuse_localhost(
     sentence: String,
     helper: Option<provider::CheckedExecutable>,
 ) {
-    use crate::localhost_file_migration::{localhost_bringup, LocalhostBringup as Bringup, LOCALHOST_FILES_CHECKING, LOCALHOST_FILES_PENDING_UPDATE};
+    use crate::localhost_file_migration::{
+        localhost_bringup, LocalhostBringup as Bringup, LOCALHOST_FILES_CHECKING,
+        LOCALHOST_FILES_PENDING_UPDATE,
+    };
     let checking = sentence == LOCALHOST_FILES_CHECKING;
-    if checking { tracing::info!(target: "elastos", "{sentence}"); } else { tracing::error!(target: "elastos", "{sentence}"); }
+    if checking {
+        tracing::info!(target: "elastos", "{sentence}");
+    } else {
+        tracing::error!(target: "elastos", "{sentence}");
+    }
     elastos_server::local_apps::set_local_apps_refusal(data_dir, Some(sentence.clone()));
-    registry.register(Arc::new(elastos_server::local_apps::RefusingLocalhostProvider::new(sentence))).await;
-    if !checking { return; }
+    registry
+        .register(Arc::new(
+            elastos_server::local_apps::RefusingLocalhostProvider::new(sentence),
+        ))
+        .await;
+    if !checking {
+        return;
+    }
     let (registry, data_dir) = (registry.clone(), data_dir.to_path_buf());
     let device_key = zeroize::Zeroizing::new(*device_key);
     tokio::spawn(async move {
-        async fn apply(registry: &Arc<provider::ProviderRegistry>, data_dir: &Path, helper: &Option<provider::CheckedExecutable>, bringup: Bringup) {
+        async fn apply(
+            registry: &Arc<provider::ProviderRegistry>,
+            data_dir: &Path,
+            helper: &Option<provider::CheckedExecutable>,
+            bringup: Bringup,
+        ) {
             let sentence = match (bringup, helper) {
                 (Bringup::Start(_), None) => {
                     registry.unregister("localhost").await;
@@ -785,14 +808,13 @@ async fn refuse_localhost(
                     return;
                 }
                 (Bringup::Start(config), Some(helper)) => {
-                    elastos_server::local_apps::set_local_apps_refusal(data_dir, Some(LOCALHOST_FILES_CHECKING.to_string()));
-                    let started = spawn_allow_listed_provider(
-                        "localhost-provider",
-                        helper,
+                    elastos_server::local_apps::set_local_apps_refusal(
                         data_dir,
-                        config,
-                    )
-                    .await;
+                        Some(LOCALHOST_FILES_CHECKING.to_string()),
+                    );
+                    let started =
+                        spawn_allow_listed_provider("localhost-provider", helper, data_dir, config)
+                            .await;
                     match started {
                         Ok(bridge) => {
                             registry
@@ -810,23 +832,37 @@ async fn refuse_localhost(
                 (Bringup::Refuse(sentence), _) => sentence,
             };
             elastos_server::local_apps::set_local_apps_refusal(data_dir, Some(sentence.clone()));
-            registry.register(Arc::new(elastos_server::local_apps::RefusingLocalhostProvider::new(sentence.clone()))).await;
+            registry
+                .register(Arc::new(
+                    elastos_server::local_apps::RefusingLocalhostProvider::new(sentence.clone()),
+                ))
+                .await;
             tracing::error!(target: "elastos", "{sentence}");
-            println!("{}", elastos_server::local_apps::local_apps_health_line(&sentence));
+            println!(
+                "{}",
+                elastos_server::local_apps::local_apps_health_line(&sentence)
+            );
             let _ = std::io::Write::flush(&mut std::io::stdout());
         }
         let mut said = false;
         loop {
             let (dir, key) = (data_dir.clone(), device_key.clone());
-            let bringup = match tokio::task::spawn_blocking(move || localhost_bringup(&dir, &key)).await {
-                Ok(b) => b,
-                Err(err) => Bringup::Refuse(format!("The local app file move stopped ({err}). Restart Home.")),
-            };
+            let bringup =
+                match tokio::task::spawn_blocking(move || localhost_bringup(&dir, &key)).await {
+                    Ok(b) => b,
+                    Err(err) => Bringup::Refuse(format!(
+                        "The local app file move stopped ({err}). Restart Home."
+                    )),
+                };
             if !matches!(&bringup, Bringup::Refuse(s) if s == LOCALHOST_FILES_PENDING_UPDATE) {
-                if matches!(bringup, Bringup::Start(_)) { drop(ensure_file_backed_roots(&data_dir)); }
+                if matches!(bringup, Bringup::Start(_)) {
+                    drop(ensure_file_backed_roots(&data_dir));
+                }
                 return apply(&registry, &data_dir, &helper, bringup).await;
             }
-            if !std::mem::replace(&mut said, true) { apply(&registry, &data_dir, &helper, bringup).await; }
+            if !std::mem::replace(&mut said, true) {
+                apply(&registry, &data_dir, &helper, bringup).await;
+            }
             tokio::time::sleep(LOCALHOST_UPDATE_TICK).await;
         }
     });
@@ -1233,8 +1269,9 @@ async fn setup_server_infrastructure_impl(
     if elastos_server::local_apps::local_apps_refusal(&data_dir).is_none() {
         ensure_file_backed_roots(&data_dir).ok();
     }
-    // Host creates Auth before any helper fence makes System read-only.
-    elastos_server::auth::verify_auth_audit_chain_ready(&data_dir)?;
+    // A refused prepare left ElastOS unmade. Skip the audit directory so
+    // startup follows that refusal instead of creating ElastOS/System/Auth.
+    elastos_server::gateway_cmd::verify_auth_audit_after_prepare(&data_dir)?;
     elastos_server::protected_content_runtime::log_unresolved_runtime_releases(&data_dir);
     let provider_registry = Arc::new(provider::ProviderRegistry::new());
     let mut managed_host_processes = Vec::new();
@@ -1397,47 +1434,55 @@ async fn setup_server_infrastructure_impl(
         ),
     }
 
-    match binaries::resolve_verified_native_provider_binary("object-provider") {
-        Ok(Some(path)) => match object_provider_bridge_config(&data_dir, &device_key) {
-            Err(err) => tracing::error!("object helper spawn refused: {err}"),
-            Ok(object_config) => {
-                // One line: the loader census names this exact call.
-                let object_bridge =
-                    spawn_allow_listed_provider("object-provider", &path, &data_dir, object_config);
-                match object_bridge.await {
-                    Ok(bridge) => {
-                        let object_provider: Arc<dyn provider::Provider> = Arc::new(
-                            provider::CapsuleProvider::with_scheme(bridge.clone(), "object"),
-                        );
-                        if let Err(e) = provider_registry
-                            .register_sub_provider("object", object_provider)
-                            .await
-                        {
-                            tracing::warn!(
-                                "Failed to register elastos://object sub-provider: {}",
-                                e
+    if elastos_server::local_apps::refusal_leaves_elastos_unmade(&data_dir) {
+        tracing::info!("object-provider stays stopped while a refused prepare left ElastOS unmade");
+    } else {
+        match binaries::resolve_verified_native_provider_binary("object-provider") {
+            Ok(Some(path)) => match object_provider_bridge_config(&data_dir, &device_key) {
+                Err(err) => tracing::error!("object helper spawn refused: {err}"),
+                Ok(object_config) => {
+                    // The loader census names this call.
+                    let object_bridge = spawn_allow_listed_provider(
+                        "object-provider",
+                        &path,
+                        &data_dir,
+                        object_config,
+                    );
+                    match object_bridge.await {
+                        Ok(bridge) => {
+                            let object_provider: Arc<dyn provider::Provider> = Arc::new(
+                                provider::CapsuleProvider::with_scheme(bridge.clone(), "object"),
                             );
+                            if let Err(e) = provider_registry
+                                .register_sub_provider("object", object_provider)
+                                .await
+                            {
+                                tracing::warn!(
+                                    "Failed to register elastos://object sub-provider: {}",
+                                    e
+                                );
+                            }
+                            tracing::info!("object-provider capsule from {}", path.display());
                         }
-                        tracing::info!("object-provider capsule from {}", path.display());
+                        Err(provider::bridge::BridgeError::NoPublicRuntimeDid) => {
+                            tracing::error!("object helper spawn refused: no public runtime DID");
+                        }
+                        Err(e) => tracing::warn!("Failed to spawn object-provider: {e}"),
                     }
-                    Err(provider::bridge::BridgeError::NoPublicRuntimeDid) => {
-                        tracing::error!("object helper spawn refused: no public runtime DID");
-                    }
-                    Err(e) => tracing::warn!("Failed to spawn object-provider: {e}"),
                 }
+            },
+            Ok(None) => {
+                report_missing_home_provider(
+                    &data_dir,
+                    "object-provider",
+                    "Library object operations will fail closed",
+                );
             }
-        },
-        Ok(None) => {
-            report_missing_home_provider(
-                &data_dir,
-                "object-provider",
-                "Library object operations will fail closed",
-            );
+            Err(e) => tracing::warn!(
+                "Skipping object-provider due to verification failure: {}",
+                e
+            ),
         }
-        Err(e) => tracing::warn!(
-            "Skipping object-provider due to verification failure: {}",
-            e
-        ),
     }
 
     match binaries::resolve_verified_native_provider_binary("webspace-provider") {
@@ -2072,7 +2117,12 @@ async fn setup_server_infrastructure_impl(
 
     // Peers are served only CIDs an active publication lists: bring that
     // index in line with the publish records before Carrier answers anyone.
-    {
+    // The reconcile loads auth state, which creates ElastOS/System/Auth.
+    if elastos_server::local_apps::refusal_leaves_elastos_unmade(&data_dir) {
+        tracing::info!(
+            "published CID reconcile stays stopped while a refused prepare left ElastOS unmade"
+        );
+    } else {
         let data_dir = data_dir.clone();
         if let Err(e) = tokio::task::spawn_blocking(move || {
             elastos_server::library::reconcile_published_cids(&data_dir)
@@ -12621,6 +12671,409 @@ fn main() {
         println!(
             "{}",
             serde_json::json!({"data_root": data_dir, "registered_route": registration})
+        );
+    }
+
+    /// Read and append a plain `localhost://Users` file through the provider
+    /// proxy, and refuse a file past the hard limit before its body is read.
+    #[tokio::test]
+    async fn a_plain_users_file_is_read_and_appended_through_provider_proxy() {
+        use axum::extract::{Path, State};
+        use axum::http::HeaderMap;
+        use axum::{Extension, Json};
+        use elastos_runtime::session::{Session, SessionType};
+        use sha2::Digest as _;
+
+        let binary =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/debug/localhost-provider");
+        assert!(
+            binary.is_file(),
+            "{} is missing. Build localhost-provider before this row.",
+            binary.display()
+        );
+        let root = TempDir::new().unwrap();
+        fs::create_dir_all(root.path().join("Users")).unwrap();
+        let plain = b"hello-plain";
+        let note = root.path().join("Users/plain.txt");
+        fs::write(&note, plain).unwrap();
+        let huge = root.path().join("Users/huge.bin");
+        fs::write(&huge, b"not-loaded").unwrap();
+        fs::OpenOptions::new()
+            .write(true)
+            .open(&huge)
+            .unwrap()
+            .set_len(localhost_provider::SEALED_READ_HARD_LIMIT + 1)
+            .unwrap();
+        let checksum = format!(
+            "sha256:{}",
+            hex::encode(sha2::Sha256::digest(fs::read(&binary).unwrap()))
+        );
+        let checked = provider::CheckedExecutable::pinned(&binary, &checksum)
+            .unwrap()
+            .with_home_data_dir(root.path());
+        let key = (0u8..32).collect::<Vec<_>>();
+        let bridge = Arc::new(
+            provider::ProviderBridge::spawn(
+                &checked,
+                provider::BridgeProviderConfig {
+                    base_path: root.path().to_string_lossy().to_string(),
+                    allowed_paths: vec!["*".to_string()],
+                    read_only: false,
+                    encryption_key: hex::encode(&key),
+                    extra: serde_json::json!({ "file_key": true }),
+                },
+            )
+            .await
+            .unwrap_or_else(|error| panic!("localhost-provider did not start: {error}")),
+        );
+        let registry = Arc::new(provider::ProviderRegistry::new());
+        registry
+            .register(Arc::new(provider::CapsuleProvider::new(Arc::clone(
+                &bridge,
+            ))))
+            .await;
+        let state = elastos_server::api::handlers::provider::ProviderProxyState {
+            registry,
+            capability_manager: None,
+            data_dir: TempDir::new().unwrap().keep(),
+        };
+        let ask = |op: &str, body: serde_json::Value| {
+            let state = state.clone();
+            let op = op.to_string();
+            let body = body.to_string();
+            async move { provider_proxy_value(state, op, body).await }
+        };
+        let read = ask("read", serde_json::json!({"path": "Users/plain.txt"})).await;
+        assert_eq!(read["status"], "ok", "{read}");
+        assert_eq!(read["data"]["content"], serde_json::json!(plain.to_vec()));
+        assert_eq!(fs::read(&note).unwrap(), plain);
+        let appended = ask(
+            "write",
+            serde_json::json!({
+                "path": "Users/plain.txt",
+                "append": true,
+                "content": b"-more".to_vec(),
+            }),
+        )
+        .await;
+        assert_eq!(appended["status"], "ok", "{appended}");
+        let again = ask("read", serde_json::json!({"path": "Users/plain.txt"})).await;
+        assert_eq!(again["status"], "ok", "{again}");
+        assert_eq!(
+            again["data"]["content"],
+            serde_json::json!(b"hello-plain-more".to_vec())
+        );
+        let refused = ask("read", serde_json::json!({"path": "Users/huge.bin"})).await;
+        let message = refused["message"].as_str().unwrap_or("");
+        assert!(
+            message.contains("is larger than this process can read. Move it out of the folder."),
+            "{refused}"
+        );
+        bridge
+            .shutdown()
+            .await
+            .expect("localhost-provider shutdown");
+
+        async fn provider_proxy_value(
+            state: elastos_server::api::handlers::provider::ProviderProxyState,
+            op: String,
+            body: String,
+        ) -> serde_json::Value {
+            let Json(value) = elastos_server::api::handlers::provider::provider_proxy(
+                State(state),
+                Extension(Session::new(SessionType::Shell, None)),
+                Path(("localhost".to_string(), op)),
+                HeaderMap::new(),
+                body,
+            )
+            .await
+            .unwrap_or_else(|(code, message)| panic!("proxy {code}: {message}"));
+            value
+        }
+    }
+
+    /// All five roots absent, a mismatched marker, and identity mode 0500.
+    /// Startup reports the refusal and leaves ElastOS absent.
+    #[test]
+    fn refused_prepare_leaves_elastos_absent_on_startup() {
+        use sha2::Digest as _;
+        use std::os::unix::fs::PermissionsExt;
+        let _guard = ENV_LOCK.lock().unwrap();
+        let scratch = TempDir::new().unwrap();
+        fs::set_permissions(scratch.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        let home = scratch.path().join("home");
+        let xdg = scratch.path().join("xdg");
+        fs::create_dir_all(&home).unwrap();
+        fs::create_dir_all(&xdg).unwrap();
+        for directory in [&home, &xdg] {
+            fs::set_permissions(directory, fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let data = if cfg!(target_os = "macos") {
+            home.join("Library/Application Support/elastos")
+        } else {
+            xdg.join("elastos")
+        };
+        fs::create_dir_all(&data).unwrap();
+        fs::set_permissions(&data, fs::Permissions::from_mode(0o700)).unwrap();
+        if cfg!(target_os = "macos") {
+            for part in ["Library", "Library/Application Support"] {
+                fs::set_permissions(home.join(part), fs::Permissions::from_mode(0o700)).unwrap();
+            }
+        }
+        let device_key = [0x22u8; 32];
+        plant_device_key(&data, &device_key);
+        fs::set_permissions(
+            data.join("identity/device.key"),
+            fs::Permissions::from_mode(0o600),
+        )
+        .unwrap();
+        elastos_identity::load_or_create_device_key(&data).unwrap();
+        let marker = crate::localhost_file_migration::localhost_marker_record(
+            &expected_localhost_file_key(&[0xabu8; 32]),
+        );
+        fs::write(data.join("identity/localhost-file-key-v1"), &marker).unwrap();
+        let bin = data.join("bin");
+        fs::create_dir_all(&bin).unwrap();
+        fs::set_permissions(&bin, fs::Permissions::from_mode(0o700)).unwrap();
+        let mut external = serde_json::Map::new();
+        for (name, provides) in [
+            ("localhost-provider", "localhost://*"),
+            ("object-provider", "elastos://object/*"),
+        ] {
+            let source = scratch.path().join(format!("{name}.rs"));
+            fs::write(
+                &source,
+                r#"use std::io::{BufRead, Write};
+fn main() {
+    let stdin = std::io::stdin();
+    let mut out = std::io::stdout();
+    for line in stdin.lock().lines() {
+        if line.is_err() { break; }
+        if writeln!(out, "{{\"status\":\"ok\"}}").is_err() { break; }
+        let _ = out.flush();
+    }
+}
+"#,
+            )
+            .unwrap();
+            let probe = bin.join(name);
+            let built = Command::new("rustc")
+                .args(["--edition", "2021", "-o"])
+                .arg(&probe)
+                .arg(&source)
+                .output()
+                .unwrap();
+            assert!(
+                built.status.success(),
+                "{name} probe failed: {}",
+                String::from_utf8_lossy(&built.stderr)
+            );
+            fs::set_permissions(&probe, fs::Permissions::from_mode(0o755)).unwrap();
+            let checksum = format!(
+                "sha256:{}",
+                hex::encode(sha2::Sha256::digest(fs::read(&probe).unwrap()))
+            );
+            external.insert(
+                name.to_string(),
+                serde_json::json!({
+                    "version": "test",
+                    "install_path": format!("bin/{name}"),
+                    "provider_runtime": {
+                        "role": "provider",
+                        "substrate": "native",
+                        "runtime_abi": "elastos.provider-stdio/v1",
+                        "execution": "native-provider",
+                        "provides": provides,
+                    },
+                    "platforms": {elastos_server::setup::detect_platform(): {
+                        "checksum": checksum,
+                        "source": probe.to_string_lossy(),
+                        "strategy": "local-copy",
+                    }},
+                }),
+            );
+        }
+        fs::write(
+            data.join("components.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "external": external,
+                "capsules": {},
+                "profiles": {"home": {"components": ["localhost-provider", "object-provider"]}},
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        sign_test_home(&data);
+        // The publisher release lives under ElastOS. Copy it to the consumed
+        // installation pair, then remove that root so startup begins with all
+        // five roots absent and the object helper is still admitted.
+        let installed_head = elastos_common::localhost::installation_release_head_path(&data);
+        let installed_release =
+            elastos_common::localhost::installation_release_manifest_path(&data);
+        fs::create_dir_all(installed_head.parent().unwrap()).unwrap();
+        fs::set_permissions(
+            installed_head.parent().unwrap(),
+            fs::Permissions::from_mode(0o700),
+        )
+        .unwrap();
+        fs::write(
+            &installed_head,
+            fs::read(elastos_common::localhost::publisher_release_head_path(
+                &data,
+            ))
+            .unwrap(),
+        )
+        .unwrap();
+        fs::write(
+            &installed_release,
+            fs::read(elastos_common::localhost::publisher_release_manifest_path(
+                &data,
+            ))
+            .unwrap(),
+        )
+        .unwrap();
+        for path in [&installed_head, &installed_release] {
+            fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        fs::remove_dir_all(data.join("ElastOS")).unwrap();
+        struct RestoreMode(PathBuf);
+        impl Drop for RestoreMode {
+            fn drop(&mut self) {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = fs::set_permissions(&self.0, fs::Permissions::from_mode(0o700));
+            }
+        }
+        let identity = data.join("identity");
+        let _restore = RestoreMode(identity.clone());
+        fs::set_permissions(&identity, fs::Permissions::from_mode(0o500)).unwrap();
+        for name in ["AppCapsules", "ElastOS", "Local", "Users", "UsersAI"] {
+            assert!(
+                std::fs::symlink_metadata(data.join(name)).is_err(),
+                "{name} existed before startup"
+            );
+        }
+        let output = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "--ignored",
+                "--nocapture",
+                "server_infra::tests::refused_prepare_startup_probe",
+            ])
+            .env("HOME", &home)
+            .env("XDG_DATA_HOME", &xdg)
+            .env("TMPDIR", scratch.path())
+            .env("RUST_LOG", "elastos=info")
+            .env("ELASTOS_FENCE_HOME_ROOT", &data)
+            .env_remove("ELASTOS_CAPSULE_BIN_DIR")
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let log = format!("{stderr}\n{stdout}");
+        assert!(
+            output.status.success() && !log.contains("FAILED") && !log.contains("panicked"),
+            "startup probe failed ({}): {log}",
+            output.status
+        );
+        let facts: serde_json::Value = serde_json::from_str(
+            stdout
+                .lines()
+                .rev()
+                .find(|line| line.starts_with('{'))
+                .unwrap_or_else(|| panic!("startup probe reported no facts: {log}")),
+        )
+        .unwrap();
+        assert_eq!(facts["ok"], true, "{facts}");
+        assert_eq!(facts["elastos"], false, "{facts}");
+        let sentence = facts["refusal"].as_str().unwrap_or("");
+        assert!(sentence.contains("could not be written"), "{sentence}");
+        assert!(sentence.contains("localhost-file-key.lock"), "{sentence}");
+        assert!(
+            log.contains("Local apps are off."),
+            "startup did not report the refusal: {log}"
+        );
+        assert!(
+            log.contains(
+                "object-provider stays stopped while a refused prepare left ElastOS unmade"
+            ),
+            "object-provider was not skipped: {log}"
+        );
+        assert!(
+            log.contains(
+                "published CID reconcile stays stopped while a refused prepare left ElastOS unmade"
+            ),
+            "published CID reconcile was not skipped: {log}"
+        );
+        for name in ["AppCapsules", "ElastOS", "Local", "Users", "UsersAI"] {
+            assert!(
+                std::fs::symlink_metadata(data.join(name)).is_err(),
+                "{name} was created"
+            );
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "child half of refused_prepare_leaves_elastos_absent_on_startup; the parent runs it"]
+    async fn refused_prepare_startup_probe() {
+        rustls::crypto::ring::default_provider()
+            .install_default()
+            .unwrap();
+        tracing_subscriber::fmt()
+            .with_ansi(false)
+            .with_max_level(tracing::Level::INFO)
+            .try_init()
+            .expect("tracing subscriber");
+        let data_dir = crate::sources::default_data_dir();
+        let expected = PathBuf::from(
+            std::env::var_os("ELASTOS_FENCE_HOME_ROOT").expect("ELASTOS_FENCE_HOME_ROOT"),
+        );
+        assert_eq!(data_dir, expected);
+        assert!(
+            elastos_server::binaries::AdmittedProvider::admit(&data_dir, "object-provider")
+                .expect("object admission")
+                .is_some(),
+            "object-provider was not admitted, so a missing skip would not create ElastOS"
+        );
+        let mut infrastructure = setup_server_infrastructure()
+            .await
+            .unwrap_or_else(|error| panic!("Home did not start: {error:#}"));
+        let started = std::time::Instant::now();
+        let sentence = loop {
+            match elastos_server::local_apps::local_apps_refusal(&data_dir) {
+                Some(text) if text != elastos_server::local_apps::LOCAL_APPS_CHECKING => {
+                    break text
+                }
+                _ => {
+                    assert!(
+                        started.elapsed() < std::time::Duration::from_secs(30),
+                        "the refusal did not settle"
+                    );
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                }
+            }
+        };
+        let elastos = std::fs::symlink_metadata(data_dir.join("ElastOS")).is_ok();
+        for name in ["AppCapsules", "ElastOS", "Local", "Users", "UsersAI"] {
+            assert!(
+                std::fs::symlink_metadata(data_dir.join(name)).is_err(),
+                "{name} was created"
+            );
+        }
+        if let Some(carrier) = infrastructure.carrier_service.as_mut() {
+            carrier.shutdown().await.unwrap();
+        }
+        drop(infrastructure);
+        println!(
+            "{}",
+            elastos_server::local_apps::local_apps_health_line(&sentence)
+        );
+        println!(
+            "{}",
+            serde_json::json!({
+                "ok": true,
+                "elastos": elastos,
+                "refusal": sentence,
+            })
         );
     }
 }
