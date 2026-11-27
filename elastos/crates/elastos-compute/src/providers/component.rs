@@ -4497,6 +4497,13 @@ mod tests {
     /// The guest reads an event and then burns fuel, while a source keeps
     /// sending. A delivered event leaves the tick count as it is, so the
     /// guest still ends on the tick bound.
+    ///
+    /// Six ticks are 60 ms when the shared ticker is on time. One fuel bucket
+    /// is about two seconds of a tight burn, and a late ticker makes those
+    /// six ticks take longer than that bucket. The fuel here is many buckets,
+    /// so the execution bound cannot win the race. The sender is its own
+    /// thread: a yield on this runtime can sit longer than one tick, and that
+    /// idle gap parks the guest and clears the ticks this test is counting.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn v2_a_delivered_event_does_not_clear_the_tick_bound() {
         let provider = ComponentProvider::new();
@@ -4505,13 +4512,12 @@ mod tests {
             "(func (export \"callback\") (param $event i32) (param $handle i32) (param $result i32) (result i32)\n      i32.const 0 i32.const 0 i32.const 65536 memory.fill\n      local.get $event i32.const 2 i32.eq",
         )]);
         let handle = load_v2_fixture(&provider, bytes).await;
-        provider
-            .instances
-            .write()
-            .await
-            .get_mut(&handle.id)
-            .unwrap()
-            .test_max_ticks = 6;
+        {
+            let mut instances = provider.instances.write().await;
+            let guest = instances.get_mut(&handle.id).unwrap();
+            guest.test_max_ticks = 6;
+            guest.v2_fuel = crate::providers::fuel_bucket::V2_BUCKET_CAPACITY.saturating_mul(64);
+        }
         provider.start(&handle).await.unwrap();
         let sender = provider
             .instances
@@ -4520,16 +4526,31 @@ mod tests {
             .get(&handle.id)
             .and_then(|instance| instance.events.clone())
             .expect("the guest is reading events");
-        let source = tokio::spawn(async move {
-            while sender
-                .send(v2::elastos::bus::types::Event::Message(Vec::new()))
-                .is_ok()
-            {
-                tokio::task::yield_now().await;
+        let source = std::thread::spawn(move || loop {
+            for _ in 0..32 {
+                if sender
+                    .send(v2::elastos::bus::types::Event::Message(Vec::new()))
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            let pause = Instant::now() + Duration::from_millis(1);
+            while Instant::now() < pause {
+                std::hint::spin_loop();
             }
         });
-        let ending = v2_ending(&provider, &handle).await;
-        source.abort();
+        let ending = tokio::time::timeout(Duration::from_secs(20), async {
+            loop {
+                if let Some(ending) = provider.endings.read().await.get(&handle.id).cloned() {
+                    return ending;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the tick bound did not end the guest");
+        source.join().expect("the event source");
         assert!(
             ending.contains(ENDING_EPOCH_DEADLINE),
             "a stream of events must still end on the tick bound, got {ending}"
