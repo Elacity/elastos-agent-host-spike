@@ -23,19 +23,22 @@ impl ObjectProviderProcess {
     }
 
     fn handle(&mut self, mut request: Value) -> Value {
-        match request.get("op").and_then(Value::as_str) {
+        let response = match request.get("op").and_then(Value::as_str) {
             Some("init") => self.init(request.get("config").cloned().unwrap_or(Value::Null)),
             Some("shutdown") => response_ok(json!({
                 "provider": PROVIDER_ID,
             })),
-            Some(_) => {
-                let Some(data_dir) = &self.data_dir else {
-                    return response_error("not_initialized", "object-provider is not initialized");
-                };
-                elastos_server::library::handle_object_provider_raw_request(data_dir, &mut request)
-            }
+            Some(_) => match self.data_dir.clone() {
+                Some(data_dir) => elastos_server::library::handle_object_provider_raw_request(
+                    &data_dir,
+                    &mut request,
+                ),
+                None => response_error("not_initialized", "object-provider is not initialized"),
+            },
             None => response_error("invalid_request", "provider request missing op"),
-        }
+        };
+        elastos_server::object_authority::wipe_object_authority(&mut request);
+        response
     }
 
     fn init(&mut self, config: Value) -> Value {

@@ -112,38 +112,49 @@ impl ObjectAuthorityV1 {
             .ok_or_else(|| anyhow!(OUTSIDE_LIBRARY))
     }
 
-    /// Build one envelope from the sign-in record. The activation lock taken
-    /// inside the split check, and again inside `resolve`, is released before
-    /// this function returns. Callers must not hold it across the helper pipe.
-    ///
-    /// This loads the data key. Dispatch uses `build_for` so a keyless
-    /// operation does not read the recovery archive key.
+    /// Build one envelope and load its data key. See `build_for`.
     pub(crate) fn build(data_dir: &Path, principal_id: &str) -> anyhow::Result<Self> {
         Self::build_for(data_dir, principal_id, true)
     }
 
+    /// Build one envelope from the sign-in record. One audit-activation lock
+    /// covers the split check, the root resolution, and the protection read.
+    /// That lock is released before this function returns. Callers must not
+    /// hold it across the helper pipe.
+    ///
+    /// `load_key` false leaves the data key unset, so a missing recovery
+    /// archive key does not refuse a keyless operation.
     pub(crate) fn build_for(
         data_dir: &Path,
         principal_id: &str,
         load_key: bool,
     ) -> anyhow::Result<Self> {
-        refuse_split_sign_in_record(data_dir)?;
-        let resolved = auth::ResolvedPrincipalRoot::resolve(data_dir, data_dir, principal_id)?;
-        let root = resolved.localhost_root();
-        let root = if root.is_empty() {
-            None
-        } else {
-            Some(root.to_string())
-        };
-        let kind = resolved.kind();
-        let loaded = if load_key {
-            match &root {
-                Some(root) => load_data_key(data_dir, principal_id, root)?,
-                None => LoadedDataKey::none(),
-            }
-        } else {
-            LoadedDataKey::none()
-        };
+        let (root, kind, loaded) = auth::with_audit_chain_activation_lock(data_dir, || {
+            refuse_split_sign_in_record_locked(data_dir)?;
+            #[cfg(test)]
+            note_audit_lock_still_held(data_dir);
+            let resolved = auth::ResolvedPrincipalRoot::resolve(data_dir, data_dir, principal_id)?;
+            #[cfg(test)]
+            note_audit_lock_still_held(data_dir);
+            let root = resolved.localhost_root();
+            let root = if root.is_empty() {
+                None
+            } else {
+                Some(root.to_string())
+            };
+            let kind = resolved.kind();
+            let loaded = if load_key {
+                match &root {
+                    Some(root) => load_data_key(data_dir, principal_id, root)?,
+                    None => LoadedDataKey::none(),
+                }
+            } else {
+                LoadedDataKey::none()
+            };
+            #[cfg(test)]
+            note_audit_lock_still_held(data_dir);
+            Ok((root, kind, loaded))
+        })?;
         let authority = Self {
             schema: SCHEMA.to_string(),
             version: VERSION,
@@ -310,12 +321,7 @@ impl ObjectAuthorityV1 {
 
 /// A sign-in file that is ahead of its audit checkpoint is refused here.
 /// `load_auth_state` would write the checkpoint forward. This read does not.
-fn refuse_split_sign_in_record(data_dir: &Path) -> anyhow::Result<()> {
-    auth::with_audit_chain_activation_lock(data_dir, || {
-        refuse_split_sign_in_record_locked(data_dir)
-    })
-}
-
+/// `build_for` holds the audit lock across this read and the two that follow.
 fn refuse_split_sign_in_record_locked(data_dir: &Path) -> anyhow::Result<()> {
     let Some(state) = auth::load_auth_state_unverified(data_dir)? else {
         return Ok(());
@@ -342,6 +348,49 @@ fn refuse_split_sign_in_record_locked(data_dir: &Path) -> anyhow::Result<()> {
         }
         (None, None) => Ok(()),
     }
+}
+
+#[cfg(test)]
+std::thread_local! {
+    static AUDIT_LOCK_HITS: std::cell::RefCell<
+        Option<std::sync::Arc<std::sync::atomic::AtomicUsize>>,
+    > = const { std::cell::RefCell::new(None) };
+}
+
+/// Armed by the concurrency row. A second thread tries the audit lock while
+/// this thread is between the Auth reads. Deleting the lock in `build_for`
+/// lets that try succeed, and the row fails.
+#[cfg(test)]
+fn note_audit_lock_still_held(data_dir: &Path) {
+    let hits = AUDIT_LOCK_HITS.with(|slot| slot.borrow().clone());
+    let Some(hits) = hits else {
+        return;
+    };
+    let (tx, rx) = std::sync::mpsc::channel();
+    let path = data_dir.to_path_buf();
+    let checker = std::thread::spawn(move || {
+        let acquired = auth::try_audit_activation_lock_for_test(&path);
+        tx.send(acquired).expect("the lock check sends");
+    });
+    let acquired = rx
+        .recv_timeout(std::time::Duration::from_secs(2))
+        .expect("the lock check returns");
+    checker.join().expect("the lock check joins");
+    assert!(
+        !acquired,
+        "build_for released the audit lock between Auth reads"
+    );
+    hits.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+}
+
+#[cfg(test)]
+fn arm_audit_lock_proof(hits: std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+    AUDIT_LOCK_HITS.with(|slot| *slot.borrow_mut() = Some(hits));
+}
+
+#[cfg(test)]
+fn disarm_audit_lock_proof() {
+    AUDIT_LOCK_HITS.with(|slot| *slot.borrow_mut() = None);
 }
 
 struct LoadedDataKey {
@@ -1039,5 +1088,77 @@ mod tests {
         assert!(!rendered.contains("CALLER-SUPPLIED-ENVELOPE"), "{rendered}");
         assert!(!rendered.contains("caller-supplied-key"), "{rendered}");
         assert!(!rendered.contains("forged"), "{rendered}");
+    }
+
+    /// Concurrent audit saves beside `build`. The first build also checks that
+    /// the audit lock stays held across the split check, the root resolution,
+    /// and the protection read. Deleting that one lock makes the check acquire
+    /// it, so this row fails before the race has to lose.
+    #[test]
+    fn build_holds_one_audit_lock_beside_appended_audit_events() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let principal = "person:local:ada";
+        auth::store_test_human_principal(dir.path(), principal);
+        let hits = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        arm_audit_lock_proof(std::sync::Arc::clone(&hits));
+        struct ClearProof;
+        impl Drop for ClearProof {
+            fn drop(&mut self) {
+                disarm_audit_lock_proof();
+            }
+        }
+        let _clear = ClearProof;
+        ObjectAuthorityV1::build(dir.path(), principal).expect("locked build");
+        disarm_audit_lock_proof();
+        assert_eq!(
+            hits.load(std::sync::atomic::Ordering::SeqCst),
+            3,
+            "the three Auth reads did not all run while the audit lock was held"
+        );
+
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let saver = std::thread::spawn({
+            let data = dir.path().to_path_buf();
+            let stop = std::sync::Arc::clone(&stop);
+            move || {
+                let mut index = 0u64;
+                while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    auth::append_audit_event(
+                        &data,
+                        elastos_runtime::auth::RuntimeAuditEventV1 {
+                            schema: elastos_runtime::auth::RuntimeAuditEventV1::SCHEMA.to_string(),
+                            event_id: format!("audit:build-race:{index}"),
+                            event_type: "test.audit".to_string(),
+                            principal_id: Some(principal.to_string()),
+                            proof_binding_id: None,
+                            session_id: Some("session:test".to_string()),
+                            challenge_id: None,
+                            capsule_id: Some("system".to_string()),
+                            result: "allowed".to_string(),
+                            reason: format!("build race {index}"),
+                            occurred_at: index + 1,
+                            signer_did: None,
+                            signature: None,
+                        },
+                    )
+                    .expect("audit save");
+                    index += 1;
+                }
+                index
+            }
+        });
+        let mut builds = 0u32;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while builds < 25 && std::time::Instant::now() < deadline {
+            ObjectAuthorityV1::build(dir.path(), principal).expect("build beside an audit save");
+            builds += 1;
+        }
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        let saves = saver.join().expect("saver");
+        assert!(
+            builds >= 25,
+            "{builds} builds finished beside {saves} audit saves"
+        );
+        assert!(saves >= 1, "{saves} audit saves ran beside the builds");
     }
 }

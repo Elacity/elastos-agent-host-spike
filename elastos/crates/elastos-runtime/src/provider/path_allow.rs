@@ -32,16 +32,18 @@ pub(crate) struct HelperConfinement {
 /// is the parameter for `ElastOS/SystemServices/Library`.
 ///
 /// `Users` and `UsersAI` hold caller-chosen object names and stay writable.
-/// `ElastOS/System` is read-only, including `ElastOS/System/Auth`: the helper
-/// reads auth state and the recovery key and does not write them. The
-/// published-CID index under `ElastOS/SystemServices/Library` is the one
-/// SystemServices directory this helper may write. Home creates it before
-/// the helper starts and leaves it owner-only.
+/// This slice still grants `ElastOS/System`, so the sign-in folder is inside
+/// the object helper's roots. The helper reads the per-request envelope.
+/// Piece 3 removes `ElastOS/System` from these roots. The published-CID index
+/// under `ElastOS/SystemServices/Library` is the one SystemServices directory
+/// this helper may write. Home creates it before the helper starts and leaves
+/// it owner-only.
 ///
 /// Linux Landlock cannot exclude a child of a granted directory. Localhost
 /// still grants `ElastOS`, so `ElastOS/SystemServices/Wallet` stays inside
 /// that grant on Linux. macOS adds a Seatbelt deny for that wallet directory
-/// after the `ElastOS` allow. The object helper does not grant `ElastOS`.
+/// after the `ElastOS` allow. The object helper grants `ElastOS/System`, not
+/// the rest of `ElastOS`.
 const OBJECT_ROOTS: &[(&str, &str)] = &[
     ("ElastOS_System", "ElastOS/System"),
     ("Users", "Users"),

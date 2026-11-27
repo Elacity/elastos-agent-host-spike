@@ -493,6 +493,19 @@ pub(crate) fn hold_audit_activation_lock_for_test(
     );
 }
 
+/// `true` when this call acquired the process lock. A builder that already
+/// holds it makes this return `false`.
+#[cfg(test)]
+pub(crate) fn try_audit_activation_lock_for_test(data_dir: &Path) -> bool {
+    match audit_chain_activation_mutex(data_dir).try_lock() {
+        Ok(guard) => {
+            drop(guard);
+            true
+        }
+        Err(_) => false,
+    }
+}
+
 pub(crate) fn principal_root_object_mutation_lock(data_dir: &Path) -> &'static Mutex<()> {
     home_mutex(&PRINCIPAL_ROOT_OBJECT_LOCKS, data_dir)
 }
@@ -4898,10 +4911,45 @@ pub(crate) fn load_audit_chain_activation_unlocked(
     Ok(Some(activation))
 }
 
+std::thread_local! {
+    static AUDIT_ACTIVATION_LOCK_MARKS: std::cell::RefCell<Vec<PathBuf>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Remembers that this thread already holds the audit lock for one data
+/// directory. `build_for` holds that lock across root resolution and the
+/// protection read, and both of those call this function again.
+struct AuditActivationLockMark(PathBuf);
+
+impl AuditActivationLockMark {
+    fn enter(key: PathBuf) -> Self {
+        AUDIT_ACTIVATION_LOCK_MARKS.with(|held| held.borrow_mut().push(key.clone()));
+        Self(key)
+    }
+}
+
+impl Drop for AuditActivationLockMark {
+    fn drop(&mut self) {
+        AUDIT_ACTIVATION_LOCK_MARKS.with(|held| {
+            let mut held = held.borrow_mut();
+            if let Some(index) = held.iter().rposition(|path| path == &self.0) {
+                held.remove(index);
+            }
+        });
+    }
+}
+
 pub(crate) fn with_audit_chain_activation_lock<T>(
     data_dir: &Path,
     operation: impl FnOnce() -> anyhow::Result<T>,
 ) -> anyhow::Result<T> {
+    let key = auth_state_cache_key(data_dir);
+    let reentered =
+        AUDIT_ACTIVATION_LOCK_MARKS.with(|held| held.borrow().iter().any(|path| path == &key));
+    if reentered {
+        return operation();
+    }
+    let _mark = AuditActivationLockMark::enter(key);
     let _guard = audit_chain_activation_mutex(data_dir)
         .lock()
         .map_err(|_| anyhow!("audit activation lock poisoned"))?;
