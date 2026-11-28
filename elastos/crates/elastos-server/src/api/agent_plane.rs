@@ -190,6 +190,8 @@ impl AgentPlane {
     /// whether that session actually ended and whether a plan effect is still
     /// in flight. A caller signs `ok` only from those two facts.
     pub(crate) async fn shutdown(mut self) -> Vec<EndedGuest> {
+        let register = self.runtime.register_gate.lock().await;
+        self.runtime.close_start_generation();
         let capsules = self.runtime.list_capsules().await;
         let mut ids = std::collections::HashSet::new();
         for info in &capsules {
@@ -234,6 +236,7 @@ impl AgentPlane {
                 effect_inflight,
             });
         }
+        drop(register);
         self.server.abort();
         let _ = tokio::time::timeout(Duration::from_secs(2), &mut self.watcher).await;
         ended
@@ -414,6 +417,9 @@ fn retiring_runtime(data_dir: &Path) -> Option<Arc<crate::runtime::Runtime>> {
 }
 
 async fn runtime_busy(runtime: &crate::runtime::Runtime) -> bool {
+    if runtime.admitted_load_in_flight() {
+        return true;
+    }
     if runtime.any_plan_effect_inflight() {
         return true;
     }

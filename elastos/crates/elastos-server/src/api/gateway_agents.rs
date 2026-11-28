@@ -922,7 +922,14 @@ pub(super) async fn agents_disable(
     headers: HeaderMap,
 ) -> Response {
     let disabled = agents_set_enabled(&state, &headers, false);
-    if disabled.is_ok() {
+    let stop_off = match &disabled {
+        Ok(_) => true,
+        Err(error) => {
+            crate::agents::refusal_text(error).is_none()
+                && !crate::agents::home_enabled(&state.data_dir)
+        }
+    };
+    if stop_off {
         let owner = agents_owner(&state, &headers).ok();
         let data = state.data_dir.clone();
         let ended = finish_live_stop(
@@ -1138,14 +1145,23 @@ pub(super) async fn agents_activate(
     let result = async {
         let owner = agents_owner(&state, &headers)?;
         let request: ActiveRequest = agents_request(&body)?;
-        let active = crate::agents::set_active(
+        let stored = crate::agents::set_active(
             &state.data_dir,
             &owner.caller(),
             &request.agent_id,
             request.active,
             now_ts(),
-        )?;
-        if !request.active {
+        );
+        let turn_off = match &stored {
+            Ok(_) => !request.active,
+            Err(error) => {
+                !request.active
+                    && crate::agents::refusal_text(error).is_none()
+                    && crate::agents::agent_marked_active(&state.data_dir, &request.agent_id)
+                        == Some(false)
+            }
+        };
+        if turn_off {
             // Turning this agent off ends its run. The owed stop is recorded
             // before the grant revoke, which can end the guest before Stop.
             let data = state.data_dir.clone();
@@ -1216,7 +1232,7 @@ pub(super) async fn agents_activate(
             ))?;
             crate::resource_bridge::notify_plan_waiters();
         }
-        Ok(active)
+        stored
     }
     .await;
     agents_response(result)
@@ -1588,7 +1604,6 @@ fn owner_may_stop(
 
 /// A demote that did not come through the route. Another remaining admin
 /// signs the same stop. The route's own stop is claimed and does not reach here.
-#[cfg(test)]
 pub(super) fn schedule_demoted_owner_stop(data_dir: &std::path::Path, owner_id: &str) {
     let Some(other) = crate::agent_record_audit::another_live_admin(data_dir, owner_id) else {
         tracing::warn!("demoted owner '{owner_id}' still has agents and no admin to sign the stop");

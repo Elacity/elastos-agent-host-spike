@@ -280,7 +280,6 @@ fn confirm_nonce() -> u64 {
 }
 
 /// Another admin with a live passkey. `owner_id` is not a candidate.
-#[cfg(test)]
 pub(crate) fn another_live_admin(
     data_dir: &Path,
     owner_id: &str,

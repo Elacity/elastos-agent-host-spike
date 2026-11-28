@@ -146,6 +146,30 @@ pub(crate) fn home_enabled(data_dir: &Path) -> bool {
         .unwrap_or(false)
 }
 
+/// `Some` when the agent file is present: whether agents are on.
+/// `Some(false)` when that file cannot be read. `None` when there is no file.
+pub(crate) fn stored_home_enabled(data_dir: &Path) -> Option<bool> {
+    let path = agent_file_path(data_dir).ok()?;
+    if !path.is_file() {
+        return None;
+    }
+    match open(data_dir, false) {
+        Ok(opened) => Some(opened.file.enabled.is_some()),
+        Err(_) => Some(false),
+    }
+}
+
+/// The stored `active` flag, when this agent is in the file.
+pub(crate) fn agent_marked_active(data_dir: &Path, agent_id: &str) -> Option<bool> {
+    let opened = open(data_dir, false).ok()?;
+    opened
+        .file
+        .agents
+        .iter()
+        .find(|agent| agent.record.principal_id == agent_id)
+        .map(|agent| agent.active)
+}
+
 fn build_allows_for_home(data_dir: &Path) -> bool {
     build_allows() || {
         #[cfg(all(test, unix))]
@@ -2354,14 +2378,31 @@ pub(crate) fn owner_is_admin_now(data_dir: &Path, owner_id: &str) -> anyhow::Res
     Ok(admin && (!passkey || live_passkey))
 }
 
-#[cfg(test)]
 type OwnerDemotedHook = fn(&Path, &str);
-#[cfg(test)]
 static OWNER_DEMOTED_HOOK: std::sync::LazyLock<std::sync::Mutex<Option<OwnerDemotedHook>>> =
     std::sync::LazyLock::new(|| std::sync::Mutex::new(None));
 
+thread_local! {
+    static SUPPRESS_OWNER_DEMOTED: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Holds the direct-demote stop off for the HTTP route, which stops itself.
+pub(crate) struct OwnerDemotedHold;
+
+impl OwnerDemotedHold {
+    pub(crate) fn suppress() -> Self {
+        SUPPRESS_OWNER_DEMOTED.with(|flag| flag.set(true));
+        Self
+    }
+}
+
+impl Drop for OwnerDemotedHold {
+    fn drop(&mut self) {
+        SUPPRESS_OWNER_DEMOTED.with(|flag| flag.set(false));
+    }
+}
+
 /// The gateway registers the stop that a direct demote runs.
-#[cfg(test)]
 pub(crate) fn set_owner_demoted_hook(hook: fn(&Path, &str)) {
     *OWNER_DEMOTED_HOOK
         .lock()
@@ -2369,8 +2410,10 @@ pub(crate) fn set_owner_demoted_hook(hook: fn(&Path, &str)) {
 }
 
 /// After a direct demote outside the HTTP route, run the registered stop.
-#[cfg(test)]
 pub(crate) fn notify_owner_demoted(data_dir: &Path, owner_id: &str) {
+    if SUPPRESS_OWNER_DEMOTED.with(|flag| flag.get()) {
+        return;
+    }
     if ids_owned_by(data_dir, owner_id).is_empty() {
         return;
     }

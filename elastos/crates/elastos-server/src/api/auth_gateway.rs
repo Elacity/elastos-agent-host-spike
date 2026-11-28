@@ -1091,6 +1091,29 @@ async fn passkey_list_inner(
     })
 }
 
+#[cfg(test)]
+static PASSKEY_REVOKE_FOLLOWUP: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashSet<std::path::PathBuf>>,
+> = std::sync::LazyLock::new(Default::default);
+
+/// The next last-passkey revoke stores the revocation, then fails the
+/// credential removal before any later audit row.
+#[cfg(all(test, unix, feature = "prototype-agents"))]
+pub(in crate::api) fn fail_next_passkey_revoke_followup(data_dir: &std::path::Path) {
+    PASSKEY_REVOKE_FOLLOWUP
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+        .insert(data_dir.to_path_buf());
+}
+
+#[cfg(test)]
+fn take_passkey_revoke_followup(data_dir: &std::path::Path) -> bool {
+    PASSKEY_REVOKE_FOLLOWUP
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+        .remove(data_dir)
+}
+
 async fn passkey_revoke_inner(
     state: &GatewayState,
     headers: &HeaderMap,
@@ -1104,7 +1127,7 @@ async fn passkey_revoke_inner(
     // The identity lock serializes every credential-store change with the one
     // auth write that checks and revokes.
     let manager = state.identity_manager()?;
-    let mut manager = manager.lock().await;
+    let manager = manager.lock().await;
     let now = crate::auth::now_ts();
     let actor_record =
         crate::auth::load_principal_for_proof_binding(&state.data_dir, actor_proof_binding_id)?;
@@ -1117,45 +1140,59 @@ async fn passkey_revoke_inner(
         now,
     )?;
     drop(gate);
-    // The credential follows the committed revocation; when an earlier
-    // attempt already removed it, there is nothing left to do.
-    if let Some(credential_id) = manager
+    let credential_id = manager
         .credentials()
         .into_iter()
         .find(|credential| passkey_proof_binding_id(credential) == proof_binding_id)
-        .map(|credential| credential.credential_id)
-    {
-        manager.revoke_credential(&credential_id)?;
-    }
+        .map(|credential| credential.credential_id);
     drop(manager);
-    let actor = context.principal_id().to_string();
-    crate::auth::append_audit_event(
-        &state.data_dir,
-        audit_event(AuditEventInput {
-            event_type: "auth.passkey.revoked",
-            principal_id: Some(actor),
-            proof_binding_id: Some(proof_binding_id.clone()),
-            session_id: Some(context.session_id().to_string()),
-            result: "ok",
-            reason: "passkey credential revoked",
-            occurred_at: now,
-            ..AuditEventInput::default()
-        }),
-    )?;
-    match crate::agents::owner_is_admin_now(&state.data_dir, &revoked.principal_id) {
-        Ok(false) => {
-            super::gateway::stop_agents_after_admin_lost(
-                &state.data_dir,
-                &context,
-                &actor_record,
-                &revoked.principal_id,
-                "passkey revoked",
-            )
-            .await?;
+    let still_admin = crate::agents::owner_is_admin_now(&state.data_dir, &revoked.principal_id);
+    let stopped = if matches!(still_admin, Ok(false)) {
+        super::gateway::stop_agents_after_admin_lost(
+            &state.data_dir,
+            &context,
+            &actor_record,
+            &revoked.principal_id,
+            "passkey revoked",
+        )
+        .await
+    } else {
+        Ok(())
+    };
+    // Credential removal and the audit row run even when the stop failed.
+    // The stop's error is the one the route reports.
+    let follow_up = async {
+        #[cfg(test)]
+        if take_passkey_revoke_followup(&state.data_dir) {
+            anyhow::bail!("injected passkey revoke follow-up failure");
         }
-        Ok(true) => {}
-        Err(error) => return Err(error),
+        // The credential follows the committed revocation; when an earlier
+        // attempt already removed it, there is nothing left to do.
+        let manager = state.identity_manager()?;
+        let mut manager = manager.lock().await;
+        if let Some(credential_id) = credential_id {
+            manager.revoke_credential(&credential_id)?;
+        }
+        drop(manager);
+        let actor = context.principal_id().to_string();
+        crate::auth::append_audit_event(
+            &state.data_dir,
+            audit_event(AuditEventInput {
+                event_type: "auth.passkey.revoked",
+                principal_id: Some(actor),
+                proof_binding_id: Some(proof_binding_id.clone()),
+                session_id: Some(context.session_id().to_string()),
+                result: "ok",
+                reason: "passkey credential revoked",
+                occurred_at: now,
+                ..AuditEventInput::default()
+            }),
+        )?;
+        Ok(())
     }
+    .await;
+    stopped.and(follow_up)?;
+    still_admin?;
 
     let clear_current_cookie = context.proof_binding_id() == Some(proof_binding_id.as_str());
     Ok((
@@ -1237,8 +1274,12 @@ async fn passkey_demote_guest_inner(
 
     let now = crate::auth::now_ts();
     // An Inbox approval reads the owner's role under this same gate.
+    // The route stops the agents itself, so the direct-demote hook stays quiet.
     let gate = super::gateway::grant_answer_gate().lock().await;
-    let demoted = crate::auth::demote_passkey_to_guest(&state.data_dir, &proof_binding_id, now)?;
+    let demoted = {
+        let _hold = crate::agents::OwnerDemotedHold::suppress();
+        crate::auth::demote_passkey_to_guest(&state.data_dir, &proof_binding_id, now)?
+    };
     drop(gate);
     let audited = crate::auth::append_audit_event(
         &state.data_dir,

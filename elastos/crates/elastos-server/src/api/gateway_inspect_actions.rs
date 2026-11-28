@@ -420,6 +420,14 @@ pub(super) fn approve_agent_plan_request(
     if let Some(block) = agent_plan_approval_block(&state.data_dir, request_id) {
         anyhow::bail!(block);
     }
+    if let Ok(record) = read_inspect_action_record(&state.data_dir, request_id) {
+        if record.kind == AGENT_PLAN_KIND
+            && record.status == "pending"
+            && now_ts().saturating_sub(record.created_at) >= PLAN_DECISION_SECS
+        {
+            anyhow::bail!("agent plan is expired and cannot be approved");
+        }
+    }
     store::claim_pending_agent_plan_for_owner(
         &state.data_dir,
         request_id,

@@ -4,7 +4,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 #[cfg(test)]
 use std::sync::atomic::AtomicBool;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, RwLock as StdRwLock};
 use tokio::sync::RwLock;
 
@@ -295,6 +295,53 @@ struct AgentModelCeiling {
     key: AgentKey,
 }
 
+/// One admitted Start that has not registered its guest yet.
+struct AdmittedLoad {
+    generation: u64,
+    token: u64,
+    data_dir: PathBuf,
+}
+
+/// Drops this Start's admitted-load note. A later Start for the same agent
+/// has its own token, so this drop leaves that note in place.
+struct AdmittedLoadGuard<'a> {
+    runtime: &'a Runtime,
+    agent_id: String,
+    token: u64,
+}
+
+impl Drop for AdmittedLoadGuard<'_> {
+    fn drop(&mut self) {
+        self.runtime
+            .finish_admitted_load(&self.agent_id, self.token);
+    }
+}
+
+impl<'a> AdmittedLoadGuard<'a> {
+    fn begin(runtime: &'a Runtime, agent_id: &str, data_dir: &Path) -> Self {
+        static LOAD_TOKENS: AtomicU64 = AtomicU64::new(1);
+        let generation = runtime.start_generation.load(Ordering::Acquire);
+        let token = LOAD_TOKENS.fetch_add(1, Ordering::Relaxed);
+        runtime
+            .admitted_loads
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .insert(
+                agent_id.to_string(),
+                AdmittedLoad {
+                    generation,
+                    token,
+                    data_dir: data_dir.to_path_buf(),
+                },
+            );
+        Self {
+            runtime,
+            agent_id: agent_id.to_string(),
+            token,
+        }
+    }
+}
+
 /// The main ElastOS runtime
 pub struct Runtime {
     // Keep the storage provider alive for runtime/lifecycle ownership even
@@ -338,6 +385,12 @@ pub struct Runtime {
     /// a turn.
     live_runs: Arc<StdMutex<AgentLiveRuns>>,
     launch_turns: Arc<StdMutex<HashMap<String, LaunchTurn>>>,
+    /// Admitted Starts that have not registered yet. Off raises
+    /// `start_generation` under `register_gate` before it reads the guest
+    /// list, so a Start still loading cannot register after Off.
+    start_generation: AtomicU64,
+    admitted_loads: StdMutex<HashMap<String, AdmittedLoad>>,
+    pub(crate) register_gate: tokio::sync::Mutex<()>,
     /// Reference to the component provider for ABI-specific launch.
     component_provider: Option<Arc<ComponentProvider>>,
     /// Per-launch manifest capability ceilings for capsule bridge requests.
@@ -2166,6 +2219,9 @@ impl Runtime {
             plan_book: new_plan_book(),
             live_runs: Arc::new(StdMutex::new(AgentLiveRuns::default())),
             launch_turns: Arc::new(StdMutex::new(HashMap::new())),
+            start_generation: AtomicU64::new(0),
+            admitted_loads: StdMutex::new(HashMap::new()),
+            register_gate: tokio::sync::Mutex::new(()),
             component_provider: None,
             bridge_manifest_capabilities: Arc::new(StdRwLock::new(HashMap::new())),
             bridge_model_token_ceilings: Arc::new(StdRwLock::new(HashMap::new())),
@@ -2199,6 +2255,9 @@ impl Runtime {
             plan_book: new_plan_book(),
             live_runs: Arc::new(StdMutex::new(AgentLiveRuns::default())),
             launch_turns: Arc::new(StdMutex::new(HashMap::new())),
+            start_generation: AtomicU64::new(0),
+            admitted_loads: StdMutex::new(HashMap::new()),
+            register_gate: tokio::sync::Mutex::new(()),
             component_provider,
             bridge_manifest_capabilities: Arc::new(StdRwLock::new(HashMap::new())),
             bridge_model_token_ceilings: Arc::new(StdRwLock::new(HashMap::new())),
@@ -2691,6 +2750,44 @@ impl Runtime {
             .await
     }
 
+    fn finish_admitted_load(&self, agent_id: &str, token: u64) {
+        let mut loads = self
+            .admitted_loads
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        if loads.get(agent_id).is_some_and(|load| load.token == token) {
+            loads.remove(agent_id);
+        }
+    }
+
+    pub(crate) fn admitted_load_in_flight(&self) -> bool {
+        !self
+            .admitted_loads
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .is_empty()
+    }
+
+    pub(crate) fn close_start_generation(&self) {
+        self.start_generation.fetch_add(1, Ordering::AcqRel);
+    }
+
+    fn admitted_register_refused(&self, agent_id: &str) -> bool {
+        let (generation, data_dir) = {
+            let loads = self
+                .admitted_loads
+                .lock()
+                .unwrap_or_else(|err| err.into_inner());
+            let Some(load) = loads.get(agent_id) else {
+                return false;
+            };
+            (load.generation, load.data_dir.clone())
+        };
+        let generation_closed = self.start_generation.load(Ordering::Acquire) != generation;
+        let turned_off = crate::agents::stored_home_enabled(&data_dir) == Some(false);
+        generation_closed || turned_off
+    }
+
     /// Consume the short grant once. One live run for this agent refuses
     /// another start. The run is admitted under `live_runs` before any await
     /// that follows, and that admission does not read the registry, so a
@@ -2708,6 +2805,7 @@ impl Runtime {
                 crate::resource_bridge::PLAN_WAIT_FULL.into(),
             ));
         }
+        let _admitted = AdmittedLoadGuard::begin(self, facts.agent_id, facts.data_dir);
         let capsules = &self.running_capsules;
         let turn = self.launch_turn(facts.agent_id);
         let _turn = turn.lock().await;
@@ -4722,6 +4820,18 @@ impl Runtime {
 
         if let Some(component) = detached_component {
             let id = handle.id.clone();
+            let _register = if plan_agent.is_some() {
+                Some(self.register_gate.lock().await)
+            } else {
+                None
+            };
+            if let Some(agent_id) = plan_agent.as_deref() {
+                if self.admitted_register_refused(agent_id) {
+                    return Err(ElastosError::InvalidManifest(
+                        crate::agents::NOT_ENABLED.to_string(),
+                    ));
+                }
+            }
             self.register_capsule(RunningCapsuleInfo {
                 id: id.0.clone(),
                 name: handle.manifest.name.clone(),
@@ -4739,6 +4849,7 @@ impl Runtime {
             if let Some(agent_id) = plan_agent {
                 self.bind_plan_instance(&id.0, &agent_id);
             }
+            drop(_register);
             self.watch_activation(
                 id,
                 handle.clone(),

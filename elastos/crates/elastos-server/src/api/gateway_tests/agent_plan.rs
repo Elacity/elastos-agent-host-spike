@@ -146,6 +146,13 @@ fn submit_with_bounds(
     now: u64,
     bounds: Option<Vec<elastos_common::AuthorityBound>>,
 ) -> serde_json::Value {
+    // A fixture clock below a real unix time is a fresh plan. The expiry row
+    // passes an age of PLAN_DECISION_SECS, which stays above this floor.
+    let now = if now > 1_000_000_000 {
+        now
+    } else {
+        crate::auth::now_ts()
+    };
     let record = submit_pending_agent_plan(
         dir,
         owner,
@@ -1748,6 +1755,9 @@ fn planted_plan(now: u64) -> (tempfile::TempDir, String, String) {
     );
     let created = submit(dir.path(), &owner.principal_id, &agent_id, read_plan(), now);
     let request_id = created["request_id"].as_str().unwrap().to_string();
+    let mut record = read_record(dir.path(), &request_id);
+    record["created_at"] = json!(now);
+    write_record(dir.path(), &request_id, &record);
     (dir, owner.principal_id, request_id)
 }
 
@@ -1821,6 +1831,62 @@ async fn agent_off_closes_that_agents_pending_plan() {
     crate::api::gateway::close_agent_plans(dir.path(), &agent_id, "agent off").unwrap();
     assert_eq!(plan_status(dir.path(), &request_id), "agent off");
     assert!(chain_has(dir.path(), "agent.plan.closed", "agent off"));
+}
+
+#[tokio::test]
+async fn approval_refuses_a_plan_past_its_decision_limit() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = gateway_router(routed_agent_plan_state(dir.path()).await);
+    let owner = passkey_authority(dir.path());
+    let requester = "agent:v2:expired-plan";
+    let agent_id =
+        if crate::agents::stored_agent(dir.path(), &owner.principal_id, requester).is_ok() {
+            requester.to_string()
+        } else {
+            crate::agents::tests::plant_for_dispatch(
+                dir.path(),
+                &owner.principal_id,
+                &owner.principal_id,
+            )
+        };
+    let token = app_token_for_authority(dir.path(), INBOX_CAPSULE_ID, &owner);
+    let created_at =
+        crate::auth::now_ts().saturating_sub(super::gateway_inspect_actions::PLAN_DECISION_SECS);
+    let created = submit(
+        dir.path(),
+        &owner.principal_id,
+        &agent_id,
+        read_plan(),
+        created_at,
+    );
+    let request_id = created["request_id"].as_str().unwrap();
+    if created["request"]["scheme"] == "availability" {
+        grant_admin_for_record(&created).await;
+    }
+    let card = owner_card(&app, &token, request_id).await;
+    let passkey = step_up_token_for_app_context(
+        dir.path(),
+        INBOX_CAPSULE_ID,
+        &token,
+        "agent_plan.approve",
+        &json!({ "request_id": request_id }),
+    );
+    let (status, body) = post_action(
+        &app,
+        &token,
+        approve_body(request_id, &card["request_binding"], Some(&passkey)),
+    )
+    .await;
+    assert_ne!(status, StatusCode::OK, "{body}");
+    assert!(
+        body.contains("expired"),
+        "approval of a plan past 300 seconds did not say expired: {body}"
+    );
+    assert_eq!(
+        read_record(dir.path(), request_id)["status"],
+        "pending",
+        "{body}"
+    );
 }
 
 #[tokio::test]

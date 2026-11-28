@@ -8080,7 +8080,7 @@ pub fn demote_passkey_to_guest(
     proof_binding_id: &str,
     updated_at: u64,
 ) -> anyhow::Result<PrincipalRecord> {
-    mutate_auth_state(data_dir, |state| {
+    let demoted = mutate_auth_state(data_dir, |state| {
         let index = active_passkey_role_target(state, proof_binding_id)?;
         let target = &state.principals[index];
         if target.role != RuntimePrincipalRole::Admin {
@@ -8104,7 +8104,9 @@ pub fn demote_passkey_to_guest(
             RuntimePrincipalRole::Guest,
             updated_at,
         ))
-    })
+    })?;
+    crate::agents::notify_owner_demoted(data_dir, &demoted.principal_id);
+    Ok(demoted)
 }
 
 pub fn ensure_recovered_root_reassignable(
