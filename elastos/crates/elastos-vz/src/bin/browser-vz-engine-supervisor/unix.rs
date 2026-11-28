@@ -7596,11 +7596,10 @@ mod tests {
 
     #[test]
     fn bridge_propagates_runtime_eof_to_guest_and_exits() {
+        let event_timeout = Duration::from_secs(60);
         let (mut guest_client, guest_bridge) = UnixStream::pair().unwrap();
         let (runtime_bridge, mut runtime_client) = UnixStream::pair().unwrap();
-        guest_client
-            .set_read_timeout(Some(Duration::from_secs(2)))
-            .unwrap();
+        guest_client.set_read_timeout(Some(event_timeout)).unwrap();
         let (done_tx, done_rx) = mpsc::channel();
 
         let bridge = thread::spawn(move || {
@@ -7622,11 +7621,11 @@ mod tests {
         assert_eq!(&response, b"pong");
         let mut eof = [0_u8; 1];
         assert_eq!(guest_client.read(&mut eof).unwrap(), 0);
-        // EOF is already in hand. The idle direction notices `done` on its
-        // 250ms read timeout; joining that thread took more than 2s once
-        // while the Studio workspace suite was running.
+        // Wait for both real events: guest EOF above, then bridge completion.
+        // Leave scheduling headroom for a loaded host at each blocking wait;
+        // the bridge's I/O polling interval is not a thread completion bound.
         done_rx
-            .recv_timeout(Duration::from_secs(15))
+            .recv_timeout(event_timeout)
             .expect("VZ egress bridge should close after Runtime EOF");
 
         let (guest_to_runtime, runtime_to_guest) = bridge.join().unwrap().unwrap();
