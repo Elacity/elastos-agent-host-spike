@@ -34,6 +34,10 @@ pub(crate) fn repair_recorded_audit(
     if present {
         return Ok(());
     }
+    #[cfg(test)]
+    if crate::api::gateway::seams::persistent_record_fault(data_dir) == Some("audit") {
+        anyhow::bail!("injected persistent agent record audit failure");
+    }
     crate::auth::append_audit_event(
         data_dir,
         RuntimeAuditEventV1 {

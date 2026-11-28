@@ -326,14 +326,13 @@ impl<'a> AdmittedLoadGuard<'a> {
             .admitted_loads
             .lock()
             .unwrap_or_else(|err| err.into_inner())
-            .insert(
-                agent_id.to_string(),
-                AdmittedLoad {
-                    generation,
-                    token,
-                    data_dir: data_dir.to_path_buf(),
-                },
-            );
+            .entry(agent_id.to_string())
+            .or_default()
+            .push(AdmittedLoad {
+                generation,
+                token,
+                data_dir: data_dir.to_path_buf(),
+            });
         Self {
             runtime,
             agent_id: agent_id.to_string(),
@@ -388,8 +387,10 @@ pub struct Runtime {
     /// Admitted Starts that have not registered yet. Off raises
     /// `start_generation` under `register_gate` before it reads the guest
     /// list, so a Start still loading cannot register after Off.
+    /// Every in-flight Start for one id keeps its own note. Dropping one
+    /// does not erase the others.
     start_generation: AtomicU64,
-    admitted_loads: StdMutex<HashMap<String, AdmittedLoad>>,
+    admitted_loads: StdMutex<HashMap<String, Vec<AdmittedLoad>>>,
     pub(crate) register_gate: tokio::sync::Mutex<()>,
     /// Reference to the component provider for ABI-specific launch.
     component_provider: Option<Arc<ComponentProvider>>,
@@ -2755,17 +2756,21 @@ impl Runtime {
             .admitted_loads
             .lock()
             .unwrap_or_else(|err| err.into_inner());
-        if loads.get(agent_id).is_some_and(|load| load.token == token) {
+        let Some(list) = loads.get_mut(agent_id) else {
+            return;
+        };
+        list.retain(|load| load.token != token);
+        if list.is_empty() {
             loads.remove(agent_id);
         }
     }
 
     pub(crate) fn admitted_load_in_flight(&self) -> bool {
-        !self
-            .admitted_loads
+        self.admitted_loads
             .lock()
             .unwrap_or_else(|err| err.into_inner())
-            .is_empty()
+            .values()
+            .any(|list| !list.is_empty())
     }
 
     pub(crate) fn close_start_generation(&self) {
@@ -2773,19 +2778,24 @@ impl Runtime {
     }
 
     fn admitted_register_refused(&self, agent_id: &str) -> bool {
-        let (generation, data_dir) = {
+        let (generation_closed, dirs) = {
             let loads = self
                 .admitted_loads
                 .lock()
                 .unwrap_or_else(|err| err.into_inner());
-            let Some(load) = loads.get(agent_id) else {
-                return false;
+            let Some(list) = loads.get(agent_id).filter(|list| !list.is_empty()) else {
+                return true;
             };
-            (load.generation, load.data_dir.clone())
+            let current = self.start_generation.load(Ordering::Acquire);
+            let generation_closed = list.iter().any(|load| load.generation != current);
+            let dirs: Vec<PathBuf> = list.iter().map(|load| load.data_dir.clone()).collect();
+            (generation_closed, dirs)
         };
-        let generation_closed = self.start_generation.load(Ordering::Acquire) != generation;
-        let turned_off = crate::agents::stored_home_enabled(&data_dir) == Some(false);
-        generation_closed || turned_off
+        if generation_closed {
+            return true;
+        }
+        dirs.iter()
+            .any(|dir| crate::agents::stored_home_enabled(dir) == Some(false))
     }
 
     /// Consume the short grant once. One live run for this agent refuses
@@ -2806,6 +2816,8 @@ impl Runtime {
             ));
         }
         let _admitted = AdmittedLoadGuard::begin(self, facts.agent_id, facts.data_dir);
+        #[cfg(test)]
+        self.live_run_await("admitted").await;
         let capsules = &self.running_capsules;
         let turn = self.launch_turn(facts.agent_id);
         let _turn = turn.lock().await;

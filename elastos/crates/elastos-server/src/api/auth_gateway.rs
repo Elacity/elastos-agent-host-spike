@@ -1098,7 +1098,7 @@ static PASSKEY_REVOKE_FOLLOWUP: std::sync::LazyLock<
 
 /// The next last-passkey revoke stores the revocation, then fails the
 /// credential removal before any later audit row.
-#[cfg(all(test, unix, feature = "prototype-agents"))]
+#[cfg(test)]
 pub(in crate::api) fn fail_next_passkey_revoke_followup(data_dir: &std::path::Path) {
     PASSKEY_REVOKE_FOLLOWUP
         .lock()
@@ -1112,6 +1112,14 @@ fn take_passkey_revoke_followup(data_dir: &std::path::Path) -> bool {
         .lock()
         .unwrap_or_else(|err| err.into_inner())
         .remove(data_dir)
+}
+
+#[cfg(test)]
+#[test]
+fn the_revoke_followup_hook_can_be_armed() {
+    let dir = std::env::temp_dir();
+    fail_next_passkey_revoke_followup(&dir);
+    assert!(take_passkey_revoke_followup(&dir));
 }
 
 async fn passkey_revoke_inner(
@@ -1278,7 +1286,7 @@ async fn passkey_demote_guest_inner(
     let gate = super::gateway::grant_answer_gate().lock().await;
     let demoted = {
         let _hold = crate::agents::OwnerDemotedHold::suppress();
-        crate::auth::demote_passkey_to_guest(&state.data_dir, &proof_binding_id, now)?
+        crate::agents::demote_passkey_and_stop_owner(&state.data_dir, &proof_binding_id, now)?
     };
     drop(gate);
     let audited = crate::auth::append_audit_event(

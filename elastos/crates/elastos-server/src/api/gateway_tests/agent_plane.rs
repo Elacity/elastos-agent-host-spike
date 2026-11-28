@@ -2963,6 +2963,153 @@ async fn agent_off_stops_the_guest_when_the_record_audit_fails() {
 }
 
 #[tokio::test]
+async fn agents_off_stops_the_guest_when_the_record_audit_keeps_failing() {
+    let (home, dir) = live_home();
+    let agent = home.create_agent("Live", &sign_probe(&dir));
+    let gateway = Gateway::start(&home.data).await;
+    let session = home.launch(&agent, &dir).await;
+    let mut up = false;
+    for _ in 0..50 {
+        if capsule_live(&gateway.agent_url, &gateway.secret, &session).await {
+            up = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(up, "guest is up before agents off");
+    let runtime = crate::api::agent_plane::plane_runtime(&home.data).expect("plane");
+    super::seams::arm_persistent_record_fault(&home.data, "audit");
+    let (status, body) = post_json(
+        &gateway.addr,
+        &system_token(&home),
+        "/api/apps/system/agents/disable",
+        "{}",
+    )
+    .await;
+    assert_ne!(status, 200, "{body}");
+    assert!(
+        body.contains("injected persistent agent record audit failure"),
+        "{body}"
+    );
+    let running = runtime
+        .list_capsules()
+        .await
+        .iter()
+        .any(|info| info.session_id == session && info.ended_at.is_none());
+    assert!(
+        !running,
+        "agents off left the guest running when the record audit kept failing"
+    );
+    gateway.shutdown().await;
+}
+
+#[tokio::test]
+async fn agent_off_stops_the_guest_when_the_confirmation_write_keeps_failing() {
+    let (home, dir) = live_home();
+    let agent = home.create_agent("Live", &sign_probe(&dir));
+    let gateway = Gateway::start(&home.data).await;
+    let session = home.launch(&agent, &dir).await;
+    let mut up = false;
+    for _ in 0..50 {
+        if capsule_live(&gateway.agent_url, &gateway.secret, &session).await {
+            up = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(up, "guest is up before agent off");
+    super::seams::arm_persistent_record_fault(&home.data, "confirm");
+    let (status, body) = post_json(
+        &gateway.addr,
+        &system_token(&home),
+        "/api/apps/system/agents/activate",
+        &json!({ "agent_id": agent, "active": false }).to_string(),
+    )
+    .await;
+    assert_ne!(status, 200, "{body}");
+    assert!(
+        body.contains("injected persistent agent record confirmation failure"),
+        "{body}"
+    );
+    assert!(
+        !capsule_live(&gateway.agent_url, &gateway.secret, &session).await,
+        "agent off left the guest running when the confirmation write kept failing"
+    );
+    gateway.shutdown().await;
+}
+
+#[tokio::test]
+async fn an_unauthenticated_or_guest_caller_cannot_turn_agents_off() {
+    let (home, dir) = live_home();
+    let agent = home.create_agent("Live", &sign_probe(&dir));
+    let gateway = Gateway::start(&home.data).await;
+    let session = home.launch(&agent, &dir).await;
+    let mut up = false;
+    for _ in 0..50 {
+        if capsule_live(&gateway.agent_url, &gateway.secret, &session).await {
+            up = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(up, "guest is up before the refused Off");
+    let plan = super::super::gateway_inspect_actions::submit_pending_agent_plan(
+        &home.data,
+        &home.owner,
+        &agent,
+        HOST,
+        &session,
+        &step_plan(),
+        crate::auth::now_ts(),
+    )
+    .unwrap();
+    let plan_id = plan["request_id"].as_str().unwrap();
+    crate::agents::set_enabled(&home.data, &home.caller(), false, crate::auth::now_ts()).unwrap();
+    let anonymous = reqwest::Client::new()
+        .post(format!(
+            "http://{}/api/apps/system/agents/disable",
+            gateway.addr
+        ))
+        .header("host", &gateway.addr)
+        .header("origin", "null")
+        .header("content-type", "application/json")
+        .body("{}")
+        .send()
+        .await
+        .unwrap();
+    let status = anonymous.status().as_u16();
+    let body = anonymous.text().await.unwrap();
+    assert_eq!(status, 403, "{body}");
+    assert!(
+        body.contains("missing home launch token")
+            || body == "Gateway request requires an admitted host and caller",
+        "{body}"
+    );
+    let guest = super::passkey_authority_with_name_role_credential(
+        &home.data,
+        Some("Guest"),
+        crate::auth::RuntimePrincipalRole::Guest,
+        "r30-off-guest",
+    );
+    let (status, body) = post_json(
+        &gateway.addr,
+        &guest.system_token,
+        "/api/apps/system/agents/disable",
+        "{}",
+    )
+    .await;
+    assert_eq!(status, 403, "{body}");
+    assert!(body.contains("admin passkey required"), "{body}");
+    let stored = plan_file(&home.data, plan_id);
+    assert_eq!(stored["status"], "pending", "{stored}");
+    assert!(
+        capsule_live(&gateway.agent_url, &gateway.secret, &session).await,
+        "a refused Off stopped the guest"
+    );
+    gateway.shutdown().await;
+}
+
+#[tokio::test]
 async fn last_passkey_revoke_stops_the_guest_when_the_follow_up_fails() {
     let home = Home::open();
     let owner = super::passkey_authority_with_name_role_credential(
@@ -3079,6 +3226,86 @@ async fn agents_off_refuses_a_start_that_is_still_loading() {
 }
 
 #[tokio::test]
+async fn a_second_start_dropped_while_waiting_cannot_let_the_first_register_after_off() {
+    let (home, dir) = live_home();
+    let agent = home.create_agent("Loading", &sign_probe(&dir));
+    let gateway = Gateway::start(&home.data).await;
+    let runtime = crate::api::agent_plane::plane_runtime(&home.data).expect("plane");
+    let first = runtime.arm_live_run_await("load");
+    let data = home.data.clone();
+    let grant = super::super::gateway_home_token::issue_home_agent_launch_token_with_context(
+        &home.data,
+        &agent,
+        HOST,
+        &home.context,
+    )
+    .unwrap();
+    let launch_dir = dir.clone();
+    let launch_agent = agent.clone();
+    let started = tokio::spawn(async move {
+        super::super::gateway_home_runtime::launch_runtime_agent(
+            &data,
+            &launch_dir,
+            &launch_agent,
+            &grant,
+        )
+        .await
+    });
+    tokio::time::timeout(Duration::from_secs(20), first.entered.notified())
+        .await
+        .expect("the first start did not reach load");
+    let second = runtime.arm_live_run_await("admitted");
+    let data = home.data.clone();
+    let grant = super::super::gateway_home_token::issue_home_agent_launch_token_with_context(
+        &home.data,
+        &agent,
+        HOST,
+        &home.context,
+    )
+    .unwrap();
+    let launch_dir = dir.clone();
+    let launch_agent = agent.clone();
+    let dropped = tokio::spawn(async move {
+        super::super::gateway_home_runtime::launch_runtime_agent(
+            &data,
+            &launch_dir,
+            &launch_agent,
+            &grant,
+        )
+        .await
+    });
+    tokio::time::timeout(Duration::from_secs(20), second.entered.notified())
+        .await
+        .expect("the second start did not reach admitted");
+    dropped.abort();
+    let _ = tokio::time::timeout(Duration::from_secs(5), dropped).await;
+    let (status, body) = post_json(
+        &gateway.addr,
+        &system_token(&home),
+        "/api/apps/system/agents/disable",
+        "{}",
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    first.release.notify_one();
+    let result = tokio::time::timeout(Duration::from_secs(20), started)
+        .await
+        .expect("the first start did not finish")
+        .expect("start task");
+    assert!(
+        result.is_err(),
+        "the first Start registered after a second Start was dropped"
+    );
+    let running = runtime
+        .list_capsules()
+        .await
+        .iter()
+        .any(|info| info.ended_at.is_none());
+    assert!(!running, "a guest registered after Off");
+    gateway.shutdown().await;
+}
+
+#[tokio::test]
 async fn another_admin_stops_an_agent_whose_owner_was_demoted_directly() {
     let home = Home::open();
     let owner = super::passkey_authority_with_name_role_credential(
@@ -3106,7 +3333,7 @@ async fn another_admin_stops_an_agent_whose_owner_was_demoted_directly() {
             .await
             .unwrap()
             .session_id;
-    let demoted = crate::auth::demote_passkey_to_guest(
+    let demoted = crate::agents::demote_passkey_and_stop_owner(
         &home.data,
         &owner.proof_binding_id,
         crate::auth::now_ts(),

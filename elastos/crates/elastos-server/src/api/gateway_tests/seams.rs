@@ -53,6 +53,20 @@ pub(crate) fn take_record_audit(data_dir: &Path) -> bool {
     guard(&RECORD_AUDIT).remove(data_dir)
 }
 
+static PERSISTENT_RECORD: LazyLock<Mutex<HashMap<PathBuf, &'static str>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Stays armed. `audit` fails the record append. `confirm` fails the
+/// confirmation write. A later write of this Home hits the same fault.
+#[cfg(all(unix, feature = "prototype-agents"))]
+pub(crate) fn arm_persistent_record_fault(data_dir: &Path, kind: &'static str) {
+    guard(&PERSISTENT_RECORD).insert(data_dir.to_path_buf(), kind);
+}
+
+pub(crate) fn persistent_record_fault(data_dir: &Path) -> Option<&'static str> {
+    guard(&PERSISTENT_RECORD).get(data_dir).copied()
+}
+
 /// `crash` is the gap after the approval row and before the mint.
 /// The other fault is a failed approval append.
 pub(crate) fn arm_grant_fault(data_dir: &Path, crash: bool) {

@@ -159,17 +159,6 @@ pub(crate) fn stored_home_enabled(data_dir: &Path) -> Option<bool> {
     }
 }
 
-/// The stored `active` flag, when this agent is in the file.
-pub(crate) fn agent_marked_active(data_dir: &Path, agent_id: &str) -> Option<bool> {
-    let opened = open(data_dir, false).ok()?;
-    opened
-        .file
-        .agents
-        .iter()
-        .find(|agent| agent.record.principal_id == agent_id)
-        .map(|agent| agent.active)
-}
-
 fn build_allows_for_home(data_dir: &Path) -> bool {
     build_allows() || {
         #[cfg(all(test, unix))]
@@ -1045,6 +1034,10 @@ fn open_for(data_dir: &Path, for_write: bool, wait: Option<Duration>) -> anyhow:
                 audit.confirmed = true;
             }
             let updated = serde_json::to_vec_pretty(&file)?;
+            #[cfg(test)]
+            if crate::api::gateway::seams::persistent_record_fault(data_dir) == Some("confirm") {
+                anyhow::bail!("injected persistent agent record confirmation failure");
+            }
             crate::auth::atomic_write(&agent_file_path(data_dir)?, &updated)?;
         }
     }
@@ -1407,6 +1400,10 @@ fn write(
     if crate::api::gateway::seams::take_record_audit(data_dir) {
         anyhow::bail!("injected agent record audit failure");
     }
+    #[cfg(test)]
+    if crate::api::gateway::seams::persistent_record_fault(data_dir) == Some("audit") {
+        anyhow::bail!("injected persistent agent record audit failure");
+    }
     let digest = hex::encode(Sha256::digest(&bytes));
     crate::auth::append_audit_event(
         data_dir,
@@ -1430,6 +1427,10 @@ fn write(
         audit.confirmed = true;
     }
     // Same sequence as the audited write. The hash in the row is the first file.
+    #[cfg(test)]
+    if crate::api::gateway::seams::persistent_record_fault(data_dir) == Some("confirm") {
+        anyhow::bail!("injected persistent agent record confirmation failure");
+    }
     let confirmed = serde_json::to_vec_pretty(&recorded)?;
     crate::auth::atomic_write(&agent_file_path(data_dir)?, &confirmed)?;
     Ok(())
@@ -2407,6 +2408,19 @@ pub(crate) fn set_owner_demoted_hook(hook: fn(&Path, &str)) {
     *OWNER_DEMOTED_HOOK
         .lock()
         .unwrap_or_else(|err| err.into_inner()) = Some(hook);
+}
+
+/// Demote one admin passkey, then stop that owner's agents when this call
+/// is not the HTTP route. The route holds `OwnerDemotedHold` and stops them
+/// itself, so this notification stays quiet there.
+pub(crate) fn demote_passkey_and_stop_owner(
+    data_dir: &Path,
+    proof_binding_id: &str,
+    updated_at: u64,
+) -> anyhow::Result<crate::auth::PrincipalRecord> {
+    let demoted = crate::auth::demote_passkey_to_guest(data_dir, proof_binding_id, updated_at)?;
+    notify_owner_demoted(data_dir, &demoted.principal_id);
+    Ok(demoted)
 }
 
 /// After a direct demote outside the HTTP route, run the registered stop.

@@ -434,16 +434,6 @@ fn agents_request<T: serde::de::DeserializeOwned>(body: &Bytes) -> anyhow::Resul
         .map_err(|error| Refused(format!("agent request is invalid: {error}")).into())
 }
 
-fn agents_set_enabled(
-    state: &GatewayState,
-    headers: &HeaderMap,
-    enabled: bool,
-) -> anyhow::Result<serde_json::Value> {
-    let owner = agents_owner(state, headers)?;
-    let enabled = crate::agents::set_enabled(&state.data_dir, &owner.caller(), enabled, now_ts())?;
-    Ok(serde_json::json!({ "enabled": enabled }))
-}
-
 pub(super) async fn agents_enable(
     State(state): State<GatewayState>,
     headers: HeaderMap,
@@ -771,9 +761,39 @@ async fn owe_for_stop(data_dir: &std::path::Path, request: &StopRequest<'_>) -> 
     Ok(())
 }
 
-/// Every live-session end: owe the stop, stop the session, sign
-/// `agent.stopped`, then clear the owed record. A failure between those
+/// The sessions this Off already ended. Written after the guest is down, so a
+/// failed record audit cannot skip the stop. A crash before the signature
+/// still leaves the debt for restart.
+fn owe_reported(
+    data_dir: &std::path::Path,
+    request: &StopRequest<'_>,
+    report: &LiveEnd,
+) -> anyhow::Result<()> {
+    let Some(actor) = request.actor else {
+        return Ok(());
+    };
+    let rows: Vec<_> = report
+        .runs
+        .iter()
+        .map(|run| {
+            owed_stop_row(
+                data_dir,
+                actor,
+                &run.agent_id,
+                &run.session_id,
+                request.cause,
+            )
+        })
+        .collect();
+    crate::agents::note_stop_rows(data_dir, &rows)
+}
+
+/// Every live-session end owes the stop, stops the session, signs
+/// `agent.stopped`, then clears the owed record. A failure between those
 /// steps leaves the owed record. Restart signs that record once.
+/// Agents Off and one agent Off stop and revoke first. The record write and
+/// the owed stop run after that, and a failure there is reported with the
+/// guest already down.
 async fn finish_live_stop<B, F, Fut>(
     data_dir: &std::path::Path,
     request: &StopRequest<'_>,
@@ -787,7 +807,10 @@ where
 {
     let lock = home_async_lock(data_dir, "finish");
     let _held = lock.lock().await;
-    owe_for_stop(data_dir, request).await?;
+    let stop_first = matches!(request.cause, "agents off" | "agent off");
+    if !stop_first {
+        owe_for_stop(data_dir, request).await?;
+    }
     before_stop()?;
     let (report, plan_close) = match stop().await {
         Ok(pair) => pair,
@@ -810,6 +833,9 @@ where
             return Err(error);
         }
     };
+    if stop_first {
+        owe_reported(data_dir, request, &report)?;
+    }
     #[cfg(test)]
     if crate::api::gateway::seams::take_grant_kind(data_dir, "after-stop")
         || crate::api::gateway::seams::take_grant_kind(data_dir, "after-off-stop")
@@ -921,61 +947,79 @@ pub(super) async fn agents_disable(
     State(state): State<GatewayState>,
     headers: HeaderMap,
 ) -> Response {
-    let disabled = agents_set_enabled(&state, &headers, false);
-    let stop_off = match &disabled {
-        Ok(_) => true,
+    let owner = match agents_owner(&state, &headers) {
+        Ok(owner) => owner,
         Err(error) => {
-            crate::agents::refusal_text(error).is_none()
-                && !crate::agents::home_enabled(&state.data_dir)
+            return agents_response(Err(error) as anyhow::Result<serde_json::Value>);
         }
     };
-    if stop_off {
-        let owner = agents_owner(&state, &headers).ok();
-        let data = state.data_dir.clone();
-        let ended = finish_live_stop(
-            &state.data_dir,
-            &StopRequest {
-                actor: owner.as_ref(),
-                agent_id: None,
-                session_id: None,
-                cause: "agents off",
-                reason: None,
-                sign_failed: true,
-                idle_ok: false,
-            },
-            || Ok(()),
-            || {
-                let data = data.clone();
-                async move {
-                    let (guests, closed) = crate::api::agent_plane::stop_running(&data).await;
-                    let plan = closed.err();
-                    Ok((live_end_of_guests(guests), plan))
-                }
-            },
-        )
-        .await;
-        let ended = match ended {
-            Ok(ended) => ended,
-            Err(error) => {
-                crate::resource_bridge::notify_plan_waiters();
-                return agents_response(Err(error) as anyhow::Result<serde_json::Value>);
+    let recorded = std::sync::Arc::new(std::sync::Mutex::new(None::<anyhow::Result<bool>>));
+    let slot = std::sync::Arc::clone(&recorded);
+    let principal_id = owner.principal.principal_id.clone();
+    let proof_binding_id = owner.principal.proof_binding_id.clone();
+    let session_id = owner.context.session_id().to_string();
+    let data = state.data_dir.clone();
+    let ended = finish_live_stop(
+        &state.data_dir,
+        &StopRequest {
+            actor: Some(&owner),
+            agent_id: None,
+            session_id: None,
+            cause: "agents off",
+            reason: None,
+            sign_failed: true,
+            idle_ok: false,
+        },
+        || Ok(()),
+        || {
+            let data = data.clone();
+            let slot = std::sync::Arc::clone(&slot);
+            let principal_id = principal_id.clone();
+            let proof_binding_id = proof_binding_id.clone();
+            let session_id = session_id.clone();
+            async move {
+                let (guests, closed) = crate::api::agent_plane::stop_running(&data).await;
+                let caller = crate::agents::Caller {
+                    principal_id: &principal_id,
+                    proof_binding_id: &proof_binding_id,
+                    session_id: &session_id,
+                };
+                let written = crate::agents::set_enabled(&data, &caller, false, now_ts());
+                *slot.lock().unwrap_or_else(|err| err.into_inner()) = Some(written);
+                Ok((live_end_of_guests(guests), closed.err()))
             }
-        };
-        if ended.runs.is_empty() {
-            if let Err(error) = confirm_stopping_rows(&state.data_dir).await {
-                crate::resource_bridge::notify_plan_waiters();
-                return agents_response(Err(error) as anyhow::Result<serde_json::Value>);
-            }
-        }
-        if let Err(error) = recorded_plan_close(crate::api::gateway::close_home_plans(
-            &state.data_dir,
-            "agents off",
-        )) {
+        },
+    )
+    .await;
+    let ended = match ended {
+        Ok(ended) => ended,
+        Err(error) => {
             crate::resource_bridge::notify_plan_waiters();
             return agents_response(Err(error) as anyhow::Result<serde_json::Value>);
         }
-        crate::resource_bridge::notify_plan_waiters();
+    };
+    if ended.runs.is_empty() {
+        if let Err(error) = confirm_stopping_rows(&state.data_dir).await {
+            crate::resource_bridge::notify_plan_waiters();
+            return agents_response(Err(error) as anyhow::Result<serde_json::Value>);
+        }
     }
+    if let Err(error) = recorded_plan_close(crate::api::gateway::close_home_plans(
+        &state.data_dir,
+        "agents off",
+    )) {
+        crate::resource_bridge::notify_plan_waiters();
+        return agents_response(Err(error) as anyhow::Result<serde_json::Value>);
+    }
+    crate::resource_bridge::notify_plan_waiters();
+    let disabled = match recorded
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+        .take()
+    {
+        Some(result) => result.map(|enabled| serde_json::json!({ "enabled": enabled })),
+        None => Err(anyhow::anyhow!("agents off did not record the switch")),
+    };
     agents_response(disabled)
 }
 
@@ -1137,6 +1181,71 @@ pub(super) async fn agents_rename(
     }))
 }
 
+/// A named refusal for turning one agent off, before any guest is stopped.
+fn refuse_agent_off_before_stop(
+    data_dir: &std::path::Path,
+    owner: &AgentsOwner,
+    agent_id: &str,
+) -> anyhow::Result<()> {
+    if !crate::agents::home_enabled(data_dir) {
+        return Err(crate::agents::Refused(crate::agents::NOT_ENABLED.to_string()).into());
+    }
+    let agent =
+        crate::agents::stored_agent_for_stop(data_dir, &owner.principal.principal_id, agent_id)?;
+    if agent.record.retired_at.is_some() {
+        return Err(crate::agents::Refused(crate::agents::ALREADY_RETIRED.to_string()).into());
+    }
+    Ok(())
+}
+
+/// Revoke this agent's grants and stop its guest. The record write follows.
+async fn stop_one_agent_for_off(
+    data_dir: &std::path::Path,
+    agent_id: &str,
+) -> anyhow::Result<LiveEnd> {
+    let data = data_dir.to_path_buf();
+    let agent = agent_id.to_string();
+    let prior = match crate::api::agent_plane::plane_runtime(&data) {
+        Some(runtime) => runtime.live_sessions_for_agent(&agent).await,
+        None => Vec::new(),
+    };
+    crate::api::agent_plane::revoke_agent_grants(&data, &agent).await;
+    let outcome = match stop_runtime_agent(&data, &agent).await {
+        Ok(outcome) => outcome,
+        Err(error) if stop_is_a_refusal(&error) => Default::default(),
+        Err(error) => {
+            tracing::warn!("agent off stop failed: {error:#}");
+            return Err(error);
+        }
+    };
+    if !outcome.stopped.is_empty() || !outcome.stopping.is_empty() {
+        return Ok(live_end(&agent, outcome));
+    }
+    let Some(runtime) = crate::api::agent_plane::plane_runtime(&data) else {
+        return Ok(empty_end());
+    };
+    let mut built = super::gateway_home_runtime::RuntimeAgentStop::default();
+    for session_id in prior {
+        let info = runtime.get_capsule(&session_id).await;
+        let ended = info.as_ref().is_none_or(|info| info.ended_at.is_some());
+        let inflight = runtime.plan_effect_inflight(&session_id);
+        let status = info
+            .map(|info| info.status)
+            .unwrap_or_else(|| "stopped".to_string());
+        let row = super::gateway_home_runtime::StoppedRuntimeAgent {
+            session_id,
+            status,
+            ended,
+        };
+        if ended && !inflight {
+            built.stopped.push(row);
+        } else {
+            built.stopping.push(row);
+        }
+    }
+    Ok(live_end(&agent, built))
+}
+
 pub(super) async fn agents_activate(
     State(state): State<GatewayState>,
     headers: HeaderMap,
@@ -1145,94 +1254,73 @@ pub(super) async fn agents_activate(
     let result = async {
         let owner = agents_owner(&state, &headers)?;
         let request: ActiveRequest = agents_request(&body)?;
-        let stored = crate::agents::set_active(
-            &state.data_dir,
-            &owner.caller(),
-            &request.agent_id,
-            request.active,
-            now_ts(),
-        );
-        let turn_off = match &stored {
-            Ok(_) => !request.active,
-            Err(error) => {
-                !request.active
-                    && crate::agents::refusal_text(error).is_none()
-                    && crate::agents::agent_marked_active(&state.data_dir, &request.agent_id)
-                        == Some(false)
-            }
-        };
-        if turn_off {
-            // Turning this agent off ends its run. The owed stop is recorded
-            // before the grant revoke, which can end the guest before Stop.
-            let data = state.data_dir.clone();
-            let agent = request.agent_id.clone();
-            finish_live_stop(
+        if request.active {
+            return crate::agents::set_active(
                 &state.data_dir,
-                &StopRequest {
-                    actor: Some(&owner),
-                    agent_id: Some(&request.agent_id),
-                    session_id: None,
-                    cause: "agent off",
-                    reason: None,
-                    sign_failed: true,
-                    idle_ok: false,
-                },
-                || Ok(()),
-                || {
-                    let data = data.clone();
-                    let agent = agent.clone();
-                    async move {
-                        let prior = match crate::api::agent_plane::plane_runtime(&data) {
-                            Some(runtime) => runtime.live_sessions_for_agent(&agent).await,
-                            None => Vec::new(),
-                        };
-                        crate::api::agent_plane::revoke_agent_grants(&data, &agent).await;
-                        let outcome = match stop_runtime_agent(&data, &agent).await {
-                            Ok(outcome) => outcome,
-                            Err(error) if stop_is_a_refusal(&error) => Default::default(),
-                            Err(error) => {
-                                tracing::warn!("agent off stop failed: {error:#}");
-                                return Err(error);
-                            }
-                        };
-                        if !outcome.stopped.is_empty() || !outcome.stopping.is_empty() {
-                            return plain_end(live_end(&agent, outcome));
-                        }
-                        let Some(runtime) = crate::api::agent_plane::plane_runtime(&data) else {
-                            return plain_end(empty_end());
-                        };
-                        let mut built = super::gateway_home_runtime::RuntimeAgentStop::default();
-                        for session_id in prior {
-                            let info = runtime.get_capsule(&session_id).await;
-                            let ended = info.as_ref().is_none_or(|info| info.ended_at.is_some());
-                            let inflight = runtime.plan_effect_inflight(&session_id);
-                            let status = info
-                                .map(|info| info.status)
-                                .unwrap_or_else(|| "stopped".to_string());
-                            let row = super::gateway_home_runtime::StoppedRuntimeAgent {
-                                session_id,
-                                status,
-                                ended,
-                            };
-                            if ended && !inflight {
-                                built.stopped.push(row);
-                            } else {
-                                built.stopping.push(row);
-                            }
-                        }
-                        plain_end(live_end(&agent, built))
-                    }
-                },
-            )
-            .await?;
-            recorded_plan_close(crate::api::gateway::close_agent_plans(
-                &state.data_dir,
+                &owner.caller(),
                 &request.agent_id,
-                "agent off",
-            ))?;
-            crate::resource_bridge::notify_plan_waiters();
+                true,
+                now_ts(),
+            );
         }
-        stored
+        refuse_agent_off_before_stop(&state.data_dir, &owner, &request.agent_id)?;
+        let recorded = std::sync::Arc::new(std::sync::Mutex::new(
+            None::<anyhow::Result<crate::agents::AgentView>>,
+        ));
+        let slot = std::sync::Arc::clone(&recorded);
+        let principal_id = owner.principal.principal_id.clone();
+        let proof_binding_id = owner.principal.proof_binding_id.clone();
+        let session_id = owner.context.session_id().to_string();
+        let data = state.data_dir.clone();
+        let agent = request.agent_id.clone();
+        finish_live_stop(
+            &state.data_dir,
+            &StopRequest {
+                actor: Some(&owner),
+                agent_id: Some(&request.agent_id),
+                session_id: None,
+                cause: "agent off",
+                reason: None,
+                sign_failed: true,
+                idle_ok: false,
+            },
+            || Ok(()),
+            || {
+                let data = data.clone();
+                let agent = agent.clone();
+                let slot = std::sync::Arc::clone(&slot);
+                let principal_id = principal_id.clone();
+                let proof_binding_id = proof_binding_id.clone();
+                let session_id = session_id.clone();
+                async move {
+                    let end = stop_one_agent_for_off(&data, &agent).await?;
+                    let caller = crate::agents::Caller {
+                        principal_id: &principal_id,
+                        proof_binding_id: &proof_binding_id,
+                        session_id: &session_id,
+                    };
+                    let written =
+                        crate::agents::set_active(&data, &caller, &agent, false, now_ts());
+                    *slot.lock().unwrap_or_else(|err| err.into_inner()) = Some(written);
+                    plain_end(end)
+                }
+            },
+        )
+        .await?;
+        recorded_plan_close(crate::api::gateway::close_agent_plans(
+            &state.data_dir,
+            &request.agent_id,
+            "agent off",
+        ))?;
+        crate::resource_bridge::notify_plan_waiters();
+        let written = recorded
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .take();
+        match written {
+            Some(written) => written,
+            None => Err(anyhow::anyhow!("agent off did not record the switch")),
+        }
     }
     .await;
     agents_response(result)

@@ -8105,7 +8105,6 @@ pub fn demote_passkey_to_guest(
             updated_at,
         ))
     })?;
-    crate::agents::notify_owner_demoted(data_dir, &demoted.principal_id);
     Ok(demoted)
 }
 
