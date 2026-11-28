@@ -54,8 +54,7 @@ fn unfenced(sources: &BTreeMap<String, String>) -> Vec<String> {
         // renamed wrapper with a generic `binary` argument.
         let fixture = file.contains("custody")
             || text.contains("CARGO_BIN_EXE_custody-provider")
-            || file.ends_with("protected_content_runtime/tests.rs")
-            || file.ends_with("custody_test_support.rs");
+            || file.ends_with("protected_content_runtime/tests.rs");
         for (start, _) in code.match_indices("fn ") {
             let Some(open) = code[start..].find('{').map(|offset| start + offset) else {
                 continue;

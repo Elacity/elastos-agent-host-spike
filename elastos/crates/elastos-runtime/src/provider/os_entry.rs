@@ -53,7 +53,7 @@ pub struct Launched {
     /// The verified copy sandbox-exec runs. The bridge holds it while the
     /// provider lives, so the checked bytes are the bytes that start.
     #[cfg(all(not(elastos_unsupported_os_check), target_os = "macos"))]
-    pub prepared: super::checked_executable::PreparedExecutable,
+    pub(super) prepared: super::checked_executable::PreparedExecutable,
 }
 
 #[cfg(all(
