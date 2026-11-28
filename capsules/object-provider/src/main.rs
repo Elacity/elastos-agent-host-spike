@@ -6,7 +6,9 @@
 
 use elastos_server::Zeroize;
 use serde_json::{json, Value};
-use std::io::{self, BufRead, Write};
+#[cfg(not(unix))]
+use std::io::BufRead;
+use std::io::{self, Write};
 use std::path::PathBuf;
 
 const PROVIDER_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -146,18 +148,76 @@ fn response_error(code: &str, message: &str) -> Value {
     })
 }
 
+#[cfg(unix)]
+fn read_fd_line(
+    leftover: &mut elastos_server::Zeroizing<Vec<u8>>,
+    line: &mut elastos_server::Zeroizing<Vec<u8>>,
+) -> std::io::Result<usize> {
+    line.clear();
+    loop {
+        if let Some(pos) = leftover.iter().position(|byte| *byte == b'\n') {
+            line.extend_from_slice(&leftover[..=pos]);
+            let mut rest = leftover.split_off(pos + 1);
+            leftover.zeroize();
+            leftover.clear();
+            leftover.append(&mut rest);
+            return Ok(line.len());
+        }
+        let mut chunk = elastos_server::Zeroizing::new([0u8; 4096]);
+        let read = loop {
+            let n = unsafe { read(0, chunk.as_mut_ptr(), chunk.len()) };
+            if n < 0 {
+                let err = std::io::Error::last_os_error();
+                chunk.zeroize();
+                if err.kind() == std::io::ErrorKind::Interrupted {
+                    continue;
+                }
+                return Err(err);
+            }
+            break n;
+        };
+        if read == 0 {
+            line.extend_from_slice(leftover);
+            leftover.zeroize();
+            leftover.clear();
+            chunk.zeroize();
+            return Ok(line.len());
+        }
+        leftover.extend_from_slice(&chunk[..read as usize]);
+        chunk.zeroize();
+    }
+}
+
+#[cfg(unix)]
+unsafe extern "C" {
+    fn read(fd: i32, buf: *mut u8, count: usize) -> isize;
+}
+
 fn main() {
     #[cfg(unix)]
     std::env::set_var("ELASTOS_OBJECT_HELPER", "1");
     eprintln!("object-provider: starting v{PROVIDER_VERSION}");
-    let stdin = io::stdin();
     let mut stdout = io::stdout();
     let mut provider = ObjectProviderProcess::new();
+    #[cfg(unix)]
+    let mut leftover = elastos_server::Zeroizing::new(Vec::new());
+    #[cfg(not(unix))]
+    let stdin = io::stdin();
+    #[cfg(not(unix))]
     let mut stdin = stdin.lock();
     let mut line = elastos_server::Zeroizing::new(Vec::new());
 
     loop {
         line.clear();
+        #[cfg(unix)]
+        let read = match read_fd_line(&mut leftover, &mut line) {
+            Ok(read) => read,
+            Err(err) => {
+                eprintln!("object-provider read error: {err}");
+                break;
+            }
+        };
+        #[cfg(not(unix))]
         let read = match stdin.read_until(b'\n', &mut line) {
             Ok(read) => read,
             Err(err) => {
@@ -194,6 +254,23 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Unix stdin is read with `read` into a wiped chunk. `read_until` stays
+    /// on the non-Unix arm, so a `BufReader` does not keep the line.
+    #[test]
+    fn unix_stdin_does_not_keep_the_line_in_a_buffered_reader() {
+        let source = include_str!("main.rs");
+        let reader = source.find("fn read_fd_line(").expect("unix stdin reader");
+        assert!(
+            source[reader..].contains("fn read("),
+            "the unix reader does not call read"
+        );
+        let until = source.find("read_until(").expect("windows fallback");
+        assert!(
+            source[..until].rfind("cfg(not(unix))").is_some(),
+            "read_until is not confined to the non-unix arm"
+        );
+    }
 
     #[test]
     fn rejects_requests_before_init() {
