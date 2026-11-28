@@ -103,6 +103,7 @@ release() {
   python3 scripts/verify-linux-engine-test.py
   python3 scripts/update-hop-compare-test.py
   python3 .github/scripts/release-mac-capacity-test.py
+  python3 scripts/local-carrier-setup-smoke-redactor.test.py
 }
 
 case "${1:-all}" in

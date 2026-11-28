@@ -24,9 +24,11 @@ concrete wallet/DID journey.
 | `btc-mainnet` | Bitcoin | REST | n/a | typed mempool.space backend |
 
 All default networks support `status`, `block_number`, and `sync_health` reads.
-Operators can override the default Base backend with `BASE_RPC_URL`, and can
-replace `btc-mainnet` with a `bitcoin_core_rpc` network in provider config when
-a local Bitcoin Core node is available.
+Operators can override the default Base backend with `BASE_RPC_URL` in the
+Runtime process environment. Runtime passes that value to the helper in Init
+and does not log it. The helper does not read it from its own environment.
+Operators can replace `btc-mainnet` with a `bitcoin_core_rpc` network in
+provider config when a local Bitcoin Core node is available.
 
 ## Provider Operations
 
@@ -47,7 +49,7 @@ Supported operations are intentionally narrow:
 - `erc1271_is_valid_signature`: verify a smart-account signature with the typed ERC-1271 `isValidSignature(bytes32,bytes)` ABI without exposing arbitrary `eth_call`.
 - `prepare_transaction`: build a typed unsigned EIP-155 legacy EVM transaction intent with nonce, gas price, and gas limit resolved by the provider; the intent requires wallet approval before signing.
 - `broadcast_transaction`: broadcast an already signed EVM transaction through the provider boundary.
-- `node_lifecycle`: report and persist typed node lifecycle status, and run start/stop/restart only for explicit operator-approved loopback supervisor config.
+- `node_lifecycle`: report and persist typed node lifecycle status. Start, stop, and restart are refused. `control_available` stays false.
 
 There is no arbitrary JSON-RPC passthrough. Browser compatibility operations
 such as `contract_call` and `estimate_gas` are still typed provider operations:
@@ -76,7 +78,7 @@ broadcast, and revocation separable.
 | ERC-1271 proof | `elastos://chain/<network>/proof/erc1271` | Provider implemented for typed smart-account signature verification |
 | Transaction prepare | `elastos://chain/<network>/prepare_transaction` | Provider implemented for signable typed EIP-155 legacy EVM transaction intents |
 | Transaction broadcast | `elastos://chain/<network>/broadcast_transaction` | Provider implemented for signed EVM transaction submission |
-| Node lifecycle | `elastos://chain/<network>/node_lifecycle` | Provider status persists typed state and is System-gateway covered; control actions require explicit loopback supervisor config |
+| Node lifecycle | `elastos://chain/<network>/node_lifecycle` | Provider status persists typed state and is System-gateway covered. Start, stop, and restart are refused. `control_available` stays false |
 | Revoke | `elastos://chain/<network>/revoke` | Planned |
 
 Write or broadcast operations must remain behind capability scope, wallet
@@ -135,9 +137,11 @@ infrastructure.
 
 For operator-owned Bitcoin Core, configure a `bitcoin_core_rpc` network with a
 loopback endpoint such as `http://127.0.0.1:8332`. If the node requires
-credentials, set `BITCOIN_RPC_USER` and `BITCOIN_RPC_PASSWORD` in the
-chain-provider runtime environment. Capsules still never receive that URL or
-those credentials.
+credentials, set `BITCOIN_RPC_USER` and `BITCOIN_RPC_PASSWORD` in the Runtime
+process environment. Runtime passes them to the helper in Init and does not
+log them. The helper does not read them from its own environment. Capsules
+still never receive that URL or those credentials. `BITCOIN_REST_URL` in the
+same environment overrides the default Bitcoin REST backend the same way.
 
 Additional local nodes should be added behind the same provider contract:
 
@@ -168,25 +172,25 @@ capability:
 - `managed`: persisted provider classification for the backend, retained with
   the lifecycle timestamps.
 - `first_seen_at` / `updated_at`: persisted status timestamps.
-- `control_available`: `true` only when the backend is loopback and an
-  operator-approved supervisor command set exists for that network.
-- `control_reason`: human-readable reason control is unavailable or configured.
+- `control_available`: stays false. Admission refuses `node_supervisor`.
+- `control_reason`: human-readable reason control is unavailable.
 
-Start, stop, and restart use explicit argv command config. The provider never
-accepts shell strings, never returns the command path, and never persists or
-returns raw node RPC URLs, credentials, ports, or process handles. Remote
-backends still fail closed for lifecycle control even if supervisor config is
-present.
+Start, stop, and restart are refused with `managed_node_unavailable`. The
+provider does not run an operator program, does not accept shell strings, and
+does not return a command path, raw node RPC URLs, credentials, ports, or
+process handles. A set `node_supervisor` is refused at init with
+`node_supervisor_refused`, before any stored network or supervisor changes.
+The example below is the shape that refusal matches. Null leaves the key unset.
 
-System may render Start, Stop, and Restart controls only from a
-`node_lifecycle` response where `control_available=true`. Public or remote RPC
-networks remain status-only in the UI.
+System does not render Start, Stop, or Restart. `control_available` stays
+false, so those controls stay off. Public or remote RPC networks remain
+status-only in the UI.
 
-Runtime gateway requests for Start, Stop, and Restart are treated as external
-effects. They must be initiated by System authority, executed through the chain
-provider, and recorded as `chain.node_lifecycle.*` audit events for the
-requested and completed/failed phases. Status reads remain typed provider reads
-and do not expose raw node RPC URLs or supervisor command details.
+Runtime gateway requests for Start, Stop, and Restart are refused by the
+provider with `managed_node_unavailable`. The provider does not execute them
+and does not record a completed node action. Status reads remain typed
+provider reads and do not expose raw node RPC URLs or supervisor command
+details.
 
 Example operator config shape:
 

@@ -10269,20 +10269,83 @@ pub(crate) mod tests {
 
     #[cfg(unix)]
     async fn wait_running(runtime: &Runtime, id: &str) {
-        tokio::time::timeout(std::time::Duration::from_secs(15), async {
+        let ended = tokio::time::timeout(std::time::Duration::from_secs(15), async {
             loop {
-                if runtime
-                    .get_capsule(id)
-                    .await
-                    .is_some_and(|info| info.status == CAPSULE_RUNNING)
-                {
-                    return;
+                if let Some(info) = runtime.get_capsule(id).await {
+                    if info.status == CAPSULE_RUNNING {
+                        return None;
+                    }
+                    if info.ended_at.is_some() {
+                        return Some(format!(
+                            "{} {}",
+                            info.status,
+                            info.cause.unwrap_or_default()
+                        ));
+                    }
                 }
                 tokio::task::yield_now().await;
             }
         })
         .await
         .unwrap_or_else(|_| panic!("{id} did not reach running"));
+        if let Some(ended) = ended {
+            panic!("{id} ended before it stayed running: {ended}");
+        }
+    }
+
+    /// The spin's default fuel is gone before a busy runtime can publish
+    /// `running` and record the owner stop. Hold each watcher before
+    /// `start_resident` copies that fuel, give it the stop-target budget,
+    /// then wait until the row is actually `running`.
+    #[cfg(unix)]
+    async fn start_spins_running(
+        runtime: &Arc<Runtime>,
+        folder: &Path,
+        bytes: &Arc<Vec<u8>>,
+        names: &[String],
+    ) -> Vec<String> {
+        let mut holds = Vec::new();
+        for _ in names {
+            holds.push(runtime.arm_watch_pause_for_test("sees-stop"));
+        }
+        let mut starts = Vec::new();
+        for name in names {
+            let runtime = Arc::clone(runtime);
+            let bytes = Arc::clone(bytes);
+            let folder = folder.to_path_buf();
+            let name = name.clone();
+            starts.push(tokio::spawn(async move {
+                start_named(&runtime, &folder, &name, &bytes).await
+            }));
+        }
+        let mut ids = Vec::new();
+        for start in starts {
+            ids.push(start.await.expect("the spin start task"));
+        }
+        for hold in &holds {
+            tokio::time::timeout(std::time::Duration::from_secs(30), hold.entered.notified())
+                .await
+                .expect("the watcher did not reach the start");
+        }
+        let provider = runtime
+            .component_provider
+            .as_ref()
+            .expect("component provider");
+        for id in &ids {
+            assert!(
+                provider
+                    .prepare_stop_target_for_test(&CapsuleId(id.clone()), false)
+                    .await,
+                "{id} was gone before its fuel was set"
+            );
+        }
+        for hold in &holds {
+            hold.release.notify_one();
+        }
+        for id in &ids {
+            wait_running(runtime, id).await;
+        }
+        ids
     }
 
     /// The watcher has entered the open-stop wait, and the row has no cause yet.
@@ -10325,9 +10388,9 @@ pub(crate) mod tests {
         assert_eq!(cause, "stopped: owner", "{id}");
     }
 
-    /// Starts and stops overlap. The watcher is not paused after the outcome.
-    /// Every end is `stopped: owner`. A ticket dropped before commit releases
-    /// the wait.
+    /// 4 starts overlap, 4 stops overlap, and each stop races its own watcher.
+    /// The watcher is not paused after the outcome. Every end is
+    /// `stopped: owner`. A ticket dropped before commit releases the wait.
     #[cfg(unix)]
     #[tokio::test]
     async fn overlapping_owner_stops_record_stopped_owner() {
@@ -10400,15 +10463,12 @@ pub(crate) mod tests {
         }
 
         for wave in 0..(STOPS / WAVE) {
+            let names: Vec<String> = (0..WAVE).map(|slot| format!("run-{wave}-{slot}")).collect();
+            let ids = start_spins_running(&runtime, &folder, &spin, &names).await;
             let mut tasks = Vec::new();
-            for slot in 0..WAVE {
+            for id in ids {
                 let runtime = Arc::clone(&runtime);
-                let bytes = Arc::clone(&spin);
-                let folder = folder.clone();
-                let name = format!("run-{wave}-{slot}");
                 tasks.push(tokio::spawn(async move {
-                    let id = start_named(&runtime, &folder, &name, &bytes).await;
-                    wait_running(&runtime, &id).await;
                     let gate = runtime.arm_pre_commit_stop_gate(&id);
                     let stopping = Arc::clone(&runtime);
                     let stop_id = id.clone();
@@ -10431,8 +10491,11 @@ pub(crate) mod tests {
             }
         }
 
-        let id = start_named(&runtime, &folder, "drop-ticket", &spin).await;
-        wait_running(&runtime, &id).await;
+        let id = start_spins_running(&runtime, &folder, &spin, &[String::from("drop-ticket")])
+            .await
+            .into_iter()
+            .next()
+            .expect("the drop guest");
         let gate = runtime.arm_pre_commit_stop_gate(&id);
         let stopping = Arc::clone(&runtime);
         let stop_id = id.clone();

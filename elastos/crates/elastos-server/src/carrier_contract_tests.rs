@@ -25,7 +25,8 @@ use sha2::{Digest, Sha256};
 
 #[cfg(unix)]
 use crate::carrier::{
-    start_carrier_node_with_registry, CarrierGossipProvider, CarrierNode, CarrierProviderInvoker,
+    start_isolated_carrier_node_with_registry, CarrierGossipProvider, CarrierNode,
+    CarrierProviderInvoker,
 };
 
 #[cfg(unix)]
@@ -166,9 +167,12 @@ impl CurrentCarrier {
         let sender_registry = Arc::new(ProviderRegistry::new());
         let receiver_registry = Arc::new(ProviderRegistry::new());
         crate::library::publish_cid_for_test(receiver_dir.path(), &content_cid(FILE_BYTES));
-        let (sender_key, sender_did) = elastos_identity::derive_did(&[211; 32]);
-        let (receiver_key, receiver_did) = elastos_identity::derive_did(&[212; 32]);
-        let sender_node = start_carrier_node_with_registry(
+        let mut seed = [0u8; 32];
+        getrandom::getrandom(&mut seed).expect("contract carrier seed");
+        let (sender_key, sender_did) = elastos_identity::derive_did(&seed);
+        seed[31] ^= 0xff;
+        let (receiver_key, receiver_did) = elastos_identity::derive_did(&seed);
+        let sender_node = start_isolated_carrier_node_with_registry(
             &sender_key,
             &sender_did,
             sender_dir.path().to_path_buf(),
@@ -176,7 +180,7 @@ impl CurrentCarrier {
         )
         .await
         .unwrap();
-        let receiver_node = start_carrier_node_with_registry(
+        let receiver_node = start_isolated_carrier_node_with_registry(
             &receiver_key,
             &receiver_did,
             receiver_dir.path().to_path_buf(),
@@ -552,7 +556,10 @@ fn claimed_did_body() -> String {
 
 #[cfg(unix)]
 fn unknown_did() -> String {
-    elastos_identity::derive_did(&[214; 32]).1
+    // Seed 214 is a live Home in other carrier tests, and mDNS dials it.
+    let mut seed = [0u8; 32];
+    getrandom::getrandom(&mut seed).expect("unknown DID seed");
+    elastos_identity::derive_did(&seed).1
 }
 
 #[cfg(unix)]
@@ -624,7 +631,10 @@ async fn r3_request_reply_responder_unknown_did(carrier: &dyn CarrierUnderTest) 
         .request_reply(&unknown_did(), b"wrong peer")
         .await
         .unwrap_err();
-    assert!(matches!(refused, ProviderError::Unavailable(_)));
+    assert!(
+        matches!(refused, ProviderError::Unavailable(_)),
+        "{refused:?}"
+    );
     assert_eq!(carrier.remote_calls(), calls);
 }
 
@@ -802,7 +812,10 @@ async fn f3_file_request_responder_unknown_did(carrier: &dyn CarrierUnderTest) {
         .request_file(&cid, &unknown_did())
         .await
         .unwrap_err();
-    assert!(matches!(refused, ProviderError::Unavailable(_)));
+    assert!(
+        matches!(refused, ProviderError::Unavailable(_)),
+        "{refused:?}"
+    );
     assert_eq!(carrier.remote_calls(), calls);
 }
 

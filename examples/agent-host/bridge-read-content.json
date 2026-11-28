@@ -1,0 +1,9 @@
+[
+  {"bytes": [], "binary": false, "content": []},
+  {"bytes": [], "binary": true, "content": {"b64": ""}},
+  {"bytes": [97], "binary": true, "content": {"b64": "YQ=="}},
+  {"bytes": [97, 98], "binary": true, "content": {"b64": "YWI="}},
+  {"bytes": [97, 98, 99], "binary": true, "content": {"b64": "YWJj"}},
+  {"bytes": [0, 255], "binary": false, "content": [0, 255]},
+  {"bytes": [0, 255], "binary": true, "content": {"b64": "AP8="}}
+]

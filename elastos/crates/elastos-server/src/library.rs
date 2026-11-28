@@ -3979,6 +3979,11 @@ fn library_target(data_dir: &Path, principal_id: &str, uri: &str) -> anyhow::Res
         crate::auth::ResolvedPrincipalRoot::resolve(data_dir, data_dir, principal_id)?
             .localhost_root()
             .to_string();
+    crate::auth_state_files::refuse_object_helper_recovery_key_create(
+        data_dir,
+        principal_id,
+        &localhost_root,
+    )?;
     library_target_from_root(data_dir, &localhost_root, uri)
 }
 
@@ -4042,6 +4047,10 @@ fn clean_library_uri(localhost_root: &str, uri: &str) -> anyhow::Result<String> 
     Ok(uri)
 }
 
+pub fn object_helper_init_extra(did: &str) -> Value {
+    json!({ "runtime_did": did })
+}
+
 /// The start walk's folder-depth rule for Library writes (#449). Home does
 /// not start while a protected folder is 16 or more folders below its root,
 /// so Library refuses to create such a file or folder, by write, upload,
@@ -4049,35 +4058,60 @@ fn clean_library_uri(localhost_root: &str, uri: &str) -> anyhow::Result<String> 
 struct StartWalkRule {
     localhost_root: String,
     inventory: Vec<crate::auth::PrincipalRootProtectedObjectDeclarationV1>,
+    unread: Option<String>,
 }
 
 impl StartWalkRule {
     fn new(data_dir: &Path, localhost_root: &str) -> Self {
+        // The helper cannot read the grants; `check` covers every root there.
+        let unread = if elastos_identity::object_helper_process() {
+            None
+        } else {
+            crate::api::capsule_inventory::read_active_storage_grants(data_dir).err()
+        };
         Self {
             localhost_root: localhost_root.to_string(),
             inventory: crate::api::auth_gateway::principal_root_protected_object_inventory(
                 data_dir,
                 localhost_root,
             ),
+            unread,
         }
     }
 
     fn file(&self, uri: &str) -> anyhow::Result<()> {
-        crate::auth::refuse_principal_root_depth_breach(
-            &self.localhost_root,
-            &self.inventory,
-            uri,
-            false,
-        )
+        self.check(uri, false)
     }
 
     fn folder(&self, uri: &str) -> anyhow::Result<()> {
-        crate::auth::refuse_principal_root_depth_breach(
-            &self.localhost_root,
-            &self.inventory,
-            uri,
-            true,
-        )
+        self.check(uri, true)
+    }
+
+    /// The object helper cannot read the capsules' storage grants, and a
+    /// capsule can be installed while Home runs. There, every folder directly
+    /// below the person's root also counts as a start-walk root, so the depth
+    /// bound holds for any root a grant can name.
+    fn check(&self, uri: &str, folder: bool) -> anyhow::Result<()> {
+        if let Some(file) = &self.unread {
+            bail!("library write was not saved: the start-walk rule could not read {file}");
+        }
+        let root = &self.localhost_root;
+        crate::auth::refuse_principal_root_depth_breach(root, &self.inventory, uri, folder)?;
+        if !elastos_identity::object_helper_process() {
+            return Ok(());
+        }
+        let first = uri
+            .strip_prefix(root.as_str())
+            .map(|rest| rest.trim_start_matches('/'));
+        let Some(first) =
+            first.and_then(|rest| rest.split('/').next().filter(|name| !name.is_empty()))
+        else {
+            return Ok(());
+        };
+        let declared = [
+            crate::auth::PrincipalRootProtectedObjectDeclarationV1::root(format!("{root}/{first}")),
+        ];
+        crate::auth::refuse_principal_root_depth_breach(root, &declared, uri, folder)
     }
 
     /// `from` copied or moved to `to_uri`: every file and folder it holds is
@@ -8357,6 +8391,7 @@ fn write_publish_record(
         record,
     )?;
     if active {
+        stop_before_publish_index()?;
         set_published_index_entry(data_dir, principal_id, record, true)?;
     }
     Ok(())
@@ -8619,6 +8654,9 @@ fn remove_publish_record(
 
 /// A plain publication moves with its file on rename and move, so Unpublish
 /// keeps control of it. Protected publications keep their records as before.
+///
+/// The old record goes before the new one, and the index names the new place
+/// only inside that write. A crash in between leaves one record or none.
 fn move_publish_record(
     data_dir: &Path,
     principal_id: &str,
@@ -8631,12 +8669,62 @@ fn move_publish_record(
     if record_is_runtime_custody(&record) {
         return Ok(());
     }
+    if record_is_published(&record) {
+        set_published_index_entry(data_dir, principal_id, &record, false)?;
+    }
+    remove_publish_record(data_dir, principal_id, from_uri)?;
+    stop_before_new_publish_record()?;
     record.object_uri = to_uri.to_string();
     if let Some(object_uri) = record.content_security.get_mut("object_uri") {
         *object_uri = Value::String(to_uri.to_string());
     }
-    write_publish_record(data_dir, principal_id, &record)?;
-    remove_publish_record(data_dir, principal_id, from_uri)
+    write_publish_record(data_dir, principal_id, &record)
+}
+
+#[cfg(test)]
+thread_local! {
+    static MOVE_GAP: std::cell::Cell<u8> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn arm_move_gap(kind: u8) {
+    MOVE_GAP.with(|gap| gap.set(kind));
+}
+
+#[cfg(test)]
+fn take_move_gap(kind: u8) -> bool {
+    MOVE_GAP.with(|gap| {
+        gap.get() == kind && {
+            gap.set(0);
+            true
+        }
+    })
+}
+
+#[cfg(test)]
+fn stop_before_new_publish_record() -> anyhow::Result<()> {
+    if take_move_gap(1) {
+        bail!("move publish stopped before the new record");
+    }
+    Ok(())
+}
+
+#[cfg(not(test))]
+fn stop_before_new_publish_record() -> anyhow::Result<()> {
+    Ok(())
+}
+
+#[cfg(test)]
+fn stop_before_publish_index() -> anyhow::Result<()> {
+    if take_move_gap(2) {
+        bail!("publish index stopped after the record");
+    }
+    Ok(())
+}
+
+#[cfg(not(test))]
+fn stop_before_publish_index() -> anyhow::Result<()> {
+    Ok(())
 }
 
 /// Refuses to delete `uri` (a file, or a folder and everything in it) while it
@@ -8925,6 +9013,103 @@ fn viewer_options_for_name(data_dir: &Path, name: &str) -> Vec<LibraryViewerOpti
         .collect()
 }
 
+/// The fence test writes this key. That file does not spell the product name.
+#[cfg(all(test, not(elastos_unsupported_os_check)))]
+pub(crate) use crate::protected_content_runtime::ENABLED_CONFIG_KEY as PROTECT_HOST_CONFIG_KEY;
+
+/// Fill `viewer`, `viewers`, and the `protect` capability on library objects
+/// the fenced object helper returned.
+///
+/// The helper's roots are `ElastOS/System`, `Users`, `UsersAI`, and
+/// `ElastOS/SystemServices/Library` (the published-CID index only). It does not
+/// receive `components.json`, `capsules`, or `config.toml`. The Runtime reads
+/// those three and writes only these fields. Every other `LibraryObject`
+/// field stays the helper's: `schema`, `uri`, `name`, `kind`, `mime`, `size`,
+/// `created_at`, `modified_at`, `revision`, `thumbnail_uri`, `availability`,
+/// `blocked_reason`, `content_cid`, `published_cid`, `metadata`, `published`,
+/// `publication`, `shared`, and the capabilities the helper already computed.
+pub fn fill_fenced_library_fields(data_dir: &Path, value: &mut Value) {
+    match value {
+        Value::Array(items) => {
+            for item in items {
+                fill_fenced_library_fields(data_dir, item);
+            }
+        }
+        Value::Object(map) => {
+            match map.get("schema").and_then(Value::as_str) {
+                Some(LIBRARY_OBJECT_SCHEMA) => fill_one_fenced_library_object(data_dir, map),
+                Some(LIBRARY_ARCHIVE_PREVIEW_ENTRY_SCHEMA) => {
+                    fill_archive_preview_viewers(data_dir, map);
+                }
+                _ => {}
+            }
+            let nested: Vec<String> = map.keys().cloned().collect();
+            for key in nested {
+                if let Some(child) = map.get_mut(&key) {
+                    fill_fenced_library_fields(data_dir, child);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn write_viewer_fields(map: &mut serde_json::Map<String, Value>, viewers: &[LibraryViewerOption]) {
+    if viewers.is_empty() {
+        map.remove("viewer");
+        map.remove("viewers");
+    } else {
+        map.insert("viewer".to_string(), json!(viewers[0].id));
+        map.insert("viewers".to_string(), json!(viewers));
+    }
+}
+
+fn fill_archive_preview_viewers(data_dir: &Path, map: &mut serde_json::Map<String, Value>) {
+    let path = map
+        .get("entry")
+        .and_then(|entry| entry.get("path"))
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let viewers = viewer_options_for_name(data_dir, &path);
+    if let Some(entry) = map.get_mut("entry").and_then(Value::as_object_mut) {
+        // The unfenced preview always has `viewers`, including an empty list.
+        entry.insert("viewers".to_string(), json!(viewers));
+    }
+}
+
+fn fill_one_fenced_library_object(data_dir: &Path, map: &mut serde_json::Map<String, Value>) {
+    let name = map
+        .get("uri")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    if is_webspace_uri(name.trim_end_matches('/')) {
+        return;
+    }
+    let viewers = viewer_options_for_name(data_dir, &name);
+    write_viewer_fields(map, &viewers);
+    let file = map.get("kind").and_then(Value::as_str) == Some("file");
+    let published = map.get("published").and_then(Value::as_bool) == Some(true);
+    let blocked = map.get("blocked_reason").is_some();
+    let can_publish = map
+        .get("capabilities")
+        .and_then(Value::as_array)
+        .is_some_and(|caps| caps.iter().any(|cap| cap.as_str() == Some("publish")));
+    if file
+        && !published
+        && !blocked
+        && can_publish
+        && crate::protected_content_runtime::protected_content_enabled(data_dir)
+    {
+        if let Some(caps) = map.get_mut("capabilities").and_then(Value::as_array_mut) {
+            if !caps.iter().any(|cap| cap.as_str() == Some("protect")) {
+                caps.push(json!("protect"));
+            }
+        }
+    }
+}
+
 fn viewer_ids_for_name(name: &str) -> Vec<&'static str> {
     let lower = name.to_lowercase();
     if archive_family_for_name(&lower).is_some() {
@@ -9019,6 +9204,65 @@ fn anyhow_error_detail(error: &anyhow::Error) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn archive_preview_viewers_match_the_unfenced_answer_including_an_empty_list() {
+        let data = tempfile::tempdir().unwrap();
+        let capsule = data.path().join("capsules/documents");
+        std::fs::create_dir_all(&capsule).unwrap();
+        std::fs::write(
+            capsule.join("index.html"),
+            "<!doctype html><title>Documents</title>",
+        )
+        .unwrap();
+        std::fs::write(
+            capsule.join("capsule.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "schema": "elastos.capsule/v1",
+                "name": "documents",
+                "version": "0.1.0",
+                "description": "Documents",
+                "author": "elastos",
+                "role": "viewer",
+                "type": "data",
+                "entrypoint": "index.html"
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            data.path().join("components.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "external": {
+                    "documents": { "install_path": "capsules/documents", "platforms": {} }
+                },
+                "capsules": {},
+                "profiles": {}
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        for name in ["note.txt", "blob.bin", ""] {
+            let unfenced = super::viewer_options_for_name(data.path(), name);
+            let mut value = serde_json::json!({
+                "schema": super::LIBRARY_ARCHIVE_PREVIEW_ENTRY_SCHEMA,
+                "entry": { "path": name, "viewers": ["stale"] }
+            });
+            super::fill_fenced_library_fields(data.path(), &mut value);
+            assert_eq!(
+                value["entry"]["viewers"],
+                serde_json::json!(unfenced),
+                "{name}"
+            );
+            assert!(value["entry"].get("viewers").is_some(), "{name}");
+            assert!(value["entry"].get("viewer").is_none(), "{name}");
+        }
+        assert!(
+            !super::viewer_options_for_name(data.path(), "note.txt").is_empty(),
+            "the documents capsule is the unfenced viewer for a text entry"
+        );
+        assert!(super::viewer_options_for_name(data.path(), "blob.bin").is_empty());
+    }
+
     /// A5-S3c-0b, class I: the object provider request no longer carries a
     /// client-named principal; the Runtime supplies the resolved root.
     /// Expected-fail: it deserializes an id. Flipped by A5-S3c-4.
@@ -11052,6 +11296,53 @@ mod publish_tests {
             .await;
         assert_eq!(trash["status"], "ok", "{trash}");
     }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_move_drops_the_old_record_before_the_index_names_the_new_one() {
+        let home = home("did:key:z6MkMoveRecordOrder").await;
+        let from = home.uri("Documents/a.txt");
+        let to = home.uri("Documents/b.txt");
+        let later = home.uri("Documents/c.txt");
+        let record = serde_json::from_value(json!({
+            "schema": "elastos.library.publish-record/v1",
+            "object_uri": from,
+            "cid": "cid-move-order",
+            "published_at": 1,
+            "receipt": {},
+            "availability": {"status": "local_pinned"},
+            "publication_id": "pub-move-order",
+            "content_security": {
+                "schema": "elastos.library.published-content-security/v1",
+                "object_uri": from,
+                "published_payload": "plain_content"
+            }
+        }))
+        .unwrap();
+        write_publish_record(home.dir.path(), home.principal, &record).unwrap();
+
+        arm_move_gap(1);
+        let stopped = move_publish_record(home.dir.path(), home.principal, &from, &to);
+        assert!(stopped.is_err(), "{stopped:?}");
+        assert!(read_publish_record(home.dir.path(), home.principal, &from).is_err());
+        assert!(read_publish_record(home.dir.path(), home.principal, &to).is_err());
+        assert!(!cid_is_published_here(home.dir.path(), "cid-move-order"));
+
+        write_publish_record(home.dir.path(), home.principal, &record).unwrap();
+        arm_move_gap(2);
+        let index_stopped = move_publish_record(home.dir.path(), home.principal, &from, &to);
+        assert!(index_stopped.is_err(), "{index_stopped:?}");
+        assert!(read_publish_record(home.dir.path(), home.principal, &from).is_err());
+        let kept = read_publish_record(home.dir.path(), home.principal, &to).unwrap();
+        assert_eq!(kept.object_uri, to);
+        assert!(record_is_published(&kept));
+        assert!(!cid_is_published_here(home.dir.path(), "cid-move-order"));
+
+        move_publish_record(home.dir.path(), home.principal, &to, &later).unwrap();
+        assert!(read_publish_record(home.dir.path(), home.principal, &to).is_err());
+        assert!(read_publish_record(home.dir.path(), home.principal, &later).is_ok());
+        assert!(cid_is_published_here(home.dir.path(), "cid-move-order"));
+    }
 }
 
 #[cfg(test)]
@@ -12312,6 +12603,63 @@ mod r5a_tests {
     #[test]
     fn empty_trash_of_an_unstored_principal_keeps_the_shared_index() {
         unstored_publish_row("empty_trash");
+    }
+
+    /// A WebSpace object already named its viewers. Fill must not replace
+    /// them, including a folder whose name looks like a text file.
+    #[test]
+    fn a_webspace_object_keeps_its_own_viewer_fields() {
+        let held = tempfile::tempdir().unwrap();
+        let mut folder = serde_json::json!({
+            "schema": super::LIBRARY_OBJECT_SCHEMA,
+            "uri": "localhost://WebSpaces/demo/notes.txt/",
+            "kind": "directory",
+            "viewers": []
+        });
+        super::fill_fenced_library_fields(held.path(), &mut folder);
+        assert!(folder.get("viewer").is_none(), "{folder}");
+        assert_eq!(folder["viewers"], serde_json::json!([]));
+        let mut file = serde_json::json!({
+            "schema": super::LIBRARY_OBJECT_SCHEMA,
+            "uri": "localhost://WebSpaces/demo/notes.txt",
+            "kind": "file",
+            "viewer": "documents",
+            "viewers": [{ "id": "documents", "name": "Documents" }]
+        });
+        super::fill_fenced_library_fields(held.path(), &mut file);
+        assert_eq!(file["viewer"], "documents");
+        assert_eq!(file["viewers"][0]["id"], "documents");
+    }
+
+    /// The depth rule reads `components.json` before a write. A read that
+    /// does not finish refuses the write and names that file.
+    #[cfg(unix)]
+    #[test]
+    fn a_library_write_names_components_json_when_it_cannot_be_read() {
+        let held = tempfile::tempdir().unwrap();
+        let principal = "person:local:ada";
+        let protection = crate::auth::store_test_principal_root_protection(held.path(), principal);
+        std::fs::create_dir(held.path().join("components.json")).unwrap();
+        let reply = super::handle_object_provider_raw_request(
+            held.path(),
+            &serde_json::json!({
+                "op": "mkdir",
+                "principal_id": principal,
+                "parent_uri": format!("{}/Notes", protection.localhost_root),
+                "name": "kept"
+            }),
+        );
+        assert_eq!(reply["status"], "error", "{reply}");
+        let message = reply["message"].as_str().unwrap_or("");
+        assert!(
+            message.contains("components.json"),
+            "the unread file was not named: {reply}"
+        );
+        assert!(!held
+            .path()
+            .join(protection.localhost_root.trim_start_matches("localhost://"))
+            .join("Notes/kept")
+            .exists());
     }
 }
 

@@ -1543,6 +1543,7 @@ pub(super) async fn gateway_library_events_stream(
 
     let stream_state = LibraryEventsStreamState {
         registry,
+        data_dir: state.data_dir.clone(),
         principal_id: context.principal_id().to_string(),
         cursor: String::new(),
         initialized: false,
@@ -1551,6 +1552,7 @@ pub(super) async fn gateway_library_events_stream(
         loop {
             match library_events_since_cursor(
                 &stream_state.registry,
+                &stream_state.data_dir,
                 &stream_state.principal_id,
                 &stream_state.cursor,
             )
@@ -2063,6 +2065,12 @@ pub(super) async fn gateway_provider_proxy(
             }),
         }
     };
+    // The fenced object helper cannot read components.json, capsules, or
+    // config.toml. The Runtime fills viewer, viewers, and protect from those
+    // files. Other object fields stay the helper's.
+    if scheme == "object" {
+        crate::library::fill_fenced_library_fields(&state.data_dir, &mut response);
+    }
     let mut response_status = StatusCode::OK;
     if scheme == "model" {
         if let Some(refusal) = local_model_request_expiry_refusal(&request, &response) {
@@ -4481,6 +4489,7 @@ fn library_request_targets_webspace(request: &serde_json::Value) -> bool {
 
 struct LibraryEventsStreamState {
     registry: Arc<ProviderRegistry>,
+    data_dir: std::path::PathBuf,
     principal_id: String,
     cursor: String,
     initialized: bool,
@@ -4488,6 +4497,7 @@ struct LibraryEventsStreamState {
 
 async fn library_events_since_cursor(
     registry: &ProviderRegistry,
+    data_dir: &std::path::Path,
     principal_id: &str,
     cursor: &str,
 ) -> anyhow::Result<(Vec<serde_json::Value>, String)> {
@@ -4502,6 +4512,8 @@ async fn library_events_since_cursor(
         )
         .await
         .map_err(|err| anyhow::anyhow!("object provider unavailable: {err}"))?;
+    let mut response = response;
+    crate::library::fill_fenced_library_fields(data_dir, &mut response);
     if response.get("status").and_then(|value| value.as_str()) == Some("error") {
         let message = response
             .get("message")

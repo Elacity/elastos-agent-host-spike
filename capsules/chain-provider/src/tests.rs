@@ -70,6 +70,219 @@ fn provider_with_rpc(rpc_url: String) -> ChainProvider {
 }
 
 #[test]
+fn operator_settings_arrive_through_init_and_are_not_in_the_reply() {
+    let config = include_str!("config.rs");
+    let rpc = include_str!("rpc.rs");
+    assert!(!config.contains("env::var"), "{config}");
+    assert!(!rpc.contains("env::var"), "{rpc}");
+    let mut provider = ChainProvider::new();
+    let secret = "rpc-password-must-not-appear";
+    let init = provider.handle(Request::Init {
+        config: json!({
+            "extra": {
+                "operator_settings": {
+                    "BASE_RPC_URL": "https://base.example.test",
+                    "BITCOIN_REST_URL": "https://btc.example.test",
+                    "BITCOIN_RPC_USER": "rpc-user",
+                    "BITCOIN_RPC_PASSWORD": secret
+                }
+            }
+        }),
+    });
+    let text = serde_json::to_string(&init).unwrap();
+    assert!(!text.contains(secret), "{text}");
+    assert!(!text.contains("base.example.test"), "{text}");
+    assert_eq!(
+        provider.rpc_url_for("base-mainnet"),
+        Some("https://base.example.test")
+    );
+    assert_eq!(
+        provider.rpc_url_for("btc-mainnet"),
+        Some("https://btc.example.test")
+    );
+    assert_eq!(provider.bitcoin_rpc_user_for_test(), Some("rpc-user"));
+    let unknown = provider.handle(Request::Init {
+        config: json!({
+            "extra": { "operator_settings": { "OTHER": "no" } }
+        }),
+    });
+    let unknown = serde_json::to_string(&unknown).unwrap();
+    assert!(unknown.contains("unknown key"), "{unknown}");
+}
+
+fn default_urls(provider: &ChainProvider) -> (String, String, Option<String>) {
+    (
+        provider.rpc_url_for("base-mainnet").unwrap().to_string(),
+        provider.rpc_url_for("btc-mainnet").unwrap().to_string(),
+        provider.bitcoin_rpc_user_for_test().map(str::to_string),
+    )
+}
+
+fn assert_settings_unchanged(provider: &ChainProvider, before: &(String, String, Option<String>)) {
+    assert_eq!(
+        provider.rpc_url_for("base-mainnet"),
+        Some(before.0.as_str())
+    );
+    assert_eq!(provider.rpc_url_for("btc-mainnet"), Some(before.1.as_str()));
+    assert_eq!(provider.bitcoin_rpc_user_for_test(), before.2.as_deref());
+    assert!(provider.rpc_url_for("ela-mainnet").is_some());
+}
+
+#[test]
+fn an_invalid_cleartext_operator_url_leaves_networks_unchanged() {
+    let mut provider = ChainProvider::new();
+    let before = default_urls(&provider);
+    let secret = "cleartext-secret-key";
+    let response = provider.handle(Request::Init {
+        config: json!({
+            "networks": [{
+                "id": "base-mainnet",
+                "display_name": "Should Not Stick",
+                "kind": "evm_json_rpc",
+                "chain_id": 8453,
+                "native_symbol": "ETH",
+                "provider": "test",
+                "mainnet": true,
+                "explorer_url": null,
+                "rpc_url": "https://staged.example.invalid"
+            }],
+            "extra": {
+                "operator_settings": {
+                    "BASE_RPC_URL": format!("http://evil.example/v2/{secret}"),
+                    "BITCOIN_RPC_USER": "should-not-stick",
+                    "BITCOIN_RPC_PASSWORD": secret
+                }
+            }
+        }),
+    });
+    let text = serde_json::to_string(&response).unwrap();
+    assert!(text.contains("invalid_config"), "{text}");
+    assert!(!text.contains(secret), "{text}");
+    assert!(!text.contains("evil.example"), "{text}");
+    assert!(!text.contains("/v2/"), "{text}");
+    assert!(!text.contains("Should Not Stick"), "{text}");
+    assert_settings_unchanged(&provider, &before);
+}
+
+#[test]
+fn an_operator_url_with_credentials_leaves_networks_unchanged() {
+    let mut provider = ChainProvider::new();
+    let before = default_urls(&provider);
+    let secret = "userinfo-secret-key";
+    let response = provider.handle(Request::Init {
+        config: json!({
+            "extra": {
+                "operator_settings": {
+                    "BITCOIN_REST_URL": format!("https://user:{secret}@example.invalid/v2/{secret}?k={secret}"),
+                    "BITCOIN_RPC_USER": "should-not-stick",
+                    "BITCOIN_RPC_PASSWORD": secret
+                }
+            }
+        }),
+    });
+    let text = serde_json::to_string(&response).unwrap();
+    assert!(text.contains("invalid_config"), "{text}");
+    assert!(!text.contains(secret), "{text}");
+    assert!(!text.contains("example.invalid"), "{text}");
+    assert!(!text.contains("user:"), "{text}");
+    assert_settings_unchanged(&provider, &before);
+}
+
+#[test]
+fn a_transport_timeout_does_not_carry_the_rpc_url() {
+    let secret = "super-secret-rpc-key";
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        if let Ok((sock, _)) = listener.accept() {
+            let _ = sock;
+            std::thread::sleep(std::time::Duration::from_secs(2));
+        }
+    });
+    let url = format!("http://127.0.0.1:{port}/v2/{secret}?token={secret}");
+    let mut provider = provider_with_rpc(url);
+    provider.set_transport_timeout_for_test(std::time::Duration::from_millis(200));
+    let response = provider.handle(Request::Status {
+        network: "esc-local".to_string(),
+    });
+    let text = serde_json::to_string(&response).unwrap();
+    assert!(
+        text.contains("chain transport failed for esc-local"),
+        "{text}"
+    );
+    assert!(!text.contains(secret), "{text}");
+    assert!(!text.contains(&port.to_string()), "{text}");
+    assert!(!text.contains("/v2/"), "{text}");
+    assert!(!text.contains("127.0.0.1"), "{text}");
+    assert!(!text.contains("token="), "{text}");
+    assert!(!text.contains("http"), "{text}");
+}
+
+#[test]
+fn an_accepted_network_keeps_its_rpc_when_operator_settings_arrive_with_it() {
+    let mut network = complete_protected_content_network("base-mainnet");
+    network["rpc_url"] = json!("https://accepted.example.invalid");
+    let mut provider = ChainProvider::new();
+    let init = provider.handle(Request::Init {
+        config: json!({
+            "extra": {
+                "protected_content_runtime_issuer": runtime_issuer_hex(0x42),
+                "protected_content_network": network,
+                "operator_settings": {
+                    "BASE_RPC_URL": "https://operator.example.test/rpc",
+                    "BITCOIN_REST_URL": "https://btc.example.test",
+                    "BITCOIN_RPC_USER": "rpc-user",
+                    "BITCOIN_RPC_PASSWORD": "rpc-password"
+                }
+            }
+        }),
+    });
+    assert!(matches!(init, Response::Ok { .. }), "{init:?}");
+    assert_eq!(
+        provider.rpc_url_for("base-mainnet"),
+        Some("https://accepted.example.invalid")
+    );
+    assert_eq!(
+        provider.rpc_url_for("btc-mainnet"),
+        Some("https://btc.example.test")
+    );
+    assert_eq!(provider.bitcoin_rpc_user_for_test(), Some("rpc-user"));
+
+    let mut listed = ChainProvider::new();
+    let listed_init = listed.handle(Request::Init {
+        config: json!({
+            "networks": [{
+                "id": "base-mainnet",
+                "display_name": "Listed",
+                "kind": "evm_json_rpc",
+                "chain_id": 8453,
+                "native_symbol": "ETH",
+                "provider": "test",
+                "mainnet": true,
+                "explorer_url": null,
+                "rpc_url": "https://listed.example.invalid"
+            }],
+            "extra": {
+                "operator_settings": {
+                    "BASE_RPC_URL": "https://operator.example.test/rpc",
+                    "BITCOIN_RPC_USER": "rpc-user",
+                    "BITCOIN_RPC_PASSWORD": "rpc-password"
+                }
+            }
+        }),
+    });
+    assert!(
+        matches!(listed_init, Response::Ok { .. }),
+        "{listed_init:?}"
+    );
+    assert_eq!(
+        listed.rpc_url_for("base-mainnet"),
+        Some("https://listed.example.invalid")
+    );
+    assert_eq!(listed.bitcoin_rpc_user_for_test(), Some("rpc-user"));
+}
+
+#[test]
 fn chain_provider_rejects_hidden_prepare_transaction_fields() {
     let request = json!({
         "op": "prepare_transaction",
@@ -1183,15 +1396,12 @@ fn init_bitcoin_rpc_provider(provider: &mut ChainProvider, rpc_url: String) {
     assert!(matches!(init, Response::Ok { .. }));
 }
 
-fn write_node_supervisor_helper(data_dir: &Path) -> String {
-    let helper = data_dir.join("test-node-supervisor");
-    fs::write(&helper, "#!/bin/sh\nexit 0\n").unwrap();
-    fs::set_permissions(&helper, fs::Permissions::from_mode(0o755)).unwrap();
-    helper.to_string_lossy().into_owned()
-}
-
-fn add_test_node_supervisor(provider: &mut ChainProvider, network_id: &str, program: &str) {
-    let init = provider.handle(Request::Init {
+fn init_with_node_supervisor(
+    provider: &mut ChainProvider,
+    network_id: &str,
+    program: &str,
+) -> Response {
+    provider.handle(Request::Init {
         config: json!({
             "node_supervisor": {
                 "networks": {
@@ -1204,8 +1414,7 @@ fn add_test_node_supervisor(provider: &mut ChainProvider, network_id: &str, prog
                 }
             }
         }),
-    });
-    assert!(matches!(init, Response::Ok { .. }));
+    })
 }
 
 fn provider_with_bitcoin_rest(rpc_url: String) -> ChainProvider {
@@ -1787,47 +1996,60 @@ fn node_lifecycle_reports_status_and_fails_closed_for_control() {
 }
 
 #[test]
-fn node_lifecycle_runs_operator_supervisor_for_loopback_nodes() {
+fn node_supervisor_is_refused_at_admission_and_does_not_run() {
     let data_dir = TestDataDir::new();
     let mut provider =
         provider_with_bitcoin_rpc_in(data_dir.path(), "http://127.0.0.1:18446".to_string());
-    let supervisor_program = write_node_supervisor_helper(data_dir.path());
-    add_test_node_supervisor(&mut provider, "btc-local", &supervisor_program);
+    let marker = data_dir.path().join("supervisor-ran");
+    let program = data_dir.path().join("test-node-supervisor");
+    fs::write(
+        &program,
+        format!("#!/bin/sh\ntouch '{}'\nexit 0\n", marker.display()),
+    )
+    .unwrap();
+    fs::set_permissions(&program, fs::Permissions::from_mode(0o755)).unwrap();
+    let program_text = program.to_string_lossy().into_owned();
 
-    let status = ok_data(provider.handle(Request::NodeLifecycle {
-        network: "btc-local".to_string(),
-        action: NodeLifecycleAction::Status,
-    }));
-    assert_eq!(status["managed"], true);
-    assert_eq!(status["control_available"], true);
-    assert_eq!(status["state"], "managed_local");
-    assert_json_strings_do_not_contain(&status, &supervisor_program);
-    assert_json_strings_do_not_contain(&status, "18446");
+    let init = init_with_node_supervisor(&mut provider, "btc-local", &program_text);
+    assert_eq!(error_code(init), "node_supervisor_refused");
+    assert!(!marker.exists(), "admission ran the supervisor");
 
-    let start = ok_data(provider.handle(Request::NodeLifecycle {
+    let start = provider.handle(Request::NodeLifecycle {
         network: "btc-local".to_string(),
         action: NodeLifecycleAction::Start,
-    }));
-    assert_eq!(start["action"], "start");
-    assert_eq!(start["control_available"], true);
-    assert_eq!(start["state"], "managed_local");
-    assert_json_strings_do_not_contain(&start, &supervisor_program);
-    assert_json_strings_do_not_contain(&start, "18446");
+    });
+    assert_eq!(error_code(start), "managed_node_unavailable");
+    assert!(!marker.exists(), "a later control ran the supervisor");
 }
 
 #[test]
-fn node_lifecycle_rejects_supervisor_control_for_remote_backends() {
+fn a_null_node_supervisor_leaves_the_key_unset() {
+    let mut provider = ChainProvider::new();
+    let init = provider.handle(Request::Init {
+        config: json!({ "node_supervisor": null }),
+    });
+    assert!(
+        matches!(init, Response::Ok { .. }),
+        "null is unset, not invalid_config or node_supervisor_refused: {init:?}"
+    );
+}
+
+#[test]
+fn node_supervisor_on_a_remote_network_is_refused_at_admission() {
     let data_dir = TestDataDir::new();
     let mut provider = provider_with_rpc("https://example.invalid/rpc".to_string());
-    let supervisor_program = write_node_supervisor_helper(data_dir.path());
-    add_test_node_supervisor(&mut provider, "esc-local", &supervisor_program);
+    let marker = data_dir.path().join("supervisor-ran");
+    let program = data_dir.path().join("test-node-supervisor");
+    fs::write(
+        &program,
+        format!("#!/bin/sh\ntouch '{}'\nexit 0\n", marker.display()),
+    )
+    .unwrap();
+    fs::set_permissions(&program, fs::Permissions::from_mode(0o755)).unwrap();
 
-    let response = provider.handle(Request::NodeLifecycle {
-        network: "esc-local".to_string(),
-        action: NodeLifecycleAction::Start,
-    });
-
-    assert_eq!(error_code(response), "managed_node_unavailable");
+    let init = init_with_node_supervisor(&mut provider, "esc-local", &program.to_string_lossy());
+    assert_eq!(error_code(init), "node_supervisor_refused");
+    assert!(!marker.exists(), "admission ran the supervisor");
 }
 
 #[test]

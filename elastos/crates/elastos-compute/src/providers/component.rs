@@ -289,6 +289,8 @@ struct V2RunControl {
     pending_read: Arc<AtomicBool>,
     #[cfg(test)]
     wall_clock: bool,
+    #[cfg(test)]
+    delivered_ticks: Option<Arc<Mutex<Vec<u64>>>>,
 }
 
 /// What a sealed component gets for any call to the bridge.
@@ -1065,6 +1067,8 @@ impl ComponentProvider {
             pending_read: instance.pending_read.clone(),
             #[cfg(test)]
             wall_clock: instance.test_wall_clock,
+            #[cfg(test)]
+            delivered_ticks: None,
         };
         let ending_cancel = control.cancel_requested.clone();
         #[cfg(any(test, feature = "test-fixtures"))]
@@ -1588,6 +1592,8 @@ impl ComponentProvider {
                 bucket,
                 #[cfg(test)]
                 control.pending_read.clone(),
+                #[cfg(test)]
+                control.delivered_ticks.clone(),
             ),
         )
         .map_err(|err| run_error("Failed to open v2 events", err))?;
@@ -1634,6 +1640,7 @@ struct V2EventFeed(
     String,
     Arc<Mutex<crate::providers::fuel_bucket::FuelBucket>>,
     #[cfg(test)] Arc<AtomicBool>,
+    #[cfg(test)] Option<Arc<Mutex<Vec<u64>>>>,
 );
 
 impl<D> StreamProducer<D> for V2EventFeed {
@@ -1661,6 +1668,13 @@ impl<D> StreamProducer<D> for V2EventFeed {
                 store.set_epoch_deadline(1);
                 note_delivered_event(&self.1, &self.2, &self.3, &event);
                 destination.set_buffer(Some(event));
+                #[cfg(test)]
+                if let Some(delivered_ticks) = &self.6 {
+                    delivered_ticks
+                        .lock()
+                        .expect("delivered ticks")
+                        .push(self.4.lock().expect("fuel").window_ticks);
+                }
                 Poll::Ready(Ok(StreamResult::Completed))
             }
             Poll::Ready(None) => {
@@ -4494,42 +4508,76 @@ mod tests {
         assert_eq!(v2_ending(&provider, &handle).await, "stopped");
     }
 
-    /// The guest reads an event and then burns fuel, while a source keeps
-    /// sending. A delivered event leaves the tick count as it is, so the
-    /// guest still ends on the tick bound.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    /// Drive real epoch callbacks between fuel yields on an isolated engine.
+    /// Each read follows guest work, and completed deliveries must span ticks.
+    #[tokio::test(flavor = "current_thread")]
     async fn v2_a_delivered_event_does_not_clear_the_tick_bound() {
-        let provider = ComponentProvider::new();
+        let engine = quiet_v2_engine();
         let bytes = v2_variant(&[(
-            "(func (export \"callback\") (param $event i32) (param $handle i32) (param $result i32) (result i32)\n      local.get $event i32.const 2 i32.eq",
-            "(func (export \"callback\") (param $event i32) (param $handle i32) (param $result i32) (result i32)\n      i32.const 0 i32.const 0 i32.const 65536 memory.fill\n      local.get $event i32.const 2 i32.eq",
+            "(local $code i32)\n      (loop $again",
+            "(local $code i32) (local $left i32)\n      (loop $again\n\
+             i32.const 1000 local.set $left\n\
+             (loop $work\n\
+               local.get $left i32.const 1 i32.sub local.tee $left br_if $work)",
         )]);
-        let handle = load_v2_fixture(&provider, bytes).await;
-        provider
-            .instances
-            .write()
-            .await
-            .get_mut(&handle.id)
-            .unwrap()
-            .test_max_ticks = 6;
-        provider.start(&handle).await.unwrap();
-        let sender = provider
-            .instances
-            .read()
-            .await
-            .get(&handle.id)
-            .and_then(|instance| instance.events.clone())
-            .expect("the guest is reading events");
-        let source = tokio::spawn(async move {
-            while sender
+        let component = Component::new(&engine, bytes).expect("tick-bound guest");
+        let (sender, receiver) = mpsc::unbounded_channel();
+        for _ in 0..8 {
+            sender
                 .send(v2::elastos::bus::types::Event::Message(Vec::new()))
-                .is_ok()
-            {
-                tokio::task::yield_now().await;
+                .unwrap();
+        }
+        // A finite stream also lets a broken tick window finish cheaply.
+        drop(sender);
+        let delivered_ticks = Arc::new(Mutex::new(Vec::new()));
+        let control = V2RunControl {
+            stop_requested: Arc::new(AtomicBool::new(false)),
+            cancel_requested: Arc::new(AtomicBool::new(false)),
+            max_ticks: 32,
+            fuel: crate::providers::fuel_bucket::V2_BUCKET_CAPACITY,
+            fuel_slice: 1_000,
+            pending_read: Arc::new(AtomicBool::new(false)),
+            wall_clock: false,
+            delivered_ticks: Some(delivered_ticks.clone()),
+        };
+        let (ready_tx, _ready_rx) = tokio::sync::oneshot::channel();
+        let run = ComponentProvider::run_v2(
+            engine.clone(),
+            component,
+            ComponentState::new(None, "tick-bound".into(), None),
+            receiver,
+            control,
+            ready_tx,
+        );
+        let mut run = std::pin::pin!(run);
+        let mut ending = None;
+        // Poll once per sleep, advancing only this engine. Fuel yields keep
+        // each poll small; neither scheduling gaps nor CPU speed create ticks.
+        for _ in 0..128 {
+            let poll =
+                std::future::poll_fn(|cx| Poll::Ready(std::future::Future::poll(run.as_mut(), cx)))
+                    .await;
+            if let Poll::Ready(result) = poll {
+                ending = Some(result);
+                break;
             }
-        });
-        let ending = v2_ending(&provider, &handle).await;
-        source.abort();
+            engine.increment_epoch();
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+        let ticks = delivered_ticks.lock().expect("delivered ticks").clone();
+        assert!(
+            ticks.len() >= 2 && ticks.iter().all(|tick| *tick > 0),
+            "at least two events must be delivered after ticks start, got {ticks:?}"
+        );
+        assert!(
+            ticks.windows(2).all(|pair| pair[0] < pair[1]),
+            "deliveries must span distinct increasing ticks, got {ticks:?}"
+        );
+        let ending = ending
+            .expect("guest must end within 128 sleeping polls")
+            .expect_err("a stream of events must reach the tick bound")
+            .to_string();
+        eprintln!("completed deliveries at ticks {ticks:?}; ending: {ending}");
         assert!(
             ending.contains(ENDING_EPOCH_DEADLINE),
             "a stream of events must still end on the tick bound, got {ending}"
@@ -5448,6 +5496,7 @@ mod tests {
             fuel_slice,
             pending_read: Arc::new(AtomicBool::new(false)),
             wall_clock: false,
+            delivered_ticks: None,
         };
         match ComponentProvider::run_v2(
             engine.clone(),

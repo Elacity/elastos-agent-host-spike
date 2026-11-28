@@ -76,15 +76,21 @@ fn row(
 const OPEN_ROWS: &[(&str, &str, &str)] = &[
     (
         "elastos-server/src/server_infra.rs",
-        "register_chain_provider_plane",
-        "load_or_create_device_key",
-    ),
-    (
-        "elastos-server/src/server_infra.rs",
         "setup_server_infrastructure_impl",
         "encryption_key: device_key_hex",
     ),
+    (
+        "elastos-runtime/src/provider/path_allow.rs",
+        "root_specs",
+        "RuntimeProviderId::Object => OBJECT_ROOTS",
+    ),
 ];
+
+/// Localhost stays open until slice L. Home still passes the raw device key.
+const LOCALHOST_OPEN_REASON: &str = "Home still passes the raw device key to the localhost provider. The row stays open until slice L.";
+
+/// The object helper's allowed root still contains the owner's recovery archive key.
+const OBJECT_ROOT_OPEN_REASON: &str = "The object helper's allowed root contains the folder where the owner's recovery archive key lives. The row closes when that key moves out of the helper's root or the key step (slice L) lands.";
 
 fn rows() -> Vec<HeldRow> {
     vec![
@@ -129,6 +135,18 @@ fn rows() -> Vec<HeldRow> {
         "SigningKey::from_bytes",
         1,
         mark("runtime-own", "capability signing key", "Runtime", "Runtime reads its stored capability signing key"),
+    ),
+    row(
+        "elastos-runtime/src/provider/path_allow.rs",
+        "root_specs",
+        "RuntimeProviderId::Object => OBJECT_ROOTS",
+        1,
+        mark(
+            "open",
+            "object helper file root",
+            "object provider",
+            OBJECT_ROOT_OPEN_REASON,
+        ),
     ),
     row(
         "elastos-server/src/api/auth_gateway.rs",
@@ -966,7 +984,7 @@ fn rows() -> Vec<HeldRow> {
         "observe_runtime_device_key_file_identity",
         "device_key_path",
         1,
-        mark("home-own", "device key file", "Home", "Home watches the device key file so a changed key drops the cached auth state"),
+        mark("home-own", "device key file", "Home", "Home watches the device key file so a changed key drops the cached auth state. The object helper treats a fence refusal to stat that file as absent and does not open it."),
     ),
     row(
         "elastos-server/src/auth.rs",
@@ -1372,7 +1390,12 @@ fn rows() -> Vec<HeldRow> {
         "register_chain_provider_plane",
         "load_or_create_device_key",
         1,
-        mark("open", "device private key", "chain provider", "The child config now carries only the Ed25519 verifying key of `derive_did(device_key)`, which `RuntimeOperationIssuerKeyV1` accepts only as a public key. The row stays open: the child is an unconfined same-user process and the data directory is a fixed default, so it can still open `identity/device.key`, as the object provider can. It closes when slice C confines it."),
+        mark(
+            "home-own",
+            "device private key",
+            "Home",
+            "Home derives the chain issuer from the device key and passes the issuer. The chain process does not receive the key, and identity/ is outside the chain allow-list.",
+        ),
     ),
     row(
         "elastos-server/src/server_infra.rs",
@@ -1386,7 +1409,12 @@ fn rows() -> Vec<HeldRow> {
         "setup_server_infrastructure_impl",
         "encryption_key: device_key_hex",
         1,
-        mark("open", "device private key", "localhost provider", "Home hands the device private key to the localhost provider. The object config no longer carries the device key; the process is an unconfined child and `base_path` is the data directory, so it can open `identity/device.key`."),
+        mark(
+            "open",
+            "device private key",
+            "localhost provider",
+            LOCALHOST_OPEN_REASON,
+        ),
     ),
     row(
         "elastos-server/src/server_infra.rs",
@@ -1460,6 +1488,7 @@ fn needles() -> Vec<(String, String)> {
         call(&["require_home_", "runtime_wallet_authority"]),
         call(&["require_home_", "wallet_connector_authority"]),
         text(&["encryption_key: ", "device_key_hex"]),
+        text(&["RuntimeProviderId::Object => ", "OBJECT_ROOTS"]),
         call(&["read_", "hosted_secret"]),
         call(&["write_", "hosted_secret"]),
         call(&["hosted_", "secret_path"]),
@@ -2019,6 +2048,127 @@ fn open_rows_are_an_explicit_list() {
     }
     let listed: BTreeSet<_> = OPEN_ROWS.iter().copied().collect();
     assert_eq!(from_rows, listed, "open rows drifted from OPEN_ROWS");
+}
+
+/// Localhost, object, and chain start through the path allow-list. Home derives
+/// the chain issuer itself. The localhost device-key hand-off stays open.
+/// The object helper's allowed root stays open: that root contains the folder
+/// where the owner's recovery archive key lives.
+#[test]
+fn localhost_object_and_chain_start_on_the_path_allow_list() {
+    let raw = sources()
+        .get("elastos-server/src/server_infra.rs")
+        .expect("server_infra")
+        .as_str();
+    let helpers = function_raw_bodies(raw, "spawn_allow_listed_provider");
+    assert_eq!(helpers.len(), 2, "unix and windows helpers");
+    let unix = helpers
+        .iter()
+        .copied()
+        .find(|body| body.contains("spawn_path_allow"))
+        .expect("unix helper");
+    assert!(unix.contains("ProviderBridge::spawn_path_allow("));
+    assert!(
+        !unix.contains("ProviderBridge::spawn("),
+        "the unix helper has an unconfined spawn"
+    );
+    let windows = helpers
+        .iter()
+        .copied()
+        .find(|body| body.contains("ProviderBridge::spawn("))
+        .expect("windows helper");
+    assert!(!windows.contains("spawn_path_allow"));
+    let setup = function_raw_bodies(raw, "setup_server_infrastructure_impl");
+    assert_eq!(setup.len(), 1);
+    let plane = function_raw_bodies(raw, "register_chain_provider_plane");
+    assert_eq!(plane.len(), 1);
+    let mut keys = helper_component_keys(setup[0]);
+    keys.extend(helper_component_keys(plane[0]));
+    keys.sort();
+    assert_eq!(
+        keys,
+        vec!["chain-provider", "localhost-provider", "object-provider"]
+    );
+    assert!(plane[0].contains("ProviderBridge::spawn_path_allow("));
+    assert!(
+        !plane[0].contains("ProviderBridge::spawn("),
+        "the chain plane has an unconfined spawn"
+    );
+    assert!(setup[0].contains("ProviderBridge::spawn("));
+    let spawn = "ProviderBridge::spawn(";
+    let mut from = 0;
+    while let Some(at) = raw[from..].find(spawn) {
+        let pos = from + at;
+        let window = &raw[pos..raw.len().min(pos + 180)];
+        for key in ["chain-provider", "localhost-provider", "object-provider"] {
+            assert!(
+                !window.contains(key),
+                "{key} is spawned unconfined: {window}"
+            );
+        }
+        from = pos + spawn.len();
+    }
+    for row in rows() {
+        if (row.function, row.mechanism)
+            == ("register_chain_provider_plane", "load_or_create_device_key")
+        {
+            assert_eq!(row.status, "home-own");
+            assert_eq!(row.behalf, "Home");
+            assert!(
+                row.reason.contains("does not receive the key"),
+                "{}",
+                row.reason
+            );
+        }
+        if (row.function, row.mechanism)
+            == (
+                "setup_server_infrastructure_impl",
+                "encryption_key: device_key_hex",
+            )
+        {
+            assert_eq!(row.status, "open");
+            assert_eq!(row.reason, LOCALHOST_OPEN_REASON);
+        }
+        if (row.file, row.function, row.mechanism)
+            == (
+                "elastos-runtime/src/provider/path_allow.rs",
+                "root_specs",
+                "RuntimeProviderId::Object => OBJECT_ROOTS",
+            )
+        {
+            assert_eq!(row.status, "open");
+            assert_eq!(row.count, 1);
+            assert_eq!(row.reason, OBJECT_ROOT_OPEN_REASON);
+        }
+    }
+    let roots = sources()
+        .get("elastos-runtime/src/provider/path_allow.rs")
+        .expect("path_allow");
+    let bodies = function_raw_bodies(roots, "root_specs");
+    assert_eq!(bodies.len(), 1);
+    assert!(
+        bodies[0].contains("RuntimeProviderId::Object => OBJECT_ROOTS"),
+        "the object helper root grant left root_specs"
+    );
+}
+
+fn helper_component_keys(body: &str) -> Vec<&str> {
+    let mut keys = Vec::new();
+    let mut rest = body;
+    let needle = "spawn_allow_listed_provider(";
+    while let Some(at) = rest.find(needle) {
+        let after = &rest[at + needle.len()..];
+        let end = after.find(')').unwrap_or(after.len());
+        let args = &after[..end];
+        if let Some(start) = args.find('"') {
+            let tail = &args[start + 1..];
+            if let Some(stop) = tail.find('"') {
+                keys.push(&tail[..stop]);
+            }
+        }
+        rest = &after[end..];
+    }
+    keys
 }
 
 #[test]

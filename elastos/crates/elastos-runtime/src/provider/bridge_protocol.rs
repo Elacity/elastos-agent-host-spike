@@ -120,6 +120,8 @@ pub enum BridgeError {
     TaskJoin(String),
     /// The Runtime refused to start a provider; it names the reason verbatim.
     Refused(String),
+    /// The object helper was not given a public runtime DID.
+    NoPublicRuntimeDid,
 }
 
 impl std::fmt::Display for BridgeError {
@@ -138,6 +140,9 @@ impl std::fmt::Display for BridgeError {
                 write!(f, "provider bridge task failed: {}", message)
             }
             BridgeError::Refused(message) => write!(f, "{}", message),
+            BridgeError::NoPublicRuntimeDid => {
+                write!(f, "object helper spawn refused: no public runtime DID")
+            }
         }
     }
 }

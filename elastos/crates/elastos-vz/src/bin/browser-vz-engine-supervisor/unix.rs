@@ -7622,8 +7622,11 @@ mod tests {
         assert_eq!(&response, b"pong");
         let mut eof = [0_u8; 1];
         assert_eq!(guest_client.read(&mut eof).unwrap(), 0);
+        // EOF is already in hand. The idle direction notices `done` on its
+        // 250ms read timeout; joining that thread took more than 2s once
+        // while the Studio workspace suite was running.
         done_rx
-            .recv_timeout(Duration::from_secs(2))
+            .recv_timeout(Duration::from_secs(15))
             .expect("VZ egress bridge should close after Runtime EOF");
 
         let (guest_to_runtime, runtime_to_guest) = bridge.join().unwrap().unwrap();

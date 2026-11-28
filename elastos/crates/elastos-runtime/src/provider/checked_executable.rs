@@ -51,6 +51,10 @@ fn private_copy_root(data_dir: &Path, create: bool) -> Result<Option<PathBuf>, S
         std::fs::create_dir_all(data_dir)
             .map_err(|e| format!("provider copy Home cannot be created: {e}"))?;
     }
+    // A symlinked data directory is the real directory it names. The owner
+    // and mode checks apply to that directory, not to the symlink inode.
+    let data_dir = &std::fs::canonicalize(data_dir)
+        .map_err(|e| format!("provider copy Home cannot be inspected: {e}"))?;
     let home = std::fs::symlink_metadata(data_dir)
         .map_err(|e| format!("provider copy Home cannot be inspected: {e}"))?;
     if !home.is_dir()
@@ -311,6 +315,18 @@ impl CheckedExecutable {
         &self.path
     }
 
+    /// A second owned pin with the same path, digest, and Home. Chain restart
+    /// keeps this beside the running bridge and passes it to the same start.
+    pub(super) fn duplicate(&self) -> Self {
+        Self {
+            path: self.path.clone(),
+            digest: self.digest,
+            refusal: self.refusal.clone(),
+            siblings: self.siblings.clone(),
+            home_data_dir: self.home_data_dir.clone(),
+        }
+    }
+
     pub fn verify_at_spawn(&self) -> Result<PreparedExecutable, String> {
         if let Some(reason) = &self.refusal {
             return Err(reason.clone());
@@ -511,7 +527,15 @@ int main(void) {
             prepared.exec_path().exists(),
             "the owner holds the live copy"
         );
-        child.kill().await.unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), child.kill())
+            .await
+            .expect("the provider is killed and reaped within the bound")
+            .unwrap();
+        recover_verified_copies(home.path()).unwrap();
+        assert!(
+            prepared.exec_path().exists(),
+            "the owner keeps the copy lock through the provider's reap"
+        );
         let PreparedExecutable {
             _private_dir,
             _liveness_lock,
@@ -520,8 +544,32 @@ int main(void) {
         // A killed owner leaves a stale directory for the next recovery.
         std::mem::forget(_private_dir);
         drop(_liveness_lock);
+        // A sibling test can fork without exec while the owner holds its
+        // CLOEXEC lock. Wait for the last inherited handle to close before
+        // attempting recovery, even though this provider is already reaped.
+        let lock = std::fs::File::open(exec_path.parent().unwrap().join(COPY_LOCK)).unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+                    break;
+                }
+                let error = std::io::Error::last_os_error();
+                assert_eq!(error.kind(), std::io::ErrorKind::WouldBlock, "{error}");
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("sibling test children release inherited copy locks within the bound");
+        // A concurrent fork can inherit this probe too. Unlock explicitly so
+        // that its inherited handles cannot delay the recovery being tested.
+        assert_eq!(unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_UN) }, 0);
+        drop(lock);
         recover_verified_copies(home.path()).unwrap();
         assert!(!exec_path.exists(), "the reaped provider left a stale copy");
+        assert!(
+            !exec_path.parent().unwrap().exists(),
+            "the stale directory goes"
+        );
     }
 
     #[test]
@@ -653,5 +701,34 @@ mod tests {
             "a #! script needs /proc/self/fd/N after exec"
         );
         assert!(!native.script, "an ELF provider keeps FD_CLOEXEC");
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod symlink_home_tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn a_symlinked_data_directory_uses_the_real_directory() {
+        let held = tempfile::tempdir().unwrap();
+        let real = held.path().join("real");
+        std::fs::create_dir(&real).unwrap();
+        std::fs::set_permissions(&real, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let link = held.path().join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let root = private_copy_root(&link, true).unwrap().unwrap();
+        assert_eq!(
+            root,
+            std::fs::canonicalize(&real)
+                .unwrap()
+                .join("provider-copies")
+        );
+        let meta = std::fs::symlink_metadata(&root).unwrap();
+        assert!(meta.is_dir());
+        assert_eq!(meta.permissions().mode() & 0o777, 0o700);
+        std::fs::set_permissions(&real, std::fs::Permissions::from_mode(0o777)).unwrap();
+        let error = private_copy_root(&link, false).unwrap_err();
+        assert!(error.contains("unsafe ownership or permissions"), "{error}");
     }
 }
