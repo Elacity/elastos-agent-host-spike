@@ -95,17 +95,17 @@ impl ObjectAuthorityV1 {
         let object = request
             .as_object_mut()
             .ok_or_else(|| anyhow!("object request must be a JSON object"))?;
+        // Wipe a caller envelope before build. A failed build must not drop
+        // that base64 data_key.
+        if let Some(mut incoming) = object.remove(WIRE_FIELD) {
+            zeroize_value(&mut incoming);
+        }
         let principal_id = object
             .get("principal_id")
             .and_then(Value::as_str)
             .unwrap_or("")
             .to_string();
         let authority = Self::build(data_dir, &principal_id)?;
-        // A caller cannot supply this field. Strip any incoming envelope,
-        // then insert the one this Runtime just built.
-        if let Some(mut incoming) = object.remove(WIRE_FIELD) {
-            zeroize_value(&mut incoming);
-        }
         object.insert(WIRE_FIELD.to_string(), authority.wire());
         Ok(request)
     }
@@ -451,5 +451,27 @@ mod tests {
         assert!(!rendered.contains("CALLER-SUPPLIED-ENVELOPE"), "{rendered}");
         assert!(!rendered.contains("caller-supplied-key"), "{rendered}");
         assert!(!rendered.contains("forged"), "{rendered}");
+    }
+
+    /// The caller envelope is wiped before `build`. Moving the wipe below
+    /// `Self::build` leaves this red: a failed build would drop the key.
+    #[test]
+    fn attach_wipes_a_caller_envelope_before_build() {
+        let path =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/object_authority.rs");
+        let text = std::fs::read_to_string(&path).expect("object authority source");
+        let marker = "pub(crate) fn attach(";
+        let start = text.find(marker).expect("attach");
+        let body = &text[start..];
+        let end = body
+            .find("\n    /// The one serialize")
+            .expect("end of attach");
+        let body = &body[..end];
+        let wipe = body.find("zeroize_value(").expect("wipe");
+        let build = body.find("Self::build").expect("build");
+        assert!(
+            wipe < build,
+            "attach drops a caller data_key when build fails"
+        );
     }
 }
