@@ -674,6 +674,7 @@ pub fn handle_object_provider_raw_request(data_dir: &Path, request: &mut Value) 
         Ok(request) => request,
         Err(err) => return provider_error("invalid_request", &err.to_string()),
     };
+    let _trust = crate::object_authority::TrustedObjectEnvelope::enter();
     let result = dispatch_library_request(data_dir, &authority, request);
 
     match result {
@@ -1327,15 +1328,8 @@ async fn handle_library_webspace_request(
             if_revision,
             cancel,
         } => {
-            let keyed;
-            let active = if is_webspace_uri(uri.as_str())
-                && is_webspace_uri(destination_uri.as_str())
-            {
-                &authority
-            } else {
-                keyed = crate::object_authority::ObjectAuthorityV1::build(data_dir, &principal_id)?;
-                &keyed
-            };
+            let active =
+                crate::object_authority::ObjectAuthorityV1::build(data_dir, &principal_id)?;
             let (source_uri, archive_name, bytes) = if is_webspace_uri(uri.as_str()) {
                 let uri = clean_webspace_uri(&uri)?;
                 let (object, bytes) = webspace_read_bytes(data_dir, registry, &uri).await?;
@@ -1343,10 +1337,10 @@ async fn handle_library_webspace_request(
                 let archive_name = object.name.clone();
                 (uri, archive_name, bytes)
             } else {
-                let target = library_target(data_dir, active, &uri)?;
-                check_revision(data_dir, active, &target.uri, if_revision.as_deref())?;
+                let target = library_target(data_dir, &active, &uri)?;
+                check_revision(data_dir, &active, &target.uri, if_revision.as_deref())?;
                 let archive_name = library_archive_name(&target, "selected extraction")?;
-                let bytes = read_library_file_bytes(data_dir, active, &target)?;
+                let bytes = read_library_file_bytes(data_dir, &active, &target)?;
                 (target.uri.clone(), archive_name, bytes)
             };
             let request = ArchiveExtractRequest {
@@ -1359,11 +1353,11 @@ async fn handle_library_webspace_request(
             };
             if is_webspace_uri(destination_uri.as_str()) {
                 extract_archive_entries_to_webspace_destination(
-                    data_dir, registry, active, bytes, request,
+                    data_dir, registry, &active, bytes, request,
                 )
                 .await
             } else {
-                extract_archive_entries_to_local_destination(data_dir, active, bytes, request)
+                extract_archive_entries_to_local_destination(data_dir, &active, bytes, request)
             }
         }
         ObjectProviderRequest::Sync { principal_id, uri } => {

@@ -5497,6 +5497,85 @@ async fn test_library_gateway_imports_external_webspace_archive_entries_to_local
     assert_eq!(String::from_utf8(bytes).unwrap(), "zip nested");
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn protected_webspace_extract_refuses_a_missing_recovery_key() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = gateway_router(library_webspace_test_state(dir.path()).await);
+    let authority = passkey_authority_with_name(dir.path(), Some("admin"));
+    crate::auth::store_test_principal_root_protection(dir.path(), &authority.principal_id);
+    let key_path = crate::auth::recovery_archive_key_path(dir.path()).unwrap();
+    std::fs::remove_file(&key_path).unwrap();
+    let token = app_token_for_authority(dir.path(), LIBRARY_CAPSULE_ID, &authority);
+    let (status, body) = post_library(
+        app,
+        &token,
+        "archive_extract_entries",
+        json!({
+            "uri": "localhost://WebSpaces/Operator/Projects/Bundle.zip",
+            "destination_uri": "localhost://WebSpaces/OperatorMutable/Folder",
+            "entries": ["alpha.txt"],
+            "conflict_policy": "replace",
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["status"], "error", "{body}");
+    assert!(
+        body["message"]
+            .as_str()
+            .unwrap_or("")
+            .contains(crate::object_authority::RECOVERY_KEY_REFUSAL),
+        "{body}"
+    );
+    let root = crate::auth::principal_localhost_root(&authority.principal_id);
+    let event_uri = format!("{root}/.AppData/LocalHost/.Runtime/Library/events.jsonl");
+    let event_path =
+        elastos_common::localhost::rooted_localhost_fs_path(dir.path(), &event_uri).unwrap();
+    assert!(
+        !event_path.exists(),
+        "extract wrote the event log before the recovery key refusal"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn protected_webspace_extract_seals_the_event_log() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = gateway_router(library_webspace_test_state(dir.path()).await);
+    let authority = passkey_authority_with_name(dir.path(), Some("admin"));
+    crate::auth::store_test_principal_root_protection(dir.path(), &authority.principal_id);
+    let token = app_token_for_authority(dir.path(), LIBRARY_CAPSULE_ID, &authority);
+    let (status, body) = post_library(
+        app.clone(),
+        &token,
+        "archive_extract_entries",
+        json!({
+            "uri": "localhost://WebSpaces/Operator/Projects/Bundle.zip",
+            "destination_uri": "localhost://WebSpaces/OperatorMutable/Folder",
+            "entries": ["alpha.txt"],
+            "conflict_policy": "replace",
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["status"], "ok", "{body}");
+    let (events_status, events) = post_library(app, &token, "events", json!({})).await;
+    assert_eq!(events_status, StatusCode::OK);
+    assert_eq!(events["status"], "ok", "{events}");
+    let root = crate::auth::principal_localhost_root(&authority.principal_id);
+    let event_uri = format!("{root}/.AppData/LocalHost/.Runtime/Library/events.jsonl");
+    let event_path =
+        elastos_common::localhost::rooted_localhost_fs_path(dir.path(), &event_uri).unwrap();
+    let stored = std::fs::read(&event_path).expect("event log");
+    assert!(
+        !stored
+            .windows(b"archive_extract_entries".len())
+            .any(|window| window == b"archive_extract_entries"),
+        "events.jsonl stored the extract event in plaintext"
+    );
+}
+
 #[tokio::test]
 async fn test_library_gateway_webspace_archive_writeback_requires_mutable_write_adapter() {
     let dir = tempfile::tempdir().unwrap();
@@ -8539,6 +8618,29 @@ async fn test_library_provider_runtime_custody_buy_rejects_caller_supplied_purch
 #[tokio::test]
 async fn test_runtime_custody_buy_raw_provider_call_requires_gateway_wallet_authority() {
     let dir = tempfile::tempdir().unwrap();
+    let principal = "person:local:raw-provider-buy";
+    crate::auth::store_test_human_principal(dir.path(), principal);
+    let response = crate::library::handle_object_provider_runtime_request_with_gateway(
+        dir.path(),
+        Arc::new(ProviderRegistry::new()),
+        &json!({
+            "op": "buy",
+            "principal_id": principal,
+            "mint_id": "00".repeat(32),
+        }),
+        None,
+    )
+    .await;
+    assert_eq!(response["status"], "error");
+    assert_eq!(
+        response["message"],
+        crate::protected_content_runtime::RUNTIME_CUSTODY_PURCHASE_DENIED_MESSAGE
+    );
+}
+
+#[tokio::test]
+async fn test_runtime_custody_buy_raw_provider_call_refuses_a_missing_principal() {
+    let dir = tempfile::tempdir().unwrap();
     let response = crate::library::handle_object_provider_runtime_request_with_gateway(
         dir.path(),
         Arc::new(ProviderRegistry::new()),
@@ -8551,9 +8653,11 @@ async fn test_runtime_custody_buy_raw_provider_call_requires_gateway_wallet_auth
     )
     .await;
     assert_eq!(response["status"], "error");
-    assert_eq!(
-        response["message"],
-        crate::protected_content_runtime::RUNTIME_CUSTODY_PURCHASE_DENIED_MESSAGE
+    assert!(
+        response["message"].as_str().unwrap_or("").contains(
+            "principal 'person:local:raw-provider-buy' has no stored record; its root cannot be chosen"
+        ),
+        "{response}"
     );
 }
 

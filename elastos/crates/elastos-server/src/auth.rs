@@ -461,7 +461,7 @@ fn home_mutex(
     mutex
 }
 
-fn audit_chain_activation_mutex(data_dir: &Path) -> &'static Mutex<()> {
+pub(crate) fn audit_chain_activation_mutex(data_dir: &Path) -> &'static Mutex<()> {
     home_mutex(&AUDIT_CHAIN_ACTIVATION_LOCKS, data_dir)
 }
 
@@ -557,7 +557,7 @@ fn verified_auth_state_cache() -> &'static Mutex<HashMap<PathBuf, VerifiedAuthSt
     VERIFIED_AUTH_STATE_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-fn auth_state_cache_key(data_dir: &Path) -> PathBuf {
+pub(crate) fn auth_state_cache_key(data_dir: &Path) -> PathBuf {
     std::fs::canonicalize(data_dir).unwrap_or_else(|_| data_dir.to_path_buf())
 }
 
@@ -4688,7 +4688,7 @@ fn open_auth_state_lock(data_dir: &Path) -> anyhow::Result<File> {
     open_regular_lock_file(&path, "auth state")
 }
 
-fn open_audit_chain_activation_lock(data_dir: &Path) -> anyhow::Result<File> {
+pub(crate) fn open_audit_chain_activation_lock(data_dir: &Path) -> anyhow::Result<File> {
     let path = audit_chain_activation_lock_path(data_dir)?;
     if let Some(parent) = path.parent() {
         ensure_regular_auth_parent(data_dir, parent)?;
@@ -4750,11 +4750,11 @@ fn lock_principal_root_lifecycle(_data_dir: &Path) -> anyhow::Result<FileLock> {
     Err(unsupported_on_this_platform())
 }
 
-fn lock_auth_state_file(file: File) -> anyhow::Result<FileLock> {
+pub(crate) fn lock_auth_state_file(file: File) -> anyhow::Result<FileLock> {
     FileLock::exclusive(file).context("failed to lock auth state")
 }
 
-fn unlock_auth_state_file(lock: FileLock) -> anyhow::Result<()> {
+pub(crate) fn unlock_auth_state_file(lock: FileLock) -> anyhow::Result<()> {
     lock.release().context("failed to unlock auth state")
 }
 
@@ -4911,53 +4911,7 @@ pub(crate) fn load_audit_chain_activation_unlocked(
     Ok(Some(activation))
 }
 
-std::thread_local! {
-    static AUDIT_ACTIVATION_LOCK_MARKS: std::cell::RefCell<Vec<PathBuf>> =
-        const { std::cell::RefCell::new(Vec::new()) };
-}
-
-/// Remembers that this thread already holds the audit lock for one data
-/// directory. `build_for` holds that lock across root resolution and the
-/// protection read, and both of those call this function again.
-struct AuditActivationLockMark(PathBuf);
-
-impl AuditActivationLockMark {
-    fn enter(key: PathBuf) -> Self {
-        AUDIT_ACTIVATION_LOCK_MARKS.with(|held| held.borrow_mut().push(key.clone()));
-        Self(key)
-    }
-}
-
-impl Drop for AuditActivationLockMark {
-    fn drop(&mut self) {
-        AUDIT_ACTIVATION_LOCK_MARKS.with(|held| {
-            let mut held = held.borrow_mut();
-            if let Some(index) = held.iter().rposition(|path| path == &self.0) {
-                held.remove(index);
-            }
-        });
-    }
-}
-
-pub(crate) fn with_audit_chain_activation_lock<T>(
-    data_dir: &Path,
-    operation: impl FnOnce() -> anyhow::Result<T>,
-) -> anyhow::Result<T> {
-    let key = auth_state_cache_key(data_dir);
-    let reentered =
-        AUDIT_ACTIVATION_LOCK_MARKS.with(|held| held.borrow().iter().any(|path| path == &key));
-    if reentered {
-        return operation();
-    }
-    let _mark = AuditActivationLockMark::enter(key);
-    let _guard = audit_chain_activation_mutex(data_dir)
-        .lock()
-        .map_err(|_| anyhow!("audit activation lock poisoned"))?;
-    let lock = lock_auth_state_file(open_audit_chain_activation_lock(data_dir)?)?;
-    let value = operation()?;
-    unlock_auth_state_file(lock)?;
-    Ok(value)
-}
+pub(crate) use crate::auth_state_files::with_audit_chain_activation_lock;
 
 #[cfg(unix)]
 #[cfg(test)]

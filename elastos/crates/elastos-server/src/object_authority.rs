@@ -436,10 +436,12 @@ fn decode_data_key(text: &str) -> anyhow::Result<Zeroizing<[u8; 32]>> {
         decoded.zeroize();
         anyhow::bail!(KEY_NOT_32);
     }
-    let mut key = [0u8; 32];
-    key.copy_from_slice(&decoded);
+    let mut raw = [0u8; 32];
+    raw.copy_from_slice(&decoded);
     decoded.zeroize();
-    Ok(Zeroizing::new(key))
+    let key = Zeroizing::new(raw);
+    raw.zeroize();
+    Ok(key)
 }
 
 fn json_opt_string(value: Option<&str>) -> Value {
@@ -519,6 +521,74 @@ fn bound_root<'a>(
     Ok(root)
 }
 
+std::thread_local! {
+    static TRUSTED_OBJECT_ENVELOPE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Set for the helper's own request. That process trusts the envelope and
+/// does not open the sign-in folder. Runtime writes reload protection.
+pub(crate) struct TrustedObjectEnvelope {
+    previous: bool,
+}
+
+impl TrustedObjectEnvelope {
+    pub(crate) fn enter() -> Self {
+        Self {
+            previous: TRUSTED_OBJECT_ENVELOPE.replace(true),
+        }
+    }
+}
+
+impl Drop for TrustedObjectEnvelope {
+    fn drop(&mut self) {
+        TRUSTED_OBJECT_ENVELOPE.set(self.previous);
+    }
+}
+
+struct ActiveSeal {
+    key: Option<Zeroizing<[u8; 32]>>,
+    key_id: Option<String>,
+}
+
+fn active_seal(authority: &ObjectAuthorityV1, data_dir: &Path) -> anyhow::Result<ActiveSeal> {
+    if TRUSTED_OBJECT_ENVELOPE.with(|flag| flag.get()) {
+        return Ok(ActiveSeal {
+            key: authority.data_key.clone(),
+            key_id: authority.data_key_id.clone(),
+        });
+    }
+    let Some(root) = authority.root.as_deref() else {
+        return Ok(ActiveSeal {
+            key: None,
+            key_id: None,
+        });
+    };
+    let protection =
+        auth::load_principal_root_protection(data_dir, authority.principal_id(), root)?;
+    let Some(protection) = protection else {
+        return Ok(ActiveSeal {
+            key: None,
+            key_id: None,
+        });
+    };
+    let envelope_matches = authority.data_key_id.as_deref()
+        == Some(protection.data_key_id.as_str())
+        && authority.data_key.is_some();
+    if envelope_matches {
+        return Ok(ActiveSeal {
+            key: authority.data_key.clone(),
+            key_id: Some(protection.data_key_id),
+        });
+    }
+    let mut raw = auth::principal_root_data_key_from_protection(data_dir, &protection)?;
+    let key = Zeroizing::new(raw);
+    raw.zeroize();
+    Ok(ActiveSeal {
+        key: Some(key),
+        key_id: Some(protection.data_key_id),
+    })
+}
+
 pub(crate) fn read_principal_root_object_with_authority(
     authority: &ObjectAuthorityV1,
     path: &Path,
@@ -531,26 +601,29 @@ pub(crate) fn read_principal_root_object_with_authority(
         .map_err(|_| anyhow!("principal-root object mutation lock poisoned"))?;
     #[cfg(test)]
     auth::principal_object_io::record_read(data_dir, path);
-    if authority.data_key.is_none() {
+    let seal = active_seal(authority, data_dir)?;
+    if seal.key.is_none() {
         let (mut file, _) = auth::open_principal_root_object_file(path)?;
         let mut bytes = Vec::new();
         file.read_to_end(&mut bytes)
             .with_context(|| format!("failed to read {path:?}"))?;
         return Ok(bytes);
     }
-    read_protected(authority, data_dir, root, uri, path)
+    read_protected(authority, &seal, data_dir, root, uri, path)
 }
 
 fn read_protected(
     authority: &ObjectAuthorityV1,
+    seal: &ActiveSeal,
     data_dir: &Path,
     root: &str,
     uri: &str,
     path: &Path,
 ) -> anyhow::Result<Vec<u8>> {
     let (mut file, len) = auth::open_principal_root_object_file(path)?;
-    let data_key_id = authority
-        .data_key_id
+    let data_key = seal.key.as_ref().ok_or_else(|| anyhow!(KEY_MISMATCH))?;
+    let data_key_id = seal
+        .key_id
         .as_deref()
         .ok_or_else(|| anyhow!(KEY_MISMATCH))?;
     let expected = PrincipalRootObjectExpectation {
@@ -587,10 +660,6 @@ fn read_protected(
     if auth::principal_root_object_label_never_opens(&damage) {
         return Err(damaged(damage));
     }
-    let data_key = authority
-        .data_key
-        .as_ref()
-        .ok_or_else(|| anyhow!(KEY_MISMATCH))?;
     let bytes = auth::read_principal_root_object_rest(&mut file, probe.prefix)
         .with_context(|| format!("failed to read {path:?}"))?;
     auth::decrypt_principal_root_object_envelope_bytes(data_key, &expected, &bytes)
@@ -637,7 +706,8 @@ pub(crate) fn write_principal_root_object_with_authority(
         .map_err(|_| anyhow!("principal-root object mutation lock poisoned"))?;
     #[cfg(test)]
     auth::principal_object_io::record_write(data_dir, path);
-    let bytes = sealed_bytes(authority, root, uri, plaintext)?;
+    let seal = active_seal(authority, data_dir)?;
+    let bytes = sealed_bytes(authority, &seal, root, uri, plaintext)?;
     if create_only {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
@@ -661,15 +731,16 @@ pub(crate) fn create_principal_root_object_with_authority(
 
 fn sealed_bytes(
     authority: &ObjectAuthorityV1,
+    seal: &ActiveSeal,
     root: &str,
     uri: &str,
     plaintext: &[u8],
 ) -> anyhow::Result<Vec<u8>> {
-    let Some(data_key) = authority.data_key.as_ref() else {
+    let Some(data_key) = seal.key.as_ref() else {
         return Ok(plaintext.to_vec());
     };
-    let data_key_id = authority
-        .data_key_id
+    let data_key_id = seal
+        .key_id
         .as_deref()
         .ok_or_else(|| anyhow!(KEY_MISMATCH))?;
     let mut nonce = [0u8; 12];
@@ -802,6 +873,22 @@ pub(crate) fn wipe_wire_key(request: &mut Value) {
     zeroize_value(authority);
 }
 
+struct ObjectRootLockRelease {
+    done: Option<std::sync::mpsc::Sender<()>>,
+    worker: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Drop for ObjectRootLockRelease {
+    fn drop(&mut self) {
+        if let Some(done) = self.done.take() {
+            let _ = done.send(());
+        }
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
+}
+
 /// The confined object provider registered by the server. A `send_raw` that
 /// reaches this registration carries the Runtime's envelope. Any envelope
 /// the caller supplied is removed and is not forwarded.
@@ -833,17 +920,49 @@ impl AuthorityAttachingProvider {
                 self.inner.send_raw(&stripped).await
             };
         }
-        // Hold the attached value across the await. Drop wipes the wire key
-        // when the helper returns and when this future is cancelled.
-        let attached = match AttachedRequest::new(&self.data_dir, request) {
-            Ok(attached) => attached,
-            Err(err) => return Ok(authority_error(&err)),
+        // Build the envelope on a side thread that holds the object lock
+        // until the helper returns. The guard is not Send, so it cannot
+        // cross this await. Drop releases the lock if the future is cancelled.
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let data_dir = self.data_dir.clone();
+        let request = request.clone();
+        let worker = std::thread::Builder::new()
+            .name("object-root-lock".to_string())
+            .spawn(move || {
+                let _guard = match auth::principal_root_object_mutation_lock(&data_dir).lock() {
+                    Ok(guard) => guard,
+                    Err(_) => {
+                        let _ = ready_tx
+                            .send(Err(anyhow!("principal-root object mutation lock poisoned")));
+                        return;
+                    }
+                };
+                let attached = AttachedRequest::new(&data_dir, &request);
+                let _ = ready_tx.send(attached);
+                let _ = done_rx.recv();
+            })
+            .map_err(|err| ProviderError::Provider(err.to_string()))?;
+        let release = ObjectRootLockRelease {
+            done: Some(done_tx),
+            worker: Some(worker),
         };
-        if fenced {
+        let attached = match ready_rx.recv() {
+            Ok(Ok(attached)) => attached,
+            Ok(Err(err)) => return Ok(authority_error(&err)),
+            Err(_) => {
+                return Ok(authority_error(&anyhow!(
+                    "principal-root object mutation lock poisoned"
+                )));
+            }
+        };
+        let result = if fenced {
             self.inner.send_raw_fenced(attached.value(), fence).await
         } else {
             self.inner.send_raw(attached.value()).await
-        }
+        };
+        drop(release);
+        result
     }
 }
 
@@ -1040,6 +1159,39 @@ mod tests {
         }
     }
 
+    struct LockProbe {
+        data_dir: PathBuf,
+        held: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    #[async_trait::async_trait]
+    impl Provider for LockProbe {
+        async fn handle(
+            &self,
+            _request: elastos_runtime::provider::ResourceRequest,
+        ) -> Result<elastos_runtime::provider::ResourceResponse, ProviderError> {
+            Err(ProviderError::Provider(
+                "resource requests are not used in this test".to_string(),
+            ))
+        }
+
+        fn schemes(&self) -> Vec<&'static str> {
+            Vec::new()
+        }
+
+        fn name(&self) -> &'static str {
+            "lock-probe"
+        }
+
+        async fn send_raw(&self, _request: &Value) -> Result<Value, ProviderError> {
+            let busy = auth::principal_root_object_mutation_lock(&self.data_dir)
+                .try_lock()
+                .is_err();
+            self.held.store(busy, std::sync::atomic::Ordering::SeqCst);
+            Ok(serde_json::json!({ "status": "ok" }))
+        }
+    }
+
     /// The inner provider must see the Runtime envelope. Deleting the insert
     /// in `ObjectAuthorityV1::attach`, or forwarding a caller-supplied
     /// envelope, leaves this red.
@@ -1181,6 +1333,135 @@ mod tests {
         assert!(
             wipe < build,
             "attach drops a caller data_key when build fails"
+        );
+    }
+
+    /// `decode_data_key` copies into a stack array. That copy is wiped after
+    /// `Zeroizing` takes it. Deleting `raw.zeroize()` leaves this red.
+    #[test]
+    fn decode_data_key_wipes_the_stack_copy() {
+        let path =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/object_authority.rs");
+        let text = std::fs::read_to_string(&path).expect("object authority source");
+        let start = text.find("fn decode_data_key(").expect("decode_data_key");
+        let body = &text[start..];
+        let end = body.find("\nfn json_opt_string").expect("end of decode");
+        let body = &body[..end];
+        let copied = body.find("Zeroizing::new(").expect("zeroizing copy");
+        assert!(
+            body[copied..].contains("raw.zeroize()"),
+            "decode_data_key leaves the stack key copy"
+        );
+    }
+
+    /// The audit-lock reentrancy mark is sign-in file code. It does not live
+    /// in `auth.rs`.
+    #[test]
+    fn audit_activation_lock_mark_is_not_server_code_in_auth_rs() {
+        let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
+        let auth = std::fs::read_to_string(root.join("auth.rs")).expect("auth.rs");
+        assert!(
+            !auth.contains("struct AuditActivationLockMark"),
+            "auth.rs still defines the audit lock mark"
+        );
+        assert!(
+            !auth.contains("AUDIT_ACTIVATION_LOCK_MARKS"),
+            "auth.rs still keeps the audit lock thread-local"
+        );
+        let files =
+            std::fs::read_to_string(root.join("auth_state_files.rs")).expect("auth_state_files");
+        assert!(files.contains("struct AuditActivationLockMark"));
+        assert!(files.contains("fn with_audit_chain_activation_lock"));
+    }
+
+    /// A keyless envelope captured before protection is stored must still
+    /// seal. Deleting the disk reload inside the mutation lock leaves the
+    /// plaintext marker in the file.
+    #[cfg(unix)]
+    #[test]
+    fn a_keyless_write_seals_with_protection_stored_before_the_lock() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let principal = "person:local:ada";
+        auth::store_test_human_principal(dir.path(), principal);
+        let stale = ObjectAuthorityV1::build_for(dir.path(), principal, false).expect("keyless");
+        assert!(stale.data_key.is_none());
+        auth::store_test_principal_root_protection(dir.path(), principal);
+        let root = stale.root.clone().expect("root");
+        let marker = b"PLAINTEXT-RACE-MARKER";
+        seal_marker(dir.path(), &stale, &root, "race.txt", marker);
+        let after = ObjectAuthorityV1::build_for(dir.path(), principal, false).expect("keyless");
+        assert!(after.data_key.is_none());
+        seal_marker(dir.path(), &after, &root, "later.txt", marker);
+    }
+
+    #[cfg(unix)]
+    fn seal_marker(
+        data_dir: &std::path::Path,
+        authority: &ObjectAuthorityV1,
+        root: &str,
+        name: &str,
+        marker: &[u8],
+    ) {
+        let uri = format!("{root}/Notes/{name}");
+        let path =
+            elastos_common::localhost::rooted_localhost_fs_path(data_dir, &uri).expect("path");
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).expect("parent");
+        }
+        write_principal_root_object_with_authority(authority, &path, &uri, data_dir, marker, false)
+            .expect("write");
+        let stored = std::fs::read(&path).expect("stored");
+        assert!(
+            !stored.windows(marker.len()).any(|window| window == marker),
+            "a keyless envelope wrote plaintext after protection was stored: {uri}"
+        );
+        let schema = auth::PRINCIPAL_ROOT_OBJECT_SCHEMA.as_bytes();
+        assert!(
+            stored.windows(schema.len()).any(|window| window == schema),
+            "the stored object is not an envelope: {uri}"
+        );
+        let opened = read_principal_root_object_with_authority(authority, &path, &uri, data_dir)
+            .expect("read");
+        assert_eq!(opened, marker);
+    }
+
+    /// The helper send runs while the object mutation lock is held. Init does
+    /// not take that lock. Dropping the lock before `send_raw` leaves this red.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn dispatch_holds_the_object_lock_across_send_raw() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let principal = "person:local:ada";
+        auth::store_test_human_principal(dir.path(), principal);
+        let held = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let provider = AuthorityAttachingProvider::new(
+            dir.path().to_path_buf(),
+            Arc::new(LockProbe {
+                data_dir: dir.path().to_path_buf(),
+                held: std::sync::Arc::clone(&held),
+            }),
+        );
+        let reply = provider
+            .send_raw(&serde_json::json!({
+                "op": "list",
+                "principal_id": principal,
+            }))
+            .await
+            .expect("dispatch");
+        assert_eq!(reply["status"], "ok", "{reply}");
+        assert!(
+            held.load(std::sync::atomic::Ordering::SeqCst),
+            "dispatch released the object lock before the helper send"
+        );
+        held.store(false, std::sync::atomic::Ordering::SeqCst);
+        let init = provider
+            .send_raw(&serde_json::json!({ "op": "init" }))
+            .await
+            .expect("init");
+        assert_eq!(init["status"], "ok", "{init}");
+        assert!(
+            !held.load(std::sync::atomic::Ordering::SeqCst),
+            "init held the object lock"
         );
     }
 }
