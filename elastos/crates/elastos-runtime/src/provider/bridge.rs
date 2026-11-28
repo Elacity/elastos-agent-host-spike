@@ -1993,6 +1993,77 @@ impl ProviderBridge {
         .await
     }
 
+    /// Provision custody inside its Runtime fence. The fixed state root and
+    /// rights are identical to `spawn_path_allow`; dropping this future kills
+    /// and reaps the child before its verified executable copy is released.
+    pub async fn spawn_custody_provision(
+        binary_path: &CheckedExecutable,
+        data_dir: &Path,
+        issuer_hex: &str,
+        output_limit: usize,
+        timeout: std::time::Duration,
+    ) -> Result<Vec<u8>, String> {
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt;
+        use tokio::io::AsyncReadExt;
+
+        let data_dir = std::fs::canonicalize(data_dir).map_err(|err| err.to_string())?;
+        let state =
+            super::init_base_path(super::rights_table::RuntimeProviderId::Custody, &data_dir);
+        let state = CString::new(state.as_os_str().as_bytes()).map_err(|err| err.to_string())?;
+        let issuer = CString::new(issuer_hex).map_err(|err| err.to_string())?;
+        let authority = ProviderAuthority {
+            reason: "runtime grant".to_string(),
+            capabilities: Vec::new(),
+            audit_events: Vec::new(),
+            rights: Vec::new(),
+        };
+        let (stdin_read, stdout_write, stdio) =
+            Self::protocol_pipes().map_err(|err| err.to_string())?;
+        let launched = super::os_entry::start_path_allow_args(
+            "custody-provider",
+            &authority,
+            binary_path,
+            &data_dir,
+            stdio,
+            &[
+                c"provision",
+                c"--base-path",
+                &state,
+                c"--trusted-runtime-issuer",
+                &issuer,
+            ],
+        )
+        .map_err(|err| format!("custody-provider provisioning refused: {err}"))?;
+        drop(stdin_read);
+        drop(stdout_write);
+        let mut child = ForkChild::start(launched.pid).map_err(|err| err.to_string())?;
+        drop(launched.to_child);
+        let reader = tokio::fs::File::from_std(std::fs::File::from(launched.from_child));
+        let failed = || "custody provider state provisioning failed".to_string();
+        let result = tokio::time::timeout(timeout, async {
+            let mut stdout = Vec::new();
+            reader
+                .take(output_limit.saturating_add(1) as u64)
+                .read_to_end(&mut stdout)
+                .await
+                .map_err(|_| failed())?;
+            if stdout.len() > output_limit {
+                return Err("custody provider provisioning output is invalid".to_string());
+            }
+            let status = (&mut child.status).await.map_err(|_| failed())?;
+            child.reaped = true;
+            if !libc::WIFEXITED(status) || libc::WEXITSTATUS(status) != 0 {
+                return Err(failed());
+            }
+            Ok(stdout)
+        })
+        .await
+        .map_err(|_| failed())?;
+        drop(child);
+        result
+    }
+
     /// `attach_resolver` is set for the bridge the caller holds. A restart
     /// passes false: the replacement stays beside that bridge and does not
     /// watch the file again.

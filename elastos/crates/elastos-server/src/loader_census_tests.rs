@@ -356,19 +356,10 @@ fn rows() -> Vec<Row> {
         row(
             "elastos-server/src/protected_content_config.rs",
             "provision_custody_node_with_installed_provider",
-            "command",
+            "ProviderBridge::spawn",
             "host process",
             "checksum",
-            "P2-8",
-            1,
-        ),
-        row(
-            "elastos-server/src/protected_content_config.rs",
-            "provision_custody_node_with_installed_provider",
-            "spawn()",
-            "host process",
-            "checksum",
-            "P2-8",
+            "P2-4",
             1,
         ),
         // Unix calls spawn_path_allow. Windows calls ProviderBridge::spawn.

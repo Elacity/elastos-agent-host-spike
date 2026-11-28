@@ -74,4 +74,5 @@
 # Runtime table gains the custody id, its state root, the two metadata
 # parents, the Init base path, and the syscall and profile arms. Measured
 # 27 Nov 2026.
-13610
+# +85: custody provisioning shares the fenced launch, bounded output, and child reap.
+13695

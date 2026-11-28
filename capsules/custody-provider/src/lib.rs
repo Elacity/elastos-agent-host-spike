@@ -207,14 +207,7 @@ pub fn provision_state_root(
     let root = normalize_root_path(root)?;
     let paths = CustodyProviderStatePaths::derive(root.clone());
     if paths.root.exists() {
-        let loaded = load_state_from_root(&paths.root)?;
-        if loaded.expected_runtime_issuer != expected_runtime_issuer {
-            return Err(CustodyProviderStateRootError::Conflict);
-        }
-        return Ok(ProvisionedCustodyProviderPublicKeys {
-            node_public_key: loaded.node_public_key,
-            node_custody_public_key: loaded.node_custody_secret.public_key().unwrap(),
-        });
+        return provision_existing_root(&paths, expected_runtime_issuer);
     }
 
     let parent = paths
@@ -250,19 +243,7 @@ fn provision_state_root_in_stage(
     parent: &Path,
 ) -> Result<ProvisionedCustodyProviderPublicKeys, CustodyProviderStateRootError> {
     create_owner_only_directory(&stage_paths.data_root)?;
-    write_owner_only_hex32_file(
-        &stage_paths.trusted_runtime_issuer,
-        expected_runtime_issuer.as_bytes(),
-    )?;
-
-    let node_custody_secret = generate_nonzero_secret()?;
-    write_owner_only_hex32_file(&stage_paths.node_custody_secret, &node_custody_secret)?;
-
-    let node_signing_seed = generate_nonzero_secret()?;
-    write_owner_only_hex32_file(&stage_paths.node_signing_key, &node_signing_seed)?;
-
-    sync_directory(&stage_paths.data_root)?;
-    sync_directory(&stage_paths.root)?;
+    write_state_files(stage_paths, expected_runtime_issuer)?;
 
     match rename_without_replacement(&stage_paths.root, &final_paths.root) {
         Ok(()) => {}
@@ -289,6 +270,102 @@ fn provision_state_root_in_stage(
         node_public_key: loaded.node_public_key,
         node_custody_public_key: loaded.node_custody_secret.public_key().unwrap(),
     })
+}
+
+/// Runtime opens the fence on an existing empty root. Keep every temporary
+/// entry inside that root, and use same-directory renames (no Landlock REFER
+/// right). The data directory is published last: load_state_from_root accepts
+/// the identity only after all three key files and that directory are present.
+/// A partial existing identity retains the existing refusal rule.
+#[cfg(unix)]
+fn provision_existing_root(
+    paths: &CustodyProviderStatePaths,
+    issuer: RuntimeOperationIssuerKeyV1,
+) -> Result<ProvisionedCustodyProviderPublicKeys, CustodyProviderStateRootError> {
+    use std::os::fd::AsRawFd;
+    validate_state_root_path(&paths.root)?;
+    let lock =
+        open_directory(&paths.root).map_err(|_| CustodyProviderStateRootError::MissingOrUnsafe)?;
+    if unsafe { nix::libc::flock(lock.as_raw_fd(), nix::libc::LOCK_EX) } != 0 {
+        return Err(CustodyProviderStateRootError::ProvisioningFailed);
+    }
+    if fs::read_dir(&paths.root)
+        .map_err(|_| CustodyProviderStateRootError::MissingOrUnsafe)?
+        .next()
+        .is_none()
+    {
+        let data_root = create_stage_root(&paths.root)?;
+        let prefix = data_root
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        let stage = CustodyProviderStatePaths {
+            root: paths.root.clone(),
+            trusted_runtime_issuer: paths
+                .root
+                .join(format!("{prefix}-{TRUSTED_RUNTIME_ISSUER_FILE}")),
+            node_custody_secret: paths
+                .root
+                .join(format!("{prefix}-{NODE_CUSTODY_SECRET_FILE}")),
+            node_signing_key: paths.root.join(format!("{prefix}-{NODE_SIGNING_KEY_FILE}")),
+            data_root,
+        };
+        let files = [
+            (&stage.trusted_runtime_issuer, &paths.trusted_runtime_issuer),
+            (&stage.node_custody_secret, &paths.node_custody_secret),
+            (&stage.node_signing_key, &paths.node_signing_key),
+        ];
+        let result = (|| {
+            write_state_files(&stage, issuer)?;
+            for (from, to) in files {
+                rename_without_replacement(from, to)?;
+            }
+            rename_without_replacement(&stage.data_root, &paths.data_root)?;
+            sync_directory(&paths.root)
+        })();
+        for (from, _) in files {
+            match fs::remove_file(from) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(_) => return Err(CustodyProviderStateRootError::ProvisioningFailed),
+            }
+        }
+        if stage.data_root.exists() {
+            remove_created_stage_root(&stage.data_root)?;
+        }
+        result?;
+    }
+    let loaded = load_state_from_root(&paths.root)?;
+    if loaded.expected_runtime_issuer != issuer {
+        return Err(CustodyProviderStateRootError::Conflict);
+    }
+    Ok(ProvisionedCustodyProviderPublicKeys {
+        node_public_key: loaded.node_public_key,
+        node_custody_public_key: loaded.node_custody_secret.public_key().unwrap(),
+    })
+}
+
+#[cfg(unix)]
+fn write_state_files(
+    stage_paths: &CustodyProviderStatePaths,
+    expected_runtime_issuer: RuntimeOperationIssuerKeyV1,
+) -> Result<(), CustodyProviderStateRootError> {
+    write_owner_only_hex32_file(
+        &stage_paths.trusted_runtime_issuer,
+        expected_runtime_issuer.as_bytes(),
+    )?;
+
+    let node_custody_secret = generate_nonzero_secret()?;
+    write_owner_only_hex32_file(&stage_paths.node_custody_secret, &node_custody_secret)?;
+
+    let node_signing_seed = generate_nonzero_secret()?;
+    write_owner_only_hex32_file(&stage_paths.node_signing_key, &node_signing_seed)?;
+
+    sync_directory(&stage_paths.data_root)?;
+    sync_directory(&stage_paths.root)?;
+
+    Ok(())
 }
 
 #[cfg(unix)]
@@ -927,6 +1004,65 @@ mod tests {
             .file_name()
             .to_string_lossy()
             .starts_with(STAGING_ROOT_PREFIX)));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn provision_state_root_accepts_empty_fenced_root_and_keeps_staging_inside() {
+        let temp = tempfile::tempdir().unwrap();
+        let parent = fs::canonicalize(temp.path()).unwrap().join("parent");
+        owner_only_dir(&parent);
+        let root = parent.join("custody");
+        owner_only_dir(&root);
+        let issuer = runtime_issuer(0x42);
+        let other = root.clone();
+        let first = std::thread::spawn(move || provision_state_root(&other, issuer));
+        let second = provision_state_root(&root, issuer).unwrap();
+        assert_eq!(first.join().unwrap().unwrap(), second);
+        assert_eq!(provision_state_root(&root, issuer).unwrap(), second);
+        assert_eq!(fs::read_dir(&parent).unwrap().count(), 1);
+        let mut names: Vec<_> = fs::read_dir(&root)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect();
+        names.sort();
+        assert_eq!(
+            names,
+            [
+                "data",
+                "node-custody-secret",
+                "node-signing-key",
+                "trusted-runtime-issuer"
+            ]
+        );
+        assert!(matches!(
+            provision_state_root(&root, runtime_issuer(0x55)),
+            Err(CustodyProviderStateRootError::Conflict)
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn provision_state_root_refuses_keys_until_data_is_published() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = fs::canonicalize(temp.path()).unwrap().join("custody");
+        owner_only_dir(&root);
+        let issuer = runtime_issuer(0x42);
+        write_owner_only_hex32_file(&root.join(TRUSTED_RUNTIME_ISSUER_FILE), issuer.as_bytes())
+            .unwrap();
+        write_owner_only_hex32_file(&root.join(NODE_CUSTODY_SECRET_FILE), &[0x44; 32]).unwrap();
+        write_owner_only_hex32_file(&root.join(NODE_SIGNING_KEY_FILE), &[0x45; 32]).unwrap();
+        let before = fs::read(root.join(NODE_SIGNING_KEY_FILE)).unwrap();
+        assert!(matches!(
+            load_state_from_root(&root),
+            Err(CustodyProviderStateRootError::MissingOrUnsafe)
+        ));
+        assert!(matches!(
+            provision_state_root(&root, issuer),
+            Err(CustodyProviderStateRootError::MissingOrUnsafe)
+        ));
+        assert_eq!(fs::read(root.join(NODE_SIGNING_KEY_FILE)).unwrap(), before);
+        assert_eq!(fs::read_dir(root).unwrap().count(), 3);
     }
 
     #[cfg(unix)]

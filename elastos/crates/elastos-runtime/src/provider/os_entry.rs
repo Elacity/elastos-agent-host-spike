@@ -133,8 +133,20 @@ pub(crate) fn start_path_allow(
     data_dir: &Path,
     stdio: ChildStdio,
 ) -> Result<Launched, String> {
+    start_path_allow_args(component_key, authority, executable, data_dir, stdio, &[])
+}
+
+/// Provisioning uses the same rights, roots, and OS launch as a protocol session.
+pub(super) fn start_path_allow_args(
+    component_key: &str,
+    authority: &ProviderAuthority,
+    executable: &super::CheckedExecutable,
+    data_dir: &Path,
+    stdio: ChildStdio,
+    args: &[&std::ffi::CStr],
+) -> Result<Launched, String> {
     let (provider, admitted) = admit_path_allow(component_key, authority)?;
-    start_path_allow_os(provider, &admitted, executable, data_dir, stdio)
+    start_path_allow_os(provider, &admitted, executable, data_dir, stdio, args)
 }
 
 fn start_path_allow_os(
@@ -143,6 +155,7 @@ fn start_path_allow_os(
     executable: &super::CheckedExecutable,
     data_dir: &Path,
     stdio: ChildStdio,
+    args: &[&std::ffi::CStr],
 ) -> Result<Launched, String> {
     #[cfg(all(
         not(elastos_unsupported_os_check),
@@ -175,6 +188,7 @@ fn start_path_allow_os(
             failure_record::start_prepared(
                 &prepared,
                 executable,
+                args,
                 Some(stdio.stdin),
                 Some(stdio.stdout),
                 Some(&env),
@@ -202,7 +216,7 @@ fn start_path_allow_os(
             executable.path(),
             5,
         )?;
-        launch_macos_path_allow(&confinement, &plan, executable, data_dir, stdio)
+        launch_macos_path_allow(&confinement, &plan, executable, data_dir, stdio, args)
     }
     #[cfg(any(
         elastos_unsupported_os_check,
@@ -215,7 +229,7 @@ fn start_path_allow_os(
         ))
     ))]
     {
-        let _ = (provider, admitted, executable, data_dir);
+        let _ = (provider, admitted, executable, data_dir, args);
         let _ = (stdio.stdin, stdio.stdout, stdio.to_child, stdio.from_child);
         Err(UNSUPPORTED_OS.to_string())
     }
@@ -261,6 +275,7 @@ fn launch_macos_path_allow(
     executable: &super::CheckedExecutable,
     data_dir: &Path,
     stdio: ChildStdio,
+    args: &[&std::ffi::CStr],
 ) -> Result<Launched, String> {
     let prepared = executable.verify_at_spawn()?;
     let binary = std::fs::canonicalize(prepared.exec_path()).map_err(|error| {
@@ -312,6 +327,11 @@ fn launch_macos_path_allow(
     // Chain has no metadata literal. `current_dir` adds no Seatbelt rule, and
     // this launch does not re-stat the directory: a same-user swap of it is
     // the root gap above, not a second grant.
+    use std::os::unix::ffi::OsStrExt;
+    command.args(
+        args.iter()
+            .map(|arg| std::ffi::OsStr::from_bytes(arg.to_bytes())),
+    );
     command.current_dir(data_dir);
     macos_launch(command, stdio, prepared, omitted_libraries)
 }
@@ -481,7 +501,7 @@ fn macos_launch(
         ));
     }
     let max_fd = macos_fd_sweep_limit(
-        unsafe { limit.assume_init() }.rlim_cur,
+        unsafe { limit.assume_init() }.rlim_max,
         macos_maxfilesperproc(),
     )?;
     // The child's stdio is already mapped when pre_exec runs. Mark every
@@ -544,14 +564,15 @@ fn macos_maxfilesperproc() -> Result<libc::rlim_t, String> {
 
 #[cfg(all(not(elastos_unsupported_os_check), target_os = "macos"))]
 fn macos_fd_sweep_limit(
-    soft: libc::rlim_t,
+    hard: libc::rlim_t,
     maxfilesperproc: Result<libc::rlim_t, String>,
 ) -> Result<i32, String> {
     let maxfilesperproc = maxfilesperproc?;
     if maxfilesperproc == 0 || maxfilesperproc > i32::MAX as libc::rlim_t {
         return Err("provider start is refused: kern.maxfilesperproc has an invalid value".into());
     }
-    Ok(soft.min(maxfilesperproc) as i32)
+    // A descriptor opened before the soft limit was lowered remains open.
+    Ok(hard.min(maxfilesperproc) as i32)
 }
 
 #[cfg(all(not(elastos_unsupported_os_check), target_os = "macos"))]
@@ -800,7 +821,7 @@ mod tests {
 
     #[cfg(all(target_os = "macos", not(elastos_unsupported_os_check)))]
     #[test]
-    fn macos_fd_sweep_limit_keeps_small_soft_limit() {
+    fn macos_fd_sweep_limit_keeps_small_hard_limit() {
         assert_eq!(macos_fd_sweep_limit(1024, Ok(184_320)), Ok(1024));
     }
 
@@ -811,6 +832,95 @@ mod tests {
         assert_eq!(
             macos_fd_sweep_limit(1024, Err(error.to_string())),
             Err(error.to_string())
+        );
+    }
+
+    #[cfg(all(target_os = "macos", not(elastos_unsupported_os_check)))]
+    #[test]
+    fn macos_launch_closes_fd_above_lowered_soft_limit() {
+        const CHILD: &str = "ELASTOS_TEST_HIGH_FD_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "provider::os_entry::tests::macos_launch_closes_fd_above_lowered_soft_limit",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success()
+                    && String::from_utf8_lossy(&output.stdout)
+                        .contains("test result: ok. 1 passed;"),
+                "{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let secret = temp.path().join("outside-key");
+        std::fs::write(&secret, b"outside-secret").unwrap();
+        let file = std::fs::File::open(secret).unwrap();
+        let high = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_DUPFD, 128) };
+        assert!(high >= 128);
+        let high = unsafe { OwnedFd::from_raw_fd(high) };
+        assert_eq!(
+            unsafe { libc::fcntl(high.as_raw_fd(), libc::F_GETFD) } & libc::FD_CLOEXEC,
+            0
+        );
+        let source = temp.path().join("fd_probe.rs");
+        let binary = temp.path().join("fd_probe");
+        std::fs::write(
+            &source,
+            r#"
+            unsafe extern "C" { fn read(fd: i32, buffer: *mut u8, size: usize) -> isize; }
+            fn main() {
+                let fd = std::env::args().nth(1).unwrap().parse().unwrap();
+                let mut bytes = [0u8; 14];
+                let read = unsafe { read(fd, bytes.as_mut_ptr(), bytes.len()) };
+                std::process::exit(if read == 14 && &bytes == b"outside-secret" { 0 } else { 1 });
+            }
+        "#,
+        )
+        .unwrap();
+        let built = std::process::Command::new("rustc")
+            .args(["--edition", "2021", "-o"])
+            .arg(&binary)
+            .arg(&source)
+            .output()
+            .unwrap();
+        assert!(
+            built.status.success(),
+            "{}",
+            String::from_utf8_lossy(&built.stderr)
+        );
+        let executable = super::super::CheckedExecutable::for_test(&binary);
+        let prepared = executable.verify_at_spawn().unwrap();
+        let mut command = std::process::Command::new(prepared.exec_path());
+        command.arg(high.as_raw_fd().to_string());
+        let (pipes, child_in, child_out) = probe_stdio();
+        let mut limit = libc::rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
+        assert_eq!(
+            unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) },
+            0
+        );
+        limit.rlim_cur = 64;
+        assert_eq!(unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &limit) }, 0);
+        let launched = macos_launch(command, pipes, prepared, Vec::new()).unwrap();
+        unsafe {
+            libc::close(child_in);
+            libc::close(child_out);
+        }
+        let status = reap_probe(launched.pid, &launched.from_child);
+        assert!(
+            libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 1,
+            "outside descriptor reached the helper or the probe failed: {}",
+            wait_text(status)
         );
     }
 
@@ -2180,6 +2290,7 @@ fn main() {
             &super::super::CheckedExecutable::for_test(&binary),
             &data,
             stdio,
+            &[],
         );
         unsafe {
             libc::close(child_in);
@@ -2522,7 +2633,7 @@ fn main() {
 
     /// The real custody binary, started by `start_path_allow`.
     ///
-    /// Provision runs outside the fence. Init and status run inside it.
+    /// Provision, Init, and status all run inside the custody fence.
     /// A missing binary, or a Linux kernel below Landlock ABI 3, panics.
     #[cfg(all(
         not(elastos_unsupported_os_check),
@@ -2597,22 +2708,20 @@ fn main() {
                 .map(|byte| format!("{byte:02x}"))
                 .collect::<String>()
         );
-        let provisioned = std::process::Command::new(&bin)
-            .args([
-                "provision",
-                "--base-path",
-                state.to_str().unwrap(),
-                "--trusted-runtime-issuer",
+        std::fs::create_dir(&state).unwrap();
+        owner_only(&state);
+        let provisioned = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(super::super::ProviderBridge::spawn_custody_provision(
+                &super::super::CheckedExecutable::for_test(&bin),
+                &data,
                 &issuer,
-            ])
-            .output()
-            .unwrap_or_else(|err| panic!("provision: {err}"));
-        assert!(
-            provisioned.status.success(),
-            "provision outside the fence failed: {} {}",
-            String::from_utf8_lossy(&provisioned.stdout),
-            String::from_utf8_lossy(&provisioned.stderr)
-        );
+                8 * 1024,
+                std::time::Duration::from_secs(5),
+            ))
+            .unwrap_or_else(|err| panic!("fenced provision: {err}"));
+        let receipt: serde_json::Value = serde_json::from_slice(&provisioned).unwrap();
+        assert_eq!(receipt["status"], "ok", "{receipt}");
 
         fn write_line(fd: i32, line: &str) {
             let mut bytes = line.as_bytes().to_vec();
@@ -2786,6 +2895,7 @@ fn main() {
             &super::super::CheckedExecutable::for_test(&binary),
             &data,
             stdio,
+            &[],
         );
         unsafe {
             libc::close(child_in);

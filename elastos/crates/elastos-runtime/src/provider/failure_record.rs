@@ -140,6 +140,7 @@ pub(super) fn start(
 pub(super) fn start_prepared(
     prepared: &preexec_installer::Prepared,
     executable: &CheckedExecutable,
+    args: &[&CStr],
     stdin_read: Option<i32>,
     stdout_write: Option<i32>,
     data_dir: Option<&CStr>,
@@ -147,7 +148,7 @@ pub(super) fn start_prepared(
     launch(
         prepared,
         executable,
-        &[],
+        args,
         NORMAL_TEST_HOOK,
         stdin_read,
         stdout_write,

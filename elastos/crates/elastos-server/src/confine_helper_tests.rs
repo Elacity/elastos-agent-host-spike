@@ -1452,7 +1452,7 @@ async fn musl_release_helpers_start_under_the_fence() {
     chain.bridge().shutdown().await.unwrap();
     recovery_kit_round_trip(&object_bin).await;
 
-    // Custody is provisioned outside the fence, then started inside it. Init
+    // Custody provisioning and protocol sessions share the same fence. Init
     // loads the state root, so a missing `geteuid` or metadata call fails here.
     let custody_bin = binary("ELASTOS_MUSL_CUSTODY");
     let custody_parent = data.join("protected-content/custody-provider");
@@ -1466,22 +1466,19 @@ async fn musl_release_helpers_start_under_the_fence() {
     for byte in signing.verifying_key().to_bytes() {
         issuer.push_str(&format!("{byte:02x}"));
     }
-    let provisioned = std::process::Command::new(&custody_bin)
-        .args([
-            "provision",
-            "--base-path",
-            state.to_str().unwrap(),
-            "--trusted-runtime-issuer",
-            &issuer,
-        ])
-        .output()
-        .unwrap_or_else(|err| panic!("musl custody provision: {err}"));
-    assert!(
-        provisioned.status.success(),
-        "musl custody provision failed: {} {}",
-        String::from_utf8_lossy(&provisioned.stdout),
-        String::from_utf8_lossy(&provisioned.stderr)
-    );
+    std::fs::create_dir(&state).unwrap();
+    std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let provisioned = elastos_runtime::provider::ProviderBridge::spawn_custody_provision(
+        &pinned(&custody_bin, &data),
+        &data,
+        &issuer,
+        8 * 1024,
+        std::time::Duration::from_secs(5),
+    )
+    .await
+    .unwrap_or_else(|err| panic!("musl custody provision: {err}"));
+    let receipt: serde_json::Value = serde_json::from_slice(&provisioned).unwrap();
+    assert_eq!(receipt["status"], "ok", "{receipt}");
     let custody = elastos_runtime::provider::ProviderBridge::spawn_path_allow(
         "custody-provider",
         &authority(),

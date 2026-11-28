@@ -218,6 +218,11 @@
       "slice": 3
     },
     {
+      "file": "elastos/crates/elastos-runtime/src/provider/bridge.rs",
+      "name": "custody-provider",
+      "slice": 4
+    },
+    {
       "file": "elastos/crates/elastos-runtime/src/provider/landlock_plan.rs",
       "name": "custody-provider",
       "slice": 4

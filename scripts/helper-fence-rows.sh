@@ -64,6 +64,13 @@ require_summary() {
   }
 }
 
+log="${RUNNER_TEMP}/helper-fence-custody-provision.log"
+run_row "$log" test --locked -p elastos-server --lib \
+  protected_content_config::tests::provision_custody_node_cannot_read_outside_its_fence \
+  -- --exact --test-threads=2
+require_summary "$log" '^test result: ok\. 1 passed; 0 failed;' \
+  "custody provisioning fence selected no test or failed"
+
 log="${RUNNER_TEMP}/helper-fence-confine.log"
 run_row "$log" test --locked -p elastos-server --lib confine_helper_tests -- --test-threads=2
 require_summary "$log" '^test result: ok\. [1-9][0-9]* passed; 0 failed;' \
@@ -72,6 +79,7 @@ require_summary "$log" '^test result: ok\. [1-9][0-9]* passed; 0 failed;' \
 case "$(uname -s)" in
   Darwin)
     names=(
+      provider::os_entry::tests::macos_launch_closes_fd_above_lowered_soft_limit
       provider::os_entry::tests::a_root_swapped_between_render_and_sandbox_exec_is_refused_and_starts_nothing
       provider::os_entry::tests::a_symlink_subpath_resolves_outside_and_the_device_key_stays_unread
       provider::os_entry::tests::localhost_object_and_chain_cannot_open_device_key

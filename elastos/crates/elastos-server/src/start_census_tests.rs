@@ -252,9 +252,9 @@ fn places() -> Vec<Place> {
         place(
             "elastos-server/src/protected_content_config.rs",
             "provision_custody_node_with_installed_provider",
-            "spawn()".to_string(),
+            spawn.clone(),
             1,
-            "provisioning: verified custody provider binary",
+            "custody provisioning: signed executable, custody rights and state root",
         ),
         place(
             "elastos-server/src/publish.rs",

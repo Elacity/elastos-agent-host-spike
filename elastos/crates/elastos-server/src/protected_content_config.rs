@@ -5,7 +5,6 @@
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
 use std::time::Duration;
 
 use anyhow::Context;
@@ -975,64 +974,36 @@ async fn provision_custody_node_with_installed_provider(
     let prepared =
         crate::setup::verify_installed_component_start(data_dir, "custody-provider", &binary)?;
     prepared.signed_checksum()?;
-    let issuer_hex = format!("0x{}", hex::encode(issuer.as_bytes()));
-    let mut command = tokio::process::Command::new(prepared.exec_path());
-    command
-        .arg("provision")
-        .arg("--base-path")
-        .arg(inactive_root)
-        .arg("--trusted-runtime-issuer")
-        .arg(&issuer_hex)
-        .kill_on_drop(true)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null());
-    prepared.attach_tokio(&mut command, false)?;
-    let mut child = command
-        .spawn()
-        .map_err(|_| anyhow::anyhow!("verified custody provider binary is unavailable"))?;
-    let output_result = tokio::time::timeout(CUSTODY_PROVIDER_PROVISION_TIMEOUT, async {
-        use tokio::io::AsyncReadExt as _;
-
-        let Some(stdout_handle) = child.stdout.take() else {
-            terminate_provision_child(&mut child).await;
-            anyhow::bail!("custody provider state provisioning failed");
-        };
-        let mut stdout = Vec::new();
-        if stdout_handle
-            .take((MAX_CUSTODY_PROVIDER_PROVISION_OUTPUT_BYTES + 1) as u64)
-            .read_to_end(&mut stdout)
-            .await
-            .is_err()
-        {
-            terminate_provision_child(&mut child).await;
-            anyhow::bail!("custody provider state provisioning failed");
-        }
-        if stdout.len() > MAX_CUSTODY_PROVIDER_PROVISION_OUTPUT_BYTES {
-            terminate_provision_child(&mut child).await;
-            anyhow::bail!("custody provider provisioning output is invalid");
-        }
-        let status = match child.wait().await {
-            Ok(status) => status,
-            Err(_) => {
-                terminate_provision_child(&mut child).await;
-                anyhow::bail!("custody provider state provisioning failed");
-            }
-        };
-        Ok::<_, anyhow::Error>((stdout, status))
-    })
-    .await;
-    let (stdout, status) = match output_result {
-        Ok(Ok(result)) => result,
-        Ok(Err(error)) => return Err(error),
-        Err(_) => {
-            terminate_provision_child(&mut child).await;
-            anyhow::bail!("custody provider state provisioning failed");
-        }
+    #[cfg(unix)]
+    let stdout = {
+        ensure_owner_only_dir(inactive_root, "inactive custody provider root")?;
+        let checked = elastos_runtime::provider::CheckedExecutable::pinned(
+            &binary,
+            prepared.signed_checksum()?,
+        )
+        .map_err(anyhow::Error::msg)?
+        .with_home_data_dir(data_dir);
+        elastos_runtime::provider::ProviderBridge::spawn_custody_provision(
+            &checked,
+            data_dir,
+            &format!("0x{}", hex::encode(issuer.as_bytes())),
+            MAX_CUSTODY_PROVIDER_PROVISION_OUTPUT_BYTES,
+            CUSTODY_PROVIDER_PROVISION_TIMEOUT,
+        )
+        .await
+        .map_err(anyhow::Error::msg)?
     };
-    if !status.success() {
-        anyhow::bail!("custody provider state provisioning failed");
-    }
+    #[cfg(not(unix))]
+    let stdout: Vec<u8> = {
+        let _ = (
+            inactive_root,
+            MAX_CUSTODY_PROVIDER_PROVISION_OUTPUT_BYTES,
+            CUSTODY_PROVIDER_PROVISION_TIMEOUT,
+        );
+        Err::<Vec<u8>, _>(anyhow::anyhow!(
+            "custody-provider provisioning refused: this operating system has no custody fence"
+        ))?
+    };
     let value: serde_json::Value = serde_json::from_slice(&stdout)
         .map_err(|_| anyhow::anyhow!("custody provider provisioning output is invalid"))?;
     parse_and_verify_provisioning_output(&value, issuer).map_err(|error| match error {
@@ -1043,11 +1014,6 @@ async fn provision_custody_node_with_installed_provider(
             anyhow::anyhow!("custody provider provisioning receipt is invalid")
         }
     })
-}
-
-async fn terminate_provision_child(child: &mut tokio::process::Child) {
-    let _ = child.kill().await;
-    let _ = child.wait().await;
 }
 
 fn parse_runtime_issuer_hex(value: &str) -> anyhow::Result<RuntimeOperationIssuerKeyV1> {
@@ -1274,7 +1240,27 @@ pub(crate) mod tests {
     }
 
     #[cfg(unix)]
-    fn install_successful_provision_script(
+    fn install_provision_probe(data_dir: &Path, body: &str) -> PathBuf {
+        let dir = safe_ancestor_tempdir();
+        let source = dir.path().join("probe.rs");
+        let binary = dir.path().join("probe");
+        std::fs::write(&source, format!("fn main() {{ {body} }}")).unwrap();
+        let compiled = std::process::Command::new("rustc")
+            .args(["--edition", "2021", "-o"])
+            .arg(&binary)
+            .arg(&source)
+            .output()
+            .unwrap();
+        assert!(
+            compiled.status.success(),
+            "{}",
+            String::from_utf8_lossy(&compiled.stderr)
+        );
+        install_verified_custody_provider(data_dir, &std::fs::read(binary).unwrap())
+    }
+
+    #[cfg(unix)]
+    fn install_successful_provision_probe(
         dir: &Path,
         data_dir: &Path,
         issuer_hex: &str,
@@ -1282,11 +1268,28 @@ pub(crate) mod tests {
     ) -> serde_json::Value {
         let (template_root, output) = provisioned_template(dir, issuer_hex, seed);
         let output_json = serde_json::to_string(&output).unwrap();
-        let script = format!(
-            "#!/bin/sh\nset -eu\nif [ \"$#\" -ne 5 ] || [ \"$1\" != \"provision\" ] || [ \"$2\" != \"--base-path\" ] || [ \"$4\" != \"--trusted-runtime-issuer\" ] || [ \"$5\" != \"{issuer_hex}\" ]; then\n  exit 73\nfi\nmkdir -p \"$3\"\ncp -R '{template_root}/.' \"$3/\"\nchmod 700 \"$3\" \"$3/data\"\nchmod 600 \"$3/trusted-runtime-issuer\" \"$3/node-signing-key\" \"$3/node-custody-secret\"\nprintf '%s\\n' '{output_json}'\n",
-            template_root = template_root.display(),
+        let mut body = format!(
+            "use std::os::unix::fs::{{DirBuilderExt, OpenOptionsExt}}; use std::io::Write; \
+             let args: Vec<_> = std::env::args().collect(); \
+             assert_eq!(args.len(), 6); assert_eq!(args[1], \"provision\"); \
+             assert_eq!(args[2], \"--base-path\"); assert_eq!(args[4], \"--trusted-runtime-issuer\"); \
+             assert_eq!(args[5], {issuer_hex:?}); \
+             let root = std::path::Path::new(&args[3]); \
+             if !root.exists() {{ std::fs::DirBuilder::new().mode(0o700).create(root).unwrap(); }} \
+             if !root.join(\"data\").exists() {{ std::fs::DirBuilder::new().mode(0o700).create(root.join(\"data\")).unwrap(); }}"
         );
-        install_verified_custody_provider(data_dir, script.as_bytes());
+        for name in [
+            "trusted-runtime-issuer",
+            "node-signing-key",
+            "node-custody-secret",
+        ] {
+            let bytes = std::fs::read_to_string(template_root.join(name)).unwrap();
+            body.push_str(&format!(
+                "std::fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(root.join({name:?})).unwrap().write_all({bytes:?}.as_bytes()).unwrap();"
+            ));
+        }
+        body.push_str(&format!("println!(\"{{}}\", {output_json:?});"));
+        install_provision_probe(data_dir, &body);
         output
     }
 
@@ -1359,13 +1362,42 @@ pub(crate) mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
+    async fn provision_custody_node_cannot_read_outside_its_fence() {
+        let dir = safe_ancestor_tempdir();
+        let data = dir.path().join("data");
+        owner_only_dir(&data);
+        owner_only_dir(&data.join("identity"));
+        let secret = data.join("identity/device.key");
+        std::fs::write(&secret, b"outside-secret\n").unwrap();
+        let state = provisioned_inactive_custody_root(&data).unwrap();
+        owner_only_dir(&state);
+        let report = state.join("fence-report");
+        install_provision_probe(&data, &format!(
+            "let result = if std::fs::read({secret:?}).is_ok() {{ \"leaked\" }} else {{ \"fenced\" }}; std::fs::write({report:?}, result).unwrap();"
+        ));
+        let error = run_provision_custody_node_for_test(
+            data,
+            dir.path().join("node.json"),
+            test_runtime_issuer_hex(),
+        )
+        .await
+        .unwrap_err();
+        let report = std::fs::read_to_string(report).unwrap_or_else(|failure| {
+            panic!("custody provisioning probe did not run: {error}; report: {failure}")
+        });
+        assert_eq!(report, "fenced", "{error}");
+        assert_eq!(std::fs::read(secret).unwrap(), b"outside-secret\n");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
     async fn provision_custody_node_provisions_inactive_root_and_writes_descriptor() {
         use std::os::unix::fs::PermissionsExt;
 
         let dir = safe_ancestor_tempdir();
         let data_dir = dir.path().join("data");
         owner_only_dir(&data_dir);
-        let expected = install_successful_provision_script(
+        let expected = install_successful_provision_probe(
             dir.path(),
             &data_dir,
             &test_runtime_issuer_hex(),
@@ -1432,12 +1464,7 @@ pub(crate) mod tests {
         let data_dir = dir.path().join("data");
         std::fs::create_dir(&data_dir).unwrap();
         std::fs::set_permissions(&data_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
-        install_successful_provision_script(
-            dir.path(),
-            &data_dir,
-            &test_runtime_issuer_hex(),
-            0x42,
-        );
+        install_successful_provision_probe(dir.path(), &data_dir, &test_runtime_issuer_hex(), 0x42);
 
         run_provision_custody_node_for_test(
             data_dir.clone(),
@@ -1459,7 +1486,7 @@ pub(crate) mod tests {
         let data_dir = dir.path().join("data");
         owner_only_dir(&data_dir);
         let issuer = test_runtime_issuer_hex();
-        install_successful_provision_script(dir.path(), &data_dir, &issuer, 0x43);
+        install_successful_provision_probe(dir.path(), &data_dir, &issuer, 0x43);
 
         let first_out = run_provision_custody_node_for_test(
             data_dir.clone(),
@@ -1598,7 +1625,7 @@ pub(crate) mod tests {
         let data_dir = dir.path().join("data");
         owner_only_dir(&data_dir);
 
-        install_verified_custody_provider(&data_dir, b"#!/bin/sh\nexit 61\n");
+        install_provision_probe(&data_dir, "std::process::exit(61);");
         let exit_error = run_provision_custody_node_for_test(
             data_dir.clone(),
             dir.path().join("exit.descriptor.json"),
@@ -1611,10 +1638,7 @@ pub(crate) mod tests {
             "custody provider state provisioning failed"
         );
 
-        install_verified_custody_provider(
-            &data_dir,
-            b"#!/bin/sh\nprintf '%s\\n' '{\"status\":\"ok\"}'\n",
-        );
+        install_provision_probe(&data_dir, r#"println!("{{\"status\":\"ok\"}}");"#);
         let invalid_output_error = run_provision_custody_node_for_test(
             data_dir.clone(),
             dir.path().join("invalid-output.descriptor.json"),
@@ -1632,8 +1656,10 @@ pub(crate) mod tests {
         wrong_receipt["data"]["receipt"] =
             serde_json::json!(format!("0x{}", hex::encode([0x66; 32])));
         let wrong_receipt_json = serde_json::to_string(&wrong_receipt).unwrap();
-        let script = format!("#!/bin/sh\nprintf '%s\\n' '{wrong_receipt_json}'\n");
-        install_verified_custody_provider(&data_dir, script.as_bytes());
+        install_provision_probe(
+            &data_dir,
+            &format!("println!(\"{{}}\", {wrong_receipt_json:?});"),
+        );
         let invalid_receipt_error = run_provision_custody_node_for_test(
             data_dir.clone(),
             dir.path().join("invalid-receipt.descriptor.json"),
@@ -1654,10 +1680,7 @@ pub(crate) mod tests {
         let data_dir = dir.path().join("data");
         owner_only_dir(&data_dir);
 
-        install_verified_custody_provider(
-            &data_dir,
-            b"#!/bin/sh\nawk 'BEGIN { printf \"{\\\"status\\\":\\\"ok\\\",\\\"data\\\":\\\"\"; for (i = 0; i < 9000; i++) printf \"a\"; printf \"\\\"}\" }'\n",
-        );
+        install_provision_probe(&data_dir, r#"print!("{}", "a".repeat(9000));"#);
         let oversized_error = run_provision_custody_node_for_test(
             data_dir.clone(),
             dir.path().join("oversized.descriptor.json"),
@@ -1670,12 +1693,10 @@ pub(crate) mod tests {
             "custody provider provisioning output is invalid"
         );
 
-        let pid_path = dir.path().join("timeout.pid");
-        let timeout_script = format!(
-            "#!/bin/sh\nprintf '%s' $$ > '{}'\nexec sleep 30\n",
-            pid_path.display()
-        );
-        install_verified_custody_provider(&data_dir, timeout_script.as_bytes());
+        let pid_path = inactive_custody_state_root(&data_dir).join("timeout.pid");
+        install_provision_probe(&data_dir, &format!(
+            "std::fs::write({pid_path:?}, std::process::id().to_string()).unwrap(); loop {{ std::hint::spin_loop(); }}"
+        ));
         let timeout_error = run_provision_custody_node_for_test(
             data_dir.clone(),
             dir.path().join("timeout.descriptor.json"),
