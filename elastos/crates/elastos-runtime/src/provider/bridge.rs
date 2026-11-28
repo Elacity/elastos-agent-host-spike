@@ -32,6 +32,10 @@ use super::registry::{
 };
 use super::CheckedExecutable;
 
+#[cfg(feature = "test-hooks")]
+#[path = "custody_test_support.rs"]
+pub mod custody_test_support;
+
 #[cfg(test)]
 thread_local! {
     static AFTER_VERIFY_SWAP: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =

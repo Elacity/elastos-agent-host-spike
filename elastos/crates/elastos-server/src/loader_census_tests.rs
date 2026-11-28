@@ -7,6 +7,11 @@ use std::fs;
 
 use crate::start_census_tests as source;
 
+#[test]
+fn custody_test_loaders_use_the_product_fence() {
+    source::custody::assert_fenced();
+}
+
 struct Row {
     file: &'static str,
     function: &'static str,

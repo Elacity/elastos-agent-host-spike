@@ -24,6 +24,7 @@ zeroize = "1.9"
 
 [dev-dependencies]
 elastos-auth = { path = "../../elastos/crates/elastos-auth" }
+elastos-runtime = { path = "../../elastos/crates/elastos-runtime", features = ["test-hooks"] }
 k256 = { version = "0.13", features = ["ecdsa"] }
 sha3 = "0.10"
 tempfile = "3.12"

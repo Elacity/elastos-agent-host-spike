@@ -36,6 +36,7 @@ use elastos_protected_content_runtime::{
     RuntimeRightsProvider, RuntimeSelectedProvider, RuntimeVerifiedPurchaseEffect,
     RuntimeViewerSession,
 };
+use elastos_runtime::provider::bridge::custody_test_support;
 use elastos_runtime::provider::{
     bridge::ProviderConfig, CapsuleProvider, Provider, ProviderBridge, ProviderCarrierInvoker,
     ProviderCarrierRoute, ProviderError, ProviderInvocation, ProviderInvocationTransport,
@@ -744,24 +745,12 @@ fn provision_custody_node_public_receipt(
     state_root: &Path,
     runtime_issuer_seed: u8,
 ) -> ProvisionedCustodyProviderPublicKeys {
-    let output = Command::new(binary)
-        .args([
-            "provision",
-            "--base-path",
-            state_root.to_str().unwrap(),
-            "--trusted-runtime-issuer",
-            &runtime_issuer_hex(runtime_issuer_seed),
-        ])
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "status={:?} stdout={} stderr={}",
-        output.status,
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
+    let output = custody_test_support::provision(
+        binary,
+        state_root,
+        &runtime_issuer_hex(runtime_issuer_seed),
     );
-    let response: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let response: Value = serde_json::from_slice(&output).unwrap();
     parse_and_verify_provisioning_output(
         &response,
         runtime_operation_issuer_for_seed(runtime_issuer_seed),
@@ -3430,24 +3419,8 @@ fn provision_custody_node_public_receipt_for_issuer(
     runtime_issuer: RuntimeOperationIssuerKeyV1,
 ) -> ProvisionedCustodyProviderPublicKeys {
     let issuer_hex = format!("0x{}", hex::encode(runtime_issuer.as_bytes()));
-    let output = Command::new(binary)
-        .args([
-            "provision",
-            "--base-path",
-            state_root.to_str().unwrap(),
-            "--trusted-runtime-issuer",
-            &issuer_hex,
-        ])
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "status={:?} stdout={} stderr={}",
-        output.status,
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let response: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let output = custody_test_support::provision(binary, state_root, &issuer_hex);
+    let response: Value = serde_json::from_slice(&output).unwrap();
     parse_and_verify_provisioning_output(&response, runtime_issuer).unwrap()
 }
 

@@ -223,6 +223,11 @@
       "slice": 4
     },
     {
+      "file": "elastos/crates/elastos-runtime/src/provider/custody_test_support.rs",
+      "name": "custody-provider",
+      "slice": 4
+    },
+    {
       "file": "elastos/crates/elastos-runtime/src/provider/landlock_plan.rs",
       "name": "custody-provider",
       "slice": 4
@@ -1176,6 +1181,21 @@
       "file": "elastos/crates/elastos-server/src/start_census_tests.rs",
       "name": "protected-content",
       "slice": 3
+    },
+    {
+      "file": "elastos/crates/elastos-server/src/start_census_tests/custody.rs",
+      "name": "custody-provider",
+      "slice": 4
+    },
+    {
+      "file": "elastos/crates/elastos-server/src/start_census_tests/custody.rs",
+      "name": "protect-provider",
+      "slice": 4
+    },
+    {
+      "file": "elastos/crates/elastos-server/src/start_census_tests/custody.rs",
+      "name": "protected-content",
+      "slice": 4
     },
     {
       "file": "elastos/crates/elastos-server/src/update.rs",

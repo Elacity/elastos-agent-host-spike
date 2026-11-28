@@ -1,15 +1,10 @@
 #![cfg(unix)]
 
 use std::fs;
-use std::io::{BufRead as _, BufReader, Write as _};
 use std::path::Path;
-use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{SystemTime, UNIX_EPOCH};
 
-use custody_provider::{
-    load_state_from_root, parse_runtime_issuer_hex, provision_state_root, PROVISIONING_PROVIDER_ID,
-    PROVISIONING_SCHEMA_V1,
-};
+use custody_provider::{load_state_from_root, PROVISIONING_PROVIDER_ID, PROVISIONING_SCHEMA_V1};
 use ed25519_dalek::{Signer as _, SigningKey};
 use elastos_auth::ethereum_signed_message_hash;
 use elastos_protected_content_contracts::{
@@ -37,6 +32,7 @@ use elastos_protected_content_custody::{
 use elastos_protected_content_provider_contracts::{
     CustodyProviderRequestV1, CustodyProviderResponseStatusV1, CustodyProviderResponseV1,
 };
+use elastos_runtime::provider::bridge::custody_test_support::{self, CustodyTestProcess};
 use k256::ecdsa::SigningKey as WalletSigningKey;
 use sha2::Digest as _;
 use sha3::Keccak256;
@@ -60,78 +56,38 @@ fn expires_unix_seconds() -> u64 {
 const PROCESS_TEST_VALID_RELEASE_LIFETIME_SECS: u64 =
     elastos_protected_content_contracts::MAX_RELEASE_REQUEST_LIFETIME_SECS;
 
-struct ProviderProcess {
-    child: Child,
-    stdin: ChildStdin,
-    stdout: BufReader<ChildStdout>,
-}
+struct ProviderProcess(CustodyTestProcess);
 
 impl ProviderProcess {
-    fn start() -> Self {
-        let mut child = Command::new(env!("CARGO_BIN_EXE_custody-provider"))
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-            .unwrap();
-        let stdin = child.stdin.take().unwrap();
-        let stdout = BufReader::new(child.stdout.take().unwrap());
-        Self {
-            child,
-            stdin,
-            stdout,
-        }
+    fn start(data_dir: &Path) -> Self {
+        Self(CustodyTestProcess::start(
+            Path::new(env!("CARGO_BIN_EXE_custody-provider")),
+            data_dir,
+        ))
     }
 
     fn request(&mut self, value: serde_json::Value) -> serde_json::Value {
-        serde_json::to_writer(&mut self.stdin, &value).unwrap();
-        writeln!(self.stdin).unwrap();
-        self.stdin.flush().unwrap();
-        let mut line = String::new();
-        self.stdout.read_line(&mut line).unwrap();
-        serde_json::from_str(&line).unwrap()
+        self.0.request(value)
     }
 
-    fn stop(mut self) {
-        let _ = self.request(serde_json::json!({"op": "shutdown"}));
-        drop(self.stdin);
-        let _ = self.child.wait();
+    fn stop(self) {
+        self.shutdown_and_wait_with_stdin_open();
     }
 
     fn shutdown_and_wait_with_stdin_open(mut self) {
         let response = self.request(serde_json::json!({"op": "shutdown"}));
         assert_eq!(response["status"], "ok");
-        for _ in 0..50 {
-            if let Some(status) = self.child.try_wait().unwrap() {
-                assert!(status.success());
-                return;
-            }
-            std::thread::sleep(Duration::from_millis(10));
-        }
-        let _ = self.child.kill();
-        panic!("custody provider did not exit after shutdown acknowledgement");
+        self.0.wait_with_stdin_open();
     }
 }
 
 fn run_provision_command(root: &Path, trusted_runtime_issuer: &str) -> serde_json::Value {
-    let output = Command::new(env!("CARGO_BIN_EXE_custody-provider"))
-        .args([
-            "provision",
-            "--base-path",
-            root.to_str().unwrap(),
-            "--trusted-runtime-issuer",
-            trusted_runtime_issuer,
-        ])
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "status={:?} stdout={} stderr={}",
-        output.status,
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
+    let output = custody_test_support::provision(
+        Path::new(env!("CARGO_BIN_EXE_custody-provider")),
+        root,
+        trusted_runtime_issuer,
     );
-    serde_json::from_slice(&output.stdout).unwrap()
+    serde_json::from_slice(&output).unwrap()
 }
 
 fn digest(seed: u8) -> Digest32 {
@@ -594,18 +550,8 @@ fn runtime_issuer_hex(seed: u8) -> String {
 fn prepare_config_with_seeds(root: &Path, custody_seed: u8, signing_seed: u8) -> serde_json::Value {
     use std::os::unix::fs::PermissionsExt;
 
-    let root = fs::canonicalize(root).unwrap();
-    let provider_parent = root.join("providers");
-    if !provider_parent.exists() {
-        fs::create_dir(&provider_parent).unwrap();
-        fs::set_permissions(&provider_parent, fs::Permissions::from_mode(0o700)).unwrap();
-    }
-    let provider_root =
-        provider_parent.join(format!("provider-{custody_seed:02x}-{signing_seed:02x}"));
-    let runtime_issuer = parse_runtime_issuer_hex(&runtime_issuer_hex(0x42)).unwrap();
-    if !provider_root.exists() {
-        provision_state_root(&provider_root, runtime_issuer).unwrap();
-    }
+    let provider_root = custody_test_support::state_root(root);
+    run_provision_command(&provider_root, &runtime_issuer_hex(0x42));
     if custody_seed != 1 {
         let custody = provider_root.join("node-custody-secret");
         fs::write(&custody, format!("0x{}", hex_bytes(&[custody_seed; 32]))).unwrap();
@@ -656,7 +602,7 @@ fn custody_provider_provision_command_returns_both_public_keys_and_redacts_priva
 
         fs::set_permissions(temp.path(), fs::Permissions::from_mode(0o700)).unwrap();
     }
-    let root = fs::canonicalize(temp.path()).unwrap().join("provider-root");
+    let root = custody_test_support::state_root(temp.path());
     let issuer = runtime_issuer_hex(0x42);
     let response = run_provision_command(&root, &issuer);
     assert_eq!(response["status"], "ok", "{response}");
@@ -711,7 +657,7 @@ fn custody_provider_provision_command_is_idempotent_for_public_identities() {
 
         fs::set_permissions(temp.path(), fs::Permissions::from_mode(0o700)).unwrap();
     }
-    let root = fs::canonicalize(temp.path()).unwrap().join("provider-root");
+    let root = custody_test_support::state_root(temp.path());
     let issuer = runtime_issuer_hex(0x42);
     let first = run_provision_command(&root, &issuer);
     let second = run_provision_command(&root, &issuer);
@@ -743,7 +689,7 @@ fn custody_provider_process_keeps_provisioning_issuer_while_buyer_runtime_releas
     let provisioning = signed_provisioning(&record);
     let provision_request =
         CustodyProviderRequestV1::new_provision_node_share(&record, &provisioning).unwrap();
-    let mut provider = ProviderProcess::start();
+    let mut provider = ProviderProcess::start(temp.path());
     let init = provider.request(init_request);
     assert_eq!(init["status"], "ok", "{init}");
     assert_eq!(init["data"]["provider"], PROVISIONING_PROVIDER_ID);
@@ -801,7 +747,7 @@ fn custody_provider_process_keeps_provisioning_issuer_while_buyer_runtime_releas
     assert_eq!(replay["data"], contribution["data"]);
     provider.stop();
 
-    let mut restarted = ProviderProcess::start();
+    let mut restarted = ProviderProcess::start(temp.path());
     assert_eq!(
         restarted.request(prepare_config(temp.path()))["status"],
         "ok"
@@ -810,11 +756,10 @@ fn custody_provider_process_keeps_provisioning_issuer_while_buyer_runtime_releas
     assert_eq!(restart_replay["data"], contribution["data"]);
     restarted.stop();
 
-    let mut wrong_secret = ProviderProcess::start();
-    assert_eq!(
-        wrong_secret.request(prepare_config_with_seeds(temp.path(), 2, 1))["status"],
-        "ok"
-    );
+    let wrong_secret_home = tempfile::tempdir().unwrap();
+    let wrong_secret_config = prepare_config_with_seeds(wrong_secret_home.path(), 2, 1);
+    let mut wrong_secret = ProviderProcess::start(wrong_secret_home.path());
+    assert_eq!(wrong_secret.request(wrong_secret_config)["status"], "ok");
     let wrong_secret_response =
         serde_json::to_string(&wrong_secret.request(request_value(&provision_request))).unwrap();
     assert!(
@@ -836,11 +781,10 @@ fn custody_provider_process_keeps_provisioning_issuer_while_buyer_runtime_releas
         &wrong_signing_decision,
     )
     .unwrap();
-    let mut wrong_signing = ProviderProcess::start();
-    assert_eq!(
-        wrong_signing.request(prepare_config_with_seeds(temp.path(), 1, 2))["status"],
-        "ok"
-    );
+    let wrong_signing_home = tempfile::tempdir().unwrap();
+    let wrong_signing_config = prepare_config_with_seeds(wrong_signing_home.path(), 1, 2);
+    let mut wrong_signing = ProviderProcess::start(wrong_signing_home.path());
+    assert_eq!(wrong_signing.request(wrong_signing_config)["status"], "ok");
     let wrong_signing_response =
         serde_json::to_string(&wrong_signing.request(request_value(&wrong_signing_request)))
             .unwrap();
@@ -851,7 +795,8 @@ fn custody_provider_process_keeps_provisioning_issuer_while_buyer_runtime_releas
 
 #[test]
 fn custody_provider_process_shutdown_exits_while_stdin_remains_open() {
-    ProviderProcess::start().shutdown_and_wait_with_stdin_open();
+    let temp = tempfile::tempdir().unwrap();
+    ProviderProcess::start(temp.path()).shutdown_and_wait_with_stdin_open();
 }
 
 #[test]
@@ -864,7 +809,7 @@ fn custody_provider_process_rejects_wrong_issuer_node_conflict_and_redacts_diagn
     let provisioning = signed_provisioning(&record);
     let provision_request =
         CustodyProviderRequestV1::new_provision_node_share(&record, &provisioning).unwrap();
-    let mut provider = ProviderProcess::start();
+    let mut provider = ProviderProcess::start(temp.path());
     let init = provider.request(init_request);
     assert_eq!(init["status"], "ok", "{init}");
     assert_eq!(
@@ -986,7 +931,8 @@ fn custody_provider_process_rejects_wrong_issuer_node_conflict_and_redacts_diagn
 
 #[test]
 fn custody_provider_process_malformed_shutdown_keeps_serving_until_valid_shutdown() {
-    let mut provider = ProviderProcess::start();
+    let temp = tempfile::tempdir().unwrap();
+    let mut provider = ProviderProcess::start(temp.path());
 
     let malformed = provider.request(serde_json::json!({
         "op": "shutdown",

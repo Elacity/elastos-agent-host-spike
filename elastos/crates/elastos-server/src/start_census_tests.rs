@@ -5,12 +5,14 @@
 //! unless each call sits in a place this file lists with the gate named in one
 //! short phrase.
 //!
-//! Test code is left out by construction. The sources are the closure of
+//! The production rows leave test code out by construction. Their sources are the closure of
 //! `mod` and `include!` from each crate root (`lib.rs` and `main.rs`) after
 //! every `#[cfg(test)]` item is removed. So an inline test module, a
 //! `mod tests;` declaration and a file included only from a test module are
 //! never read. This module is not reachable from those roots, and every needle
 //! below is built from parts at run time, so this file never counts itself.
+//! The custody row also reads test modules and integration tests directly,
+//! including the shared test helper, and refuses an unfenced custody start.
 //!
 //! A capsule load or spawn is one of:
 //!
@@ -30,6 +32,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+
+#[path = "start_census_tests/custody.rs"]
+pub(super) mod custody;
 
 /// A listed caller: the file, the function that makes the call, the call as a
 /// label, how many times that function makes it, and the gate in one phrase.
@@ -931,7 +936,7 @@ pub(super) fn without_test_items(text: &str) -> String {
     let mut out = String::new();
     let mut cursor = 0;
     while cursor < bytes.len() {
-        let Some((start, end)) = next_test_attribute(&code, cursor) else {
+        let Some((start, end)) = next_test_attribute(&code, text, cursor) else {
             out.push_str(&text[cursor..]);
             break;
         };
@@ -942,7 +947,7 @@ pub(super) fn without_test_items(text: &str) -> String {
 }
 
 /// The range of the next attribute that makes its item test-only.
-fn next_test_attribute(text: &str, from: usize) -> Option<(usize, usize)> {
+fn next_test_attribute(text: &str, raw: &str, from: usize) -> Option<(usize, usize)> {
     let bytes = text.as_bytes();
     let mut at = from;
     while let Some(found) = text[at..].find("#[cfg(") {
@@ -963,7 +968,7 @@ fn next_test_attribute(text: &str, from: usize) -> Option<(usize, usize)> {
             }
             i += 1;
         }
-        if i < bytes.len() && bytes.get(i + 1) == Some(&b']') && test_only(&text[open..i]) {
+        if i < bytes.len() && bytes.get(i + 1) == Some(&b']') && test_only(&raw[open..i]) {
             return Some((start, i + 2));
         }
         at = start + 1;
@@ -973,7 +978,7 @@ fn next_test_attribute(text: &str, from: usize) -> Option<(usize, usize)> {
 
 /// Whether a `cfg` predicate holds only in a test build.
 fn test_only(expr: &str) -> bool {
-    if expr == "test" {
+    if expr == "test" || expr == "feature = \"test-hooks\"" {
         return true;
     }
     let Some(inner) = expr
@@ -1081,6 +1086,8 @@ mod tests {
     const EXAMPLE: &str = r#"{"#;
     fn hidden() { component.start_resident(&handle); }
 }
+#[cfg(feature = "test-hooks")]
+mod fixture_support;
 fn production() { component.start_resident(&handle); }
 "##;
     let filtered = without_test_items(source);
@@ -1088,6 +1095,7 @@ fn production() { component.start_resident(&handle); }
     assert!(filtered.contains("fn production()"));
     assert!(!filtered.contains("test_count: usize"));
     assert!(!filtered.contains("fn hidden()"));
+    assert!(!filtered.contains("mod fixture_support"));
     assert_eq!(sites("sample.rs", &filtered).len(), 1);
 
     let sources = production_sources();
