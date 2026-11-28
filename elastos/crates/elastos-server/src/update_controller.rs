@@ -1943,6 +1943,17 @@ pub fn try_claim_file_move(data_dir: &Path) -> Result<Option<FileMoveGuard>> {
     }
 }
 
+/// An update prepare refuses with this sentence while pass two holds the file-move claim.
+pub const UPDATE_DURING_LOCALHOST_FILE_MOVE: &str = "Local app files are moving to the new key. Run this update again when that move finishes; this installation was not changed.";
+
+/// Takes the claim pass two holds. A busy claim refuses so this prepare does not overlap a file replace.
+pub fn claim_file_move_for_update(data_dir: &Path) -> Result<FileMoveGuard> {
+    match try_claim_file_move(data_dir)? {
+        Some(guard) => Ok(guard),
+        None => bail!("{UPDATE_DURING_LOCALHOST_FILE_MOVE}"),
+    }
+}
+
 #[cfg(unix)]
 fn claim_file_move_unix(data_dir: &Path) -> Result<Option<FileMoveGuard>> {
     let data_dir = fs::canonicalize(data_dir)?;

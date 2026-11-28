@@ -933,6 +933,27 @@ async fn refuse_localhost(
     });
 }
 
+#[cfg(all(test, unix))]
+thread_local! {
+    static STARTUP_DATA_DIR: std::cell::RefCell<Option<PathBuf>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(all(test, unix))]
+fn set_startup_data_dir(path: Option<PathBuf>) {
+    STARTUP_DATA_DIR.with(|slot| *slot.borrow_mut() = path);
+}
+
+fn startup_data_dir() -> PathBuf {
+    #[cfg(all(test, unix))]
+    {
+        if let Some(path) = STARTUP_DATA_DIR.with(|slot| slot.borrow().clone()) {
+            return path;
+        }
+    }
+    default_data_dir()
+}
+
 pub(crate) async fn setup_server_infrastructure() -> anyhow::Result<ServerInfrastructure> {
     setup_server_infrastructure_impl(true, elastos_server::ipfs::IpfsHostRole::User).await
 }
@@ -1292,7 +1313,10 @@ async fn setup_server_infrastructure_impl(
     spawn_host_providers: bool,
     ipfs_role: elastos_server::ipfs::IpfsHostRole,
 ) -> anyhow::Result<ServerInfrastructure> {
-    let data_dir = default_data_dir();
+    let data_dir = startup_data_dir();
+    let device_key = elastos_identity::load_or_create_device_key(&data_dir).map_err(|_| {
+        anyhow::anyhow!("identity/device.key cannot be read. Make it readable, or restore it with the identity/credentials.json it belongs to, then restart.")
+    })?;
     // Before ensure_file_backed_roots recreates AppCapsules, ElastOS, Local,
     // Users, and UsersAI. Gateway calls the same function before its auth lock.
     crate::localhost_file_migration::prepare_localhost_files(&data_dir)?;
@@ -1394,9 +1418,6 @@ async fn setup_server_infrastructure_impl(
     {
         tracing::warn!("Failed to register elastos://inspect sub-provider: {}", err);
     }
-    let device_key = elastos_identity::load_or_create_device_key(&data_dir).map_err(|_| {
-        anyhow::anyhow!("identity/device.key cannot be read. Make it readable, or restore it with the identity/credentials.json it belongs to, then restart.")
-    })?;
     let protected_content_runtime_issuer = derive_protected_content_runtime_issuer(&device_key)?;
     let mut provider_cid = "sha256:unavailable".to_string();
     let verify_provider_binary = |name: &str, path: &std::path::Path| -> anyhow::Result<()> {
@@ -10439,25 +10460,34 @@ fn main() {
         }
     }
 
-    #[test]
-    fn an_unreadable_device_key_beside_credentials_stops_with_the_plain_sentence() {
+    #[tokio::test(flavor = "current_thread")]
+    async fn an_unreadable_device_key_beside_credentials_stops_with_the_plain_sentence() {
         let sentence = "identity/device.key cannot be read. Make it readable, or restore it with the identity/credentials.json it belongs to, then restart.";
-        let mapped = anyhow::anyhow!(sentence);
-        assert_eq!(mapped.to_string(), sentence);
-        // Chosen place: server_infra.rs load_or_create_device_key map_err. Home cannot run without
-        // the device key (DID, issuer, providers), so Home stops; docs say so.
-        let product = include_str!("server_infra.rs")
-            .split("mod tests")
-            .next()
-            .expect("product");
-        assert!(
-            product.contains(sentence),
-            "plain sentence missing from product"
-        );
-        assert!(
-            product.contains("load_or_create_device_key(&data_dir).map_err"),
-            "map_err site missing from product"
-        );
+        let root = TempDir::new().unwrap();
+        let data = root.path().join("data");
+        let identity = data.join("identity");
+        fs::create_dir_all(&identity).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&identity, fs::Permissions::from_mode(0o700)).unwrap();
+        let key_path = identity.join("device.key");
+        fs::write(&key_path, [7u8; 32]).unwrap();
+        fs::write(identity.join("credentials.json"), b"{\"kept\":true}").unwrap();
+        fs::set_permissions(&key_path, fs::Permissions::from_mode(0o000)).unwrap();
+        struct RestoreStartupKey(std::path::PathBuf);
+        impl Drop for RestoreStartupKey {
+            fn drop(&mut self) {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = fs::set_permissions(&self.0, fs::Permissions::from_mode(0o600));
+                super::set_startup_data_dir(None);
+            }
+        }
+        let _restore = RestoreStartupKey(key_path);
+        super::set_startup_data_dir(Some(data));
+        let error = setup_control_plane_infrastructure()
+            .await
+            .err()
+            .expect("startup accepted an unreadable device key");
+        assert_eq!(error.to_string(), sentence);
     }
 
     /// Pending-update state under `data`: sources.json names a binary beside `bin`.
@@ -10793,6 +10823,351 @@ fn main() {
         assert!(!began, "the update-start lock was free during pass two");
         assert_ne!(bytes, planted);
         assert_envelope_opens_with_exactly_one_key(&note, b"kept", &device_key, &file_key);
+    }
+
+    const COMPONENTS_V1: &[u8] =
+        br#"{"schema":"elastos.components/v1","external":{},"profiles":{},"capsules":{}}"#;
+
+    fn fixture_signing_key() -> ed25519_dalek::SigningKey {
+        ed25519_dalek::SigningKey::from_bytes(&[7; 32])
+    }
+
+    fn raw_artifact_cid(bytes: &[u8]) -> String {
+        use sha2::Digest;
+        let digest = sha2::Sha256::digest(bytes);
+        let hash = cid::multihash::Multihash::<64>::wrap(0x12, digest.as_slice()).unwrap();
+        cid::Cid::new_v1(0x55, hash).to_string()
+    }
+
+    fn artifact_descriptor(bytes: &[u8]) -> serde_json::Value {
+        use sha2::Digest;
+        serde_json::json!({
+            "cid": raw_artifact_cid(bytes),
+            "sha256": hex::encode(sha2::Sha256::digest(bytes)),
+            "size": bytes.len(),
+        })
+    }
+
+    fn signed_release_envelope(
+        key: &ed25519_dalek::SigningKey,
+        payload: serde_json::Value,
+        domain: &str,
+    ) -> Vec<u8> {
+        let (signature, signer_did) = elastos_server::crypto::domain_separated_sign(
+            key,
+            domain,
+            &serde_json::to_vec(&payload).unwrap(),
+        );
+        serde_json::to_vec(&serde_json::json!({
+            "payload": payload,
+            "signature": signature,
+            "signer_did": signer_did,
+        }))
+        .unwrap()
+    }
+
+    fn release_head_payload(release: &[u8]) -> serde_json::Value {
+        use sha2::Digest;
+        let digest = sha2::Sha256::digest(release);
+        let hash = cid::multihash::Multihash::<64>::wrap(0x12, digest.as_slice()).unwrap();
+        serde_json::json!({
+            "schema": "elastos.release.head/v1",
+            "version": "0.7.1",
+            "channel": "stable",
+            "latest_release_cid": cid::Cid::new_v1(0x55, hash).to_string(),
+            "release_sha256": hex::encode(digest),
+        })
+    }
+
+    fn release_payload(
+        version: &str,
+        binary: &[u8],
+        components: Option<&[u8]>,
+    ) -> serde_json::Value {
+        let platform = elastos_server::update::detect_release_platform();
+        let mut entry = serde_json::json!({
+            "binary": artifact_descriptor(binary),
+        });
+        if let Some(components) = components {
+            entry["components"] = artifact_descriptor(components);
+        }
+        serde_json::json!({
+            "schema": "elastos.release/v1",
+            "version": version,
+            "channel": "stable",
+            "platforms": { platform: entry },
+        })
+    }
+
+    fn signed_release_pair(
+        version: &str,
+        binary: &[u8],
+        components: Option<&[u8]>,
+    ) -> (Vec<u8>, Vec<u8>) {
+        let key = fixture_signing_key();
+        let release = signed_release_envelope(
+            &key,
+            release_payload(version, binary, components),
+            "elastos.release.v1",
+        );
+        let mut head = release_head_payload(&release);
+        head["version"] = serde_json::json!(version);
+        head["channel"] = serde_json::json!("stable");
+        let head = signed_release_envelope(&key, head, "elastos.release.head.v1");
+        (head, release)
+    }
+
+    fn plant_installed_release(
+        data: &std::path::Path,
+        binary: &std::path::Path,
+        version: &str,
+        binary_bytes: &[u8],
+        components: &[u8],
+    ) {
+        use std::os::unix::fs::PermissionsExt;
+        fs::create_dir_all(data).unwrap();
+        fs::create_dir_all(binary.parent().unwrap()).unwrap();
+        fs::write(binary, binary_bytes).unwrap();
+        fs::set_permissions(binary, fs::Permissions::from_mode(0o755)).unwrap();
+        fs::write(data.join("components.json"), components).unwrap();
+        let did = elastos_server::crypto::encode_signing_key_did(&fixture_signing_key());
+        let source: elastos_server::sources::TrustedSource =
+            serde_json::from_value(serde_json::json!({
+                "name": "fixture",
+                "publisher_dids": [did],
+                "channel": "stable",
+                "installed_version": version,
+                "install_path": binary,
+            }))
+            .unwrap();
+        let mut sources = elastos_server::sources::TrustedSourcesConfig::empty();
+        sources.upsert_source(source);
+        elastos_server::sources::save_trusted_sources(data, &sources).unwrap();
+        let (head, release) = signed_release_pair(version, binary_bytes, Some(components));
+        let directory = data.join("installation");
+        fs::create_dir_all(&directory).unwrap();
+        fs::set_permissions(&directory, fs::Permissions::from_mode(0o700)).unwrap();
+        let head_path = elastos_common::localhost::installation_release_head_path(data);
+        let release_path = elastos_common::localhost::installation_release_manifest_path(data);
+        fs::write(&head_path, head).unwrap();
+        fs::write(&release_path, release).unwrap();
+        fs::set_permissions(&head_path, fs::Permissions::from_mode(0o600)).unwrap();
+        fs::set_permissions(&release_path, fs::Permissions::from_mode(0o600)).unwrap();
+    }
+
+    fn run_terminal_update(data: &std::path::Path) -> Result<(), String> {
+        let executable = b"#!/bin/sh\nprintf 'elastos 0.7.1\\n'\n";
+        let (head, release) = signed_release_pair("0.7.1", executable, Some(COMPONENTS_V1));
+        let head_cid = raw_artifact_cid(&head);
+        let artifacts = std::collections::HashMap::from([
+            (head_cid.clone(), head),
+            (raw_artifact_cid(&release), release),
+            (raw_artifact_cid(executable), executable.to_vec()),
+            (raw_artifact_cid(COMPONENTS_V1), COMPONENTS_V1.to_vec()),
+        ]);
+        let fetch: elastos_server::update::FetchFn = Box::new(move |cid| {
+            let bytes = artifacts
+                .get(&cid)
+                .cloned()
+                .ok_or_else(|| anyhow::anyhow!("source unavailable for {cid}"));
+            Box::pin(async move { bytes })
+        });
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .map_err(|err| err.to_string())?;
+        runtime
+            .block_on(elastos_server::update::run_update_for_data_dir(
+                data,
+                &fetch,
+                None,
+                false,
+                Some(head_cid),
+                "0.7.1",
+                true,
+                false,
+                false,
+            ))
+            .map_err(|err| err.to_string())
+    }
+
+    fn write_installer_candidate(
+        dir: &std::path::Path,
+        binary: &std::path::Path,
+    ) -> [std::path::PathBuf; 4] {
+        let executable = b"#!/bin/sh\nprintf 'elastos 0.7.1\\n'\n";
+        let (head, release) = signed_release_pair("0.7.1", executable, None);
+        let did = elastos_server::crypto::encode_signing_key_did(&fixture_signing_key());
+        let sources = serde_json::to_vec_pretty(&serde_json::json!({
+            "schema": "elastos.trusted-sources/v1",
+            "default_source": "default",
+            "sources": [{
+                "name": "default",
+                "publisher_dids": [did],
+                "channel": "stable",
+                "install_path": binary,
+                "installed_version": "0.7.1",
+                "head_cid": ""
+            }]
+        }))
+        .unwrap();
+        fs::create_dir_all(dir).unwrap();
+        let paths = [
+            dir.join("runtime"),
+            dir.join("sources.json"),
+            dir.join("release-head.json"),
+            dir.join("release.json"),
+        ];
+        for (path, bytes) in paths
+            .iter()
+            .zip([executable.to_vec(), sources, head, release])
+        {
+            fs::write(path, bytes).unwrap();
+        }
+        paths
+    }
+
+    fn assert_update_refused_during_pass_two(
+        kind: &str,
+        result: &Result<(), String>,
+        journal: bool,
+        replaced: bool,
+    ) {
+        let sentence = elastos_server::update_controller::UPDATE_DURING_LOCALHOST_FILE_MOVE;
+        let refused = result.as_ref().is_err_and(|message| message == sentence);
+        assert!(
+            refused && !journal,
+            "{kind} during pass two did not wait or refuse and a v1 file was replaced (refused={refused}, journal={journal}, replaced={replaced}, result={result:?})"
+        );
+    }
+
+    struct ClearPassTwoHook;
+
+    impl Drop for ClearPassTwoHook {
+        fn drop(&mut self) {
+            set_localhost_migration_during_pass_two(None);
+        }
+    }
+
+    /// A terminal update that reaches prepare while pass two holds the file-move
+    /// claim refuses before it writes a journal. Pass two then finishes its move.
+    #[test]
+    fn a_terminal_update_during_pass_two_waits_or_refuses_and_keeps_the_v1_file() {
+        let _guard = LocalAppsGuard::lock();
+        let _clear = ClearPassTwoHook;
+        let device_key = [0x42; 32];
+        let root = TempDir::new().unwrap();
+        let data = root.path().join("data");
+        fs::create_dir_all(&data).unwrap();
+        let note = data.join("Users/note.bin");
+        let planted = plant_device_envelope(&note, &device_key, b"kept");
+        let binary = root.path().join("bin/elastos");
+        plant_installed_release(
+            &data,
+            &binary,
+            "0.7.0",
+            b"#!/bin/sh\nprintf 'elastos 0.7.0\\n'\n",
+            COMPONENTS_V1,
+        );
+        let outcome = Arc::new(Mutex::new(None));
+        let outcome_hook = outcome.clone();
+        let data_hook = data.clone();
+        set_localhost_migration_during_pass_two(Some(Box::new(move || {
+            *outcome_hook.lock().unwrap() = Some(run_terminal_update(&data_hook));
+        })));
+        match localhost_bringup(&data, &device_key) {
+            LocalhostBringup::Start(_) => {}
+            LocalhostBringup::Refuse(got) => panic!("pass two refused: {got}"),
+        }
+        let stored = outcome
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("pass two did not start the update");
+        let journal = binary
+            .parent()
+            .unwrap()
+            .join(".elastos.update-journal.json")
+            .exists();
+        let replaced = fs::read(&note).unwrap_or_default().as_slice() != planted;
+        assert_update_refused_during_pass_two("terminal update", &stored, journal, replaced);
+    }
+
+    /// The installer prepares while pass two holds the file-move claim, and
+    /// refuses before it writes a journal.
+    #[test]
+    fn an_installer_prepare_during_pass_two_waits_or_refuses_and_keeps_the_v1_file() {
+        let _guard = LocalAppsGuard::lock();
+        let _clear = ClearPassTwoHook;
+        let device_key = [0x43; 32];
+        let root = TempDir::new().unwrap();
+        let data = root.path().join("data");
+        fs::create_dir_all(&data).unwrap();
+        let note = data.join("Users/note.bin");
+        let planted = plant_device_envelope(&note, &device_key, b"kept");
+        let binary = root.path().join("bin/elastos");
+        fs::create_dir_all(binary.parent().unwrap()).unwrap();
+        let candidate = write_installer_candidate(root.path().join("candidate").as_path(), &binary);
+        let outcome = Arc::new(Mutex::new(None));
+        let outcome_hook = outcome.clone();
+        let data_hook = data.clone();
+        let binary_hook = binary.clone();
+        set_localhost_migration_during_pass_two(Some(Box::new(move || {
+            let paths = [
+                candidate[0].as_path(),
+                candidate[1].as_path(),
+                candidate[2].as_path(),
+                candidate[3].as_path(),
+            ];
+            let result =
+                elastos_server::update::install_release(&data_hook, &binary_hook, paths, false)
+                    .map_err(|err| err.to_string());
+            *outcome_hook.lock().unwrap() = Some(result);
+        })));
+        match localhost_bringup(&data, &device_key) {
+            LocalhostBringup::Start(_) => {}
+            LocalhostBringup::Refuse(got) => panic!("pass two refused: {got}"),
+        }
+        let stored = outcome
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("pass two did not start the installer");
+        let journal = binary
+            .parent()
+            .unwrap()
+            .join(".elastos.update-journal.json")
+            .exists();
+        let replaced = fs::read(&note).unwrap_or_default().as_slice() != planted;
+        assert_update_refused_during_pass_two("installer prepare", &stored, journal, replaced);
+    }
+
+    /// Cleanup unlinks only a lowercase rewrite temp this code writes. A user
+    /// file whose name is 64 uppercase hex characters stays.
+    #[test]
+    fn an_uppercase_hex_user_file_survives_cleanup() {
+        let _guard = LocalAppsGuard::lock();
+        let device_key = [0x44; 32];
+        let root = TempDir::new().unwrap();
+        let users = root.path().join("Users");
+        fs::create_dir_all(&users).unwrap();
+        let user_file = users.join(format!(
+            ".{}{}",
+            "AB".repeat(32),
+            ".elastos-localhost-file-key-v1.tmp"
+        ));
+        fs::write(&user_file, b"user file stays").unwrap();
+        let note = users.join("note.bin");
+        fs::write(&note, b"plain").unwrap();
+        let temp = rewrite_temp_path(&note).unwrap();
+        fs::write(&temp, b"real temp").unwrap();
+        match localhost_bringup(root.path(), &device_key) {
+            LocalhostBringup::Start(_) => {}
+            LocalhostBringup::Refuse(got) => panic!("cleanup refused: {got}"),
+        }
+        assert_eq!(fs::read(&user_file).unwrap(), b"user file stays");
+        assert!(!temp.exists(), "owned rewrite temp was kept");
     }
 
     /// Pass two defers when the file-move claim is already held. Deleting the

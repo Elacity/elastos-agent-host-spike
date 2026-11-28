@@ -579,6 +579,16 @@ fn new_publisher_key_hint(error: anyhow::Error) -> anyhow::Error {
     }
 }
 
+/// Holds the file-move claim while the journal is written. A busy claim refuses
+/// before any release file is staged.
+fn prepare_release(
+    transaction: &InstallTransaction,
+    files: &[(ReleaseFile, &[u8])],
+) -> anyhow::Result<()> {
+    let _file_move = crate::update_controller::claim_file_move_for_update(transaction.data_dir())?;
+    transaction.prepare(files)
+}
+
 /// install.sh hands its verified candidate to the shared installation writer.
 /// `check` restores an interrupted install and admits the release before the
 /// installer stops this Home. The installer leaves components.json to setup.
@@ -640,12 +650,15 @@ pub fn install_release(
     }
     let _offline =
         crate::host_lock::acquire_host_process_lock(transaction.data_dir(), "update", "offline")?;
-    transaction.prepare(&[
-        (ReleaseFile::RuntimeBinary, executable.as_slice()),
-        (ReleaseFile::Sources, sources.as_slice()),
-        (ReleaseFile::ReleaseHead, head.as_slice()),
-        (ReleaseFile::ReleaseManifest, release.as_slice()),
-    ])?;
+    prepare_release(
+        &transaction,
+        &[
+            (ReleaseFile::RuntimeBinary, executable.as_slice()),
+            (ReleaseFile::Sources, sources.as_slice()),
+            (ReleaseFile::ReleaseHead, head.as_slice()),
+            (ReleaseFile::ReleaseManifest, release.as_slice()),
+        ],
+    )?;
     transaction.commit_checked(|| Ok(()))
 }
 
@@ -1686,7 +1699,7 @@ async fn run_upgrade_with_restart(
             transaction.writer_guard(),
             repair_version,
         )?;
-        transaction.prepare(&files)?;
+        prepare_release(&transaction, &files)?;
         if let Some(entry) = &catalog {
             if let Err(error) = transaction.prepare_support(std::slice::from_ref(entry)) {
                 transaction.abort()?;
@@ -1898,7 +1911,7 @@ async fn run_upgrade_with_restart(
         transaction.writer_guard(),
         repair_version,
     )?;
-    transaction.prepare(&files)?;
+    prepare_release(&transaction, &files)?;
     if let Some((_, paths)) = &staged_support {
         if let Err(error) = transaction.prepare_support(paths) {
             transaction.abort()?;

@@ -48,7 +48,9 @@
 //! before the done marker, the walk reads `update_can_roll_back`. The walk
 //! holds the file-move lock for a rewrite and for the marker write, including
 //! a marker write when pass 1 held no old file. The update controller takes
-//! that lock before it starts and waits while the walk holds it. Under the
+//! that lock before it starts and waits while the walk holds it. A terminal
+//! update and the installer take that lock before they prepare a release,
+//! and refuse while the walk holds it. Under the
 //! lock, pass two reads `update_can_roll_back` again before a
 //! file is replaced. An update that began while the walk waited for the
 //! migration lock, or while pass 1 read, defers with the pending-update
@@ -618,7 +620,10 @@ fn is_owned_rewrite_temp(name: &std::ffi::OsStr) -> bool {
     else {
         return false;
     };
-    hex_name.len() == 64 && hex_name.bytes().all(|byte| byte.is_ascii_hexdigit())
+    hex_name.len() == 64
+        && hex_name
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
 }
 
 #[cfg(unix)]
