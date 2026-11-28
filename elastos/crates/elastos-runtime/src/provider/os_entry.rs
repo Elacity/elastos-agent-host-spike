@@ -1610,8 +1610,7 @@ mod tests {
         let chain = data.join("chain-provider");
         std::fs::create_dir(&chain).unwrap();
         std::fs::write(chain.join("own.txt"), b"chain").unwrap();
-        // Object's own root is ElastOS/System, not ElastOS. The file directly
-        // under ElastOS is outside that grant.
+        // Object's own root is Users. ElastOS/System is outside that grant.
         let system = data.join("ElastOS/System");
         std::fs::create_dir(&system).unwrap();
         std::fs::write(system.join("own.txt"), b"own").unwrap();
@@ -1628,8 +1627,8 @@ mod tests {
             ),
             (
                 "object-provider",
+                data.join("Users/own.txt"),
                 data.join("ElastOS/System/own.txt"),
-                data.join("ElastOS/own.txt"),
                 data.join("Users/result.txt"),
             ),
             (
