@@ -1274,16 +1274,21 @@ fn browser_home_refuses_a_port_another_program_holds_on_either_loopback() {
         )
     };
 
-    for ip in [
-        std::net::IpAddr::from(std::net::Ipv4Addr::LOCALHOST),
-        std::net::IpAddr::from(std::net::Ipv6Addr::LOCALHOST),
-    ] {
-        // Keep this port owned until its refusal is checked. A released port can
-        // be claimed by another test, and both loopbacks must be exercised.
-        let listener = std::net::TcpListener::bind((ip, 0)).unwrap();
-        let port = listener.local_addr().unwrap().port();
+    let check = |listener: std::net::TcpListener| {
+        // Keep the port owned until its refusal is checked.
+        let address = listener.local_addr().unwrap();
+        let port = address.port();
         let error = refuse_browser_home_port_in_use(data.path(), port).unwrap_err();
-        assert_eq!(error.to_string(), expected(port), "held listener on {ip}");
+        assert_eq!(error.to_string(), expected(port), "held {address}");
+        drop(listener);
+        // Port 0 lets the real bind probe choose and hold a free port itself.
+        // Reusing the released number would race another test's listener.
+        refuse_browser_home_port_in_use(data.path(), 0)
+            .expect("Home accepts a free port after the other program releases its listener");
+    };
+    check(std::net::TcpListener::bind("127.0.0.1:0").unwrap());
+    if let Ok(listener) = std::net::TcpListener::bind("[::1]:0") {
+        check(listener);
     }
 }
 

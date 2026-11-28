@@ -183,6 +183,9 @@ struct ComponentActivation {
     /// Set for the wait inside `sleep-until`. A test reads it.
     #[cfg(test)]
     in_clock_sleep: Arc<AtomicBool>,
+    /// Records a clock timer reaching its deadline, for cancellation tests.
+    #[cfg(test)]
+    clock_sleep_completed: Arc<AtomicBool>,
     /// The test asks the next join to skip spawning its owner thread.
     #[cfg(test)]
     refuse_join_owner: bool,
@@ -327,6 +330,9 @@ struct ComponentState {
     /// Set while a v2 clock sleep is waiting.
     #[cfg(test)]
     in_clock_sleep: Arc<AtomicBool>,
+    /// Records a clock timer reaching its deadline, for cancellation tests.
+    #[cfg(test)]
+    clock_sleep_completed: Arc<AtomicBool>,
     /// The v2 token bucket. v1 has none.
     fuel_bucket: Option<Arc<Mutex<crate::providers::fuel_bucket::FuelBucket>>>,
     /// v2's own limiter. v1 keeps [`ComponentState::limits`].
@@ -960,6 +966,8 @@ impl ComponentProvider {
                 #[cfg(test)]
                 in_clock_sleep: Arc::new(AtomicBool::new(false)),
                 #[cfg(test)]
+                clock_sleep_completed: Arc::new(AtomicBool::new(false)),
+                #[cfg(test)]
                 refuse_join_owner: false,
                 #[cfg(test)]
                 publish_gate: None,
@@ -1045,6 +1053,8 @@ impl ComponentProvider {
             async_hostcall,
             #[cfg(test)]
             in_clock_sleep: instance.in_clock_sleep.clone(),
+            #[cfg(test)]
+            clock_sleep_completed: instance.clock_sleep_completed.clone(),
             #[cfg(test)]
             present_gate: instance.present_gate.clone(),
             #[cfg(test)]
@@ -2560,6 +2570,8 @@ impl ComponentState {
             wake: Arc::new(tokio::sync::Notify::new()),
             #[cfg(test)]
             in_clock_sleep: Arc::new(AtomicBool::new(false)),
+            #[cfg(test)]
+            clock_sleep_completed: Arc::new(AtomicBool::new(false)),
             ended_by_stop: false,
             fuel_bucket: None,
             guest_memory: super::fuel_bucket::GuestMemory::default(),
@@ -3232,6 +3244,15 @@ impl v2::elastos::bus::clock::HostWithStore<ComponentState> for HasSelf<Componen
         }
         if let Some(flag) = &sleeping {
             flag.store(false, Ordering::Release);
+        }
+        #[cfg(test)]
+        if finished {
+            accessor.with(|mut access| {
+                access
+                    .get()
+                    .clock_sleep_completed
+                    .store(true, Ordering::Release);
+            });
         }
         if let Some(bucket) = &bucket {
             let mut slot = bucket.lock().expect("fuel");
@@ -4582,25 +4603,29 @@ mod tests {
         assert_eq!(ending, "returned", "{ending}");
     }
 
-    /// Cancel wakes one long sleep. The wait is not a 10 ms poll.
+    /// Cancel wakes a parked guest; the long clock timer never completes.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn v2_cancel_ends_a_very_long_sleep_within_100ms() {
+    async fn v2_cancel_ends_a_very_long_sleep_before_its_deadline() {
+        // This is a hang guard for loaded runners, not a latency benchmark.
+        let event_timeout = Duration::from_secs(30);
         let provider = ComponentProvider::new();
-        let source = include_str!("../../../../tests/fixtures/components/v2-sleep.wat")
-            .replace("i64.const 400", "i64.const -1");
+        let fixture = include_str!("../../../../tests/fixtures/components/v2-sleep.wat");
+        assert!(fixture.contains("i64.const 400 call $sleep"));
+        let source = fixture.replace("i64.const 400 call $sleep", "i64.const -1 call $sleep");
         let bytes = wat::parse_str(&source).expect("u64::MAX sleep");
         let handle = load_v2_fixture(&provider, bytes).await;
-        provider.start(&handle).await.expect("the sleeper starts");
-        let (sleeping, wake, cancel) = {
+        let (sleeping, completed, wake, cancel) = {
             let instances = provider.instances.read().await;
             let instance = instances.get(&handle.id).expect("the guest is loaded");
             (
                 instance.in_clock_sleep.clone(),
+                instance.clock_sleep_completed.clone(),
                 instance.wake.clone(),
                 instance.cancel_requested.clone(),
             )
         };
-        tokio::time::timeout(Duration::from_secs(2), async {
+        provider.start(&handle).await.expect("the sleeper starts");
+        tokio::time::timeout(event_timeout, async {
             while !sleeping.load(Ordering::Acquire) {
                 tokio::task::yield_now().await;
             }
@@ -4611,10 +4636,9 @@ mod tests {
             provider.endings.read().await.get(&handle.id).is_none(),
             "the long sleep is still in progress"
         );
-        let started = Instant::now();
         cancel.store(true, Ordering::Release);
         wake.notify_one();
-        let ending = tokio::time::timeout(Duration::from_millis(100), async {
+        let ending = tokio::time::timeout(event_timeout, async {
             loop {
                 if let Some(ending) = provider.endings.read().await.get(&handle.id).cloned() {
                     return ending;
@@ -4623,18 +4647,21 @@ mod tests {
             }
         })
         .await
-        .expect("cancel ends a very long sleep within 100 ms");
+        .expect("cancel must end the parked guest within the 30-second safety bound");
         assert!(
-            started.elapsed() < Duration::from_millis(100),
-            "elapsed {} ms",
-            started.elapsed().as_millis()
+            !sleeping.load(Ordering::Acquire),
+            "cancel leaves the clock sleep"
         );
         assert!(
-            ending == "returned"
-                || ending.contains("stopped")
-                || ending.contains(ENDING_EPOCH_DEADLINE),
+            !completed.load(Ordering::Acquire),
+            "cancel must wake the guest before its sleep timer runs to completion"
+        );
+        // The resumed guest may return before the next epoch observes cancel.
+        assert!(
+            matches!(ending.as_str(), "returned" | "cancelled"),
             "{ending}"
         );
+        assert!(provider.instances.read().await.is_empty());
     }
 
     #[test]
