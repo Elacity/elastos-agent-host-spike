@@ -3237,6 +3237,8 @@ fn main() {
                 ready_tx: Some(ready_tx),
                 attach_secret: Some(secret.clone()),
                 host_helpers: Vec::new(),
+                agents_only: false,
+                listener: None,
             },
         ));
         ready_rx
