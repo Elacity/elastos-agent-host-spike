@@ -1,0 +1,8 @@
+Installing the A14 demo into /home/ubuntu/.local/share/elastos-demo-a14/current
+REFUSED: this machine is not ready.
+  - operating system is Linux; A14's VERSIONS.json is produced on macOS
+  - architecture is x86_64; A14 needs native Apple Silicon (arm64)
+  - /usr/bin/sandbox-exec is missing; the C1-C7 steps run provider profiles with this macOS program
+  - /usr/sbin/lsof is missing; the conformance run checks earlier homes with this path
+Next: read /home/ubuntu/.local/share/elastos-demo-a14/runs/20261026T232445Z-61myo6si/summary.txt, then fix the item above, then run `bash lab/demo-a14/install.sh` again.
+Saved: /home/ubuntu/.local/share/elastos-demo-a14/runs/20261026T232445Z-61myo6si

@@ -1,0 +1,5 @@
+exit: 0
+seconds: 1.689
+started: 2026-10-26T23:24:41Z
+
+info: downloading component rust-std

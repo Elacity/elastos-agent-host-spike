@@ -1,0 +1,9 @@
+exit: 1
+seconds: 0.227
+started: 2026-10-26T23:24:45Z
+
+missing: operating system is Linux; A14's VERSIONS.json is produced on macOS
+missing: architecture is x86_64; A14 needs native Apple Silicon (arm64)
+missing: /usr/bin/sandbox-exec is missing; the C1-C7 steps run provider profiles with this macOS program
+missing: /usr/sbin/lsof is missing; the conformance run checks earlier homes with this path
+preflight: FAIL

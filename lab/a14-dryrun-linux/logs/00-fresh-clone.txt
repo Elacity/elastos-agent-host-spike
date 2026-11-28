@@ -1,0 +1,5 @@
+exit: 0
+seconds: 3.204
+started: 2026-10-26T23:24:39Z
+
+Cloning into '/tmp/a14-dryrun-src-20261026-232436'...
