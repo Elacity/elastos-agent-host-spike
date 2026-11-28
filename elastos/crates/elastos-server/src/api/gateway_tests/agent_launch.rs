@@ -23,6 +23,7 @@ const CREATE: &str = "/api/apps/system/agents/create";
 const ACTIVATE: &str = "/api/apps/system/agents/activate";
 const LAUNCH: &str = "/api/apps/system/agents/launch";
 const STOP: &str = "/api/apps/system/agents/stop";
+const RETIRE: &str = "/api/apps/system/agents/retire";
 const HOST: &str = "agent-host";
 const ORIGIN: &str = "http://localhost:61180";
 
@@ -515,6 +516,8 @@ async fn serve_runtime(data: &std::path::Path) -> RuntimeHost {
         ready_tx: None,
         attach_secret: Some(secret.clone()),
         host_helpers: Vec::new(),
+        agents_only: false,
+        listener: None,
     })
     .unwrap()
     .layer(axum::middleware::from_fn_with_state(
@@ -549,15 +552,20 @@ async fn serve_runtime(data: &std::path::Path) -> RuntimeHost {
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
     assert!(healthy, "the runtime launch route did not answer health");
-    std::fs::write(
-        crate::runtime_control::home_runtime_coord_path(data),
-        serde_json::to_vec(&json!({
-            "api_url": url,
-            "attach_secret": secret,
-            "pid": std::process::id(),
-            "runtime_kind": crate::runtime_control::RUNTIME_KIND_MANAGED_HOME,
-        }))
-        .unwrap(),
+    crate::runtime_control::write_runtime_coords(
+        &crate::api::agent_plane::coords_path(data),
+        &crate::runtime_control::RuntimeCoords {
+            api_url: url,
+            attach_secret: secret,
+            pid: std::process::id(),
+            runtime_kind: "agent".to_string(),
+            binary_sha256: String::new(),
+            policy_sha256: String::new(),
+            dependency_sha256: String::new(),
+            generation: String::new(),
+            process_start: String::new(),
+            home_url: String::new(),
+        },
     )
     .unwrap();
     RuntimeHost {
@@ -749,6 +757,20 @@ async fn system_agent_launch_replayed_step_up_fails() {
         "a replayed step-up started another guest"
     );
     assert_eq!(mints(&world), 1, "a replayed step-up minted another grant");
+    // The replay is refused before any signed start row: the chain still
+    // holds one requested and one completed row, both bound to the one
+    // step-up the first Start spent.
+    let requested = signed_audit_rows(&world, "agent.start.requested");
+    let completed = signed_audit_rows(&world, "agent.start.completed");
+    assert_eq!(requested.len(), 1, "{requested:?}");
+    assert_eq!(completed.len(), 1, "{completed:?}");
+    let step_up_id = latest_step_up_id(&world);
+    assert_eq!(
+        requested[0].challenge_id.as_deref(),
+        Some(step_up_id.as_str()),
+        "the start rows do not bind to the spent step-up"
+    );
+    assert_eq!(completed[0].challenge_id, requested[0].challenge_id);
 }
 
 #[tokio::test]
@@ -889,7 +911,34 @@ async fn started_by(world: &World, person: &Person, agent_id: &str) -> Value {
 }
 
 async fn started(world: &World, agent_id: &str) -> Value {
-    started_by(world, &world.admin, agent_id).await
+    let value = started_by(world, &world.admin, agent_id).await;
+    // The launch route registers the row and its session record before it
+    // answers. A Stop cannot miss a guest that is still live. Wait until that
+    // row is visible, and fail here with the reason when it is not, rather
+    // than letting a later Stop report 409.
+    for _ in 0..40 {
+        let rows = world.runtime.runtime.list_capsules().await;
+        if rows
+            .iter()
+            .any(|info| info.ended_at.is_none() && info.principal.as_deref() == Some(agent_id))
+        {
+            return value;
+        }
+        let ended: Vec<_> = rows
+            .iter()
+            .filter(|info| info.principal.as_deref() == Some(agent_id))
+            .map(|info| format!("{} cause={:?}", info.status, info.cause))
+            .collect();
+        if !ended.is_empty() {
+            panic!(
+                "Start answered for {agent_id} and that guest has already ended, so a Stop would 409. The row was registered before the answer; it is not missing. {ended:?} answer={value}"
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    panic!(
+        "Start answered for {agent_id} and no row was registered. The launch route registers the row before it answers, so a Stop would 409 for a guest the owner was told had started. answer={value}"
+    );
 }
 
 async fn runtime_stop(world: &World, body: Value) -> (StatusCode, String) {
@@ -999,6 +1048,18 @@ async fn stop_by_another_owner_or_a_guest_is_refused() {
             && live_principal(&rows, &world.agent_a) == 1,
         "other={other_status} {other_body} guest={guest_status} {guest_body} rows={rows:?}"
     );
+    let guest_denial = crate::auth::load_auth_state(&world.home.data)
+        .unwrap()
+        .audit
+        .into_iter()
+        .find(|event| {
+            event.event_type == "agent.stop.denied"
+                && event.principal_id.as_deref() == Some(world.guest.principal_id.as_str())
+        })
+        .expect("guest denial");
+    let reason: Value = serde_json::from_str(&guest_denial.reason).unwrap();
+    assert_eq!(reason["agent_id"], world.agent_a);
+    assert!(!guest_denial.signature.unwrap_or_default().is_empty());
 }
 
 #[tokio::test]
@@ -1110,6 +1171,13 @@ async fn owner_stop_reaches_a_guest_when_the_agent_or_the_home_is_off() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "turn off: {body}");
+    // Turning this agent off ends its guest. The old row left the guest live
+    // so a later Stop could reach it. That is no longer the rule.
+    assert_eq!(
+        live_principal(&live(&world).await, &world.agent_a),
+        0,
+        "turning the agent off left its guest running"
+    );
     let (other_status, other_body) = stop(&world, &world.other, &world.agent_a).await;
     assert_ne!(
         other_status,
@@ -1118,11 +1186,19 @@ async fn owner_stop_reaches_a_guest_when_the_agent_or_the_home_is_off() {
     );
     assert_eq!(
         live_principal(&live(&world).await, &world.agent_a),
-        1,
-        "the other owner's stop ended the guest"
+        0,
+        "the other owner's stop changed the guest"
     );
     let (status, body) = stop(&world, &world.admin, &world.agent_a).await;
-    assert_eq!(status, StatusCode::OK, "stop while off: {body}");
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "stop after off already ended the guest: {body}"
+    );
+    assert!(
+        body.contains("no running session") || body.contains("already stopped"),
+        "{body}"
+    );
     assert_eq!(live_principal(&live(&world).await, &world.agent_a), 0);
 
     started(&world, &world.agent_b).await;
@@ -1135,8 +1211,17 @@ async fn owner_stop_reaches_a_guest_when_the_agent_or_the_home_is_off() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "retire: {body}");
+    assert_eq!(
+        live_principal(&live(&world).await, &world.agent_b),
+        0,
+        "retire ended that guest"
+    );
     let (status, body) = stop(&world, &world.admin, &world.agent_b).await;
-    assert_eq!(status, StatusCode::OK, "stop while retired: {body}");
+    assert_eq!(status, StatusCode::CONFLICT, "stop while retired: {body}");
+    assert!(
+        body.contains("no running session") || body.contains("already stopped"),
+        "{body}"
+    );
     assert_eq!(live_principal(&live(&world).await, &world.agent_b), 0);
 
     let (status, body) = call(
@@ -1169,17 +1254,37 @@ async fn owner_stop_reaches_a_guest_when_the_agent_or_the_home_is_off() {
         StatusCode::OK,
         "another owner stopped an agent while agents are off: {other_body}"
     );
-    assert!(
-        guest_is_live(&world, &world.agent_a, &session).await,
-        "the guest was not live before Stop"
-    );
-    let (status, body) = stop(&world, &world.admin, &world.agent_a).await;
+    // This guest runs on the harness runtime. Off does not register that
+    // runtime, so this test does not claim Off left the guest for a later
+    // Stop. The product row is agents_off_ends_the_guest_ensure_running_started.
+}
+
+#[tokio::test]
+async fn another_owner_cannot_retire_a_live_guest() {
+    let world = world().await;
+    started(&world, &world.agent_a).await;
+    let (status, body) = call(
+        &world.app,
+        "/api/apps/system/agents/retire",
+        &world.other.system_token,
+        "null",
+        Some(json!({ "agent_id": world.agent_a })),
+    )
+    .await;
     assert_eq!(
         status,
-        StatusCode::OK,
-        "stop while the Home has agents off: {body}"
+        StatusCode::CONFLICT,
+        "another owner's retire: {body}"
     );
-    assert_eq!(live_principal(&live(&world).await, &world.agent_a), 0);
+    assert!(
+        body.contains("the caller owns no agent with that id"),
+        "{status} {body}"
+    );
+    assert_eq!(
+        live_principal(&live(&world).await, &world.agent_a),
+        1,
+        "another owner's retire ended the guest: {status} {body}"
+    );
 }
 
 #[tokio::test]
@@ -1410,5 +1515,753 @@ async fn a_second_start_is_agent_already_running() {
             && before == 1
             && after == 1,
         "a second start was not the running refusal: {status} {body} before={before} after={after}"
+    );
+}
+
+/// The signed audit rows of one event type, read the way a new process
+/// reads them: from the Home's signed chain on disk.
+fn signed_audit_rows(world: &World, event_type: &str) -> Vec<RuntimeAuditEventV1> {
+    crate::auth::load_auth_state(&world.home.data)
+        .unwrap()
+        .audit
+        .into_iter()
+        .filter(|event| event.event_type == event_type)
+        .collect()
+}
+
+/// Every signed audit row, in chain order.
+fn signed_audit_events(world: &World) -> Vec<RuntimeAuditEventV1> {
+    crate::auth::load_auth_state(&world.home.data)
+        .unwrap()
+        .audit
+}
+
+/// The step-up id the latest completed step-up ceremony spent, read from
+/// that ceremony's own signed row.
+fn latest_step_up_id(world: &World) -> String {
+    let row = signed_audit_events(world)
+        .into_iter()
+        .rfind(|event| event.event_type == "auth.passkey_step_up.completed")
+        .unwrap();
+    serde_json::from_str::<Value>(&row.reason).unwrap()["step_up_id"]
+        .as_str()
+        .unwrap()
+        .to_string()
+}
+
+/// Plants which occurrence numbers of this Home's signed agent appends
+/// fail, so a test can reach a Start whose later row cannot be recorded
+/// while the rows before and after it succeed.
+fn fail_agent_lifecycle_audit_append_for_test(data_dir: &std::path::Path, occurrence: usize) {
+    crate::api::gateway::gateway_agents::AGENT_AUDIT_APPEND_FAILURES
+        .lock()
+        .unwrap()
+        .entry(data_dir.to_path_buf())
+        .or_default()
+        .insert(occurrence);
+}
+
+#[tokio::test]
+async fn agents_audit_start_writes_requested_then_completed_ok_in_order() {
+    let world = world().await;
+    let token = step_up(&world.app, &world.admin, &world.agent_a).await;
+    let (status, body) = start(&world, &world.admin, &world.agent_a, &token).await;
+    assert_eq!(status, StatusCode::OK, "start: {body}");
+    let answer: Value = serde_json::from_str(&body).unwrap();
+    let requested = signed_audit_rows(&world, "agent.start.requested");
+    let completed = signed_audit_rows(&world, "agent.start.completed");
+    assert_eq!(requested.len(), 1, "one requested row: {requested:?}");
+    assert_eq!(completed.len(), 1, "one completed row: {completed:?}");
+    let (requested, completed) = (&requested[0], &completed[0]);
+    let events = signed_audit_events(&world);
+    let position = |row: &RuntimeAuditEventV1| {
+        events
+            .iter()
+            .position(|event| event.event_id == row.event_id)
+            .unwrap()
+    };
+    assert!(
+        position(requested) < position(completed),
+        "the requested row must come first"
+    );
+    assert_eq!(
+        requested.principal_id.as_deref(),
+        Some(world.admin.principal_id.as_str())
+    );
+    assert_eq!(
+        completed.principal_id.as_deref(),
+        Some(world.admin.principal_id.as_str())
+    );
+    let step_up_id = latest_step_up_id(&world);
+    assert_eq!(
+        requested.challenge_id.as_deref(),
+        Some(step_up_id.as_str()),
+        "the start rows bind to the spent step-up"
+    );
+    assert_eq!(completed.challenge_id, requested.challenge_id);
+    let reason: Value = serde_json::from_str(&requested.reason).unwrap();
+    assert_eq!(reason["agent_id"], world.agent_a);
+    assert!(reason["launch_id"].as_str().unwrap().starts_with("launch:"));
+    assert_eq!(reason["host_package"], HOST);
+    let digest = reason["host_package_sha256"].as_str().unwrap();
+    assert_eq!(digest.len(), 64, "{digest}");
+    assert!(digest
+        .chars()
+        .all(|character| character.is_ascii_hexdigit()));
+    assert_eq!(requested.capsule_id.as_deref(), Some(HOST));
+    assert_eq!(
+        completed.session_id.as_deref(),
+        Some(answer["session_id"].as_str().unwrap())
+    );
+    assert_eq!(completed.result, "ok");
+}
+
+#[tokio::test]
+async fn agents_audit_refused_start_when_the_signed_row_cannot_be_appended() {
+    let world = world().await;
+    let token = step_up(&world.app, &world.admin, &world.agent_a).await;
+    // Every signed append opens the auth state's lock file first. A
+    // directory there fails every mutation while every read still works, so
+    // the owner reaches a Start whose signed row cannot be written.
+    let state_path = crate::auth::auth_state_path(&world.home.data).unwrap();
+    let lock_path = state_path.with_file_name(format!(
+        "{}.lock",
+        state_path.file_name().unwrap().to_str().unwrap()
+    ));
+    std::fs::remove_file(&lock_path).unwrap();
+    std::fs::create_dir(&lock_path).unwrap();
+    let (status, body) = start(&world, &world.admin, &world.agent_a, &token).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert!(
+        body.contains(world.agent_a.as_str()),
+        "the refusal names the agent: {body}"
+    );
+    assert_eq!(mints(&world), 0, "a refused start minted a grant");
+    assert_eq!(guests(&world).await, 0, "a refused start launched a guest");
+    assert!(signed_audit_rows(&world, "agent.start.requested").is_empty());
+    assert!(signed_audit_rows(&world, "agent.start.completed").is_empty());
+    // The chain itself still verifies: reads need no lock.
+    assert!(!latest_step_up_id(&world).is_empty());
+    std::fs::remove_dir(&lock_path).unwrap();
+}
+
+#[tokio::test]
+async fn agents_audit_stops_the_agent_when_its_completion_row_cannot_be_appended() {
+    let world = world().await;
+    // The plant: the second signed agent append of this Start, the
+    // completion row, fails; the rows before and after it succeed.
+    fail_agent_lifecycle_audit_append_for_test(&world.home.data, 2);
+    let token = step_up(&world.app, &world.admin, &world.agent_a).await;
+    let (status, body) = start(&world, &world.admin, &world.agent_a, &token).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert!(
+        body.contains(world.agent_a.as_str()),
+        "the refusal names the agent: {body}"
+    );
+    assert_eq!(
+        mints(&world),
+        1,
+        "the launch minted its grant before the completion row failed"
+    );
+    assert_eq!(
+        live_principal(&live(&world).await, &world.agent_a),
+        0,
+        "the unrecordable start left the agent running"
+    );
+    assert_eq!(
+        world.runtime.stops.lock().unwrap().len(),
+        1,
+        "the settle did not stop the agent through the runtime stop route"
+    );
+    // The chain keeps the requested row and the signed stop the settle
+    // wrote; the completion row it could not write is absent.
+    let requested = signed_audit_rows(&world, "agent.start.requested");
+    let completed = signed_audit_rows(&world, "agent.start.completed");
+    let stopped = signed_audit_rows(&world, "agent.stopped");
+    assert_eq!(requested.len(), 1, "{requested:?}");
+    assert!(completed.is_empty(), "{completed:?}");
+    assert_eq!(stopped.len(), 1, "{stopped:?}");
+    assert_eq!(stopped[0].result, "ok");
+    assert_eq!(stopped[0].capsule_id.as_deref(), Some(HOST));
+    let reason: Value = serde_json::from_str(&stopped[0].reason).unwrap();
+    assert_eq!(reason["agent_id"], world.agent_a);
+    assert_eq!(reason["cause"], "unrecorded_start");
+    assert!(!stopped[0]
+        .session_id
+        .as_deref()
+        .unwrap_or_default()
+        .is_empty());
+}
+
+#[tokio::test]
+async fn a_crash_after_the_unrecorded_start_stop_signs_once_on_restart() {
+    let world = world().await;
+    fail_agent_lifecycle_audit_append_for_test(&world.home.data, 2);
+    super::seams::arm_grant_kind(&world.home.data, "after-stop");
+    let token = step_up(&world.app, &world.admin, &world.agent_a).await;
+    let (status, body) = start(&world, &world.admin, &world.agent_a, &token).await;
+    assert_ne!(status, StatusCode::OK, "{body}");
+    let owed = crate::agents::owed_stop_rows(&world.home.data);
+    let row = owed
+        .iter()
+        .find(|row| row.result == "stopping" && row.reason.contains("unrecorded_start"))
+        .expect("the settle stop was not owed");
+    let session = row.session_id.clone().expect("session");
+    let owed_id = row.event_id.clone();
+    assert!(
+        signed_audit_rows(&world, "agent.stopped").is_empty(),
+        "the crash signed the stop"
+    );
+    for _ in 0..2 {
+        crate::agent_record_audit::reconcile_owed_stops(&world.home.data).unwrap();
+        super::super::gateway_agents::confirm_stopping_rows(&world.home.data)
+            .await
+            .unwrap();
+    }
+    let stopped = signed_audit_rows(&world, "agent.stopped");
+    assert_eq!(
+        stopped.iter().filter(|row| row.event_id == owed_id).count(),
+        1,
+        "{stopped:?}"
+    );
+    assert_eq!(
+        stopped
+            .iter()
+            .filter(|row| {
+                row.result == "ok" && row.session_id.as_deref() == Some(session.as_str())
+            })
+            .count(),
+        1,
+        "{stopped:?}"
+    );
+    assert!(crate::agents::owed_stop_rows(&world.home.data).is_empty());
+}
+
+#[tokio::test]
+async fn agents_audit_failed_launch_writes_completed_failed() {
+    let world = world().await;
+    let token = step_up(&world.app, &world.admin, &world.agent_a).await;
+    // The grant is minted before the Runtime is asked, so ending the Runtime
+    // after the token is spent fails the launch and not the gate.
+    world.runtime.task.abort();
+    let (status, body) = start(&world, &world.admin, &world.agent_a, &token).await;
+    assert_ne!(status, StatusCode::OK, "{body}");
+    assert_eq!(mints(&world), 1, "the grant was minted before the launch");
+    assert_eq!(guests(&world).await, 0);
+    let requested = signed_audit_rows(&world, "agent.start.requested");
+    let completed = signed_audit_rows(&world, "agent.start.completed");
+    assert_eq!(requested.len(), 1, "{requested:?}");
+    assert_eq!(completed.len(), 1, "{completed:?}");
+    assert_eq!(requested[0].result, "ok");
+    assert_eq!(completed[0].result, "failed");
+    let reason: Value = serde_json::from_str(&completed[0].reason).unwrap();
+    assert!(!reason["error"].as_str().unwrap_or_default().is_empty());
+    assert_eq!(reason["agent_id"], world.agent_a);
+}
+
+#[tokio::test]
+async fn agents_audit_owner_stop_writes_a_signed_stopped_row() {
+    let world = world().await;
+    let started = started(&world, &world.agent_a).await;
+    let session = started["session_id"].as_str().unwrap().to_string();
+    let (status, body) = stop(&world, &world.admin, &world.agent_a).await;
+    assert_eq!(status, StatusCode::OK, "owner stop: {body}");
+    let stopped = signed_audit_rows(&world, "agent.stopped");
+    assert_eq!(stopped.len(), 1, "one signed stop row: {stopped:?}");
+    let row = &stopped[0];
+    assert_eq!(
+        row.principal_id.as_deref(),
+        Some(world.admin.principal_id.as_str())
+    );
+    assert_eq!(row.session_id.as_deref(), Some(session.as_str()));
+    assert_eq!(row.capsule_id.as_deref(), Some(HOST));
+    assert_eq!(row.result, "ok");
+    let reason: Value = serde_json::from_str(&row.reason).unwrap();
+    assert_eq!(reason["agent_id"], world.agent_a);
+    assert_eq!(reason["cause"], "owner");
+}
+
+#[tokio::test]
+async fn agents_audit_rows_verify_after_a_restart() {
+    let world = world().await;
+    let token = step_up(&world.app, &world.admin, &world.agent_a).await;
+    let (status, body) = start(&world, &world.admin, &world.agent_a, &token).await;
+    assert_eq!(status, StatusCode::OK, "start: {body}");
+    let (status, body) = stop(&world, &world.admin, &world.agent_a).await;
+    assert_eq!(status, StatusCode::OK, "stop: {body}");
+    // A new process reads the same data dir cold. Its view of the auth
+    // state file is a changed identity, so the next load re-reads the disk
+    // and verifies the whole chain before any row is answered.
+    let state_path = crate::auth::auth_state_path(&world.home.data).unwrap();
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .open(&state_path)
+        .unwrap();
+    file.set_modified(std::time::SystemTime::now()).unwrap();
+    drop(file);
+    let step_up_id = latest_step_up_id(&world);
+    let requested = signed_audit_rows(&world, "agent.start.requested");
+    let completed = signed_audit_rows(&world, "agent.start.completed");
+    let stopped = signed_audit_rows(&world, "agent.stopped");
+    assert_eq!(requested.len(), 1, "{requested:?}");
+    assert_eq!(completed.len(), 1, "{completed:?}");
+    assert_eq!(stopped.len(), 1, "{stopped:?}");
+    assert_eq!(
+        requested[0].challenge_id.as_deref(),
+        Some(step_up_id.as_str())
+    );
+    assert_eq!(requested[0].principal_id, completed[0].principal_id);
+    assert_eq!(stopped[0].principal_id, requested[0].principal_id);
+}
+
+#[tokio::test]
+async fn agents_audit_retire_is_recorded_by_its_record_write_row() {
+    let world = world().await;
+    let (status, body) = call(
+        &world.app,
+        RETIRE,
+        &world.admin.system_token,
+        "null",
+        Some(json!({ "agent_id": world.agent_a })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "retire: {body}");
+    // The record write that performed the retire signed its own row, in the
+    // agent's name, and the route added no second `agent.retired` row.
+    let record_rows = signed_audit_rows(&world, "agent.record.retire");
+    assert_eq!(
+        record_rows.len(),
+        1,
+        "one signed retire record: {record_rows:?}"
+    );
+    assert_eq!(
+        record_rows[0].principal_id.as_deref(),
+        Some(world.agent_a.as_str())
+    );
+    assert!(signed_audit_rows(&world, "agent.retired").is_empty());
+    // A second retire is refused and writes no new chain row.
+    let (status, body) = call(
+        &world.app,
+        RETIRE,
+        &world.admin.system_token,
+        "null",
+        Some(json!({ "agent_id": world.agent_a })),
+    )
+    .await;
+    assert_ne!(status, StatusCode::OK, "{body}");
+    assert_eq!(signed_audit_rows(&world, "agent.record.retire").len(), 1);
+    assert!(signed_audit_rows(&world, "agent.retired").is_empty());
+}
+
+/// The answers a stand-in Runtime gives the gateway's hop: the launch route
+/// and the stop route each answer with a planted status and body, so a test
+/// can reach gateway behavior the real Runtime cannot produce here — a stop
+/// that fails, or a session the Runtime has not ended yet.
+#[derive(Clone)]
+struct StubRuntimeAnswers {
+    launch_status: StatusCode,
+    launch_body: Value,
+    stop_status: StatusCode,
+    stop_body: Value,
+    stops: Arc<std::sync::Mutex<Vec<Value>>>,
+}
+
+struct StubRuntimeHost {
+    task: tokio::task::JoinHandle<()>,
+    stops: Arc<std::sync::Mutex<Vec<Value>>>,
+}
+
+impl Drop for StubRuntimeHost {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
+async fn serve_stub_runtime(
+    data: &std::path::Path,
+    launch: (StatusCode, Value),
+    stop: (StatusCode, Value),
+) -> StubRuntimeHost {
+    let stops = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let answers = StubRuntimeAnswers {
+        launch_status: launch.0,
+        launch_body: launch.1,
+        stop_status: stop.0,
+        stop_body: stop.1,
+        stops: stops.clone(),
+    };
+    let app = Router::new()
+        .route("/api/health", get(|| async { StatusCode::OK }))
+        .route(
+            "/api/auth/attach",
+            post(|| async { (StatusCode::OK, axum::Json(json!({ "token": "stub-shell" }))) }),
+        )
+        .route("/api/capsules", post(stub_runtime_launch))
+        .route("/api/capsules/stop-agent", post(stub_runtime_stop))
+        .with_state(answers);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let task = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    let url = format!("http://{addr}");
+    // `read_runtime_coords` deletes the file when health is not up yet, so
+    // the file is written only after this listener answers.
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(2))
+        .build()
+        .unwrap();
+    let mut healthy = false;
+    for _ in 0..50 {
+        if client
+            .get(format!("{url}/api/health"))
+            .send()
+            .await
+            .ok()
+            .is_some_and(|response| response.status().is_success())
+        {
+            healthy = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(healthy, "the stub runtime did not answer health");
+    let coords = crate::runtime_control::RuntimeCoords {
+        api_url: url.clone(),
+        attach_secret: "agent-start-attach".to_string(),
+        pid: std::process::id(),
+        runtime_kind: "agent".to_string(),
+        binary_sha256: String::new(),
+        policy_sha256: String::new(),
+        dependency_sha256: String::new(),
+        generation: String::new(),
+        process_start: String::new(),
+        home_url: String::new(),
+    };
+    // The plane file is what Start and Stop read when it is live. The Home
+    // file stays, with the same address, so a reader of that hop still finds
+    // this stub.
+    crate::runtime_control::write_runtime_coords(
+        &crate::api::agent_plane::coords_path(data),
+        &coords,
+    )
+    .unwrap();
+    crate::runtime_control::write_runtime_coords(
+        &crate::runtime_control::home_runtime_coord_path(data),
+        &crate::runtime_control::RuntimeCoords {
+            runtime_kind: crate::runtime_control::RUNTIME_KIND_MANAGED_HOME.to_string(),
+            ..coords
+        },
+    )
+    .unwrap();
+    StubRuntimeHost { task, stops }
+}
+
+async fn stub_runtime_launch(
+    axum::extract::State(answers): axum::extract::State<StubRuntimeAnswers>,
+) -> impl axum::response::IntoResponse {
+    // A string is the runtime's raw refusal. An object is a launch answer.
+    let body = match answers.launch_body.as_str() {
+        Some(text) => text.to_string(),
+        None => answers.launch_body.to_string(),
+    };
+    (answers.launch_status, body)
+}
+
+async fn stub_runtime_stop(
+    axum::extract::State(answers): axum::extract::State<StubRuntimeAnswers>,
+    body: String,
+) -> impl axum::response::IntoResponse {
+    if let Ok(value) = serde_json::from_str::<Value>(&body) {
+        answers
+            .stops
+            .lock()
+            .expect("recorded stub stops")
+            .push(value);
+    }
+    (answers.stop_status, axum::Json(answers.stop_body))
+}
+
+#[tokio::test]
+async fn agents_audit_settle_stop_ends_only_the_session_this_start_made() {
+    let world = world().await;
+    let first_session = "session-earlier";
+    // One live run refuses a second Start while the first guest holds the
+    // token. This earlier row is resident and holds no token, so this Start
+    // is admitted. Its completion row fails, and the settle stop names only
+    // the session this Start made.
+    world
+        .runtime
+        .runtime
+        .plant_open_agent_row_for_test(&world.agent_a, first_session)
+        .await;
+    // This Start's completion row is the second signed agent append.
+    fail_agent_lifecycle_audit_append_for_test(&world.home.data, 2);
+    let token = step_up(&world.app, &world.admin, &world.agent_a).await;
+    let (status, body) = start(&world, &world.admin, &world.agent_a, &token).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    let rows = live(&world).await;
+    assert_eq!(
+        live_principal(&rows, &world.agent_a),
+        1,
+        "the settle stop ended the earlier session too: {body} rows={rows:?}"
+    );
+    let stopped = signed_audit_rows(&world, "agent.stopped");
+    assert_eq!(stopped.len(), 1, "{stopped:?}");
+    assert_ne!(
+        stopped[0].session_id.as_deref(),
+        Some(first_session),
+        "the settle stop labelled the earlier session unrecorded_start"
+    );
+    let reason: Value = serde_json::from_str(&stopped[0].reason).unwrap();
+    assert_eq!(reason["cause"], "unrecorded_start");
+}
+
+#[tokio::test]
+async fn agents_audit_settle_stop_failure_still_refuses_by_name_and_records_it() {
+    let world = world().await;
+    let planted = "/var/lib/elastos/bundle-root";
+    let _stub = serve_stub_runtime(
+        &world.home.data,
+        (
+            StatusCode::OK,
+            json!({
+                "id": "stub-capsule",
+                "session_id": format!("stub-session-{}", uuid_like_token()),
+                "status": "running",
+            }),
+        ),
+        (StatusCode::INTERNAL_SERVER_ERROR, json!(planted)),
+    )
+    .await;
+    // The completion row is the second signed agent append of this Start.
+    fail_agent_lifecycle_audit_append_for_test(&world.home.data, 2);
+    let token = step_up(&world.app, &world.admin, &world.agent_a).await;
+    let (status, body) = start(&world, &world.admin, &world.agent_a, &token).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert!(
+        body.contains(world.agent_a.as_str()) && body.contains("may still be running"),
+        "the refusal names the agent and the still-running guest: {body}"
+    );
+    assert!(
+        !body.contains(planted),
+        "the refusal carries the runtime's own body: {body}"
+    );
+    let completed = signed_audit_rows(&world, "agent.start.completed");
+    assert_eq!(completed.len(), 1, "{completed:?}");
+    assert_eq!(completed[0].result, "failed");
+    let reason: Value = serde_json::from_str(&completed[0].reason).unwrap();
+    assert!(!reason["error"].as_str().unwrap_or_default().is_empty());
+    assert!(
+        !reason["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains(planted),
+        "the failed row carries the stop's own detail: {reason}"
+    );
+    let posted = _stub.stops.lock().expect("recorded stub stops").clone();
+    assert_eq!(posted.len(), 1, "{posted:?}");
+    assert!(
+        posted[0]["session_id"].is_string(),
+        "the settle stop did not name the session it made: {posted:?}"
+    );
+}
+
+#[tokio::test]
+async fn agents_audit_owner_stop_reports_which_rows_are_missing() {
+    let world = world().await;
+    let first = started(&world, &world.agent_a).await;
+    let earlier = first["session_id"].as_str().unwrap().to_string();
+    // One live run refuses a second Start. The second row is planted beside
+    // the session this Start made, so Stop still has two rows to sign.
+    let later = format!("{earlier}-later");
+    world
+        .runtime
+        .runtime
+        .plant_open_agent_stop_for_test(&world.agent_a, &later)
+        .await;
+    // The start wrote requested and completed. Stop writes the requested row
+    // third and the first signed stop row fourth, so the plant fails only
+    // that row. The rows are signed in session-id order, so the later id is
+    // the one that is recorded.
+    fail_agent_lifecycle_audit_append_for_test(&world.home.data, 4);
+    let (status, body) = stop(&world, &world.admin, &world.agent_a).await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{body}");
+    assert!(
+        body.contains(&earlier) && body.contains(&later),
+        "the error does not name the stopped and unrecorded sessions: {body}"
+    );
+    // The row after the failed one was still attempted.
+    let stopped = signed_audit_rows(&world, "agent.stopped");
+    assert_eq!(stopped.len(), 1, "{stopped:?}");
+    assert_eq!(stopped[0].session_id.as_deref(), Some(later.as_str()));
+    assert_eq!(signed_audit_rows(&world, "agent.stop.requested").len(), 1);
+}
+
+#[tokio::test]
+async fn agents_audit_owner_stop_marks_a_session_that_has_not_ended_as_stopping() {
+    let world = world().await;
+    let _stub = serve_stub_runtime(
+        &world.home.data,
+        (StatusCode::OK, json!({ "id": "stub-capsule" })),
+        (
+            StatusCode::OK,
+            json!({
+                "stopped": [
+                    { "session_id": "stub-session-1", "status": "stopped", "ended": false }
+                ]
+            }),
+        ),
+    )
+    .await;
+    let (status, body) = stop(&world, &world.admin, &world.agent_a).await;
+    assert_eq!(status, StatusCode::OK, "owner stop: {body}");
+    let stopped = signed_audit_rows(&world, "agent.stopped");
+    assert_eq!(stopped.len(), 1, "{stopped:?}");
+    assert_eq!(stopped[0].session_id.as_deref(), Some("stub-session-1"));
+    assert_eq!(
+        stopped[0].result, "stopping",
+        "a session the Runtime has not ended is not ok: {stopped:?}"
+    );
+    let reason: Value = serde_json::from_str(&stopped[0].reason).unwrap();
+    assert_eq!(reason["cause"], "owner");
+}
+
+#[tokio::test]
+async fn agents_audit_owner_stop_writes_the_requested_row_before_the_runtime_stop() {
+    let world = world().await;
+    started(&world, &world.agent_a).await;
+    let (status, body) = stop(&world, &world.admin, &world.agent_a).await;
+    assert_eq!(status, StatusCode::OK, "owner stop: {body}");
+    let requested = signed_audit_rows(&world, "agent.stop.requested");
+    let stopped = signed_audit_rows(&world, "agent.stopped");
+    assert_eq!(requested.len(), 1, "{requested:?}");
+    assert_eq!(stopped.len(), 1, "{stopped:?}");
+    let events = signed_audit_events(&world);
+    let position = |row: &RuntimeAuditEventV1| {
+        events
+            .iter()
+            .position(|event| event.event_id == row.event_id)
+            .unwrap()
+    };
+    assert!(
+        position(&requested[0]) < position(&stopped[0]),
+        "the requested row must come before the signed stop row"
+    );
+    assert_eq!(requested[0].result, "ok");
+    assert_eq!(
+        requested[0].principal_id.as_deref(),
+        Some(world.admin.principal_id.as_str())
+    );
+    let reason: Value = serde_json::from_str(&requested[0].reason).unwrap();
+    assert_eq!(reason["agent_id"], world.agent_a);
+    assert_eq!(reason["cause"], "owner");
+    // The second stop finds no live session and is refused, and its
+    // requested row is still written before the Runtime is asked.
+    let (status, body) = stop(&world, &world.admin, &world.agent_a).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(signed_audit_rows(&world, "agent.stop.requested").len(), 2);
+    assert_eq!(signed_audit_rows(&world, "agent.stopped").len(), 1);
+}
+
+#[tokio::test]
+async fn agents_audit_failed_launch_stores_a_named_cause_without_host_paths() {
+    let world = world().await;
+    let planted = "/var/lib/elastos/bundle-root";
+    let _stub = serve_stub_runtime(
+        &world.home.data,
+        (StatusCode::INTERNAL_SERVER_ERROR, json!(planted)),
+        (StatusCode::OK, json!({ "stopped": [] })),
+    )
+    .await;
+    let token = step_up(&world.app, &world.admin, &world.agent_a).await;
+    let (status, body) = start(&world, &world.admin, &world.agent_a, &token).await;
+    assert_ne!(status, StatusCode::OK, "{body}");
+    assert!(
+        !body.contains(planted),
+        "the answer carries the runtime's own body: {body}"
+    );
+    assert!(body.contains("runtime launch failed"), "{body}");
+    let completed = signed_audit_rows(&world, "agent.start.completed");
+    assert_eq!(completed.len(), 1, "{completed:?}");
+    assert_eq!(completed[0].result, "failed");
+    let reason: Value = serde_json::from_str(&completed[0].reason).unwrap();
+    let stored = reason["error"].as_str().unwrap_or_default();
+    assert!(!stored.is_empty(), "{reason}");
+    assert!(
+        !stored.contains(planted),
+        "the signed row carries the runtime's own body: {reason}"
+    );
+    assert!(stored.contains("runtime launch failed"), "{stored}");
+}
+
+#[tokio::test]
+async fn agents_audit_launch_conflict_keeps_the_named_sentence() {
+    let world = world().await;
+    let sentence = "this agent is already running";
+    let _stub = serve_stub_runtime(
+        &world.home.data,
+        (StatusCode::CONFLICT, json!(sentence)),
+        (StatusCode::OK, json!({ "stopped": [] })),
+    )
+    .await;
+    let token = step_up(&world.app, &world.admin, &world.agent_a).await;
+    let (status, body) = start(&world, &world.admin, &world.agent_a, &token).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    let coded: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(coded["code"], "agent_already_running");
+    assert_eq!(coded["reason"], sentence);
+    let completed = signed_audit_rows(&world, "agent.start.completed");
+    assert_eq!(completed.len(), 1, "{completed:?}");
+    assert_eq!(completed[0].result, "failed");
+    let reason: Value = serde_json::from_str(&completed[0].reason).unwrap();
+    assert_eq!(reason["error"], sentence);
+}
+
+/// Removes a planted crash window if the start never reached it.
+struct CrashAfterLaunch(std::path::PathBuf);
+
+impl Drop for CrashAfterLaunch {
+    fn drop(&mut self) {
+        crate::api::gateway::gateway_agents::AGENT_AUDIT_CRASH_AFTER_LAUNCH
+            .lock()
+            .unwrap()
+            .remove(&self.0);
+    }
+}
+
+#[tokio::test]
+async fn agents_audit_restart_shows_requested_without_completed() {
+    let world = world().await;
+    crate::api::gateway::gateway_agents::AGENT_AUDIT_CRASH_AFTER_LAUNCH
+        .lock()
+        .unwrap()
+        .insert(world.home.data.clone());
+    let _guard = CrashAfterLaunch(world.home.data.clone());
+    let token = step_up(&world.app, &world.admin, &world.agent_a).await;
+    let (status, body) = start(&world, &world.admin, &world.agent_a, &token).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert!(
+        body.contains(world.agent_a.as_str()) && body.contains("completion row was not recorded"),
+        "{body}"
+    );
+    let state_path = crate::auth::auth_state_path(&world.home.data).unwrap();
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .open(&state_path)
+        .unwrap();
+    file.set_modified(std::time::SystemTime::now()).unwrap();
+    drop(file);
+    let requested = signed_audit_rows(&world, "agent.start.requested");
+    assert_eq!(requested.len(), 1, "{requested:?}");
+    assert!(
+        signed_audit_rows(&world, "agent.start.completed").is_empty(),
+        "a crash before the completion row left one"
+    );
+    assert!(signed_audit_rows(&world, "agent.stopped").is_empty());
+    assert_eq!(
+        live_principal(&live(&world).await, &world.agent_a),
+        1,
+        "the crash stop is not this path: the guest is still the one this Start made"
     );
 }

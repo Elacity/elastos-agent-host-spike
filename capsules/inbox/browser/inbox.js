@@ -107,6 +107,9 @@
 
     function publicInboxText(value, fallback) {
       const text = String(value || "").trim();
+      if (text.startsWith("Nothing ran.")) {
+        return text;
+      }
       if (!text || /\b(runtime mirror|projection|schema|derived facts?|capsules?|providers?|capabilit(?:y|ies)|affordances?|authority boundary|provider boundary|gate preview|runtime-owned|launch token|hostcall|request failed|failed to fetch|unauthorized|forbidden|[45]\d\d)\b|engine_[a-z_]+/i.test(text)) {
         return fallback;
       }
@@ -126,7 +129,8 @@
         || entry.kind === "service_access_grant"
         || entry.kind === "hosted_route_decision"
         || entry.kind === "hosted_route_history"
-        || entry.kind === "agent_plan";
+        || entry.kind === "agent_plan"
+        || entry.kind === "capability_request";
       return namedRequest ? text || fallback : publicInboxText(text, fallback);
     }
 
@@ -586,6 +590,7 @@
         ), "primary");
         approveButton.dataset.actionId = actionId;
         actions.appendChild(approveButton);
+        actions.appendChild(createActionButton("Deny", "agent-plan-deny-request:" + requestId, "danger"));
       } else if (typeof actionId === "string" && actionId.startsWith("inspect-approve-request:")) {
         const requestId = actionId.slice("inspect-approve-request:".length);
         const approveButton = createButton("Approve", (button) => approveInspectRequest(button, requestId), "primary");

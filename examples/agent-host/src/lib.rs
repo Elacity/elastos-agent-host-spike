@@ -3934,20 +3934,27 @@ fn request_journal_grants(
     }
     let mut ask = |action: &str| -> (Option<JournalGrant>, Option<&'static str>) {
         let what = format!("{action} {}", cursor.resource);
-        match bus.request_grant(&cursor.resource, action, "Agent Host task journal") {
-            Ok(id) => match JournalGrant::new(&id) {
-                Some(grant) => (Some(grant), None),
-                None => {
-                    record_grant_refusal(journal, "grant invalid", &what);
-                    (None, Some("grant invalid"))
+        // Each ask still waits 30s. An unknown outcome is a new ask, not a longer lock.
+        for _ in 0..8 {
+            match bus.request_grant(&cursor.resource, action, "Agent Host task journal") {
+                Ok(id) => match JournalGrant::new(&id) {
+                    Some(grant) => return (Some(grant), None),
+                    None => {
+                        record_grant_refusal(journal, "grant invalid", &what);
+                        return (None, Some("grant invalid"));
+                    }
+                },
+                Err(failure) => {
+                    let reason = grant_failure_reason(failure);
+                    if reason != "grant outcome unknown" {
+                        record_grant_refusal(journal, reason, &what);
+                        return (None, Some(reason));
+                    }
                 }
-            },
-            Err(failure) => {
-                let reason = grant_failure_reason(failure);
-                record_grant_refusal(journal, reason, &what);
-                (None, Some(reason))
             }
         }
+        record_grant_refusal(journal, "grant outcome unknown", &what);
+        (None, Some("grant outcome unknown"))
     };
     let (write, write_reason) = ask("write");
     let (read, read_reason) = ask("read");
@@ -4045,6 +4052,14 @@ fn submit_document_plan(
     bus: &mut impl ResourceBus,
     plan: &serde_json::Value,
 ) -> Result<serde_json::Value, &'static str> {
+    submit_document_plan_with_grant(bus, plan).map(|(result, _grant)| result)
+}
+
+#[cfg(any(test, target_arch = "wasm32"))]
+fn submit_document_plan_with_grant(
+    bus: &mut impl ResourceBus,
+    plan: &serde_json::Value,
+) -> Result<(serde_json::Value, String), &'static str> {
     let [step] = plan
         .get("steps")
         .and_then(serde_json::Value::as_array)
@@ -4092,7 +4107,65 @@ fn submit_document_plan(
     {
         return Err("submit reply did not bind the proposed step");
     }
-    Ok(result)
+    Ok((result, grant))
+}
+
+/// How many times the guest repeats the parked status read. Each park is 30s
+/// on the host and spends no guest fuel. Ten parks cover the plan's 300s life.
+#[cfg(any(test, target_arch = "wasm32"))]
+const PLAN_DECISION_PARKS: usize = 10;
+#[cfg(any(test, target_arch = "wasm32"))]
+const PLAN_UNSETTLED: &[u8] = b"agent plan has no settled result";
+
+#[cfg(any(test, target_arch = "wasm32"))]
+fn plan_reply_is_unsettled(reply: &[u8]) -> bool {
+    reply
+        .windows(PLAN_UNSETTLED.len())
+        .any(|window| window == PLAN_UNSETTLED)
+}
+
+/// Read the plan again until the owner decides, the instance ends, or the
+/// plan's own life runs out. Only the unsettled sentence is another read.
+#[cfg(any(test, target_arch = "wasm32"))]
+fn wait_for_plan_decision(
+    bus: &mut impl ResourceBus,
+    grant: &str,
+    request_id: &str,
+) -> Result<serde_json::Value, &'static str> {
+    const RESOURCE: &str = "elastos://inspect/submit_agent_plan";
+    for _ in 0..PLAN_DECISION_PARKS {
+        let body = serde_json::to_vec(&serde_json::json!({ "request_id": request_id }))
+            .map_err(|_| "plan encoding failed")?;
+        let reply = bus
+            .invoke(RESOURCE, "submit_agent_plan", &body, grant)
+            .map_err(|_| "plan decision was not a result")?;
+        if plan_reply_is_unsettled(&reply) {
+            continue;
+        }
+        let value: serde_json::Value =
+            serde_json::from_slice(&reply).map_err(|_| "plan decision was not a result")?;
+        if value
+            .pointer("/data/schema")
+            .and_then(serde_json::Value::as_str)
+            == Some("elastos.agent-plan.result/v1")
+        {
+            return Ok(value);
+        }
+        return Err("plan decision was not a result");
+    }
+    Err("the plan decision expired")
+}
+
+#[cfg(any(test, target_arch = "wasm32"))]
+fn submit_document_plan_and_wait(
+    bus: &mut impl ResourceBus,
+    plan: &serde_json::Value,
+) -> Result<serde_json::Value, &'static str> {
+    let (submitted, grant) = submit_document_plan_with_grant(bus, plan)?;
+    let Some(request_id) = submitted["data"]["request_id"].as_str() else {
+        return Err("submit reply did not bind the proposed step");
+    };
+    wait_for_plan_decision(bus, &grant, request_id)
 }
 
 #[cfg(any(test, target_arch = "wasm32"))]
@@ -8407,8 +8480,16 @@ impl exports::elastos::bus::lifecycle::Guest for AgentHost {
         }
         if journal_written {
             // An admitted agent proposes only after its activation journal is
-            // stored and read back. A refused submit ask leaves it running.
-            let _ = submit_document_plan(&mut WasmBus, &plan);
+            // stored and read back. It stays up and reads the owner's decision
+            // through the same grant. The host parks that read. A refused
+            // submit ask leaves it running.
+            if let Err(error) = submit_document_plan_and_wait(&mut WasmBus, &plan) {
+                // A refused submit ask is not a failed run. Every other end,
+                // including the plan's own limit, is named.
+                if error != "submit grant refused" && error != "submit grant invalid" {
+                    return Err(elastos::bus::types::BusError::Invalid(error.to_string()));
+                }
+            }
         }
         Ok(())
     }
@@ -9809,6 +9890,38 @@ mod tests {
         }
     }
 
+    struct DecisionBus {
+        replies: Vec<Vec<u8>>,
+        calls: usize,
+    }
+
+    impl ResourceBus for DecisionBus {
+        fn request_grant(
+            &mut self,
+            _resource: &str,
+            _action: &str,
+            _reason: &str,
+        ) -> Result<String, BusFailure> {
+            Ok("submit-grant".to_string())
+        }
+
+        fn invoke(
+            &mut self,
+            _resource: &str,
+            _operation: &str,
+            _body: &[u8],
+            _grant: &str,
+        ) -> Result<Vec<u8>, BusFailure> {
+            let reply = self
+                .replies
+                .get(self.calls)
+                .cloned()
+                .unwrap_or_else(|| self.replies.last().cloned().unwrap_or_default());
+            self.calls += 1;
+            Ok(reply)
+        }
+    }
+
     #[test]
     fn a15r_june_plan_preview_and_submit_keep_the_document_step() {
         let mut journal = empty_journal();
@@ -9873,6 +9986,45 @@ mod tests {
             Err("one step required")
         );
         assert!(bus.asks.is_empty() && bus.invokes.is_empty());
+    }
+
+    #[test]
+    fn the_guest_stays_up_and_reads_the_plan_decision() {
+        let plan = serde_json::json!({
+            "steps": [{
+                "scheme": "localhost",
+                "operation": "write",
+                "request": {"path": "localhost://UsersAI/self/Documents/note.txt"}
+            }]
+        });
+        let step = plan["steps"][0].clone();
+        let pending = serde_json::json!({
+            "status": "ok",
+            "data": {"status": "pending", "request": step, "request_id": "plan-1"}
+        });
+        let waiting = serde_json::json!({
+            "type": "error",
+            "message": "agent plan has no settled result"
+        });
+        let decided = serde_json::json!({
+            "status": "ok",
+            "data": {
+                "schema": "elastos.agent-plan.result/v1",
+                "status": "instance ended",
+                "request_id": "plan-1"
+            }
+        });
+        let mut bus = DecisionBus {
+            replies: vec![
+                serde_json::to_vec(&pending).unwrap(),
+                serde_json::to_vec(&waiting).unwrap(),
+                serde_json::to_vec(&decided).unwrap(),
+            ],
+            calls: 0,
+        };
+        let result = submit_document_plan_and_wait(&mut bus, &plan).unwrap();
+        assert_eq!(result["data"]["status"], "instance ended");
+        assert_eq!(bus.calls, 3);
     }
 
     /// The owner-area path used to be the submitted document. It stays here as
@@ -17694,6 +17846,7 @@ mod tests {
     struct SplitGrantBus {
         write: Result<String, BusFailure>,
         read: Result<String, BusFailure>,
+        asks: Vec<String>,
     }
 
     impl ResourceBus for SplitGrantBus {
@@ -17703,6 +17856,7 @@ mod tests {
             action: &str,
             _reason: &str,
         ) -> Result<String, BusFailure> {
+            self.asks.push(action.to_string());
             match action {
                 "write" => self.write.clone(),
                 "read" => self.read.clone(),
@@ -17798,12 +17952,26 @@ mod tests {
         let mut bus = SplitGrantBus {
             write: Err(BusFailure::Invalid),
             read: Err(BusFailure::Denied),
+            asks: Vec::new(),
         };
         let grants = request_journal_grants(&mut bus, &mut journal, &cursor);
         assert!(grants.write.is_none() && grants.read.is_none());
         assert_eq!(grants.write_reason, Some("grant invalid"));
         assert_eq!(grants.read_reason, Some("grant denied"));
         assert_ne!(grants.write_reason, grants.read_reason);
+        assert_eq!(
+            bus.asks
+                .iter()
+                .filter(|ask| ask.as_str() == "write")
+                .count(),
+            1,
+            "a grant the provider calls invalid is one ask"
+        );
+        assert_eq!(
+            bus.asks.iter().filter(|ask| ask.as_str() == "read").count(),
+            1,
+            "a grant the provider denies is one ask"
+        );
         assert_eq!(
             refusal_records(&journal),
             vec![
@@ -17821,6 +17989,7 @@ mod tests {
         let mut bus = SplitGrantBus {
             write: Err(BusFailure::Other),
             read: Ok(String::new()),
+            asks: Vec::new(),
         };
         let grants = request_journal_grants(&mut bus, &mut journal, &cursor);
         assert_eq!(grants.write_reason, Some("grant outcome unknown"));
@@ -17832,11 +18001,25 @@ mod tests {
                 format!("refused: grant invalid (read {})", cursor.resource),
             ]
         );
+        assert_eq!(
+            bus.asks
+                .iter()
+                .filter(|ask| ask.as_str() == "write")
+                .count(),
+            8,
+            "an unknown grant outcome asks eight times and then stops"
+        );
+        assert_eq!(
+            bus.asks.iter().filter(|ask| ask.as_str() == "read").count(),
+            1,
+            "a grant the provider returns empty is one ask"
+        );
 
         let mut journal = empty_journal();
         let mut bus = SplitGrantBus {
             write: Ok("write-grant".to_string()),
             read: Ok("read-grant".to_string()),
+            asks: Vec::new(),
         };
         let grants = request_journal_grants(&mut bus, &mut journal, &cursor);
         assert_eq!(

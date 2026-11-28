@@ -1136,8 +1136,8 @@ test("System startup and recovery stay ready while the background Carrier check 
     await context.boot();
     await context.initialRecoveryState;
     assert.equal(agentsBound, 1);
-    assert.equal(calls.includes("agents"), false, "startup binds Agents and does not wait on the list");
-    assert.deepEqual(calls, [checking ? "summary-checking" : "summary-offline",
+    assert.equal(calls[0], "agents", "startup probes the agent list and does not wait on it");
+    assert.deepEqual(calls, ["agents", checking ? "summary-checking" : "summary-offline",
       "shell", "accounts", "recovery", "chains"]);
   }
 });

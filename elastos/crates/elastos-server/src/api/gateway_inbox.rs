@@ -110,12 +110,19 @@ pub(super) async fn append_inbox_requests(
         notifications.entries.push(card);
     }
     append_wallet_approval_notifications(notifications, wallet_approvals);
-    // Runtime capability requests are the admin's to answer.
+    let (home_asks, agent_asks) = live_pending(&state.data_dir).await;
     if ensure_admin_context(&state.data_dir, context).is_ok() {
-        if let Ok(capability_requests) = runtime_capability_pending_requests(&state.data_dir).await
-        {
-            append_runtime_capability_notifications(notifications, capability_requests);
-        }
+        append_runtime_capability_notifications(notifications, home_asks);
+    }
+    // A Guest, including an admin who was just demoted, sees no agent ask.
+    if crate::agents::owner_is_admin_now(&state.data_dir, context.principal_id()).ok() == Some(true)
+    {
+        append_agent_asks(
+            notifications,
+            context.principal_id(),
+            &owned_agents(&state.data_dir),
+            &agent_asks,
+        );
     }
     if let Ok(inspect_requests) =
         pending_inspect_action_requests(&state.data_dir, context.principal_id())
@@ -254,25 +261,270 @@ pub(super) fn append_wallet_approval_notifications(
     }
 }
 
-pub(super) async fn runtime_capability_pending_requests(
-    data_dir: &std::path::Path,
+#[derive(Deserialize)]
+struct PendingBody {
+    #[serde(default)]
+    requests: Vec<RuntimeCapabilityPendingRequest>,
+}
+
+struct OwnedAgent {
+    id: String,
+    name: String,
+    root: String,
+    owner: String,
+}
+
+fn rows_from(
+    read: Option<anyhow::Result<Vec<RuntimeCapabilityPendingRequest>>>,
+) -> Vec<RuntimeCapabilityPendingRequest> {
+    match read {
+        Some(Ok(rows)) => rows,
+        Some(Err(_)) | None => Vec::new(),
+    }
+}
+
+pub(super) fn forget_shell_url(api_url: &str) {
+    if let Ok(mut map) = shell_cache().lock() {
+        map.remove(api_url);
+    }
+}
+
+fn retain_shell_urls(keep: &[String]) {
+    if let Ok(mut map) = shell_cache().lock() {
+        map.retain(|url, _| keep.iter().any(|kept| kept == url));
+    }
+}
+
+fn shell_cache() -> &'static std::sync::Mutex<std::collections::HashMap<String, String>> {
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, String>>> =
+        std::sync::OnceLock::new();
+    CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+#[cfg(test)]
+pub(in crate::api) static ATTACH_SHELL_CALLS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+async fn cached_shell(
+    client: &reqwest::Client,
+    coords: &crate::runtime_control::RuntimeCoords,
+) -> anyhow::Result<String> {
+    if let Some(token) = shell_cache()
+        .lock()
+        .ok()
+        .and_then(|map| map.get(&coords.api_url).cloned())
+    {
+        return Ok(token);
+    }
+    #[cfg(test)]
+    ATTACH_SHELL_CALLS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let token = home_attach_shell(client, &coords.api_url, &coords.attach_secret).await?;
+    if let Ok(mut map) = shell_cache().lock() {
+        map.insert(coords.api_url.clone(), token.clone());
+    }
+    Ok(token)
+}
+
+async fn read_pending(
+    coords: &crate::runtime_control::RuntimeCoords,
 ) -> anyhow::Result<Vec<RuntimeCapabilityPendingRequest>> {
-    let coords = load_live_runtime_coords(data_dir)
-        .await
-        .ok_or_else(|| anyhow::anyhow!("local runtime is not running"))?;
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(2))
         .build()?;
-    let shell_token = home_attach_shell(&client, &coords.api_url, &coords.attach_secret).await?;
-    let response = client
+    let mut shell = cached_shell(&client, coords).await?;
+    let mut response = client
         .get(format!("{}/api/capability/pending", coords.api_url))
-        .header(AUTHORIZATION, format!("Bearer {shell_token}"))
+        .header(AUTHORIZATION, format!("Bearer {shell}"))
         .send()
-        .await?
-        .error_for_status()?
-        .json::<RuntimeCapabilityPendingResponse>()
         .await?;
-    Ok(response.requests)
+    if response.status() == StatusCode::UNAUTHORIZED {
+        if let Ok(mut map) = shell_cache().lock() {
+            map.remove(&coords.api_url);
+        }
+        #[cfg(test)]
+        ATTACH_SHELL_CALLS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        shell = home_attach_shell(&client, &coords.api_url, &coords.attach_secret).await?;
+        if let Ok(mut map) = shell_cache().lock() {
+            map.insert(coords.api_url.clone(), shell.clone());
+        }
+        response = client
+            .get(format!("{}/api/capability/pending", coords.api_url))
+            .header(AUTHORIZATION, format!("Bearer {shell}"))
+            .send()
+            .await?;
+    }
+    Ok(response
+        .error_for_status()?
+        .json::<PendingBody>()
+        .await?
+        .requests)
+}
+
+async fn live_pending(
+    data_dir: &std::path::Path,
+) -> (
+    Vec<RuntimeCapabilityPendingRequest>,
+    Vec<RuntimeCapabilityPendingRequest>,
+) {
+    let home_coords = load_live_runtime_coords(data_dir).await;
+    let agent_coords = crate::api::agent_plane::live_coords(data_dir).await;
+    let mut keep = Vec::new();
+    if let Some(coords) = &home_coords {
+        keep.push(coords.api_url.clone());
+    }
+    if let Some(coords) = &agent_coords {
+        keep.push(coords.api_url.clone());
+    }
+    retain_shell_urls(&keep);
+    let home = rows_from(match home_coords {
+        Some(coords) => Some(read_pending(&coords).await),
+        None => None,
+    });
+    let agent = rows_from(match agent_coords {
+        Some(coords) => Some(read_pending(&coords).await),
+        None => None,
+    });
+    (home, agent)
+}
+
+fn owned_agents(data_dir: &std::path::Path) -> Vec<OwnedAgent> {
+    let Ok(state) = crate::auth::load_auth_state(data_dir) else {
+        return Vec::new();
+    };
+    state
+        .principals
+        .into_iter()
+        .filter_map(|record| {
+            if record.retired_at.is_some() || record.localhost_root.is_empty() {
+                return None;
+            }
+            let owner = record.owner?;
+            let name = if record.display_name.is_empty() {
+                record.principal_id.clone()
+            } else {
+                record.display_name
+            };
+            Some(OwnedAgent {
+                id: record.principal_id,
+                name,
+                root: record.localhost_root,
+                owner,
+            })
+        })
+        .filter(|agent| {
+            // An agent that is off is still this owner's. `stored_agent`
+            // refuses it; the stop lookup does not, so Inbox does not call
+            // the agent someone else's.
+            crate::agents::stored_agent_for_stop(data_dir, &agent.owner, &agent.id).is_ok()
+        })
+        .collect()
+}
+
+fn own_rest<'a>(resource: &'a str, root: &str) -> Option<&'a str> {
+    let root = root.trim_end_matches('/');
+    if resource == root {
+        return Some("");
+    }
+    let rest = resource.strip_prefix(root)?.strip_prefix('/')?;
+    if rest.is_empty()
+        || rest
+            .split('/')
+            .any(|part| part.is_empty() || part == "." || part == "..")
+    {
+        return None;
+    }
+    Some(rest)
+}
+
+fn ask_sentence(agent: &OwnedAgent, ask: &RuntimeCapabilityPendingRequest) -> Option<String> {
+    let word = match ask.action.as_str() {
+        "read" | "write" => ask.action.as_str(),
+        _ => "use",
+    };
+    let place = if ask.resource.starts_with("localhost://") {
+        match own_rest(&ask.resource, &agent.root)?.rsplit_once('/') {
+            Some((dir, _)) if !dir.is_empty() => format!("{dir} in its own folder"),
+            _ => "its own folder".to_string(),
+        }
+    } else {
+        ask.resource.clone()
+    };
+    let who = if ask.resource.starts_with("elastos://") {
+        format!("{} ({})", agent.name, agent.id)
+    } else {
+        agent.name.clone()
+    };
+    Some(format!(
+        "{who} asks to {word} {place}. It requests {} access to {}.",
+        ask.action, ask.resource
+    ))
+}
+
+fn push_capability_card(
+    notifications: &mut HomeNotificationsSummary,
+    id: String,
+    action: &str,
+    body: String,
+    action_id: String,
+    created_at: u64,
+) {
+    notifications.unread_count += 1;
+    notifications.attention_count += 1;
+    notifications.entries.push(HomeNotificationEntrySummary {
+        id,
+        source_app: SYSTEM_CAPSULE_ID.to_string(),
+        kind: "capability_request".to_string(),
+        title: capability_request_title(action),
+        body,
+        action_ref: Some(HomeNotificationActionSummary {
+            app: SYSTEM_CAPSULE_ID.to_string(),
+            action_id,
+        }),
+        severity: "attention".to_string(),
+        read: false,
+        created_at,
+        ..Default::default()
+    });
+}
+
+fn append_agent_asks(
+    notifications: &mut HomeNotificationsSummary,
+    caller: &str,
+    agents: &[OwnedAgent],
+    asks: &[RuntimeCapabilityPendingRequest],
+) {
+    for ask in asks {
+        let Some(agent) = agents
+            .iter()
+            .find(|agent| agent.id == ask.agent_id && agent.owner == caller)
+        else {
+            continue;
+        };
+        let Some(body) = ask_sentence(agent, ask) else {
+            continue;
+        };
+        push_capability_card(
+            notifications,
+            format!("capability-request:agent:{}", ask.request_id),
+            &ask.action,
+            body,
+            format!("capability-approve-request:agent:{}", ask.request_id),
+            ask.requested_at,
+        );
+    }
+}
+
+fn not_owner(caller: &str, name: &str) -> String {
+    format!("{caller} belongs to a different principal and does not own {name}")
+}
+
+fn capability_decision(action_id: &str) -> Option<(&str, bool)> {
+    if let Some(id) = action_id.strip_prefix("capability-approve-request:") {
+        return Some((id, true));
+    }
+    action_id
+        .strip_prefix("capability-deny-request:")
+        .map(|id| (id, false))
 }
 
 pub(super) fn append_runtime_capability_notifications(
@@ -280,26 +532,17 @@ pub(super) fn append_runtime_capability_notifications(
     capability_requests: Vec<RuntimeCapabilityPendingRequest>,
 ) {
     for request in capability_requests {
-        notifications.unread_count += 1;
-        notifications.attention_count += 1;
-        notifications.entries.push(HomeNotificationEntrySummary {
-            id: format!("capability-request:{}", request.request_id),
-            source_app: SYSTEM_CAPSULE_ID.to_string(),
-            kind: "capability_request".to_string(),
-            title: capability_request_title(&request.action),
-            body: format!(
+        push_capability_card(
+            notifications,
+            format!("capability-request:{}", request.request_id),
+            &request.action,
+            format!(
                 "A capsule requests {} access to {}.",
                 request.action, request.resource
             ),
-            action_ref: Some(HomeNotificationActionSummary {
-                app: SYSTEM_CAPSULE_ID.to_string(),
-                action_id: format!("capability-approve-request:{}", request.request_id),
-            }),
-            severity: "attention".to_string(),
-            read: false,
-            created_at: request.requested_at,
-            ..Default::default()
-        });
+            format!("capability-approve-request:{}", request.request_id),
+            request.requested_at,
+        );
     }
 }
 
@@ -361,9 +604,11 @@ pub(super) async fn inbox_action(
             return inbox_error_response(error);
         }
     }
-    if action.action_id.starts_with("capability-approve-request:")
-        || action.action_id.starts_with("capability-deny-request:")
-    {
+    if capability_decision(&action.action_id).is_some_and(|(id, _)| {
+        id.strip_prefix("agent:")
+            .filter(|rest| !rest.is_empty())
+            .is_none()
+    }) {
         if let Err(error) = ensure_admin_context(&state.data_dir, &context) {
             return inbox_error_response(error);
         }
@@ -559,11 +804,17 @@ async fn dispatch_inbox_action(
         )?;
         return Ok("Rejected wallet request.".to_string());
     }
-    if let Some(request_id) = action_id.strip_prefix("capability-approve-request:") {
-        return approve_runtime_capability_request(data_dir, request_id).await;
-    }
-    if let Some(request_id) = action_id.strip_prefix("capability-deny-request:") {
-        return deny_runtime_capability_request(data_dir, request_id).await;
+    if let Some((request_id, approve)) = capability_decision(action_id) {
+        if let Some(id) = request_id
+            .strip_prefix("agent:")
+            .filter(|id| !id.is_empty())
+        {
+            return answer_agent_ask(data_dir, context.principal_id(), id, approve).await;
+        }
+        return match approve {
+            true => approve_runtime_capability_request(data_dir, request_id).await,
+            false => deny_runtime_capability_request(data_dir, request_id).await,
+        };
     }
     if let Some(request_id) = action_id.strip_prefix("service-approve-request:") {
         let discovery_service = state.collaboration_discovery_service.clone();
@@ -592,6 +843,13 @@ async fn dispatch_inbox_action(
             request_id,
         )
         .await;
+    }
+    if let Some(request_id) = action_id.strip_prefix("agent-plan-deny-request:") {
+        return super::gateway_inspect_actions::deny_agent_plan_request(
+            data_dir,
+            context.principal_id(),
+            request_id,
+        );
     }
     if let Some(request_id) = action_id.strip_prefix("agent-plan-approve-request:") {
         if state.provider_registry.is_none() {
@@ -775,6 +1033,69 @@ async fn decide_contact_request(
     })
 }
 
+#[derive(Debug)]
+struct PlaneStatus {
+    code: u16,
+    message: String,
+}
+
+impl std::fmt::Display for PlaneStatus {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let _ = self.code;
+        formatter.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for PlaneStatus {}
+
+async fn decide_capability(
+    coords: &crate::runtime_control::RuntimeCoords,
+    request_id: &str,
+    approve: bool,
+) -> anyhow::Result<String> {
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(3))
+        .build()?;
+    let shell = home_attach_shell(&client, &coords.api_url, &coords.attach_secret).await?;
+    let (path, body, done) = if approve {
+        (
+            "grant",
+            serde_json::json!({
+                "request_id": request_id,
+                "duration": "session",
+                "rationale": "Approved in Inbox",
+            }),
+            "Approved.",
+        )
+    } else {
+        (
+            "deny",
+            serde_json::json!({"request_id": request_id, "reason": "Denied in Inbox"}),
+            "Denied.",
+        )
+    };
+    let response = client
+        .post(format!("{}/api/capability/{path}", coords.api_url))
+        .header(AUTHORIZATION, format!("Bearer {shell}"))
+        .json(&body)
+        .send()
+        .await?;
+    let status = response.status();
+    let text = response.text().await.unwrap_or_default();
+    if !status.is_success() {
+        let message = if text.trim().is_empty() {
+            status.to_string()
+        } else {
+            text
+        };
+        return Err(anyhow::Error::new(PlaneStatus {
+            code: status.as_u16(),
+            message,
+        }));
+    }
+    Ok(done.to_string())
+}
+
 pub(super) async fn approve_runtime_capability_request(
     data_dir: &std::path::Path,
     request_id: &str,
@@ -782,22 +1103,7 @@ pub(super) async fn approve_runtime_capability_request(
     let coords = load_live_runtime_coords(data_dir)
         .await
         .ok_or_else(|| anyhow::anyhow!("local runtime is not running"))?;
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(3))
-        .build()?;
-    let shell_token = home_attach_shell(&client, &coords.api_url, &coords.attach_secret).await?;
-    client
-        .post(format!("{}/api/capability/grant", coords.api_url))
-        .header(AUTHORIZATION, format!("Bearer {shell_token}"))
-        .json(&serde_json::json!({
-            "request_id": request_id,
-            "duration": "session",
-            "rationale": "Approved in Inbox",
-        }))
-        .send()
-        .await?
-        .error_for_status()?;
-    Ok("Approved capsule request.".to_string())
+    decide_capability(&coords, request_id, true).await
 }
 
 pub(super) async fn deny_runtime_capability_request(
@@ -807,19 +1113,616 @@ pub(super) async fn deny_runtime_capability_request(
     let coords = load_live_runtime_coords(data_dir)
         .await
         .ok_or_else(|| anyhow::anyhow!("local runtime is not running"))?;
-    let client = reqwest::Client::builder()
+    decide_capability(&coords, request_id, false).await
+}
+
+async fn answer_agent_ask(
+    data_dir: &std::path::Path,
+    caller: &str,
+    request_id: &str,
+    approve: bool,
+) -> anyhow::Result<String> {
+    let coords = crate::api::agent_plane::live_coords(data_dir)
+        .await
+        .ok_or_else(|| anyhow::anyhow!("agent runtime is not running"))?;
+    let pending = read_pending(&coords).await?;
+    let Some(ask) = pending.iter().find(|row| row.request_id == request_id) else {
+        let person = crate::auth::stored_principal_record(data_dir, caller)
+            .ok()
+            .flatten()
+            .is_some_and(|record| record.kind == crate::auth::PrincipalKind::Human);
+        if person && !crate::agents::owner_is_admin_now(data_dir, caller)? {
+            anyhow::bail!(crate::agents::OWNER_NOT_ADMIN);
+        }
+        anyhow::bail!("that request is no longer pending");
+    };
+    if ask.agent_id.is_empty() {
+        anyhow::bail!("the asking session has ended");
+    }
+    let agents = owned_agents(data_dir);
+    let Some(agent) = agents.iter().find(|agent| agent.id == ask.agent_id) else {
+        anyhow::bail!("{}", not_owner(caller, "this agent"));
+    };
+    if agent.owner != caller {
+        anyhow::bail!("{}", not_owner(caller, &agent.name));
+    }
+    if !crate::agents::owner_is_admin_now(data_dir, caller)? {
+        anyhow::bail!(crate::agents::OWNER_NOT_ADMIN);
+    }
+    if let Err(error) = crate::agents::stored_agent(data_dir, caller, &ask.agent_id) {
+        let _ = sign_agent_grant(data_dir, caller, ask, request_id, "denied", "denied");
+        let _ = decide_capability(&coords, request_id, false).await;
+        return Err(error);
+    }
+    if ask.resource.starts_with("localhost://") && own_rest(&ask.resource, &agent.root).is_none() {
+        sign_agent_grant(data_dir, caller, ask, request_id, "denied", "denied")
+            .map_err(|error| super::inbox_audit_refusal(error, "Deny this ask again."))?;
+        decide_capability(&coords, request_id, false).await?;
+        anyhow::bail!("a path outside the agent's own folder is not pending");
+    }
+    // One answer at a time, so two approvals of one ask mint one grant.
+    #[cfg(test)]
+    super::gateway_tests::seams::pause_before_answer_gate(data_dir).await;
+    let _gate = grant_answer_gate().lock().await;
+    // A demotion commits under this gate, so the role read here holds until the grant.
+    if !crate::agents::owner_is_admin_now(data_dir, caller)? {
+        anyhow::bail!(crate::agents::OWNER_NOT_ADMIN);
+    }
+    if !approve {
+        sign_agent_grant(data_dir, caller, ask, request_id, "denied", "denied")
+            .map_err(|error| super::inbox_audit_refusal(error, "Deny this ask again."))?;
+        return decide_capability(&coords, request_id, false).await;
+    }
+    let again = read_pending(&coords).await?;
+    let Some(row) = again.iter().find(|item| item.request_id == request_id) else {
+        anyhow::bail!("not_granted: the grant was already given");
+    };
+    // The signed approval exists before the mint. A crash before the send
+    // leaves that row and no grant. `sent` is the marker that the request
+    // left this process. After that marker, a crash, a timeout, or a failed
+    // minted row is unresolved. `not_granted` is only a refusal the plane
+    // answered before any mint.
+    sign_agent_grant(data_dir, caller, row, request_id, "approved", "approved")
+        .map_err(|error| super::inbox_audit_refusal(error, "Approve this ask again."))?;
+    #[cfg(test)]
+    if super::gateway_tests::seams::take_grant_kind(data_dir, "before-send") {
+        anyhow::bail!("crash before the send");
+    }
+    sign_agent_grant(data_dir, caller, row, request_id, "sent", "sent").map_err(|error| {
+        super::inbox_audit_refusal(error, "This approval is settled the next time Home starts.")
+    })?;
+    #[cfg(test)]
+    if super::gateway_tests::seams::grant_kind_is(data_dir, "timeout") {
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(3))
+            .build()?;
+        let shell = cached_shell(&client, &coords).await?;
+        let hurried = reqwest::Client::builder()
+            .timeout(Duration::from_millis(40))
+            .build()?;
+        let _ = hurried
+            .post(format!("{}/api/capability/grant", coords.api_url))
+            .header(AUTHORIZATION, format!("Bearer {shell}"))
+            .json(&serde_json::json!({
+                "request_id": request_id,
+                "duration": "session",
+                "rationale": "Approved in Inbox",
+            }))
+            .send()
+            .await;
+        let _ = sign_agent_grant(
+            data_dir,
+            caller,
+            row,
+            request_id,
+            "unresolved",
+            "the plane timed out",
+        );
+        anyhow::bail!("the plane timed out");
+    }
+    match decide_capability(&coords, request_id, true).await {
+        Err(error) if plane_refused(&error) => {
+            revoke_capability(&coords, request_id).await;
+            let _ = sign_agent_grant(
+                data_dir,
+                caller,
+                row,
+                request_id,
+                "not_granted",
+                "not_granted",
+            );
+            Err(error)
+        }
+        Ok(answered) => {
+            #[cfg(test)]
+            if super::gateway_tests::seams::take_grant_kind(data_dir, "after-mint") {
+                anyhow::bail!("crash after the mint");
+            }
+            match sign_agent_grant(data_dir, caller, row, request_id, "minted", "minted") {
+                Ok(()) => Ok(answered),
+                Err(error) => {
+                    let _ = sign_agent_grant(
+                        data_dir,
+                        caller,
+                        row,
+                        request_id,
+                        "unresolved",
+                        "the minted row failed",
+                    );
+                    Err(error)
+                }
+            }
+        }
+        Err(error) => {
+            let _ = sign_agent_grant(
+                data_dir,
+                caller,
+                row,
+                request_id,
+                "unresolved",
+                "the request was sent and the mint was not recorded",
+            );
+            Err(error)
+        }
+    }
+}
+
+pub(in crate::api) fn grant_answer_gate() -> &'static tokio::sync::Mutex<()> {
+    static GATE: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
+    GATE.get_or_init(|| tokio::sync::Mutex::new(()))
+}
+
+#[cfg(test)]
+fn plane_conflict(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<PlaneStatus>()
+        .is_some_and(|status| status.code == 409)
+}
+
+fn plane_refused(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<PlaneStatus>()
+        .is_some_and(|status| (400..500).contains(&status.code))
+}
+
+fn grant_reason(caller: &str, ask: &RuntimeCapabilityPendingRequest, cause: &str) -> String {
+    serde_json::json!({
+        "cause": cause,
+        "principal": caller,
+        "session": ask.session_id,
+        "agent": ask.agent_id,
+        "capsule": ask.agent_id,
+        "resource": ask.resource,
+    })
+    .to_string()
+}
+
+fn sign_agent_grant(
+    data_dir: &std::path::Path,
+    caller: &str,
+    ask: &RuntimeCapabilityPendingRequest,
+    request_id: &str,
+    kind: &str,
+    cause: &str,
+) -> anyhow::Result<()> {
+    #[cfg(test)]
+    if kind == "minted" && super::gateway_tests::seams::take_grant_kind(data_dir, "minted-row") {
+        anyhow::bail!("the minted row failed");
+    }
+    #[cfg(test)]
+    if kind == "sent" && super::gateway_tests::seams::take_grant_kind(data_dir, "sent") {
+        anyhow::bail!("injected agent grant audit failure");
+    }
+    #[cfg(test)]
+    if super::gateway_tests::seams::take_grant_fault(data_dir, false) {
+        anyhow::bail!("injected agent grant audit failure");
+    }
+    crate::auth::append_audit_event(
+        data_dir,
+        elastos_runtime::auth::RuntimeAuditEventV1 {
+            schema: elastos_runtime::auth::RuntimeAuditEventV1::SCHEMA.to_string(),
+            event_id: format!("audit:{}", super::gateway_home_token::uuid_like_token()),
+            event_type: format!("agent.grant.{kind}"),
+            principal_id: Some(caller.to_string()),
+            proof_binding_id: None,
+            session_id: Some(ask.session_id.clone()),
+            challenge_id: Some(request_id.to_string()),
+            capsule_id: Some(ask.agent_id.clone()),
+            result: kind.to_string(),
+            reason: grant_reason(caller, ask, cause),
+            occurred_at: now_ts(),
+            signer_did: None,
+            signature: None,
+        },
+    )
+}
+
+async fn revoke_capability(coords: &crate::runtime_control::RuntimeCoords, request_id: &str) {
+    let Ok(client) = reqwest::Client::builder()
         .timeout(Duration::from_secs(3))
-        .build()?;
-    let shell_token = home_attach_shell(&client, &coords.api_url, &coords.attach_secret).await?;
-    client
-        .post(format!("{}/api/capability/deny", coords.api_url))
-        .header(AUTHORIZATION, format!("Bearer {shell_token}"))
-        .json(&serde_json::json!({
-            "request_id": request_id,
-            "reason": "Denied in Inbox",
-        }))
+        .build()
+    else {
+        return;
+    };
+    let Ok(shell) = home_attach_shell(&client, &coords.api_url, &coords.attach_secret).await else {
+        return;
+    };
+    let url = format!("{}/api/capability/{request_id}", coords.api_url);
+    let _ = client
+        .delete(url)
+        .header(AUTHORIZATION, format!("Bearer {shell}"))
         .send()
-        .await?
-        .error_for_status()?;
-    Ok("Denied capsule request.".to_string())
+        .await;
+}
+
+fn copied_grant(
+    event: &elastos_runtime::auth::RuntimeAuditEventV1,
+) -> (String, RuntimeCapabilityPendingRequest) {
+    let mut principal = event.principal_id.clone().unwrap_or_default();
+    let mut ask = RuntimeCapabilityPendingRequest {
+        request_id: event.challenge_id.clone().unwrap_or_default(),
+        agent_id: event.capsule_id.clone().unwrap_or_default(),
+        session_id: event.session_id.clone().unwrap_or_default(),
+        resource: String::new(),
+        ..Default::default()
+    };
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(&event.reason) {
+        let text = |key: &str| {
+            value
+                .get(key)
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("")
+                .to_string()
+        };
+        if !text("principal").is_empty() {
+            principal = text("principal");
+        }
+        if !text("session").is_empty() {
+            ask.session_id = text("session");
+        }
+        if !text("agent").is_empty() {
+            ask.agent_id = text("agent");
+        }
+        if ask.agent_id.is_empty() && !text("capsule").is_empty() {
+            ask.agent_id = text("capsule");
+        }
+        if !text("resource").is_empty() {
+            ask.resource = text("resource");
+        }
+    }
+    if ask.resource.is_empty() {
+        ask.resource = event.reason.clone();
+    }
+    (principal, ask)
+}
+
+async fn grant_was_minted(data_dir: &std::path::Path, request_id: &str) -> bool {
+    let Some(runtime) = crate::api::agent_plane::plane_runtime(data_dir) else {
+        return false;
+    };
+    let Some((store, _, _)) = runtime.instance_authority_plane() else {
+        return false;
+    };
+    store
+        .get_request(request_id)
+        .await
+        .is_some_and(|request| request.is_granted())
+}
+
+/// An approved row with no later close is settled once. No `sent` marker means
+/// the request never left, so the close is `not_sent`. A `sent` marker means
+/// the request left: `crash after the mint` when the grant is still live, and
+/// otherwise that the mint was not recorded. The close copies the approved
+/// row's principal, session, agent, capsule, and resource.
+pub(crate) async fn settle_unminted_agent_grants(data_dir: &std::path::Path) -> anyhow::Result<()> {
+    let state = crate::auth::load_auth_state(data_dir)?;
+    let mut open = Vec::new();
+    let mut sent = std::collections::HashSet::new();
+    for event in &state.audit {
+        let Some(id) = event.challenge_id.clone() else {
+            continue;
+        };
+        match event.event_type.as_str() {
+            "agent.grant.not_granted"
+            | "agent.grant.minted"
+            | "agent.grant.unresolved"
+            | "agent.grant.not_sent" => {
+                open.retain(|row: &elastos_runtime::auth::RuntimeAuditEventV1| {
+                    row.challenge_id.as_deref() != Some(id.as_str())
+                });
+                sent.remove(&id);
+            }
+            "agent.grant.sent" => {
+                sent.insert(id);
+            }
+            "agent.grant.approved"
+                if open
+                    .iter()
+                    .all(|row| row.challenge_id.as_deref() != Some(id.as_str())) =>
+            {
+                open.push(event.clone());
+            }
+            _ => {}
+        }
+    }
+    for event in &open {
+        let id = event.challenge_id.clone().unwrap_or_default();
+        let (principal, ask) = copied_grant(event);
+        let (kind, cause) = if sent.contains(&id) {
+            if grant_was_minted(data_dir, &id).await {
+                ("unresolved", "crash after the mint")
+            } else {
+                (
+                    "unresolved",
+                    "the request was sent and the mint was not recorded",
+                )
+            }
+        } else {
+            ("not_sent", "crash before the send")
+        };
+        if let Err(error) = sign_agent_grant(data_dir, &principal, &ask, &id, kind, cause) {
+            eprintln!("[gateway] grant settle skipped for {id}: {error:#}");
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn agent(owner: &str) -> OwnedAgent {
+        OwnedAgent {
+            id: "agent-1".into(),
+            name: "Notes".into(),
+            root: "localhost://UsersAI/notes".into(),
+            owner: owner.into(),
+        }
+    }
+
+    fn ask(resource: &str, action: &str) -> RuntimeCapabilityPendingRequest {
+        RuntimeCapabilityPendingRequest {
+            request_id: "req-1".into(),
+            agent_id: "agent-1".into(),
+            session_id: "session-1".into(),
+            resource: resource.into(),
+            action: action.into(),
+            requested_at: 1,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_second_inbox_poll_does_not_attach_again() {
+        let url = "http://127.0.0.1:9/planted-inbox-poll";
+        let coords = crate::runtime_control::RuntimeCoords {
+            api_url: url.to_string(),
+            attach_secret: "secret".to_string(),
+            pid: 1,
+            runtime_kind: "agent".to_string(),
+            binary_sha256: String::new(),
+            policy_sha256: String::new(),
+            dependency_sha256: String::new(),
+            generation: String::new(),
+            process_start: String::new(),
+            home_url: String::new(),
+        };
+        shell_cache()
+            .lock()
+            .unwrap()
+            .insert(url.to_string(), "bearer-once".to_string());
+        let before = ATTACH_SHELL_CALLS.load(std::sync::atomic::Ordering::SeqCst);
+        let client = reqwest::Client::new();
+        let first = cached_shell(&client, &coords).await.unwrap();
+        let second = cached_shell(&client, &coords).await.unwrap();
+        assert_eq!(first, "bearer-once");
+        assert_eq!(second, "bearer-once");
+        assert_eq!(
+            ATTACH_SHELL_CALLS.load(std::sync::atomic::Ordering::SeqCst),
+            before,
+            "a cached shell is not another attach"
+        );
+        shell_cache().lock().unwrap().remove(url);
+    }
+
+    #[test]
+    fn forgetting_a_plane_url_drops_only_that_shell() {
+        let kept = "http://127.0.0.1:9/kept-shell";
+        let gone = "http://127.0.0.1:9/gone-shell";
+        shell_cache()
+            .lock()
+            .unwrap()
+            .insert(kept.to_string(), "keep".to_string());
+        shell_cache()
+            .lock()
+            .unwrap()
+            .insert(gone.to_string(), "drop".to_string());
+        forget_shell_url(gone);
+        let map = shell_cache().lock().unwrap();
+        assert_eq!(map.get(kept).map(String::as_str), Some("keep"));
+        assert!(map.get(gone).is_none());
+        drop(map);
+        shell_cache().lock().unwrap().remove(kept);
+    }
+
+    #[test]
+    fn a_restarted_home_url_drops_the_old_shell() {
+        let old_home = "http://127.0.0.1:9/old-home";
+        let plane = "http://127.0.0.1:9/plane";
+        shell_cache()
+            .lock()
+            .unwrap()
+            .insert(old_home.to_string(), "stale".to_string());
+        shell_cache()
+            .lock()
+            .unwrap()
+            .insert(plane.to_string(), "keep".to_string());
+        retain_shell_urls(&["http://127.0.0.1:9/new-home".into(), plane.to_string()]);
+        let map = shell_cache().lock().unwrap();
+        assert!(map.get(old_home).is_none(), "{map:?}");
+        assert_eq!(map.get(plane).map(String::as_str), Some("keep"));
+        drop(map);
+        shell_cache().lock().unwrap().remove(plane);
+    }
+
+    #[test]
+    fn the_card_names_the_agent_its_folder_and_the_runtime() {
+        let body = ask_sentence(
+            &agent("owner-a"),
+            &ask("localhost://UsersAI/notes/.AppData/journal", "write"),
+        )
+        .unwrap();
+        assert!(body.starts_with("Notes asks to write "), "{body}");
+        assert!(body.contains(".AppData in its own folder"), "{body}");
+        assert!(
+            body.contains("access to localhost://UsersAI/notes/.AppData/journal."),
+            "{body}"
+        );
+        let mut notes = HomeNotificationsSummary::default();
+        append_agent_asks(
+            &mut notes,
+            "owner-a",
+            &[agent("owner-a")],
+            &[ask("localhost://UsersAI/notes/.AppData/journal", "read")],
+        );
+        let entry = &notes.entries[0];
+        assert!(entry.id.contains(":agent:"), "{}", entry.id);
+        assert_eq!(
+            entry.action_ref.as_ref().unwrap().action_id,
+            "capability-approve-request:agent:req-1"
+        );
+    }
+
+    #[test]
+    fn another_owner_sees_nothing_and_is_refused_by_name() {
+        let mut notes = HomeNotificationsSummary::default();
+        append_agent_asks(
+            &mut notes,
+            "owner-b",
+            &[agent("owner-a")],
+            &[ask("localhost://UsersAI/notes/.AppData/journal", "read")],
+        );
+        assert!(notes.entries.is_empty());
+        let text = not_owner("owner-b", "Notes");
+        assert!(text.contains("owner-b"), "{text}");
+        assert!(text.contains("Notes"), "{text}");
+        assert!(text.contains("belongs to a different principal"), "{text}");
+    }
+
+    #[test]
+    fn a_path_outside_the_agents_root_is_not_approvable() {
+        let outside = ask("localhost://UsersAI/other/secret", "read");
+        assert!(ask_sentence(&agent("owner-a"), &outside).is_none());
+        let mut notes = HomeNotificationsSummary::default();
+        append_agent_asks(&mut notes, "owner-a", &[agent("owner-a")], &[outside]);
+        assert!(notes.entries.is_empty());
+        assert!(ask_sentence(
+            &agent("owner-a"),
+            &ask("localhost://UsersAI/notes-evil/file", "read")
+        )
+        .is_none());
+        assert!(ask_sentence(
+            &agent("owner-a"),
+            &ask("localhost://UsersAI/notes/../other/file", "write")
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn an_elastos_ask_stays_approvable_for_its_owner() {
+        let body = ask_sentence(
+            &agent("owner-a"),
+            &ask("elastos://inspect/submit_agent_plan", "write"),
+        )
+        .unwrap();
+        assert!(body.contains("Notes (agent-1) asks to write "), "{body}");
+        assert!(
+            body.contains("access to elastos://inspect/submit_agent_plan."),
+            "{body}"
+        );
+    }
+
+    #[test]
+    fn one_runtime_down_keeps_the_other() {
+        let kept = rows_from(Some(Ok(vec![ask(
+            "elastos://inspect/submit_agent_plan",
+            "read",
+        )])));
+        assert_eq!(kept.len(), 1);
+        assert!(rows_from(Some(Err(anyhow::anyhow!("down")))).is_empty());
+        assert!(rows_from(None).is_empty());
+    }
+
+    #[test]
+    fn a_home_card_keeps_its_sentence_and_id() {
+        let mut notes = HomeNotificationsSummary::default();
+        append_runtime_capability_notifications(
+            &mut notes,
+            vec![RuntimeCapabilityPendingRequest {
+                request_id: "cap-1".into(),
+                agent_id: String::new(),
+                session_id: String::new(),
+                resource: "elastos://content".into(),
+                action: "read".into(),
+                requested_at: 1,
+            }],
+        );
+        let entry = &notes.entries[0];
+        assert_eq!(
+            entry.body,
+            "A capsule requests read access to elastos://content."
+        );
+        assert_eq!(
+            entry.action_ref.as_ref().unwrap().action_id,
+            "capability-approve-request:cap-1"
+        );
+        assert_eq!(
+            capability_decision("capability-approve-request:cap-1").map(|(id, _)| id),
+            Some("cap-1")
+        );
+        assert_eq!(
+            capability_decision("capability-approve-request:agent:req-1").map(|(id, _)| id),
+            Some("agent:req-1")
+        );
+    }
+
+    #[test]
+    fn an_injected_grant_audit_failure_writes_no_row() {
+        let home = std::path::Path::new("/no/such/home");
+        super::gateway_tests::seams::arm_grant_fault(home, false);
+        let error = sign_agent_grant(
+            home,
+            "person:owner",
+            &ask("elastos://inspect/submit_agent_plan", "write"),
+            "req-1",
+            "approved",
+            "approved",
+        )
+        .expect_err("the injected failure refuses the grant row");
+        assert_eq!(error.to_string(), "injected agent grant audit failure");
+        let again = sign_agent_grant(
+            home,
+            "person:owner",
+            &ask("elastos://inspect/submit_agent_plan", "write"),
+            "req-1",
+            "approved",
+            "approved",
+        )
+        .expect_err("the failure is used once");
+        assert_ne!(again.to_string(), "injected agent grant audit failure");
+    }
+
+    #[test]
+    fn a_plane_conflict_is_a_refusal_and_another_status_is_not() {
+        let conflict = anyhow::Error::new(PlaneStatus {
+            code: 409,
+            message: "the session has ended".to_string(),
+        });
+        assert!(plane_conflict(&conflict));
+        assert_eq!(conflict.to_string(), "the session has ended");
+        let other = anyhow::Error::new(PlaneStatus {
+            code: 500,
+            message: "runtime failed".to_string(),
+        });
+        assert!(!plane_conflict(&other));
+    }
 }

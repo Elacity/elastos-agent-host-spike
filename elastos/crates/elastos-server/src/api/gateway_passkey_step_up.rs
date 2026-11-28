@@ -480,7 +480,7 @@ fn step_up_validation_now(_data_dir: &Path) -> u64 {
     now_ts() + offset
 }
 
-fn consume_passkey_step_up_for_effect(
+pub(in crate::api) fn consume_passkey_step_up_for_effect(
     data_dir: &Path,
     token: &str,
     launch: &RequiredHomeLaunchToken,

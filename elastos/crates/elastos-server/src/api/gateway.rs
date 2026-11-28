@@ -43,6 +43,8 @@ use url::form_urlencoded;
 
 #[path = "gateway_agents.rs"]
 mod gateway_agents;
+pub(in crate::api) use gateway_agents::finish_task_ended;
+pub(in crate::api) use gateway_agents::stop_agents_after_admin_lost;
 #[path = "gateway_assistant.rs"]
 mod gateway_assistant;
 #[path = "gateway_assistant_workspace_v2.rs"]
@@ -92,19 +94,34 @@ mod gateway_home_update;
 mod gateway_home_wallet_connector;
 #[path = "gateway_inbox.rs"]
 mod gateway_inbox;
+pub(in crate::api) use gateway_inbox::grant_answer_gate;
 #[cfg(unix)]
 #[cfg(test)]
 pub(crate) use gateway_inbox::inbox_request_entries_for_test;
+
+pub(crate) fn forget_plane_shell(api_url: &str) {
+    gateway_inbox::forget_shell_url(api_url);
+}
 #[path = "gateway_inspect_actions.rs"]
 mod gateway_inspect_actions;
+#[cfg(test)]
+pub(crate) use gateway_inspect_actions::agent_plan_approval_block;
 pub(crate) use gateway_inspect_actions::agent_plan_result_for_requester;
+pub(crate) use gateway_inspect_actions::close_agent_plans;
+pub(crate) use gateway_inspect_actions::close_home_plans;
+pub(crate) use gateway_inspect_actions::close_instance_plans;
+pub(crate) use gateway_inspect_actions::close_owner_open_plans;
 #[cfg(all(test, unix))]
 pub(in crate::api) use gateway_inspect_actions::dispatch_approved_agent_plan;
+pub(crate) use gateway_inspect_actions::expire_pending_agent_plans;
+pub(crate) use gateway_inspect_actions::reconcile_lost_plan_receipts;
 pub(crate) use gateway_inspect_actions::submit_pending_agent_plan;
 #[cfg(all(test, unix))]
 pub(in crate::api) use gateway_inspect_actions::{
     clear_plan_dispatch_wait_for_test, set_plan_dispatch_wait_for_test,
 };
+#[cfg(test)]
+pub(crate) use gateway_tests::seams;
 #[path = "gateway_model_remote.rs"]
 mod gateway_model_remote;
 #[path = "gateway_model_service.rs"]
@@ -179,7 +196,6 @@ pub(crate) use gateway_home_system::{
 };
 use gateway_home_terminal::*;
 #[cfg(test)]
-#[allow(unused_imports)]
 pub(super) use gateway_home_token::agent_launch_grants_minted_for_test;
 #[cfg(test)]
 pub(super) use gateway_home_token::bind_device_session_grant;
@@ -217,7 +233,6 @@ pub(super) use gateway_home_token::{
 use gateway_home_update::*;
 
 #[cfg(test)]
-#[allow(unused_imports)]
 pub(super) use gateway_home_system_ai_provider::{
     clear_hosted_ai_validate_doubles, install_openrouter_models_double,
     install_venice_validate_double, OpenRouterModelsDouble, VeniceAuthDouble,
@@ -249,8 +264,8 @@ pub(crate) use gateway_passkey_step_up::{
     issue_passkey_step_up_token_for_test,
 };
 pub(super) use gateway_passkey_step_up::{
-    consume_or_recover_passkey_step_up_effect, consume_passkey_step_up_token,
-    require_hosted_step_up_launch,
+    consume_or_recover_passkey_step_up_effect, consume_passkey_step_up_for_effect,
+    consume_passkey_step_up_token, require_hosted_step_up_launch,
 };
 #[cfg(unix)]
 #[cfg(test)]
@@ -1595,6 +1610,13 @@ fn gateway_provider_error_status(scheme: &str, err: &anyhow::Error) -> StatusCod
     }
 }
 
+/// An Inbox grant or plan audit failed. The path stays in the log. The person
+/// reads one sentence: nothing ran, and what to do next for this action.
+pub(super) fn inbox_audit_refusal(error: anyhow::Error, next: &'static str) -> anyhow::Error {
+    tracing::warn!("inbox decision was not recorded: {error:#}");
+    anyhow::anyhow!("Nothing ran. {next}")
+}
+
 fn inbox_error_response(err: anyhow::Error) -> Response {
     if let Some(response) = protected_record_kept_elsewhere_response(&err) {
         return response;
@@ -1605,6 +1627,7 @@ fn inbox_error_response(err: anyhow::Error) -> Response {
         .unwrap_or_else(|| err.to_string());
     let status = if text.contains("home launch token")
         || text.contains("admin passkey required")
+        || text.contains("the agent's owner is not an admin")
         || text.contains("fresh passkey")
         || text.contains("passkey step-up")
         || text.contains("auth session is not active")
@@ -1615,6 +1638,8 @@ fn inbox_error_response(err: anyhow::Error) -> Response {
         StatusCode::FORBIDDEN
     } else if profile_required.is_some()
         || text == crate::collaboration_release_network::COMMUNITY_LEFT_DETAIL
+        || text.contains("the asking session has ended")
+        || text.contains("the grant was already given")
     {
         StatusCode::CONFLICT
     } else if text.contains("service access request delivery failed") {
@@ -1623,6 +1648,7 @@ fn inbox_error_response(err: anyhow::Error) -> Response {
         || text.contains("Open Wallet")
         || text.contains("is not pending")
         || text.contains("is no longer pending")
+        || text.contains("cannot be approved")
         || text.contains("changed before Inbox approval")
         || text.contains("card binding")
         || text.contains("service access request")

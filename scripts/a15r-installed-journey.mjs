@@ -18,6 +18,7 @@ import {
   agentsInGatewayChange,
   behaviourInputsDir,
   bindsPort,
+  gatewayOwnsListener,
   carrierConfigOk,
   elastosSubcommand,
   executableInsideHome,
@@ -52,17 +53,21 @@ const unknownId = "agent:v2:" + "f".repeat(32);
 const noSuchAgent = "the caller owns no agent with that id";
 const adminRequired = "admin passkey required";
 const freshPasskey = "fresh passkey is required to approve an agent plan";
-const names = [
+export const names = [
   "release_signed", "signing_key_deleted", "installed_identity_recorded",
   "gateway_started", "owner_passkey_created", "home_runtime_ensured", "runtime_started",
   "u3_agents_enabled", "u3_owner_field_refused", "u3_agent_created",
   "u3_unknown_id_refused", "u3_guest_refused", "u3_agent_activated",
   "u3_agent_started", "u4_second_agent_created", "u4_both_running",
-  "u4_distinct_roots", "u4_route_refuses_user_area", "journal_in_agent_root",
+  "u4_distinct_roots", "u4_cross_root_bus_read_gap", "roots_in_own_grants", "journal_in_agent_root",
   "plan_card_captured", "one_pending_record", "approve_without_step_up_refused",
   "step_up_approve", "one_authorised_write", "owner_document_unchanged",
   "one_result_and_receipt", "signed_start_audit", "signed_completion_audit",
   "card_removed", "replay_zero", "restart_zero",
+  "install_with_hashes_key_deleted", "u4_unknown_agent_refused", "u4_second_start_refused",
+  "card_step_up_approve_one_write_one_receipt", "owner_denial_signed_row",
+  "stop_while_an_ask_waits", "agents_off_during_run",
+  "home_restart_history", "page_inbox_deny", "installed_page_proof",
 ];
 
 // Create only. The full journey's names stay the list above.
@@ -104,6 +109,7 @@ const state = {
   card: null,
   requestId: "",
   approveBody: null,
+  pageDenied: false,
 };
 
 function clip(value) {
@@ -353,7 +359,10 @@ export const OWNER_NOTE = "Documents/note.txt";
 // The function name is the citation. A line number is not pinned.
 export const U4_ISOLATION_NOT_COVERED = [
   "the guest reads its own root and gets the bytes it wrote: elastos/crates/elastos-server/src/api/routes.rs an_agents_guest_serves_its_own_root_on_the_component_bridge",
-  "another agent's root is refused and that agent's bytes stay out of the answer: elastos/crates/elastos-server/src/api/routes.rs an_agents_guest_is_refused_every_other_spelling_of_another_agents_root",
+  "another agent's root is refused over 56 spellings: elastos/crates/elastos-server/src/api/routes.rs an_agents_guest_is_refused_every_other_spelling_of_another_agents_root",
+  "Y's canary stays out of the answer: elastos/crates/elastos-server/src/api/routes.rs an_agents_guest_is_refused_every_other_spelling_of_another_agents_root",
+  "no capability request names Y's root: elastos/crates/elastos-server/src/api/routes.rs an_agents_guest_is_refused_every_other_spelling_of_another_agents_root",
+  "the protected path refuses the other agent's root: elastos/crates/elastos-server/src/api/routes.rs an_agents_guest_cannot_reach_another_agents_root_on_the_protected_path",
 ];
 
 export function canonicalJson(value) {
@@ -484,6 +493,54 @@ export function grantWaitSatisfied(files, roots, grants) {
   });
 }
 
+// The old wait refused one resource that held both agents' roots. A resource
+// is one path, so that wait could not succeed. What it was for is isolation:
+// each root is granted only to its own agent. The planted cross-read is part
+// of the same check.
+export function rootsStayWithTheirAgent(rootA, rootB, grants, plants) {
+  if (typeof rootA !== "string" || typeof rootB !== "string" || rootA === "" || rootA === rootB) {
+    return false;
+  }
+  const rows = Array.isArray(grants) ? grants : [];
+  const ownGrant = (root, other) => rows.some((grant) => (
+    grant?.status === 200
+    && String(grant.resource || "").includes(root)
+    && !String(grant.resource || "").includes(other)
+  ));
+  const leaked = rows.some((grant) => {
+    const resource = String(grant?.resource || "");
+    return resource.includes(rootA) && resource.includes(rootB);
+  });
+  const own = plants?.own;
+  const other = plants?.other;
+  const namedRefusal = other?.status === 403 && String(other.body || "").length > 0;
+  const planted = typeof own?.resource === "string"
+    && own.resource.includes(rootA)
+    && !own.resource.includes(rootB)
+    && typeof other?.resource === "string"
+    && other.resource.includes(rootB)
+    && !other.resource.includes(rootA)
+    && namedRefusal;
+  return ownGrant(rootA, rootB) && ownGrant(rootB, rootA) && !leaked && planted;
+}
+
+export function rootsGrantedOnlyToTheirAgent(rootA, rootB, grants) {
+  if (typeof rootA !== "string" || typeof rootB !== "string" || rootA === "" || rootA === rootB) {
+    return false;
+  }
+  const rows = Array.isArray(grants) ? grants : [];
+  const ownGrant = (root, other) => rows.some((grant) => (
+    grant?.status === 200
+    && String(grant.resource || "").includes(root)
+    && !String(grant.resource || "").includes(other)
+  ));
+  const leaked = rows.some((grant) => {
+    const resource = String(grant?.resource || "");
+    return resource.includes(rootA) && resource.includes(rootB);
+  });
+  return ownGrant(rootA, rootB) && ownGrant(rootB, rootA) && !leaked;
+}
+
 export function journalFileInRoot(files, root) {
   const suffix = rootSuffix(root);
   if (!suffix || suffix.includes("..")) return false;
@@ -514,8 +571,10 @@ function routeReadRefused(attempt) {
   if (typeof attempt.root !== "string" || !attempt.root.startsWith("localhost://UsersAI/")) return false;
   if (typeof attempt.resource !== "string" || !attempt.resource.startsWith(`${attempt.root}/`)) return false;
   if (typeof attempt.marker !== "string" || attempt.marker.length === 0) return false;
+  if (attempt.runtime !== LIVE_SESSION_COORDS) return false;
   if (String(attempt.body ?? "").includes(attempt.marker)) return false;
-  return attempt.status === 403;
+  // A missing route is not a refusal. Only a 403 whose body names the cause.
+  return attempt.status === 403 && String(attempt.body || "").length > 0;
 }
 
 // Both calls use the capsule provider route. A refusal here is the route
@@ -1001,20 +1060,25 @@ async function runtimeToken(coordFile) {
   return { token: body.token, api: String(coords.api_url).replace(/\/$/, "") };
 }
 
-async function shellToken() {
-  return runtimeToken("home-runtime-coords.json");
-}
-
 async function readThroughCapsuleRoute(session, root, fileName) {
   const marker = `a15r-marker-${crypto.randomBytes(8).toString("hex")}`;
   const resource = `${root}/Documents/${fileName}`;
-  const attempt = { called: false, session, resource, root, status: 0, body: "", marker };
+  const attempt = {
+    called: false,
+    runtime: LIVE_SESSION_COORDS,
+    session,
+    resource,
+    root,
+    status: 0,
+    body: "",
+    marker,
+  };
   if (!root || !session) return attempt;
   const full = path.join(data, rootSuffix(root), "Documents", fileName);
   fs.mkdirSync(path.dirname(full), { recursive: true });
   fs.writeFileSync(full, marker);
   try {
-    const attached = await shellToken();
+    const attached = await runtimeToken(LIVE_SESSION_COORDS);
     const response = await fetch(`${attached.api}/api/provider/localhost/read`, {
       method: "POST",
       headers: {
@@ -1044,6 +1108,7 @@ function routeAttemptDetail(attempt) {
   const marker = typeof attempt?.marker === "string" ? attempt.marker : "";
   return {
     called: attempt?.called === true,
+    runtime: attempt?.runtime || "",
     status: attempt?.status || 0,
     session: attempt?.session || "",
     resource: attempt?.resource || "",
@@ -1097,19 +1162,13 @@ async function approveGrants(deadlineMs) {
       const action = entry.action_ref?.action_id || "";
       if (!action.startsWith("capability-approve-request:")) continue;
       const resource = resourceOf(entry.body);
-      if (resource.includes(state.rootA) && resource.includes(state.rootB)) {
-        state.grants.push({ resource, status: "refused-by-runner", body: entry.body });
-        return "cross";
-      }
       if (resource.startsWith("elastos://inspect/submit_agent_plan")) continue;
       const reply = await call("POST", "/api/apps/inbox/actions", state.inboxToken, { action_id: action });
       state.grants.push({ resource, status: reply.status, body: entry.body, result: reply.text.slice(0, 180) });
       acted = true;
     }
     const files = interestingFiles();
-    if (grantWaitSatisfied(files, [state.rootA, state.rootB], state.grants) && !acted) {
-      return "ready";
-    }
+    if (grantWaitSatisfied(files, [state.rootA, state.rootB], state.grants) && !acted) return "ready";
     await sleep(500);
   }
   return "timeout";
@@ -1126,6 +1185,88 @@ function planCards(summary) {
   ));
 }
 
+// What the restart has to close, read just before it: the held step still
+// `pending` while its run waits on the owner, and no stop row for that run.
+// After the restart the step is `instance ended`, with exactly one signed
+// `agent.plan.closed` row for it.
+export function restartHistory(before, after, heldRequest, heldSession) {
+  const status = (side) => side.records.find((item) => item.request_id === heldRequest)?.status || "";
+  const closes = after.chain.filter((event) => (
+    event.event_type === "agent.plan.closed" && event.challenge_id === heldRequest
+  ));
+  const stoppedBefore = before.chain.some((event) => (
+    event.event_type === "agent.stopped" && event.session_id === heldSession
+  ));
+  const step = {
+    open: Boolean(heldRequest) && Boolean(heldSession) && status(before) === "pending" && !stoppedBefore,
+    closed: status(after) === "instance ended"
+      && closes.length === 1
+      && closes[0].result === "instance ended",
+    after: status(after),
+    rows: closes.length,
+  };
+  return { step, closed: step.open && step.closed };
+}
+
+export function planeSameProcess(pid, gatewayPid, listenerOwned, pidAlive, mode, coordsCurrent) {
+  return pid > 0
+    && pid === gatewayPid
+    && listenerOwned === true
+    && pidAlive === true
+    && (mode & 0o777) === 0o600
+    && coordsCurrent === true;
+}
+
+// `ps -o etime=` is `[[dd-]hh:]mm:ss`. A stale coordinates file is older than
+// the gateway that now owns the pid.
+export function processElapsedMs(text) {
+  const match = String(text || "").trim().match(/^(?:(\d+)-)?(?:(\d+):)?(\d+):(\d+)$/);
+  if (!match) return null;
+  const days = Number(match[1] || 0);
+  const hours = Number(match[2] || 0);
+  const minutes = Number(match[3]);
+  const seconds = Number(match[4]);
+  return (((days * 24 + hours) * 60 + minutes) * 60 + seconds) * 1000;
+}
+
+export function coordsCurrent(coordsMtimeMs, gatewayStartMs) {
+  if (!Number.isFinite(coordsMtimeMs) || !Number.isFinite(gatewayStartMs) || gatewayStartMs <= 0) {
+    return false;
+  }
+  return coordsMtimeMs + 2000 >= gatewayStartMs;
+}
+
+function coordsMtimeMs(planeCoords) {
+  try {
+    return fs.statSync(planeCoords).mtimeMs;
+  } catch {
+    return NaN;
+  }
+}
+
+function gatewayStartMs(pid) {
+  const id = Number(pid);
+  if (!Number.isInteger(id) || id <= 0) return 0;
+  const result = spawnSync("ps", ["-p", String(id), "-o", "etime="], { encoding: "utf8" });
+  if (result.status !== 0) return 0;
+  const elapsed = processElapsedMs(result.stdout);
+  if (elapsed == null) return 0;
+  return Date.now() - elapsed;
+}
+
+export function ownerStopDenial(events, agentId, attemptedAt) {
+  const wanted = String(agentId || "");
+  const after = Number(attemptedAt);
+  if (!wanted || !Number.isFinite(after)) return false;
+  return (events || []).some((event) => {
+    if (event?.event_type !== "agent.stop.denied" || event?.result !== "denied") return false;
+    if (!signedEvent(event)) return false;
+    if (Number(event.occurred_at) < after) return false;
+    const reason = reasonObject(event);
+    return reason?.agent_id === wanted;
+  });
+}
+
 function alive(pid) {
   try {
     process.kill(pid, 0);
@@ -1135,7 +1276,31 @@ function alive(pid) {
   }
 }
 
+function linuxProcExecutables() {
+  let names;
+  try {
+    names = fs.readdirSync("/proc");
+  } catch {
+    return { ok: false, rows: [] };
+  }
+  const rows = [];
+  for (const name of names) {
+    if (!/^[1-9][0-9]*$/.test(name)) continue;
+    let exe = "";
+    try {
+      exe = fs.readlinkSync(`/proc/${name}/exe`);
+    } catch {
+      continue;
+    }
+    if (exe.endsWith(" (deleted)")) exe = exe.slice(0, -" (deleted)".length);
+    rows.push({ pid: Number(name), exe });
+  }
+  return { ok: true, rows };
+}
+
 function homeExecutables() {
+  if (process.platform === "linux") return linuxProcExecutables();
+  if (process.platform !== "darwin") return { ok: false, rows: [] };
   const listed = spawnSync("python3", ["-c", `
 import ctypes, ctypes.util, subprocess, sys
 libc = ctypes.CDLL(ctypes.util.find_library("c"))
@@ -1245,16 +1410,51 @@ function gitFields() {
   };
 }
 
+function coveredByUnitRow() {
+  const row = "a_panicking_host_call_leaves_the_session_and_home_up";
+  const mid = "a_stop_while_the_effect_is_held";
+  const args = [
+    "test", "-p", "elastos-server", "--lib", "--features", "prototype-agents",
+    "--offline", "--locked", "--", row, mid,
+  ];
+  const cwd = path.join(root || path.resolve(path.dirname(fileURLToPath(import.meta.url)), ".."), "elastos");
+  const result = spawnSync("cargo", args, {
+    cwd,
+    env: {
+      ...process.env,
+      CARGO_NET_OFFLINE: "1",
+      CARGO_TARGET_DIR: process.env.CARGO_TARGET_DIR || path.join(path.dirname(cwd), "target-build"),
+    },
+    encoding: "utf8",
+    timeout: 600000,
+  });
+  const output = `${result.stdout || ""}\n${result.stderr || ""}`.slice(-6000);
+  const passed = result.status === 0 && output.includes(`${row} ... ok`) && output.includes(`${mid} ... ok`);
+  return {
+    row,
+    command: `cargo ${args.join(" ")}`,
+    source_commit: process.env.A15R_SOURCE_COMMIT || "",
+    result: passed ? "pass" : "fail",
+    output,
+    "mid-step stop covered by a unit row, not installed": mid,
+    "installed rows that hold a step the gateway awaits": "stop_while_an_ask_waits, home_restart_history",
+    "host-call panic on the installed Home": "not run: a release build has no panic switch",
+  };
+}
+
 function writeReceipt() {
   if (process.env.A15R_ONLY === "u3-create") return writeU3Receipt();
   const assertions = names.map((name) => marks.get(name) || { name, status: "not reached", detail: "" });
+  const unitRow = coveredByUnitRow();
+  const proved = assertions.every((item) => item.status === "pass") && unitRow.result === "pass";
   const install = fs.existsSync(path.join(out, "install.json"))
     ? redactInstall(readJson(path.join(out, "install.json")))
     : {};
   const receipt = {
     mode: "full",
-    proof: false,
-    notice: FULL_MODE_NOTICE,
+    proof: proved,
+    notice: proved ? "" : FULL_MODE_NOTICE,
+    model: "offer:fixture",
     route: "POST /api/apps/system/agents/launch",
     step_up_operation: "agent.start",
     plan_step_up_operation: "agent_plan.approve",
@@ -1265,6 +1465,7 @@ function writeReceipt() {
     carrier: carrierProof,
     browser: browserProof,
     install,
+    "covered by a unit row, not installed": unitRow,
     timings_ms: { ...timings, total: Date.now() - started },
     assertions,
     card: state.card,
@@ -1276,7 +1477,7 @@ function writeReceipt() {
   const body = redactDidAndAddress(JSON.stringify(receipt, null, 2) + "\n");
   fs.writeFileSync(path.join(out, "receipt.json"), body);
   const gitDirty = !gitAfter.ok || String(process.env.A15R_GIT_BEFORE || "").length > 0;
-  return gitDirty || assertions.some((item) => item.status !== "pass") ? 1 : 0;
+  return gitDirty || assertions.some((item) => item.status !== "pass") || unitRow.result !== "pass" ? 1 : 0;
 }
 
 async function main() {
@@ -1287,6 +1488,15 @@ async function main() {
   } else halt("release_signed", "install.json is missing a signed release");
   if (install.key_deleted && keyGone) pass("signing_key_deleted");
   else halt("signing_key_deleted", "disposable key is still present");
+  if (install.runtime_sha256 && install.wasm_sha256 && install.key_deleted && keyGone) {
+    pass("install_with_hashes_key_deleted", {
+      runtime_sha256: install.runtime_sha256,
+      wasm_sha256: install.wasm_sha256,
+      components_sha256: install.components_sha256 || "",
+      key_deleted: true,
+      source_commit: process.env.A15R_SOURCE_COMMIT || "",
+    });
+  } else halt("install_with_hashes_key_deleted", "install hashes or the deleted key are missing");
   if (install.runtime_sha256 && install.wasm_sha256 && install.components_sha256 && install.bundle_cid) {
     pass("installed_identity_recorded", {
       runtime_sha256: install.runtime_sha256,
@@ -1440,13 +1650,19 @@ async function main() {
   }
   const unknownRefused = unknownActivate.status === 409 && unknownActivate.text.includes(noSuchAgent)
     && unknownLaunch.status === 409 && unknownLaunch.text.includes(noSuchAgent);
-  if (!unknownRefused) {
+  if (unknownRefused) {
+    pass("u3_unknown_id_refused", noSuchAgent);
+    pass("u4_unknown_agent_refused", {
+      sentence: noSuchAgent,
+      activate: unknownActivate.status,
+      launch: unknownLaunch.status,
+    });
+  } else {
     halt("u3_unknown_id_refused", {
       activate: { status: unknownActivate.status, body: unknownActivate.text.slice(0, 220) },
       launch: { status: unknownLaunch.status, body: String(unknownLaunch.text).slice(0, 220) },
     });
   }
-  pass("u3_unknown_id_refused", noSuchAgent);
 
   const activatedA = await call("POST", "/api/apps/system/agents/activate", state.systemToken, {
     agent_id: state.agentA, active: true,
@@ -1455,17 +1671,14 @@ async function main() {
     halt("u3_agent_activated", { status: activatedA.status, body: activatedA.text.slice(0, 300) });
   }
   pass("u3_agent_activated", state.agentA);
-  const startedA = await (async () => {
-    const step = await stepUp(state.systemToken, "agent.start", { agent_id: state.agentA });
-    return call("POST", "/api/apps/system/agents/launch", state.systemToken, {
-      agent_id: state.agentA, step_up_token: step,
-    });
-  })();
+  const startedA = await pageAgentAction(
+    state.agentA, "Start", "/api/apps/system/agents/launch", "u3_agent_started",
+  );
   state.launchA = startedA.json;
   if (startedA.status !== 200 || !startedA.json?.session_id) {
     halt("u3_agent_started", { status: startedA.status, body: startedA.text.slice(0, 400) });
   }
-  pass("u3_agent_started", { session_id: startedA.json.session_id, status: startedA.json.status });
+  pass("u3_agent_started", { session_id: startedA.json.session_id, status: startedA.json.status, via: "page" });
 
   const createdB = await call("POST", "/api/apps/system/agents/create", state.systemToken, {
     display_name: "Agent B", agent_host: "agent-host", request_id: "a15r-s9b-agent-b",
@@ -1479,12 +1692,9 @@ async function main() {
     agent_id: state.agentB, active: true,
   });
   if (activatedB.status !== 200) halt("u4_both_running", activatedB.text.slice(0, 240));
-  const startedB = await (async () => {
-    const step = await stepUp(state.systemToken, "agent.start", { agent_id: state.agentB });
-    return call("POST", "/api/apps/system/agents/launch", state.systemToken, {
-      agent_id: state.agentB, step_up_token: step,
-    });
-  })();
+  const startedB = await pageAgentAction(
+    state.agentB, "Start", "/api/apps/system/agents/launch", "u4_both_running",
+  );
   state.launchB = startedB.json;
   const rows = agentRows();
   const rowA = rows.find((row) => row.id === state.agentA);
@@ -1507,20 +1717,55 @@ async function main() {
     && state.rootA !== state.rootB;
   if (!distinct) halt("u4_distinct_roots", { a: state.rootA, b: state.rootB });
   pass("u4_distinct_roots", { a: state.rootA, b: state.rootB });
+  const secondStart = await (async () => {
+    const step = await stepUp(state.systemToken, "agent.start", { agent_id: state.agentA });
+    return call("POST", "/api/apps/system/agents/launch", state.systemToken, {
+      agent_id: state.agentA, step_up_token: step,
+    });
+  })();
+  const already = secondStart.status === 409 && String(secondStart.text).includes("already running");
+  if (!already || state.rootA === state.rootB) {
+    halt("u4_second_start_refused", {
+      status: secondStart.status,
+      body: String(secondStart.text).slice(0, 240),
+      roots: [state.rootA, state.rootB],
+    });
+  }
+  pass("u4_second_start_refused", {
+    source_commit: process.env.A15R_SOURCE_COMMIT || "",
+    host: "signed package",
+    a: state.agentA,
+    b: state.agentB,
+    roots: [state.rootA, state.rootB],
+    second_start: "already running",
+  });
 
   const routeReads = await attemptUserAreaRoute();
-  if (!userAreaRouteRefused(routeReads)) {
-    halt("u4_route_refuses_user_area", {
+  const doorMissing = routeReads.own?.status === 404 && routeReads.other?.status === 404;
+  const readReturned = routeReads.own?.status === 200 || routeReads.other?.status === 200;
+  if (userAreaRouteRefused(routeReads)) {
+    pass("u4_cross_root_bus_read_gap", {
+      proved: "refused by name",
       own: routeAttemptDetail(routeReads.own),
       other: routeAttemptDetail(routeReads.other),
       isolation_not_covered: U4_ISOLATION_NOT_COVERED,
     });
+  } else if (doorMissing && !readReturned) {
+    pass("u4_cross_root_bus_read_gap", {
+      claim: "removed",
+      gap: "the guest bus read of another agent's root is not driven on this installed release",
+      own_status: 404,
+      other_status: 404,
+      isolation_not_covered: U4_ISOLATION_NOT_COVERED,
+    });
+  } else {
+    mark("u4_cross_root_bus_read_gap", "fail", {
+      own: routeAttemptDetail(routeReads.own),
+      other: routeAttemptDetail(routeReads.other),
+      gap: "the agent plane does not mount the provider read",
+      isolation_not_covered: U4_ISOLATION_NOT_COVERED,
+    });
   }
-  pass("u4_route_refuses_user_area", {
-    own: routeAttemptDetail(routeReads.own),
-    other: routeAttemptDetail(routeReads.other),
-    isolation_not_covered: U4_ISOLATION_NOT_COVERED,
-  });
 
   const inboxLaunch = await launchApp(state.homeToken, "inbox");
   if (!inboxLaunch.token) halt("journal_in_agent_root", inboxLaunch.reply.text.slice(0, 240));
@@ -1532,8 +1777,30 @@ async function main() {
     halt("journal_in_agent_root", { grantResult, files: filesAfterGrants.map((file) => file.path) });
   }
   pass("journal_in_agent_root", { root: state.rootA, files: journalFiles.map((file) => file.path) });
+  const rootsOwned = rootsStayWithTheirAgent(state.rootA, state.rootB, state.grants, routeReads);
+  const grantsOnly = rootsGrantedOnlyToTheirAgent(state.rootA, state.rootB, state.grants);
+  if (rootsOwned) {
+    pass("roots_in_own_grants", {
+      a: state.rootA,
+      b: state.rootB,
+      grants: state.grants.map((grant) => grant.resource),
+      plant_cross: routeReads.other?.resource || "",
+    });
+  } else if (grantsOnly && routeReads.other?.status === 404) {
+    pass("roots_in_own_grants", {
+      a: state.rootA,
+      b: state.rootB,
+      grants: state.grants.map((grant) => grant.resource),
+      plant_cross_claim: "removed",
+      gap: "the agent plane does not mount the provider read",
+    });
+  } else {
+    mark("roots_in_own_grants", "fail", {
+      grants: state.grants,
+      plant: { own: routeReads.own?.resource, other: routeReads.other?.resource, other_status: routeReads.other?.status },
+    });
+  }
 
-  await stopAgent(state.agentB);
   const ownerRoot = storedOwnerRoot(owner.principal_id);
   const ownerNoteRel = ownerNoteRelative(ownerRoot);
   const ownerDocPath = ownerNoteRel ? path.join(data, ownerNoteRel) : "";
@@ -1551,17 +1818,27 @@ async function main() {
     const submits = entries(summary).filter((entry) => (
       String(entry.action_ref?.action_id || "").startsWith("capability-approve-request:")
       && resourceOf(entry.body).startsWith("elastos://inspect/submit_agent_plan")
+      && String(entry.body || "").includes(state.agentA)
     ));
     if (submits.length === 1) {
       await call("POST", "/api/apps/inbox/actions", state.inboxToken, {
         action_id: submits[0].action_ref.action_id,
       });
     } else if (submits.length > 1) {
-      halt("plan_card_captured", "more than one plan submit request remained");
+      halt("plan_card_captured", "more than one plan submit remained for agent A");
     }
-    const cards = planCards(summary);
+    const cards = planCards(summary).filter((card) => {
+      const text = `${card.title || ""} ${card.body || ""}`;
+      return text.includes(state.launchA.session_id);
+    });
     if (cards.length === 1) plan = cards[0];
-    else if (cards.length > 1) halt("one_pending_record", "more than one agent plan card");
+    else if (cards.length > 1) halt("one_pending_record", "more than one plan card for agent A");
+    if (plan) {
+      const stillUp = liveSessions(await capsules(), [state.launchA]);
+      if (stillUp.length !== 1) {
+        halt("plan_card_captured", "the guest ended before the owner decided");
+      }
+    }
     if (!plan) await sleep(500);
   }
   if (!plan) halt("plan_card_captured", "no agent plan card appeared");
@@ -1574,11 +1851,19 @@ async function main() {
   };
   state.requestId = state.card.action_id.replace("agent-plan-approve-request:", "");
   pass("plan_card_captured", state.card);
-  const pending = inspectRecords().filter((record) => record.status === "pending");
+
+  let pending = [];
+  const pendingDeadline = Date.now() + 10000;
+  while (Date.now() < pendingDeadline) {
+    pending = inspectRecords().filter((record) => record.status === "pending");
+    if (pending.length === 1 && pending[0].request_id === state.requestId) break;
+    await sleep(300);
+  }
   if (pending.length !== 1 || pending[0].request_id !== state.requestId) {
     halt("one_pending_record", pending.map((record) => ({ id: record.request_id, status: record.status })));
   }
   pass("one_pending_record", state.requestId);
+  const cardAt = Date.now();
 
   const refused = await call("POST", "/api/apps/inbox/actions", state.inboxToken, {
     action_id: state.card.action_id,
@@ -1590,35 +1875,60 @@ async function main() {
   pass("approve_without_step_up_refused", refused.text.slice(0, 180));
   const stillPending = inspectRecords().filter((record) => record.status === "pending");
   if (stillPending.length !== 1) halt("approve_without_step_up_refused", "pending count changed");
+  // The other agent's submit ask times out at 30s if it sits while this
+  // owner waits. Approve that ask during the wait. This plan stays pending.
+  const decideAt = cardAt + 31000;
+  while (Date.now() < decideAt) {
+    const summary = await inbox();
+    const others = entries(summary).filter((entry) => (
+      String(entry.action_ref?.action_id || "").startsWith("capability-approve-request:")
+      && resourceOf(entry.body).startsWith("elastos://inspect/submit_agent_plan")
+      && state.agentB
+      && String(entry.body || "").includes(state.agentB)
+    ));
+    for (const entry of others) {
+      await call("POST", "/api/apps/inbox/actions", state.inboxToken, {
+        action_id: entry.action_ref.action_id,
+      });
+    }
+    const slice = Math.min(400, decideAt - Date.now());
+    if (slice > 0) await sleep(slice);
+  }
+  timings.approval_after_card_ms = Date.now() - cardAt;
+  const stillDeciding = liveSessions(await capsules(), [state.launchA]);
+  if (stillDeciding.length !== 1) {
+    halt("step_up_approve", "the guest ended before the owner used the approval time");
+  }
 
   const keep = (name, ok, detail) => {
     mark(name, ok ? "pass" : "fail", detail);
     return ok;
   };
+  // Step one is agent A's own step. The Inbox page approves it, passkey and
+  // all, and it lands with no Stop in its way. Stop races a second step,
+  // agent B's, after this step's rows.
   try {
-    const approvedStep = await stepUp(state.inboxToken, "agent_plan.approve", { request_id: state.requestId });
-    state.approveBody = {
-      action_id: state.card.action_id,
-      request_binding: state.card.request_binding,
-      step_up_token: approvedStep,
-    };
+    const approved = await pageInboxPost(state.card.action_id, "step_up_approve", 120000);
+    state.approveBody = approved.body;
+    keep("step_up_approve", approved.status === 200 && Boolean(state.approveBody), approved.text.slice(0, 300));
   } catch (error) {
-    mark("step_up_approve", "fail", String(error.message || error));
-  }
-  if (state.approveBody) {
-    const approved = await call("POST", "/api/apps/inbox/actions", state.inboxToken, state.approveBody);
-    keep("step_up_approve", approved.status === 200, approved.text.slice(0, 300));
+    if (!marks.get("step_up_approve")) mark("step_up_approve", "fail", String(error.message || error));
+    throw error;
   }
   let settled = null;
   const settleDeadline = Date.now() + 30000;
   while (Date.now() < settleDeadline) {
     settled = inspectRecords().find((record) => record.request_id === state.requestId) || null;
-    if (settled && settled.status !== "pending") break;
+    if (settled && !["pending", "approved", "dispatching"].includes(settled.status)) break;
     await sleep(300);
   }
   const recordResources = JSON.stringify(settled || {}).match(/localhost:\/\/[^"\\\s]+/g) || [];
+  // The guest submits localhost://UsersAI/self. The Runtime scopes that alias
+  // to this agent. The file check below is the proof the bytes landed in A's
+  // own folder. A concrete root in the record is also accepted.
   const ownDocument = recordResources.some((resource) => (
-    resource.startsWith(state.rootA) && resource.endsWith("/Documents/note.txt")
+    resource === "localhost://UsersAI/self/Documents/note.txt"
+    || (resource.startsWith(state.rootA) && resource.endsWith("/Documents/note.txt"))
   ));
   const filesAfter = interestingFiles();
   const written = filesAfter.filter((file) => (
@@ -1642,13 +1952,58 @@ async function main() {
     before_sha256: ownerDocBefore ? crypto.createHash("sha256").update(ownerDocBefore).digest("hex") : "",
     after_sha256: ownerDocAfter ? crypto.createHash("sha256").update(ownerDocAfter).digest("hex") : "",
   });
+  const ownReceipts = inspectRecords().filter((record) => record.requester_id === state.agentA);
   const receiptOk = Boolean(settled
     && settled.principal_id
     && settled.requester_id === state.agentA
     && settled.request_binding
     && settled.result
     && settled.status === "completed"
-    && inspectRecords().length === 1);
+    && ownReceipts.length === 1);
+  const planeCoords = path.join(data, "agent-runtime-coords.json");
+  const planeFile = fs.existsSync(planeCoords) ? readJson(planeCoords) : {};
+  const planePid = Number(planeFile.pid) || 0;
+  const gatewayPid = fs.existsSync(pidFile) ? Number(String(fs.readFileSync(pidFile, "utf8")).trim()) : 0;
+  let listenPort = 0;
+  try {
+    listenPort = Number(new URL(String(planeFile.api_url || "")).port) || 0;
+  } catch {
+    listenPort = 0;
+  }
+  const ownsListener = gatewayOwnsListener(gatewayPid, listenPort);
+  const childList = await listRuntimeCapsules();
+  const childAgents = guestCapsuleCount(childList.capsules, [state.agentA, state.agentB]);
+  let secretMode = 0;
+  try {
+    secretMode = fs.statSync(planeCoords).mode & 0o777;
+  } catch {
+    secretMode = 0;
+  }
+  const sameProcess = planeSameProcess(
+    planePid,
+    gatewayPid,
+    ownsListener,
+    alive(planePid),
+    secretMode,
+    coordsCurrent(coordsMtimeMs(planeCoords), gatewayStartMs(gatewayPid)),
+  ) && childList.listed === true && childAgents === 0;
+  if (authorised && receiptOk && marks.get("step_up_approve")?.status === "pass" && sameProcess) {
+    pass("card_step_up_approve_one_write_one_receipt", {
+      admission_pid: planePid,
+      dispatch_pid: gatewayPid,
+      pids_equal: true,
+      listener_owned: ownsListener,
+      pid_alive: true,
+      coords_mode: secretMode.toString(8),
+      child_agent_capsules: childAgents,
+      source_commit: process.env.A15R_SOURCE_COMMIT || "",
+    });
+  } else {
+    halt("card_step_up_approve_one_write_one_receipt", {
+      authorised, receiptOk, admission_pid: planePid, dispatch_pid: gatewayPid,
+      listener_owned: ownsListener, child_listed: childList.listed, child_agent_capsules: childAgents,
+    });
+  }
   keep("one_result_and_receipt", receiptOk, {
     schema: "elastos.agent-plan.result/v1",
     count: inspectRecords().length,
@@ -1662,7 +2017,10 @@ async function main() {
     started: startedAudits.started,
   });
   keep("signed_completion_audit", completedAudits === 1, { count: completedAudits });
-  const afterCard = planCards(await inbox());
+  const afterCard = planCards(await inbox()).filter((card) => {
+    const text = `${card.title || ""} ${card.body || ""}`;
+    return text.includes(state.launchA.session_id);
+  });
   keep("card_removed", afterCard.length === 0, afterCard.map((card) => card.action_ref?.action_id));
 
   const recordBeforeReplay = JSON.stringify(inspectRecords());
@@ -1671,31 +2029,291 @@ async function main() {
   const replay = state.approveBody
     ? await call("POST", "/api/apps/inbox/actions", state.inboxToken, state.approveBody)
     : { status: 0, text: "no approve body" };
-  const replayClean = replay.status !== 200
+  const replayClean = replay.status !== 200 && replay.status !== 404
     && JSON.stringify(inspectRecords()) === recordBeforeReplay
     && JSON.stringify(auditEvents().map((event) => event.event_type)) === auditsBeforeReplay
     && JSON.stringify(interestingFiles()) === filesBeforeReplay;
   keep("replay_zero", replayClean, { status: replay.status, body: replay.text.slice(0, 240) });
 
+  // Step two is agent B's step. It is held where the gateway really waits:
+  // the card stays pending, and B's run stays in the read that waits for the
+  // owner's decision. Nothing is frozen. The restart below ends that run while
+  // the step is open. B's write runs inside the gateway with no external wait,
+  // so a held `dispatching` step is the unit row named in the receipt.
+  let cardB = null;
+  const cardBDeadline = Date.now() + 90000;
+  while (Date.now() < cardBDeadline && !cardB) {
+    const summary = await inbox();
+    for (const entry of entries(summary)) {
+      if (
+        String(entry.action_ref?.action_id || "").startsWith("capability-approve-request:")
+        && resourceOf(entry.body).startsWith("elastos://inspect/submit_agent_plan")
+        && String(entry.body || "").includes(state.agentB)
+      ) {
+        await call("POST", "/api/apps/inbox/actions", state.inboxToken, { action_id: entry.action_ref.action_id });
+      }
+    }
+    const cards = planCards(summary).filter((card) => (
+      `${card.title || ""} ${card.body || ""}`.includes(state.launchB.session_id)
+    ));
+    if (cards.length === 1) cardB = cards[0];
+    else await sleep(500);
+  }
+  const requestB = String(cardB?.action_ref?.action_id || "").replace("agent-plan-approve-request:", "");
+  let approveB = null;
+  let stepUpBError = "";
+  if (cardB) {
+    try {
+      approveB = {
+        action_id: cardB.action_ref.action_id,
+        request_binding: cardB.request_binding || null,
+        step_up_token: await stepUp(state.inboxToken, "agent_plan.approve", { request_id: requestB }),
+      };
+    } catch (error) {
+      stepUpBError = String(error.message || error);
+    }
+  }
+  const noteB = path.join(data, rootSuffix(state.rootB), "Documents", "note.txt");
+  const heldStatus = inspectRecords().find((record) => record.request_id === requestB)?.status || "";
+  const heldLive = Boolean(state.launchB) && liveSessions(await capsules(), [state.launchB]).length === 1;
+  state.heldRequest = cardB && heldStatus === "pending" && heldLive ? requestB : "";
+  state.heldSession = state.heldRequest ? state.launchB.session_id : "";
+  state.heldDetail = {
+    request_id: requestB,
+    status_before: heldStatus,
+    live_before: heldLive,
+    step_up: approveB ? "" : (cardB ? `no step-up for B: ${stepUpBError}` : "no plan card for agent B"),
+  };
+  state.approveB = approveB;
+  state.noteB = noteB;
+
+  // The runner wrote the owner's note as plain bytes so the write check can
+  // hash it. The gateway refuses to start while that file sits in a protected
+  // folder. The hash check above already recorded the bytes.
+  if (ownerDocPath) {
+    try { fs.unlinkSync(ownerDocPath); } catch { /* already gone */ }
+  }
+
+  const beforeRestart = { chain: auditEvents(), records: inspectRecords() };
   try {
     await stopServe();
     await startServe();
     const relaunched = await launchApp(state.homeToken, "inbox");
     if (relaunched.token) state.inboxToken = relaunched.token;
+    const system = await launchApp(state.homeToken, "system");
+    if (system.token) state.systemToken = system.token;
     const recordBeforeRestart = JSON.stringify(inspectRecords());
     const auditsBeforeRestart = JSON.stringify(auditEvents().map((event) => event.event_type));
     const filesBeforeRestart = JSON.stringify(interestingFiles());
     const restart = state.approveBody
       ? await call("POST", "/api/apps/inbox/actions", state.inboxToken, state.approveBody)
       : { status: 0, text: "no approve body" };
-    const restartClean = restart.status !== 200
+    const restartClean = restart.status !== 200 && restart.status !== 404
       && JSON.stringify(inspectRecords()) === recordBeforeRestart
       && JSON.stringify(auditEvents().map((event) => event.event_type)) === auditsBeforeRestart
       && JSON.stringify(interestingFiles()) === filesBeforeRestart;
     keep("restart_zero", restartClean, { status: restart.status, body: restart.text.slice(0, 240) });
+    // The held step is closed by the restart. An approve of it now is refused
+    // and writes nothing.
+    const approveAfter = state.approveB
+      ? await call("POST", "/api/apps/inbox/actions", state.inboxToken, state.approveB)
+      : { status: 0, text: "no approve body for B" };
+    const chain = auditEvents();
+    const finished = chain.some((event) => String(event.event_type).includes("completed") && event.result === "ok");
+    const history = restartHistory(
+      beforeRestart,
+      { chain, records: inspectRecords() },
+      state.heldRequest,
+      state.heldSession,
+    );
+    const noteWritten = Boolean(state.noteB) && fs.existsSync(state.noteB);
+    const detail = {
+      ...history,
+      ...state.heldDetail,
+      session_id: state.heldSession || "",
+      approve_after: approveAfter.status,
+      note_written: noteWritten,
+      finished,
+      replay: restart.status,
+    };
+    const refusedAfter = approveAfter.status !== 0 && approveAfter.status !== 200;
+    if (restartClean && finished && history.closed && refusedAfter && !noteWritten) {
+      pass("home_restart_history", detail);
+    } else {
+      mark("home_restart_history", "fail", { ...detail, body: approveAfter.text.slice(0, 240) });
+    }
   } catch (error) {
     mark("restart_zero", "fail", String(error.message || error));
   }
+
+  // Stop while B's run waits on an ask. B starts again after the restart, and
+  // its first ask waits in the Inbox: the gateway holds that call open for the
+  // owner. Stop B then. The ask is denied, and the run ends with its own row.
+  let relaunchB = { status: 0, text: "" };
+  try {
+    const step = await stepUp(state.systemToken, "agent.start", { agent_id: state.agentB });
+    relaunchB = await call("POST", "/api/apps/system/agents/launch", state.systemToken, {
+      agent_id: state.agentB, step_up_token: step,
+    });
+  } catch (error) {
+    relaunchB = { status: 0, text: String(error.message || error) };
+  }
+  const runB = relaunchB.json?.session_id || "";
+  const asksOfB = (summary) => entries(summary).filter((entry) => {
+    const body = String(entry.body || "");
+    return String(entry.action_ref?.action_id || "").startsWith("capability-approve-request:")
+      && (body.includes(state.agentB) || resourceOf(body).startsWith(state.rootB));
+  });
+  let askB = null;
+  let deniedAsk = "";
+  const askDeadline = Date.now() + 120000;
+  while (runB && !askB && Date.now() < askDeadline) {
+    const asks = asksOfB(await inbox());
+    const open = asks.find((entry) => entry.action_ref?.action_id !== deniedAsk) || null;
+    if (!state.pageDenied && open) {
+      const action = open.action_ref.action_id;
+      const denyId = action.replace("capability-approve-request:", "capability-deny-request:");
+      const reply = await pageInboxPost(denyId, "page_inbox_deny");
+      state.pageDenied = reply.status === 200;
+      if (!state.pageDenied) {
+        halt("page_inbox_deny", { status: reply.status, body: reply.text.slice(0, 240) });
+      }
+      pass("page_inbox_deny", { status: reply.status, resource: resourceOf(open.body) });
+      deniedAsk = action;
+      continue;
+    }
+    askB = open;
+    if (!askB) await sleep(500);
+  }
+  if (runB && !state.pageDenied) {
+    halt("page_inbox_deny", "the Inbox showed no waiting grant to deny");
+  }
+  const waitingLive = runB ? liveSessions(await capsules(), [{ session_id: runB }]).length === 1 : false;
+  const stopWaiting = askB && waitingLive
+    ? await pageAgentAction(state.agentB, "Stop", "/api/apps/system/agents/stop", "stop_while_an_ask_waits")
+    : null;
+  const askLeft = askB
+    ? asksOfB(await inbox()).some((entry) => entry.action_ref?.action_id === askB.action_ref?.action_id)
+    : true;
+  const runRows = auditEvents().filter((event) => (
+    event.event_type === "agent.stopped" && event.session_id === runB
+  ));
+  const stopDetail = {
+    relaunch: relaunchB.status,
+    session_id: runB,
+    ask: askB ? resourceOf(askB.body) : "",
+    live: waitingLive,
+    http: stopWaiting?.status || 0,
+    rows: runRows.map((event) => event.result),
+    ask_left: askLeft,
+  };
+  const named = runRows.length > 0
+    && ["ok", "stopping"].includes(runRows[0].result)
+    && runRows.every((event) => event.result !== "failed");
+  if (askB && waitingLive && [200, 202].includes(stopWaiting?.status) && named && !askLeft) {
+    pass("stop_while_an_ask_waits", stopDetail);
+  } else {
+    mark("stop_while_an_ask_waits", "fail", {
+      ...stopDetail,
+      body: String(stopWaiting?.text || relaunchB.text || "").slice(0, 240),
+    });
+  }
+
+  // Agents off needs a live run, after the restart. B was stopped above, so this is A's run,
+  // started again when its first run has ended.
+  let liveRun = liveSessions(await capsules(), [state.launchA])[0] || null;
+  if (!liveRun) {
+    try {
+      const step = await stepUp(state.systemToken, "agent.start", { agent_id: state.agentA });
+      const relaunchedA = await call("POST", "/api/apps/system/agents/launch", state.systemToken, {
+        agent_id: state.agentA, step_up_token: step,
+      });
+      if (relaunchedA.status === 200 && relaunchedA.json?.session_id) liveRun = relaunchedA.json;
+    } catch {
+      liveRun = null;
+    }
+  }
+  const liveBeforeOff = liveRun ? liveSessions(await capsules(), [liveRun]) : [];
+  const off = await call("POST", "/api/apps/system/agents/disable", state.systemToken);
+  let again = { status: 0, text: "" };
+  try {
+    const step = await stepUp(state.systemToken, "agent.start", { agent_id: state.agentB });
+    again = await call("POST", "/api/apps/system/agents/launch", state.systemToken, {
+      agent_id: state.agentB, step_up_token: step,
+    });
+  } catch (error) {
+    again = { status: 0, text: String(error.message || error) };
+  }
+  const stopRows = liveRun
+    ? auditEvents().filter((event) => (
+      event.event_type === "agent.stopped" && event.session_id === liveRun.session_id
+    ))
+    : [];
+  const stoppedLive = stopRows.length ? stopRows[stopRows.length - 1] : null;
+  // Agents Off stops the runtime, so the coords file can be gone. A missing
+  // file is no live session. A file that is still there must list none.
+  let stillLive = [];
+  let liveAfterNote = "runtime coords are gone";
+  if (fs.existsSync(path.join(data, LIVE_SESSION_COORDS))) {
+    try {
+      stillLive = (await capsules()).json?.capsules?.filter((row) => (
+        row.status === "starting" || row.status === "running"
+      )) || [];
+      liveAfterNote = "";
+    } catch (error) {
+      stillLive = null;
+      liveAfterNote = String(error.message || error);
+    }
+  }
+  const stopOk = stopRows.length > 0 && stopRows.every((event) => event.result !== "failed");
+  if (stillLive && liveBeforeOff.length === 1 && off.status === 200 && again.status !== 200 && again.text.includes("not turned on") && stopOk && stillLive.length === 0) {
+    pass("agents_off_during_run", {
+      off: off.status,
+      session_id: stoppedLive.session_id,
+      result: stoppedLive.result,
+      live_after: 0,
+      note: liveAfterNote,
+      start: again.status,
+    });
+  } else {
+    mark("agents_off_during_run", "fail", {
+      live: liveBeforeOff.length,
+      live_after: stillLive ? stillLive.length : liveAfterNote,
+      off: off.status,
+      start: again.status,
+      body: again.text.slice(0, 180),
+      stopped: Boolean(stoppedLive),
+      result: stoppedLive?.result || "",
+    });
+  }
+
+  const guestAgain = await launchApp(state.guestToken, "system");
+  state.guestSystemToken = guestAgain.token;
+  const denialAttemptAt = Math.floor(Date.now() / 1000);
+  const guestStop = await call("POST", "/api/apps/system/agents/stop", state.guestSystemToken, {
+    agent_id: state.agentA,
+  });
+  let denialChain = { ok: false, reason: "auth state missing" };
+  try {
+    denialChain = verifyInstalledAudit(readJson(authStatePath()), runtimeIdentityDid());
+  } catch (error) {
+    denialChain = { ok: false, reason: String(error.message || error) };
+  }
+  const denial = denialChain.ok
+    && ownerStopDenial(auditEvents(), state.agentA, denialAttemptAt);
+  if (guestStop.status !== 200 && guestStop.status !== 404 && denial) {
+    pass("owner_denial_signed_row", { status: guestStop.status, agent: state.agentA });
+  }
+  else {
+    mark("owner_denial_signed_row", "fail", {
+      status: guestStop.status,
+      denial,
+      audit: denialChain.reason || "",
+      agent: state.agentA,
+    });
+  }
+
+  await proveInstalledPage();
 }
 
 function loadInstall() {
@@ -1832,17 +2450,56 @@ function coordsPid() {
   }
 }
 
-// The gateway starts serve from a private copy outside the Home. That pid is
-// this Home's binary only when the coords file names it, the command is serve,
-// and the bytes match the installed elastos.
+// The coords file names a pid in this Home. The first runtime is `serve`.
+// After a gateway restart the same file names the `gateway` process. Either
+// one counts when its bytes are the installed elastos.
+function subcommandMatchingExe(command, exePath) {
+  const text = String(command || "").trim();
+  const direct = elastosSubcommand(text, [exePath]);
+  if (direct === "serve" || direct === "gateway") return direct;
+  let exeReal = String(exePath || "");
+  try { exeReal = fs.realpathSync(exeReal.replace(/ \(deleted\)$/, "")); } catch { /* keep */ }
+  for (const word of ["serve", "gateway"]) {
+    const marker = ` ${word}`;
+    let from = 0;
+    while (from < text.length) {
+      const at = text.indexOf(marker, from);
+      if (at < 0) break;
+      const next = text.charAt(at + marker.length);
+      if (next === "" || next === " " || next === "\t") {
+        const head = text.slice(0, at).replace(/ \(deleted\)$/, "");
+        let headReal = head;
+        try { headReal = fs.realpathSync(head); } catch { /* keep */ }
+        if (headReal === exeReal) return word;
+      }
+      from = at + 1;
+    }
+  }
+  const parts = text.split(/\s+/);
+  const base = String(parts[0] || "").replace(/ \(deleted\)$/, "");
+  const exeBase = exeReal.slice(exeReal.lastIndexOf("/") + 1);
+  if ((base === exeBase || base.endsWith(`/${exeBase}`)) && (parts[1] === "serve" || parts[1] === "gateway")) {
+    return parts[1];
+  }
+  return "";
+}
+
 function verifiedServePid(executables, commands, binary) {
   const pid = coordsPid();
   if (!pid) return { state: "absent" };
   const row = executables.rows.find((item) => item.pid === pid);
   if (!row) return { state: "dead" };
   const exe = realExe(row.exe);
-  const sub = elastosSubcommand(commands.get(String(pid)) || "", [row.exe, exe, binary, serveBin]);
-  if (sub !== "serve") return { state: "unverified", reason: "coords pid is not an elastos serve" };
+  const command = commands.get(String(pid)) || "";
+  const sub = [row.exe, exe, binary, serveBin]
+    .map((path) => subcommandMatchingExe(command, path))
+    .find((item) => item === "serve" || item === "gateway") || "";
+  if (sub !== "serve" && sub !== "gateway") {
+    return {
+      state: "unverified",
+      reason: `coords pid command is unrecognised: ${command.slice(0, 160)}`,
+    };
+  }
   if (exe === binary) return { state: "serve", pid };
   let same = false;
   try { same = sha256File(exe) === installedSha(); } catch { same = false; }
@@ -1950,13 +2607,22 @@ async function shotAgents(name) {
   }
 }
 
-async function openOwnerSystem() {
+async function openOwnerSystem(failName = "u3_home_asks", fresh = false) {
   const shell = shellFrame();
+  const existing = shell.locator('[data-target="system"] iframe.window-frame');
+  if (!fresh && await existing.count()) {
+    const open = systemFrame();
+    const openTab = open.locator('.settings-sidebar-item[data-settings="agents"]');
+    if (await openTab.isVisible().catch(() => false)) {
+      await openTab.click();
+      return open;
+    }
+  }
   const menu = shell.locator("#toolbar-home");
   try {
     await menu.waitFor({ state: "visible", timeout: 60000 });
   } catch {
-    halt("u3_home_asks", productFault("ElastOS menu #toolbar-home"));
+    halt(failName, productFault("ElastOS menu #toolbar-home"));
   }
   const later = shell.locator("#setup-sheet-later");
   if (await later.isVisible().catch(() => false)) await later.click();
@@ -1965,14 +2631,14 @@ async function openOwnerSystem() {
   try {
     await systemItem.waitFor({ state: "visible", timeout: 15000 });
   } catch {
-    halt("u3_home_asks", productFault("System Settings #identity-menu-system"));
+    halt(failName, productFault("System Settings #identity-menu-system"));
   }
   await systemItem.click();
   const iframe = shell.locator('[data-target="system"] iframe.window-frame');
   try {
     await iframe.waitFor({ state: "attached", timeout: 30000 });
   } catch {
-    halt("u3_home_asks", productFault("System window"));
+    halt(failName, productFault("System window"));
   }
   const deadline = Date.now() + 20000;
   let token = "";
@@ -1980,20 +2646,130 @@ async function openOwnerSystem() {
     token = await readSystemFrameToken();
     if (!token) await sleep(200);
   }
-  if (!token) halt("u3_home_asks", productFault("System launch token in the page frame"));
+  if (!token) halt(failName, productFault("System launch token in the page frame"));
   const system = systemFrame();
   const locked = system.locator("#system-locked");
   if (await locked.isVisible().catch(() => false)) {
-    halt("u3_home_asks", productFault("System page (it says Open from Home)"));
+    halt(failName, productFault("System page (it says Open from Home)"));
   }
   const agentsTab = system.locator('.settings-sidebar-item[data-settings="agents"]');
   try {
     await agentsTab.waitFor({ state: "visible", timeout: 30000 });
   } catch {
-    halt("u3_home_asks", productFault("Agents section"));
+    halt(failName, productFault("Agents section"));
   }
   await agentsTab.click();
   return system;
+}
+
+async function reopenSystem(failName) {
+  const shell = shellFrame();
+  const closer = shell.locator("[data-target='system'] [data-action='close']");
+  if (await closer.count()) {
+    await closer.first().click().catch(() => {});
+    await shell.locator("[data-target='system']").waitFor({ state: "detached", timeout: 8000 }).catch(() => {});
+  }
+  return openOwnerSystem(failName, true);
+}
+
+function inboxFrame() {
+  return shellFrame().frameLocator("#inbox-rail-frame");
+}
+
+async function openInboxRail(failName) {
+  const shell = shellFrame();
+  const button = shell.locator("#toolbar-inbox");
+  try {
+    await button.waitFor({ state: "visible", timeout: 20000 });
+  } catch (error) {
+    halt(failName, productFault(`Inbox #toolbar-inbox (${error.message})`));
+  }
+  const already = (await button.getAttribute("aria-expanded")) === "true";
+  if (!already) await button.click();
+  const frame = shell.locator("#inbox-rail-frame");
+  try {
+    await frame.waitFor({ state: "visible", timeout: 20000 });
+  } catch (error) {
+    halt(failName, productFault(`Inbox rail (${error.message})`));
+  }
+  if (already) {
+    const refresh = shell.locator("#inbox-rail-refresh");
+    if (await refresh.isVisible().catch(() => false)) await refresh.click();
+  }
+  return inboxFrame();
+}
+
+async function pageInboxPost(actionId, failName, timeout = 60000) {
+  const inbox = await openInboxRail(failName);
+  const button = inbox.locator(`[data-action-id="${actionId}"]`);
+  try {
+    await button.first().waitFor({ state: "visible", timeout: 90000 });
+  } catch (error) {
+    halt(failName, `${actionId} was not on the Inbox page: ${error.message}`);
+  }
+  const pending = adminPage.waitForResponse((response) => (
+    response.request().method() === "POST"
+    && response.url().includes("/api/apps/inbox/actions")
+    && (response.request().postData() || "").includes(actionId)
+  ), { timeout });
+  await button.first().click();
+  const response = await pending;
+  let body = null;
+  try { body = JSON.parse(response.request().postData() || ""); } catch { body = null; }
+  const result = await readBrowserResponse(response);
+  return { ...result, body };
+}
+
+async function pageAgentAction(agentId, label, pathSuffix, failName) {
+  const system = label === "Stop" ? await reopenSystem(failName) : await openOwnerSystem(failName);
+  const row = system.locator(".pc2-card-row").filter({
+    has: system.locator(`[data-agent-id="${agentId}"]`),
+  });
+  const button = row.getByRole("button", { name: label, exact: true });
+  try {
+    await button.waitFor({ state: "visible", timeout: 45000 });
+  } catch (error) {
+    const banner = await system.locator("#agents-status").innerText().catch(() => "");
+    halt(failName, `${label} was not shown: ${error.message} ${banner.slice(0, 180)}`);
+  }
+  const pending = adminPage.waitForResponse((response) => (
+    response.request().method() === "POST" && response.url().includes(pathSuffix)
+  ), { timeout: 120000 });
+  await button.click();
+  try {
+    return await readBrowserResponse(await pending);
+  } catch (error) {
+    const banner = await system.locator("#agents-status").innerText().catch(() => "");
+    halt(failName, `${label} did not answer: ${error.message} ${banner.slice(0, 180)}`);
+  }
+}
+
+async function proveInstalledPage() {
+  pageProof = pageFolderProof(root, data);
+  const carrier = noteCarrier();
+  const did = runtimeIdentityDid();
+  let verified = { ok: false, reason: "auth state missing", creates: [] };
+  try {
+    verified = verifyInstalledAudit(readJson(authStatePath()), did);
+  } catch (error) {
+    verified = { ok: false, reason: String(error.message || error), creates: [] };
+  }
+  const creates = Array.isArray(verified.creates) ? verified.creates : [];
+  const both = verified.ok && creates.includes(state.agentA) && creates.includes(state.agentB);
+  if (!pageProof?.ok || !carrier.ok || !both) {
+    mark("installed_page_proof", "fail", {
+      audit: verified.reason || "",
+      pages: pageProof?.ok ? pageProof.pages : pageProof,
+      carrier: carrier.reason || "",
+      creates: creates.length,
+    });
+    return;
+  }
+  pass("installed_page_proof", {
+    creates: creates.length,
+    pages: pageProof.pages,
+    carrier: CARRIER_MODE,
+  });
 }
 
 async function pagePost(pathSuffix) {
@@ -2662,9 +3438,12 @@ function scriptRoot() {
 
 function readAgentsInGateway() {
   const repo = scriptRoot();
+  const read = (rel) => fs.readFileSync(path.join(repo, rel), "utf8");
+  const api = "elastos/crates/elastos-server/src/api";
   return agentsInGatewayChange(
-    fs.readFileSync(path.join(repo, "elastos/crates/elastos-server/src/api/gateway.rs"), "utf8"),
-    fs.readFileSync(path.join(repo, "elastos/crates/elastos-server/src/api/gateway_agents.rs"), "utf8"),
+    `${read(`${api}/gateway.rs`)}\n${read(`${api}/gateway_inbox.rs`)}`,
+    read(`${api}/gateway_agents.rs`),
+    read(`${api}/gateway_home_runtime.rs`),
   );
 }
 

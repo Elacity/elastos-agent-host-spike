@@ -485,6 +485,8 @@ fn enabled_file(agents: Vec<StoredAgent>) -> AgentRecordsFile {
             at: 5,
         }),
         agents,
+        last_audit: None,
+        owed_stops: Vec::new(),
     }
 }
 
@@ -531,6 +533,35 @@ fn a_missing_file_means_no_agents() {
     assert!(!home.agent_file().exists(), "a load creates nothing");
 }
 
+/// The audit hash is the first write of this sequence, confirmation clear.
+/// The file on disk is the second write: the same sequence, mark set.
+fn promised_audit_reason(home: &Home, sequence: u64) -> String {
+    let mut file = loaded(home);
+    assert_eq!(
+        file.sequence, sequence,
+        "the confirmation does not raise the sequence"
+    );
+    let audit = file
+        .last_audit
+        .as_ref()
+        .expect("the sequence records its audit");
+    assert!(audit.confirmed);
+    assert_eq!(audit.sequence, sequence);
+    let stored = home.agent_bytes();
+    if let Some(audit) = file.last_audit.as_mut() {
+        audit.confirmed = false;
+    }
+    let promised = serde_json::to_vec_pretty(&file).unwrap();
+    assert_ne!(
+        promised, stored,
+        "the confirmation is a second write of the same sequence"
+    );
+    format!(
+        "seq={sequence} sha256={}",
+        hex::encode(Sha256::digest(&promised))
+    )
+}
+
 #[test]
 fn a_write_appends_one_audit_event_and_leaves_the_owner_file_otherwise_unchanged() {
     let home = Home::new();
@@ -539,7 +570,6 @@ fn a_write_appends_one_audit_event_and_leaves_the_owner_file_otherwise_unchanged
 
     enable(&home);
 
-    let bytes = home.agent_bytes();
     assert!(matches!(home.load(), AgentFile::Loaded(file) if file.sequence == 1));
     use std::os::unix::fs::PermissionsExt;
     let mode = std::fs::metadata(home.agent_file())
@@ -554,10 +584,7 @@ fn a_write_appends_one_audit_event_and_leaves_the_owner_file_otherwise_unchanged
     assert_eq!(event.event_type, "agent.records.enable");
     assert_eq!(event.principal_id.as_deref(), Some(OWNER_ID));
     assert_eq!(event.session_id.as_deref(), Some(SESSION_ID));
-    assert_eq!(
-        event.reason,
-        format!("seq=1 sha256={}", hex::encode(Sha256::digest(&bytes)))
-    );
+    assert_eq!(event.reason, promised_audit_reason(&home, 1));
     assert_eq!(
         home.owner_json_without_audit(),
         owner_before,
@@ -763,6 +790,54 @@ fn the_sequence_rises_by_exactly_one() {
         .map(|event| event.reason[..6].to_string())
         .collect();
     assert_eq!(reasons, ["seq=1 ", "seq=2 "]);
+}
+
+#[test]
+fn seq_ten_does_not_confirm_sequence_one() {
+    let home = Home::new();
+    crate::auth::append_audit_event(
+        home.dir.path(),
+        elastos_runtime::auth::RuntimeAuditEventV1 {
+            schema: elastos_runtime::auth::RuntimeAuditEventV1::SCHEMA.to_string(),
+            event_id: "audit:agent-records:10:aaaaaaaaaaaaaaaa".to_string(),
+            event_type: "agent.records.enable".to_string(),
+            principal_id: Some(OWNER_ID.to_string()),
+            proof_binding_id: None,
+            session_id: None,
+            challenge_id: None,
+            capsule_id: None,
+            result: "ok".to_string(),
+            reason: "seq=10 sha256=abcd".to_string(),
+            occurred_at: 1,
+            signer_did: None,
+            signature: None,
+        },
+    )
+    .unwrap();
+    let pending = LastAudit {
+        sequence: 1,
+        operation: "agent.records.enable".to_string(),
+        subject: OWNER_ID.to_string(),
+        proof_binding_id: "proof".to_string(),
+        session_id: "session".to_string(),
+        at: 2,
+        confirmed: false,
+    };
+    let rows = || {
+        crate::auth::load_auth_state(home.dir.path())
+            .unwrap()
+            .audit
+            .len()
+    };
+    let before = rows();
+    crate::agent_record_audit::repair_recorded_audit(home.dir.path(), &pending, b"file").unwrap();
+    assert_eq!(rows(), before + 1, "seq=10 does not stand in for seq=1");
+    crate::agent_record_audit::repair_recorded_audit(home.dir.path(), &pending, b"file").unwrap();
+    assert_eq!(
+        rows(),
+        before + 1,
+        "the repaired seq=1 row is not written twice"
+    );
 }
 
 #[test]
@@ -1273,7 +1348,7 @@ fn turn_on(home: &Home) {
 
 fn loaded(home: &Home) -> AgentRecordsFile {
     match home.load() {
-        AgentFile::Loaded(file) => file,
+        AgentFile::Loaded(file) => *file,
         other => panic!("the agent file did not load: {other:?}"),
     }
 }
@@ -1926,8 +2001,7 @@ fn a_create_leaves_one_record_and_one_protection_in_the_agent_file_only() {
         Some(home.owner.proof_binding_id.as_str())
     );
     assert_eq!(event.session_id.as_deref(), Some(SESSION_ID));
-    let digest = hex::encode(Sha256::digest(home.agent_bytes()));
-    assert_eq!(event.reason, format!("seq=2 sha256={digest}"));
+    assert_eq!(event.reason, promised_audit_reason(&home, 2));
     assert_eq!(events.len(), 2, "one event for enable and one for create");
 }
 
@@ -2242,6 +2316,457 @@ fn retire_happens_once_and_only_for_the_owner() {
         list_in_any_build(home.path(), &home.caller()).unwrap(),
         [retired]
     );
+}
+
+/// The tombstone is stored and the audit append fails. The next open under
+/// the agent lock appends that retire row once, and the second retire is
+/// already retired.
+#[test]
+fn a_lost_retire_row_is_appended_once_on_the_next_open() {
+    if crate::agents::require_build().is_err() {
+        return;
+    }
+    let home = Home::new();
+    turn_on(&home);
+    let agent = create_one(&home, "request-lost-retire");
+    crate::api::gateway::seams::arm_record_audit(home.path());
+    let failed = retire_in_any_build(home.path(), &home.caller(), &agent.agent_id, 11);
+    assert!(failed.is_err(), "the injected append failure must surface");
+    assert!(
+        home.agent_events()
+            .iter()
+            .all(|event| event.event_type != "agent.record.retire"),
+        "the failed append left no retire row"
+    );
+    let again = retire_in_any_build(home.path(), &home.caller(), &agent.agent_id, 12);
+    assert_eq!(refusal_of(again), ALREADY_RETIRED);
+    let retires: Vec<_> = home
+        .agent_events()
+        .into_iter()
+        .filter(|event| event.event_type == "agent.record.retire")
+        .collect();
+    assert_eq!(retires.len(), 1, "the repair appends the retire row once");
+    assert_eq!(
+        retires[0].principal_id.as_deref(),
+        Some(agent.agent_id.as_str())
+    );
+}
+
+/// Agent A is already retired and audited. Agent B's retire lands in the file
+/// and loses its audit row. The next open repairs B, and A's retire stays one row.
+#[test]
+fn a_lost_retire_repairs_the_agent_that_lost_its_row() {
+    if crate::agents::require_build().is_err() {
+        return;
+    }
+    let home = Home::new();
+    turn_on(&home);
+    let first = create_one(&home, "request-retire-a");
+    let second = create_one(&home, "request-retire-b");
+    retire_in_any_build(home.path(), &home.caller(), &first.agent_id, 11).unwrap();
+    let first_rows = home
+        .agent_events()
+        .into_iter()
+        .filter(|event| {
+            event.event_type == "agent.record.retire"
+                && event.principal_id.as_deref() == Some(first.agent_id.as_str())
+        })
+        .count();
+    crate::api::gateway::seams::arm_record_audit(home.path());
+    let failed = retire_in_any_build(home.path(), &home.caller(), &second.agent_id, 12);
+    assert!(failed.is_err(), "the injected append failure must surface");
+    let again = retire_in_any_build(home.path(), &home.caller(), &second.agent_id, 13);
+    assert_eq!(refusal_of(again), ALREADY_RETIRED);
+    let retires: Vec<_> = home
+        .agent_events()
+        .into_iter()
+        .filter(|event| event.event_type == "agent.record.retire")
+        .collect();
+    assert_eq!(
+        retires
+            .iter()
+            .filter(|event| event.principal_id.as_deref() == Some(first.agent_id.as_str()))
+            .count(),
+        first_rows,
+        "the earlier agent's retire is not written again"
+    );
+    assert_eq!(
+        retires
+            .iter()
+            .filter(|event| event.principal_id.as_deref() == Some(second.agent_id.as_str()))
+            .count(),
+        1,
+        "the lost row is the second agent's"
+    );
+    let file = loaded(&home);
+    let audit = file
+        .last_audit
+        .as_ref()
+        .expect("the sequence records its audit");
+    assert!(audit.confirmed);
+    assert_eq!(audit.subject, second.agent_id);
+    assert_eq!(audit.operation, "agent.record.retire");
+}
+
+#[test]
+fn an_off_agent_is_not_stored_for_its_root() {
+    if crate::agents::require_build().is_err() {
+        return;
+    }
+    let home = Home::new();
+    turn_on(&home);
+    let agent = create_one(&home, "request-off");
+    let _ =
+        crate::agents::set_active(home.path(), &home.caller(), &agent.agent_id, true, 10).unwrap();
+    let root =
+        crate::auth::principal_stored_localhost_root(Some(home.path()), &agent.agent_id).unwrap();
+    assert!(
+        crate::agents::stored_agent_for_root(home.path(), &agent.agent_id, &root)
+            .unwrap()
+            .is_some()
+    );
+    crate::agents::set_active(home.path(), &home.caller(), &agent.agent_id, false, 11).unwrap();
+    assert!(
+        crate::agents::stored_agent_for_root(home.path(), &agent.agent_id, &root)
+            .unwrap()
+            .is_none(),
+        "an off agent is not stored for its root"
+    );
+    assert!(crate::agents::refuse_inactive_agent(home.path(), &agent.agent_id).is_err());
+}
+
+/// A signed `stopping` row is still in the file after the process that wrote
+/// it is gone. The next read appends one `agent.stopped` result `ok` for that
+/// session, and a second read does not append another.
+#[test]
+fn a_stopping_row_is_confirmed_once_from_the_file() {
+    let home = Home::new();
+    let session = "session-stopping-confirm";
+    crate::agent_record_audit::append_agent_row(
+        home.path(),
+        elastos_runtime::auth::RuntimeAuditEventV1 {
+            schema: elastos_runtime::auth::RuntimeAuditEventV1::SCHEMA.to_string(),
+            event_id: "audit:stop-plant:1".to_string(),
+            event_type: "agent.stopped".to_string(),
+            principal_id: Some(home.owner.principal_id.clone()),
+            proof_binding_id: Some(home.owner.proof_binding_id.clone()),
+            session_id: Some(session.to_string()),
+            challenge_id: None,
+            capsule_id: None,
+            result: "stopping".to_string(),
+            reason: "planted stopping row".to_string(),
+            occurred_at: 10,
+            signer_did: None,
+            signature: None,
+        },
+    )
+    .unwrap();
+    crate::agent_record_audit::confirm_stopping_rows(home.path(), |_| true).unwrap();
+    let stopped: Vec<_> = home
+        .audit()
+        .into_iter()
+        .filter(|event| {
+            event.event_type == "agent.stopped" && event.session_id.as_deref() == Some(session)
+        })
+        .collect();
+    assert_eq!(
+        stopped.len(),
+        2,
+        "the file keeps the stopping row and one final row"
+    );
+    assert!(stopped.iter().any(|event| event.result == "stopping"));
+    assert_eq!(
+        stopped.iter().filter(|event| event.result == "ok").count(),
+        1
+    );
+    crate::agent_record_audit::confirm_stopping_rows(home.path(), |_| true).unwrap();
+    let finals = home
+        .audit()
+        .into_iter()
+        .filter(|event| {
+            event.event_type == "agent.stopped"
+                && event.session_id.as_deref() == Some(session)
+                && event.result == "ok"
+        })
+        .count();
+    assert_eq!(finals, 1, "a second read does not append another final row");
+}
+
+/// A session the plane still holds is not signed `ok`. The same file confirms
+/// once the caller says the session has ended.
+#[test]
+fn a_stopping_row_stays_open_while_the_session_has_not_ended() {
+    let home = Home::new();
+    let session = "session-still-running";
+    crate::agent_record_audit::append_agent_row(
+        home.path(),
+        elastos_runtime::auth::RuntimeAuditEventV1 {
+            schema: elastos_runtime::auth::RuntimeAuditEventV1::SCHEMA.to_string(),
+            event_id: "audit:stop-plant:live".to_string(),
+            event_type: "agent.stopped".to_string(),
+            principal_id: Some(home.owner.principal_id.clone()),
+            proof_binding_id: Some(home.owner.proof_binding_id.clone()),
+            session_id: Some(session.to_string()),
+            challenge_id: None,
+            capsule_id: None,
+            result: "stopping".to_string(),
+            reason: "planted live stopping row".to_string(),
+            occurred_at: 10,
+            signer_did: None,
+            signature: None,
+        },
+    )
+    .unwrap();
+    crate::agent_record_audit::confirm_stopping_rows(home.path(), |_| false).unwrap();
+    let ok = |home: &Home| {
+        home.audit()
+            .into_iter()
+            .filter(|event| {
+                event.event_type == "agent.stopped"
+                    && event.session_id.as_deref() == Some(session)
+                    && event.result == "ok"
+            })
+            .count()
+    };
+    assert_eq!(ok(&home), 0, "a live session is not confirmed");
+    crate::agent_record_audit::confirm_stopping_rows(home.path(), |_| true).unwrap();
+    assert_eq!(ok(&home), 1, "the ended session is confirmed once");
+    crate::agent_record_audit::confirm_stopping_rows(home.path(), |_| true).unwrap();
+    assert_eq!(ok(&home), 1, "a second confirm does not append another ok");
+}
+
+/// A failed stop is owed a retry only until that agent's next started run.
+#[test]
+fn a_later_started_run_clears_a_failed_stop() {
+    let home = Home::new();
+    let row = |id: &str, event_type: &str, result: &str| {
+        crate::agent_record_audit::append_agent_row(
+            home.path(),
+            elastos_runtime::auth::RuntimeAuditEventV1 {
+                schema: elastos_runtime::auth::RuntimeAuditEventV1::SCHEMA.to_string(),
+                event_id: format!("audit:retry-plant:{id}"),
+                event_type: event_type.to_string(),
+                principal_id: Some(home.owner.principal_id.clone()),
+                proof_binding_id: Some(home.owner.proof_binding_id.clone()),
+                session_id: None,
+                challenge_id: None,
+                capsule_id: None,
+                result: result.to_string(),
+                reason: serde_json::json!({ "agent_id": "agent-a", "cause": "owner demoted" })
+                    .to_string(),
+                occurred_at: 10,
+                signer_did: None,
+                signature: None,
+            },
+        )
+        .unwrap();
+    };
+    let owed =
+        |home: &Home| crate::agent_record_audit::latest_failed_agent_stops(home.path()).len();
+    row("1", "agent.stopped", "failed");
+    assert_eq!(owed(&home), 1);
+    row("2", "agent.start.completed", "failed");
+    assert_eq!(owed(&home), 1, "a failed start is not a new run");
+    row("3", "agent.start.completed", "ok");
+    assert_eq!(
+        owed(&home),
+        0,
+        "a started run is not the one the stop was about"
+    );
+    row("4", "agent.stopped", "failed");
+    assert_eq!(owed(&home), 1, "a later failed stop is owed again");
+}
+
+fn stop_plant(home: &Home, id: &str, event_type: &str, result: &str) -> RuntimeAuditEventV1 {
+    RuntimeAuditEventV1 {
+        schema: RuntimeAuditEventV1::SCHEMA.to_string(),
+        event_id: format!("audit:owed-plant:{id}"),
+        event_type: event_type.to_string(),
+        principal_id: Some(home.owner.principal_id.clone()),
+        proof_binding_id: Some(home.owner.proof_binding_id.clone()),
+        session_id: Some("session-owed".to_string()),
+        challenge_id: None,
+        capsule_id: None,
+        result: result.to_string(),
+        reason: serde_json::json!({ "agent_id": "agent-owed", "cause": "owner" }).to_string(),
+        occurred_at: crate::auth::now_ts(),
+        signer_did: None,
+        signature: None,
+    }
+}
+
+fn signed_rows(home: &Home, result: &str) -> usize {
+    home.audit()
+        .into_iter()
+        .filter(|event| event.event_type == "agent.stopped" && event.result == result)
+        .count()
+}
+
+/// The owed-stop write comes first. Its failure is the answer, and no signed
+/// row exists for a stop the agent file does not hold.
+#[test]
+fn a_failed_owed_stop_write_is_reported_and_signs_nothing() {
+    let home = Home::new();
+    let fault = fail_spend_file_write();
+    let error = crate::agent_record_audit::append_agent_row(
+        home.path(),
+        stop_plant(&home, "1", "agent.stopped", "stopping"),
+    )
+    .unwrap_err();
+    drop(fault);
+    assert!(error.to_string().contains(CANNOT_WRITE), "{error:#}");
+    assert_eq!(signed_rows(&home, "stopping"), 0);
+    assert!(crate::agents::owed_stop_rows(home.path()).is_empty());
+}
+
+/// A crash after the owed row and before its signed row: the next start
+/// signs that row once, and the stopping session settles once.
+#[test]
+fn a_crash_before_the_signed_stop_row_settles_once_after_restart() {
+    let home = Home::new();
+    let stopping = stop_plant(&home, "2", "agent.stopped", "stopping");
+    crate::agents::note_stop_rows(home.path(), std::slice::from_ref(&stopping)).unwrap();
+    assert_eq!(signed_rows(&home, "stopping"), 0);
+    for _ in 0..2 {
+        crate::agent_record_audit::reconcile_owed_stops(home.path()).unwrap();
+        crate::agent_record_audit::confirm_stopping_rows(home.path(), |_| true).unwrap();
+    }
+    assert_eq!(signed_rows(&home, "stopping"), 1);
+    assert_eq!(signed_rows(&home, "ok"), 1);
+    assert!(crate::agents::owed_stop_rows(home.path()).is_empty());
+}
+
+/// A crash after a settling row cleared the file and before that row was
+/// signed: the next start owes the signed open stop again, once.
+#[test]
+fn a_crash_before_the_signed_settle_owes_the_stop_again() {
+    let home = Home::new();
+    for (id, result) in [("3", "stopping"), ("4", "failed")] {
+        crate::agent_record_audit::append_agent_row(
+            home.path(),
+            stop_plant(&home, id, "agent.stopped", result),
+        )
+        .unwrap();
+    }
+    let started = stop_plant(&home, "5", "agent.start.completed", "ok");
+    crate::agents::note_stop_rows(home.path(), std::slice::from_ref(&started)).unwrap();
+    assert!(crate::agents::owed_stop_rows(home.path()).is_empty());
+    for _ in 0..2 {
+        crate::agent_record_audit::reconcile_owed_stops(home.path()).unwrap();
+    }
+    let owed = crate::agents::owed_stop_rows(home.path());
+    assert_eq!(owed.len(), 1, "{owed:?}");
+    assert_eq!(owed[0].result, "failed");
+    assert_eq!(
+        crate::agent_record_audit::latest_failed_agent_stops(home.path()).len(),
+        1
+    );
+}
+
+/// The `ok` stop is signed and the process dies before the owed `stopping`
+/// row is cleared. Restart signs no later `stopping` row for that session.
+#[test]
+fn a_restart_does_not_sign_stopping_after_a_landed_ok() {
+    let home = Home::new();
+    let stopping = stop_plant(&home, "landed-open", "agent.stopped", "stopping");
+    crate::agents::note_stop_rows(home.path(), std::slice::from_ref(&stopping)).unwrap();
+    let ok = stop_plant(&home, "landed-ok", "agent.stopped", "ok");
+    crate::api::gateway::seams::arm_grant_kind(home.path(), "after-signed-stop");
+    let crashed = crate::agent_record_audit::append_agent_row(home.path(), ok);
+    assert!(
+        crashed.is_err(),
+        "the crash after the signed ok did not fire"
+    );
+    assert_eq!(signed_rows(&home, "ok"), 1);
+    assert_eq!(signed_rows(&home, "stopping"), 0);
+    assert!(
+        crate::agents::owed_stop_rows(home.path())
+            .iter()
+            .any(|row| row.result == "stopping"),
+        "the owed stop was cleared before the crash"
+    );
+    for _ in 0..2 {
+        crate::agent_record_audit::reconcile_owed_stops(home.path()).unwrap();
+        crate::agent_record_audit::confirm_stopping_rows(home.path(), |_| true).unwrap();
+    }
+    assert_eq!(signed_rows(&home, "ok"), 1, "restart appended another ok");
+    assert_eq!(
+        signed_rows(&home, "stopping"),
+        0,
+        "restart signed stopping after ok"
+    );
+    assert!(crate::agents::owed_stop_rows(home.path()).is_empty());
+}
+
+/// The landed `ok` has rolled off the anchor. Reconcile drops the owed
+/// `stopping` row and does not sign it.
+#[test]
+fn a_reconcile_drops_a_stopping_row_whose_ok_rolled_off() {
+    let home = Home::new();
+    let stopping = stop_plant(&home, "rolled-open", "agent.stopped", "stopping");
+    crate::agents::note_stop_rows(home.path(), std::slice::from_ref(&stopping)).unwrap();
+    let ok = stop_plant(&home, "rolled-ok", "agent.stopped", "ok");
+    crate::api::gateway::seams::arm_grant_kind(home.path(), "after-signed-stop");
+    assert!(crate::agent_record_audit::append_agent_row(home.path(), ok).is_err());
+    for index in 0..600 {
+        crate::auth::append_audit_event(
+            home.path(),
+            RuntimeAuditEventV1 {
+                schema: RuntimeAuditEventV1::SCHEMA.to_string(),
+                event_id: format!("audit:pad:{index}"),
+                event_type: "audit.pad".to_string(),
+                principal_id: Some(home.owner.principal_id.clone()),
+                proof_binding_id: None,
+                session_id: None,
+                challenge_id: None,
+                capsule_id: None,
+                result: "ok".to_string(),
+                reason: "pad".to_string(),
+                occurred_at: crate::auth::now_ts(),
+                signer_did: None,
+                signature: None,
+            },
+        )
+        .unwrap();
+    }
+    let state = crate::auth::load_auth_state(home.path()).unwrap();
+    assert!(state.audit_chain_anchor.is_some(), "the chain did not roll");
+    assert_eq!(
+        signed_rows(&home, "ok"),
+        0,
+        "the pad did not roll the ok off"
+    );
+    crate::agent_record_audit::reconcile_owed_stops(home.path()).unwrap();
+    assert_eq!(
+        signed_rows(&home, "stopping"),
+        0,
+        "reconcile signed stopping after the rolled-off ok"
+    );
+    assert!(
+        crate::agents::owed_stop_rows(home.path()).is_empty(),
+        "reconcile left the owed stop"
+    );
+}
+
+/// A `failed` stop is already in the kept chain. Reconcile does not sign the
+/// owed `stopping` row after it.
+#[test]
+fn a_reconcile_drops_a_stopping_row_after_a_landed_failed() {
+    let home = Home::new();
+    let stopping = stop_plant(&home, "failed-open", "agent.stopped", "stopping");
+    crate::agents::note_stop_rows(home.path(), std::slice::from_ref(&stopping)).unwrap();
+    let failed = stop_plant(&home, "failed-landed", "agent.stopped", "failed");
+    crate::auth::append_audit_event(home.path(), failed).unwrap();
+    crate::agent_record_audit::reconcile_owed_stops(home.path()).unwrap();
+    assert_eq!(signed_rows(&home, "failed"), 1);
+    assert_eq!(
+        signed_rows(&home, "stopping"),
+        0,
+        "reconcile signed stopping after failed"
+    );
+    assert!(crate::agents::owed_stop_rows(home.path())
+        .iter()
+        .all(|row| row.result != "stopping"));
 }
 
 #[test]
@@ -2990,6 +3515,12 @@ fn production_sources(dir: &Path, found: &mut Vec<(PathBuf, String)>) {
 }
 
 #[test]
+fn a_failed_owner_read_is_named() {
+    let name: fn(&Path) = fail_owner_admin_read;
+    let _ = name;
+}
+
+#[test]
 fn the_cargo_feature_is_read_in_one_place() {
     let mut sources = Vec::new();
     production_sources(
@@ -3007,6 +3538,12 @@ fn the_cargo_feature_is_read_in_one_place() {
         .filter(|(_, count)| *count > 0)
         .collect();
     assert_eq!(readers, [("agents.rs".to_string(), 1)]);
+}
+
+#[test]
+fn a_direct_demote_with_no_agents_does_not_run_a_stop() {
+    let dir = tempfile::tempdir().unwrap();
+    crate::agents::notify_owner_demoted(dir.path(), "nobody");
 }
 
 #[test]
@@ -3122,17 +3659,26 @@ fn an_older_build_refuses_a_spent_file_by_name_and_home_still_loads() {
     })
     .unwrap();
     let field_less = home.agent_bytes();
+    let field_less_text = std::str::from_utf8(&field_less).unwrap();
     assert!(
-        !std::str::from_utf8(&field_less)
-            .unwrap()
-            .contains("model_tokens_spent"),
+        !field_less_text.contains("model_tokens_spent"),
         "a zero total is absent from the file"
+    );
+    assert!(
+        field_less_text.contains("last_audit"),
+        "a write records the one-way audit field"
     );
     assert!(
         parse_strict(&field_less).is_ok(),
         "this build accepts the field-less file"
     );
-    assert_eq!(frozen_older_agent_parser(&field_less), Ok(()));
+    // last_audit is one-way. The frozen parser refuses a file that carries it
+    // before any spend. Stripping that field leaves the older shape.
+    assert_eq!(frozen_older_agent_parser(&field_less), Err(NOT_OUR_FORM));
+    let mut older_shape = serde_json::from_slice::<Value>(&field_less).unwrap();
+    older_shape.as_object_mut().unwrap().remove("last_audit");
+    let older_shape = serde_json::to_vec(&older_shape).unwrap();
+    assert_eq!(frozen_older_agent_parser(&older_shape), Ok(()));
     allow_dispatch_spend(home.path());
     charge_model_spend(home.path(), OWNER_ID, &agent.agent_id, (0, 0), 1, 64, None).unwrap();
     let bytes = home.agent_bytes();
@@ -3140,12 +3686,18 @@ fn an_older_build_refuses_a_spent_file_by_name_and_home_still_loads() {
         .unwrap()
         .contains("model_tokens_spent"));
     assert_eq!(frozen_older_agent_parser(&bytes), Err(NOT_OUR_FORM));
-    let mut without = serde_json::from_slice::<Value>(&bytes).unwrap();
-    without["agents"][0]
+    let mut without_spend = serde_json::from_slice::<Value>(&bytes).unwrap();
+    without_spend["agents"][0]
         .as_object_mut()
         .unwrap()
         .remove("model_tokens_spent");
-    let without = serde_json::to_vec(&without).unwrap();
+    let spent_only_removed = serde_json::to_vec(&without_spend).unwrap();
+    assert_eq!(
+        frozen_older_agent_parser(&spent_only_removed),
+        Err(NOT_OUR_FORM)
+    );
+    without_spend.as_object_mut().unwrap().remove("last_audit");
+    let without = serde_json::to_vec(&without_spend).unwrap();
     assert_eq!(frozen_older_agent_parser(&without), Ok(()));
     assert!(
         parse_strict(&without).is_ok(),

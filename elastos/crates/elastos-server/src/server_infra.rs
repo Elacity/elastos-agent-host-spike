@@ -3237,6 +3237,8 @@ fn main() {
                 ready_tx: Some(ready_tx),
                 attach_secret: Some(secret.clone()),
                 host_helpers: Vec::new(),
+                agents_only: false,
+                listener: None,
             },
         ));
         ready_rx
@@ -6614,7 +6616,7 @@ fn main() {
         let settled = settle::settle_and_revoke(
             &pending,
             &manager,
-            data_dir.path(),
+            Some(data_dir.path()),
             "ended-capsule",
             "trapped",
         )

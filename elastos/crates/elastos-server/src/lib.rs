@@ -5,6 +5,7 @@
 //! The security-critical runtime logic lives in `elastos-runtime`.
 
 pub(crate) mod agent_admission;
+pub(crate) mod agent_record_audit;
 pub(crate) mod agents;
 pub mod api;
 pub mod auth;

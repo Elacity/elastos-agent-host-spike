@@ -1106,13 +1106,17 @@ async fn passkey_revoke_inner(
     let manager = state.identity_manager()?;
     let mut manager = manager.lock().await;
     let now = crate::auth::now_ts();
-    crate::auth::revoke_passkey_for_actor(
+    let actor_record =
+        crate::auth::load_principal_for_proof_binding(&state.data_dir, actor_proof_binding_id)?;
+    let gate = super::gateway::grant_answer_gate().lock().await;
+    let revoked = crate::auth::revoke_passkey_for_actor(
         &state.data_dir,
         context.principal_id(),
         actor_proof_binding_id,
         &proof_binding_id,
         now,
     )?;
+    drop(gate);
     // The credential follows the committed revocation; when an earlier
     // attempt already removed it, there is nothing left to do.
     if let Some(credential_id) = manager
@@ -1138,6 +1142,20 @@ async fn passkey_revoke_inner(
             ..AuditEventInput::default()
         }),
     )?;
+    match crate::agents::owner_is_admin_now(&state.data_dir, &revoked.principal_id) {
+        Ok(false) => {
+            super::gateway::stop_agents_after_admin_lost(
+                &state.data_dir,
+                &context,
+                &actor_record,
+                &revoked.principal_id,
+                "passkey revoked",
+            )
+            .await?;
+        }
+        Ok(true) => {}
+        Err(error) => return Err(error),
+    }
 
     let clear_current_cookie = context.proof_binding_id() == Some(proof_binding_id.as_str());
     Ok((
@@ -1218,12 +1236,15 @@ async fn passkey_demote_guest_inner(
     }
 
     let now = crate::auth::now_ts();
+    // An Inbox approval reads the owner's role under this same gate.
+    let gate = super::gateway::grant_answer_gate().lock().await;
     let demoted = crate::auth::demote_passkey_to_guest(&state.data_dir, &proof_binding_id, now)?;
-    crate::auth::append_audit_event(
+    drop(gate);
+    let audited = crate::auth::append_audit_event(
         &state.data_dir,
         audit_event(AuditEventInput {
             event_type: "auth.passkey.demoted",
-            principal_id: Some(actor.principal_id),
+            principal_id: Some(actor.principal_id.clone()),
             proof_binding_id: Some(demoted.proof_binding_id.clone()),
             session_id: Some(context.session_id().to_string()),
             result: "ok",
@@ -1231,7 +1252,17 @@ async fn passkey_demote_guest_inner(
             occurred_at: now,
             ..AuditEventInput::default()
         }),
-    )?;
+    );
+    let stopped = super::gateway::stop_agents_after_admin_lost(
+        &state.data_dir,
+        &context,
+        &actor,
+        &demoted.principal_id,
+        "owner demoted",
+    )
+    .await;
+    audited?;
+    stopped?;
 
     Ok(PasskeyDemoteResponse {
         status: "demoted".to_string(),

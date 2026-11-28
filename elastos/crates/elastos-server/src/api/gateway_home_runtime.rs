@@ -655,7 +655,44 @@ struct RuntimeAgentLaunchResponse {
     status: String,
 }
 
-/// Ask the live Home Runtime to start one agent. `capsule_dir` is the
+/// The runtime that runs the agent. That is the agent plane in this process.
+/// When the plane is down, Start is refused by name and no plan is created.
+/// A plane task that has ended is named. A listener that has ended while this
+/// process still runs the guest is not an ended guest.
+async fn live_agent_coords(
+    data_dir: &FsPath,
+) -> anyhow::Result<crate::runtime_control::RuntimeCoords> {
+    if let Some(name) = crate::api::agent_plane::task_fault(data_dir) {
+        anyhow::bail!(name);
+    }
+    if let Some(coords) = crate::api::agent_plane::live_coords(data_dir).await {
+        return Ok(coords);
+    }
+    anyhow::bail!("agent runtime is not running")
+}
+
+/// The short cause a failed launch carries in the signed row and the
+/// answer. The runtime's own detail can name host paths, so it stays in
+/// the log and never travels into the signed chain or the response.
+const RUNTIME_LAUNCH_FAILURE_CAUSE: &str = "the runtime did not start the agent host";
+
+/// A 409 body is returned only when it is one of the Runtime's own refusal
+/// sentences. Any other body, including one that names a path, becomes the
+/// short cause.
+fn launch_conflict_sentence(body: &str) -> &'static str {
+    if body == crate::runtime::Runtime::AGENT_STOPPING {
+        return crate::runtime::Runtime::AGENT_STOPPING;
+    }
+    if body == crate::runtime::Runtime::AGENT_ALREADY_RUNNING {
+        return crate::runtime::Runtime::AGENT_ALREADY_RUNNING;
+    }
+    if body == crate::resource_bridge::PLAN_WAIT_FULL {
+        return crate::resource_bridge::PLAN_WAIT_FULL;
+    }
+    RUNTIME_LAUNCH_FAILURE_CAUSE
+}
+
+/// Ask the live agent plane to start one agent. `capsule_dir` is the
 /// directory `verify_agent_host` already checked. The grant was minted by the
 /// caller after the passkey step-up was consumed.
 pub(super) async fn launch_runtime_agent(
@@ -664,9 +701,17 @@ pub(super) async fn launch_runtime_agent(
     agent_id: &str,
     launch_grant: &str,
 ) -> anyhow::Result<StartedRuntimeAgent> {
-    let coords = load_live_runtime_coords(data_dir)
-        .await
-        .ok_or_else(|| anyhow::anyhow!("local runtime is not running"))?;
+    let coords = match live_agent_coords(data_dir).await {
+        Ok(coords) => coords,
+        Err(error) => {
+            let text = error.to_string();
+            if text == "agent runtime is not running" || text == crate::api::agent_plane::TASK_ENDED
+            {
+                return Err(crate::agents::Refused(text).into());
+            }
+            return Err(error);
+        }
+    };
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(60))
         .build()?;
@@ -687,25 +732,32 @@ pub(super) async fn launch_runtime_agent(
     if status == StatusCode::CONFLICT {
         let text = response.text().await.unwrap_or_default();
         let trimmed = text.trim();
-        if trimmed == crate::runtime::Runtime::AGENT_STOPPING {
+        let sentence = launch_conflict_sentence(trimmed);
+        if sentence == crate::runtime::Runtime::AGENT_STOPPING {
             return Err(crate::agents::CodedRefusal {
                 code: "agent_stopping",
                 reason: "this agent is stopping",
             }
             .into());
         }
-        if trimmed == crate::runtime::Runtime::AGENT_ALREADY_RUNNING {
+        if sentence == crate::runtime::Runtime::AGENT_ALREADY_RUNNING {
             return Err(crate::agents::CodedRefusal {
                 code: "agent_already_running",
                 reason: "this agent is already running",
             }
             .into());
         }
-        return Err(crate::agents::Refused(trimmed.to_string()).into());
+        if sentence != RUNTIME_LAUNCH_FAILURE_CAUSE {
+            return Err(crate::agents::Refused(sentence.to_string()).into());
+        }
+        tracing::warn!("runtime launch refused ({status}): {trimmed}");
+        return Err(crate::agents::Refused(RUNTIME_LAUNCH_FAILURE_CAUSE.to_string()).into());
     }
     if !status.is_success() {
-        let text = response.text().await.unwrap_or_default();
-        anyhow::bail!("runtime launch failed ({}): {}", status, text.trim());
+        let detail = response.text().await.unwrap_or_default();
+        // The body can name a bundle root. It stays in this log.
+        tracing::warn!("runtime launch failed ({status}): {detail}");
+        anyhow::bail!("runtime launch failed ({status}): {RUNTIME_LAUNCH_FAILURE_CAUSE}");
     }
     let payload = response.json::<RuntimeAgentLaunchResponse>().await?;
     Ok(StartedRuntimeAgent {
@@ -716,10 +768,12 @@ pub(super) async fn launch_runtime_agent(
 }
 
 /// One session the Runtime stopped. The hop sends the agent id and nothing
-/// else: the Runtime chooses the row by that principal.
+/// else: the Runtime chooses the row by that principal. `ended` is that
+/// row's `ended_at`: the signed stop says `ok` only when this is set.
 pub(super) struct StoppedRuntimeAgent {
     pub(super) session_id: String,
     pub(super) status: String,
+    pub(super) ended: bool,
 }
 
 /// What the Runtime's stop route answered. `already` is set when the route
@@ -730,6 +784,7 @@ pub(super) struct UnknownRuntimeStep {
     pub(super) outcome: String,
 }
 
+#[derive(Default)]
 pub(super) struct RuntimeAgentStop {
     pub(super) stopped: Vec<StoppedRuntimeAgent>,
     pub(super) stopping: Vec<StoppedRuntimeAgent>,
@@ -753,6 +808,21 @@ struct RuntimeAgentStopResponse {
 struct RuntimeStoppedSession {
     session_id: String,
     status: String,
+    /// `ended_at` was set. Absent means this answer did not say.
+    #[serde(default)]
+    ended: bool,
+}
+
+/// The body the gateway sends the Runtime's stop route. The owner's Stop
+/// names the agent only; the settle path of a Start also names the one
+/// session its own Start made.
+#[derive(Serialize)]
+struct RuntimeAgentStopRequest<'a> {
+    agent_id: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    session_id: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cause: Option<&'a str>,
 }
 
 #[derive(Deserialize)]
@@ -767,10 +837,41 @@ fn unknown_step_outcome() -> String {
     "unknown".to_string()
 }
 
+fn runtime_stop_from_guests(
+    agent_id: &str,
+    session_id: Option<&str>,
+    guests: Vec<crate::api::agent_plane::EndedGuest>,
+) -> RuntimeAgentStop {
+    let mut outcome = RuntimeAgentStop::default();
+    for guest in guests {
+        if guest.agent_id != agent_id {
+            continue;
+        }
+        if session_id.is_some_and(|id| id != guest.session_id) {
+            continue;
+        }
+        let row = StoppedRuntimeAgent {
+            session_id: guest.session_id,
+            status: guest.status,
+            ended: guest.ended,
+        };
+        if guest.ended && !guest.effect_inflight {
+            outcome.stopped.push(row);
+        } else {
+            outcome.stopping.push(row);
+        }
+    }
+    if outcome.stopped.is_empty() && outcome.stopping.is_empty() {
+        outcome.already = Some("ended".to_string());
+    }
+    outcome
+}
+
 fn stopped_agent(session: RuntimeStoppedSession) -> StoppedRuntimeAgent {
     StoppedRuntimeAgent {
         session_id: session.session_id,
         status: session.status,
+        ended: session.ended,
     }
 }
 
@@ -780,9 +881,99 @@ pub(super) async fn stop_runtime_agent(
     data_dir: &FsPath,
     agent_id: &str,
 ) -> anyhow::Result<RuntimeAgentStop> {
-    let coords = load_live_runtime_coords(data_dir)
-        .await
-        .ok_or_else(|| anyhow::anyhow!("local runtime is not running"))?;
+    stop_runtime_agent_rows(data_dir, agent_id, None, None).await
+}
+
+/// Stop, and deny this agent's waiting asks as `cause` in that same step.
+pub(super) async fn stop_runtime_agent_for_cause(
+    data_dir: &FsPath,
+    agent_id: &str,
+    cause: &str,
+) -> anyhow::Result<RuntimeAgentStop> {
+    stop_runtime_agent_rows(data_dir, agent_id, None, Some(cause)).await
+}
+
+/// Ask the agent Runtime to stop one session of this agent, named by
+/// session id: the Runtime stops only the row whose session this is, so an
+/// earlier session of the same agent, which already has its own completion
+/// row, stays up. The settle path of a Start ends only the guest its own
+/// Start made. The coordinates are the agent plane's, the same hop Stop uses.
+pub(super) async fn stop_runtime_agent_session(
+    data_dir: &FsPath,
+    agent_id: &str,
+    session_id: &str,
+) -> anyhow::Result<RuntimeAgentStop> {
+    stop_runtime_agent_rows(data_dir, agent_id, Some(session_id), None).await
+}
+
+/// The listener is gone. Stop this agent through `stop_and_settle`. Sessions
+/// the panic path already ended stay in the result when that stop finds none.
+async fn stop_held_plane(
+    data_dir: &FsPath,
+    agent_id: &str,
+    session_id: Option<&str>,
+    cause: Option<&str>,
+    gone: anyhow::Error,
+) -> anyhow::Result<RuntimeAgentStop> {
+    let body = serde_json::to_vec(&RuntimeAgentStopRequest {
+        agent_id,
+        session_id,
+        cause,
+    })?;
+    let task_ended = gone.to_string() == crate::api::agent_plane::TASK_ENDED;
+    let answer = crate::api::agent_plane::stop_on_retiring(data_dir, body).await;
+    let missed = answer
+        .as_ref()
+        .is_none_or(|response| response.status() == StatusCode::NOT_FOUND);
+    if task_ended && missed {
+        let remembered = panic_ended_for(data_dir, agent_id, session_id).await;
+        if !remembered.stopped.is_empty() || !remembered.stopping.is_empty() {
+            return Ok(remembered);
+        }
+        return Ok(RuntimeAgentStop {
+            already: Some("ended".to_string()),
+            ..RuntimeAgentStop::default()
+        });
+    }
+    stop_answer(answer.ok_or(gone)?).await
+}
+
+async fn panic_ended_for(
+    data_dir: &FsPath,
+    agent_id: &str,
+    session_id: Option<&str>,
+) -> RuntimeAgentStop {
+    let runtime = crate::api::agent_plane::plane_runtime(data_dir);
+    let mut guests = crate::api::agent_plane::ended_guests(data_dir);
+    if let Some(runtime) = runtime.as_ref() {
+        for guest in &mut guests {
+            guest.effect_inflight = runtime.plan_effect_inflight(&guest.session_id);
+            let seen = runtime.get_capsule(&guest.session_id).await;
+            (guest.status, guest.ended) = match seen {
+                Some(info) => (info.status, info.ended_at.is_some()),
+                None => (crate::runtime::CAPSULE_STOPPED.to_string(), true),
+            };
+        }
+    }
+    runtime_stop_from_guests(agent_id, session_id, guests)
+}
+
+async fn stop_runtime_agent_rows(
+    data_dir: &FsPath,
+    agent_id: &str,
+    session_id: Option<&str>,
+    cause: Option<&str>,
+) -> anyhow::Result<RuntimeAgentStop> {
+    let coords = match live_agent_coords(data_dir).await {
+        Ok(coords) => coords,
+        Err(error)
+            if error.to_string() == crate::api::agent_plane::TASK_ENDED
+                || error.to_string() == "agent runtime is not running" =>
+        {
+            return stop_held_plane(data_dir, agent_id, session_id, cause, error).await;
+        }
+        Err(error) => return Err(error),
+    };
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(60))
         .build()?;
@@ -792,9 +983,17 @@ pub(super) async fn stop_runtime_agent(
     let response = client
         .post(format!("{}/api/capsules/stop-agent", coords.api_url))
         .header(AUTHORIZATION, format!("Bearer {shell}"))
-        .json(&serde_json::json!({ "agent_id": agent_id }))
+        .json(&RuntimeAgentStopRequest {
+            agent_id,
+            session_id,
+            cause,
+        })
         .send()
         .await?;
+    stop_answer(response).await
+}
+
+async fn stop_answer(response: reqwest::Response) -> anyhow::Result<RuntimeAgentStop> {
     let status = response.status();
     if !status.is_success() {
         let text = response.text().await.unwrap_or_default();
@@ -2149,6 +2348,26 @@ async fn home_list_runtime_capsules(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_launch_conflict_passes_only_the_known_sentences() {
+        assert_eq!(
+            launch_conflict_sentence("this agent is already running"),
+            "this agent is already running"
+        );
+        assert_eq!(
+            launch_conflict_sentence("this agent is stopping"),
+            "this agent is stopping"
+        );
+        assert_eq!(
+            launch_conflict_sentence(crate::resource_bridge::PLAN_WAIT_FULL),
+            crate::resource_bridge::PLAN_WAIT_FULL
+        );
+        assert_eq!(
+            launch_conflict_sentence("refused /tmp/home/agent"),
+            RUNTIME_LAUNCH_FAILURE_CAUSE
+        );
+    }
 
     #[cfg(unix)]
     #[test]

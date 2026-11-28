@@ -270,6 +270,8 @@ pub async fn run_serve(
                                 ready_tx: None,
                                 attach_secret: None,
                                 host_helpers,
+                                agents_only: false,
+                                listener: None,
                             },
                         )
                         .await
@@ -521,6 +523,8 @@ pub async fn run_serve(
             ready_tx: None,
             attach_secret: Some(attach_secret),
             host_helpers: infra.host_helpers,
+            agents_only: false,
+            listener: None,
         },
     )
     .await;

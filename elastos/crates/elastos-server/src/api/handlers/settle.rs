@@ -1,12 +1,14 @@
 //! Runtime settle for one ending instance (M1-R N2). Its caller is
 //! `runtime.rs`'s `ActivationContextHeld::end_instance`.
 //!
-//! An end writes the token ids of its grants to the Home's pending revocation
-//! list before it asks the capability store to revoke them, and takes an id
-//! out only after the store saved that revoke (A3-R S3 fixes 2 and 3). The
-//! Home's start opens the store through [`open_capability_store`], which
-//! revokes every listed token before the store is returned. So an end that
-//! stops at any point leaves no grant of its session valid after a restart.
+//! Home's runtime passes its data folder. An end writes the token ids of its
+//! grants to that Home's pending revocation list before it asks the capability
+//! store to revoke them, and takes an id out only after the store saved that
+//! revoke (A3-R S3 fixes 2 and 3). The Home's start opens the store through
+//! [`open_capability_store`], which revokes every listed token before the
+//! store is returned. So an end that stops at any point leaves no grant of
+//! its session valid after a restart. The agent plane passes `None`. Its
+//! revocations stay in the memory store and it does not write this list.
 
 use std::path::{Path, PathBuf};
 
@@ -156,7 +158,7 @@ pub async fn open_capability_store(data_dir: &Path) -> anyhow::Result<Capability
 pub async fn settle_and_revoke(
     store: &PendingRequestStore,
     manager: &CapabilityManager,
-    data_dir: &Path,
+    data_dir: Option<&Path>,
     session_id: &str,
     cause: &str,
 ) -> Result<(), String> {
@@ -167,7 +169,7 @@ pub async fn settle_and_revoke(
 pub(crate) async fn settle_and_revoke_guests(
     store: &PendingRequestStore,
     manager: &CapabilityManager,
-    data_dir: &Path,
+    data_dir: Option<&Path>,
     session_id: &str,
     cause: &str,
     guests: Option<&elastos_compute::providers::ComponentProvider>,
@@ -197,7 +199,12 @@ pub(crate) async fn settle_and_revoke_guests(
         return Ok(());
     }
     let tokens: Vec<TokenId> = grants.iter().map(|(_, token)| *token.id()).collect();
-    let kept = keep_pending(data_dir, &tokens);
+    // Home's runtime passes the data folder and writes its pending list.
+    // The agent plane passes None: its revocations stay in its memory store.
+    let kept = match data_dir {
+        Some(dir) => keep_pending(dir, &tokens),
+        None => Ok(()),
+    };
     if let Err(list) = &kept {
         tracing::error!(%list, "settle {session_id}: pending revocations not saved");
     }
@@ -216,16 +223,21 @@ pub(crate) async fn settle_and_revoke_guests(
             .revoke_request_by(request.as_str(), &reason, Settler::Runtime)
             .await;
     }
-    if kept.is_ok() {
-        if let Err(error) = drop_pending(data_dir, &saved) {
-            tracing::warn!(%error, "settle {session_id}: saved revocations left pending");
+    if let Some(dir) = data_dir {
+        if kept.is_ok() {
+            if let Err(error) = drop_pending(dir, &saved) {
+                tracing::warn!(%error, "settle {session_id}: saved revocations left pending");
+            }
         }
     }
-    match (unsaved, kept) {
-        (None, Ok(())) => Ok(()),
-        (Some(error), Ok(())) => Err(format!("{error}; kept in pending revocations")),
-        (None, Err(list)) => Err(format!("pending revocations not saved: {list}")),
-        (Some(error), Err(list)) => Err(format!("{error}; pending revocations not saved: {list}")),
+    match (unsaved, kept, data_dir.is_some()) {
+        (None, Ok(()), _) => Ok(()),
+        (Some(error), Ok(()), false) => Err(format!("{error}")),
+        (Some(error), Ok(()), true) => Err(format!("{error}; kept in pending revocations")),
+        (None, Err(list), _) => Err(format!("pending revocations not saved: {list}")),
+        (Some(error), Err(list), _) => {
+            Err(format!("{error}; pending revocations not saved: {list}"))
+        }
     }
 }
 
@@ -283,9 +295,70 @@ mod tests {
         read_pending_list(&pending_list_path(dir)).unwrap()
     }
 
+    #[tokio::test]
+    async fn the_plane_writes_no_pending_revocation_list() {
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("home-authority-id");
+        std::fs::write(&marker, b"home-id").unwrap();
+        let state = state();
+        let (_pending, _grant, token) = seed(&state, "session-plane").await;
+        settle_and_revoke(
+            &state.pending_store,
+            &state.capability_manager,
+            None,
+            "session-plane",
+            "stopped",
+        )
+        .await
+        .unwrap();
+        assert!(
+            !dir.path().join("capability_store").exists(),
+            "a plane end writes no capability store"
+        );
+        assert_eq!(std::fs::read(&marker).unwrap(), b"home-id");
+        assert!(
+            !state.capability_manager.can_still_validate(&token).await,
+            "the grant is revoked in memory"
+        );
+    }
+
+    /// Home adds an id after a plane end would have read the list. The plane
+    /// passes no data folder, so it never replaces the list and the added id
+    /// stays.
+    #[tokio::test]
+    async fn a_plane_end_keeps_a_home_id_another_writer_added() {
+        let dir = tempfile::tempdir().unwrap();
+        let list = pending_list_path(dir.path());
+        std::fs::create_dir_all(list.parent().unwrap()).unwrap();
+        std::fs::write(&list, b"home-id-1\n").unwrap();
+        let mut extra = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&list)
+            .unwrap();
+        std::io::Write::write_all(&mut extra, b"home-id-2\n").unwrap();
+        drop(extra);
+        let before = std::fs::read(&list).unwrap();
+        let state = state();
+        let (_pending, _grant, token) = seed(&state, "session-plane").await;
+        settle_and_revoke(
+            &state.pending_store,
+            &state.capability_manager,
+            None,
+            "session-plane",
+            "stopped",
+        )
+        .await
+        .unwrap();
+        assert_eq!(std::fs::read(&list).unwrap(), before);
+        assert!(before
+            .windows(b"home-id-2".len())
+            .any(|window| window == b"home-id-2"));
+        assert!(!state.capability_manager.can_still_validate(&token).await);
+    }
+
     async fn settle_session_a(state: &CapabilityState, dir: &Path) -> Result<(), String> {
         let (store, manager) = (&state.pending_store, &state.capability_manager);
-        settle_and_revoke(store, manager, dir, "session-a", "trapped").await
+        settle_and_revoke(store, manager, Some(dir), "session-a", "trapped").await
     }
 
     fn state_over(tokens: Arc<CapabilityStore>, key: SigningKey) -> CapabilityState {
@@ -351,7 +424,7 @@ mod tests {
         settle_and_revoke(
             &state.pending_store,
             &state.capability_manager,
-            dir.path(),
+            Some(dir.path()),
             "session-a",
             "stopped",
         )
@@ -557,7 +630,7 @@ mod tests {
             runtime.block_on(settle_and_revoke(
                 &pending,
                 &manager,
-                &home,
+                Some(&home),
                 "session-a",
                 "trapped",
             ))
@@ -644,7 +717,8 @@ mod tests {
 
         drop_pending(dir.path(), &full[..1]).unwrap();
         let (store, manager) = (&state.pending_store, &state.capability_manager);
-        let settled = settle_and_revoke(store, manager, dir.path(), "session-b", "trapped").await;
+        let settled =
+            settle_and_revoke(store, manager, Some(dir.path()), "session-b", "trapped").await;
         assert_eq!(settled, Ok(()), "an end that fills the list exactly");
         let check = validate(&state, "session-b", &fits).await;
         assert_eq!(check, Err(ValidationError::TokenRevoked));

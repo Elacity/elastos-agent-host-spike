@@ -104,13 +104,16 @@ function mount(request, confirmStepUp) {
     "#agent-retry": Object.assign(element("button"), { hidden: true }),
   };
   for (const [id, node] of Object.entries(nodes)) node.id = id.slice(1);
+  const agentsNav = element("a");
   const doc = {
     defaultView: { crypto: { randomUUID: () => "11111111-1111-4111-8111-111111111111" } },
     createElement: element,
     querySelector: (selector) => nodes[selector] || query({ children: Object.values(nodes) }, selector),
+    querySelectorAll: (selector) => (selector === '[data-settings="agents"]' ? [agentsNav] : []),
   };
   const bound = bindAgents(doc, request, confirmStepUp);
   return {
+    nav: agentsNav,
     status: nodes["#agents-status"],
     name: nodes["#agent-name"],
     host: nodes["#agent-host"],
@@ -269,6 +272,7 @@ test("a Runtime without agents says so and offers no create or retry", async () 
   });
   await ui.load();
   assert.equal(ui.status.textContent, "Agents are not built into this Runtime");
+  assert.equal(ui.nav.hidden, true, "a default build hides the Agents entry");
   assert.equal(ui.form.hidden, true);
   assert.equal(ui.allow.hidden, true);
   assert.equal(ui.retry.hidden, true);
@@ -280,6 +284,73 @@ test("a Runtime without agents says so and offers no create or retry", async () 
   assert.equal(calls.length, 1);
   assert.equal(calls[0].method, "GET");
   assert.equal(calls[0].path, "/api/apps/system/agents");
+});
+
+test("Agents stays hidden until the list says this build has them", async () => {
+  const html = readFileSync(new URL("../capsules/system/browser/index.html", import.meta.url), "utf8");
+  const tags = html.match(/<[^>]*data-settings="agents"[^>]*>/g) || [];
+  assert.equal(tags.length, 2, "the sidebar entry and the section");
+  for (const tag of tags) assert.match(tag, /\shidden(?:[\s>]|$)/);
+
+  const hidden = mount(() => Promise.reject(new Error(`request failed: 409 ${NOT_BUILT}`)));
+  assert.equal(hidden.nav.hidden, true, "the first paint hides Agents");
+  await hidden.load();
+  assert.equal(hidden.nav.hidden, true, "a default build stays hidden");
+
+  const shown = mount(() => Promise.resolve({ agents: [] }));
+  await shown.load();
+  assert.equal(shown.nav.hidden, false, "a build with agents shows the entry after the probe");
+});
+
+test("a missing agents gate returns System to Accounts", async () => {
+  function track(settings, active) {
+    const names = new Set(active ? ["active"] : []);
+    return {
+      dataset: { settings },
+      hidden: settings === "agents",
+      classList: {
+        toggle(name, on) {
+          if (on) names.add(name);
+          else names.delete(name);
+        },
+        has: (name) => names.has(name),
+      },
+    };
+  }
+  const accountNav = track("account", false);
+  const agentsNav = track("agents", true);
+  const accountPane = track("account", false);
+  const agentsPane = track("agents", true);
+  const nodes = {
+    "#agents-list": element("div"),
+    "#agents-status": element("p"),
+    "#agent-form": Object.assign(element("div"), { hidden: true }),
+    "#agent-name": element("input"),
+    "#agent-host": element("input"),
+    "#agent-create": element("button"),
+    "#agent-allow": Object.assign(element("button"), { hidden: true }),
+    "#agent-retry": Object.assign(element("button"), { hidden: true }),
+  };
+  const tabs = [accountNav, agentsNav, accountPane, agentsPane];
+  const doc = {
+    defaultView: { crypto: { randomUUID: () => "11111111-1111-4111-8111-111111111111" } },
+    createElement: element,
+    querySelector: (selector) => nodes[selector]
+      || (selector === '.settings-sidebar-item[data-settings="account"]' ? accountNav : null),
+    querySelectorAll: (selector) => {
+      if (selector === '[data-settings="agents"]') return [agentsNav, agentsPane];
+      if (selector === ".settings-sidebar-item, .settings-content") return tabs;
+      return [];
+    },
+  };
+  const bound = bindAgents(doc, () => Promise.reject(new Error(`request failed: 409 ${NOT_BUILT}`)));
+  await bound.load();
+  assert.equal(agentsNav.hidden, true);
+  assert.equal(agentsPane.hidden, true);
+  assert.equal(accountNav.classList.has("active"), true);
+  assert.equal(accountPane.classList.has("active"), true);
+  assert.equal(agentsNav.classList.has("active"), false);
+  assert.equal(agentsPane.classList.has("active"), false);
 });
 
 test("agents off offers allow, and allow calls the enable route before create", async () => {
@@ -308,6 +379,7 @@ test("agents off offers allow, and allow calls the enable route before create", 
   });
   await ui.load();
   assert.equal(ui.status.textContent, "Agents are off for this Home");
+  assert.equal(ui.nav.hidden, false, "a Home that can allow agents keeps the entry");
   assert.equal(ui.allow.hidden, false);
   assert.equal(ui.form.hidden, true);
   assert.equal(ui.retry.hidden, true);
@@ -760,6 +832,28 @@ test("a refused Start with the already-running code stays Running and does not o
   await ui.load();
   assert.equal(ui.state(AGENT_ID), "On");
   assert.equal(ui.button("Start").disabled, false);
+});
+
+test("a refresh drops a running id when the row is not active", async () => {
+  let active = true;
+  const ui = mount((path, init = {}) => {
+    if ((init.method || "GET") === "GET") {
+      return Promise.resolve({
+        agents: [{ agent_id: AGENT_ID, display_name: "Helper", active }],
+      });
+    }
+    return refusal("agent_already_running", "this agent is already running");
+  }, () => Promise.resolve("step-token"));
+  await ui.load();
+  ui.button("Start").click();
+  await flush();
+  await flush();
+  await flush();
+  assert.equal(ui.state(AGENT_ID), "Running");
+  active = false;
+  await ui.load();
+  assert.equal(ui.state(AGENT_ID), OFF);
+  assert.equal(ui.button("Start"), null);
 });
 
 test("a live step labels the agent Running and a landing step labels it Stopping", async () => {

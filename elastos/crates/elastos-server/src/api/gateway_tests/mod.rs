@@ -1,8 +1,4 @@
-pub(super) use super::gateway_home_system_ai_provider::{
-    clear_hosted_ai_validate_doubles, install_openrouter_key_response,
-    install_openrouter_models_double, install_venice_validate_double, OpenRouterModelsDouble,
-    VeniceAuthDouble,
-};
+pub(super) use super::gateway_home_system_ai_provider::install_openrouter_key_response;
 use super::*;
 use crate::sources::{save_trusted_sources, TrustedSource, TrustedSourcesConfig};
 use axum::body::Body;
@@ -1184,6 +1180,9 @@ async fn wallet_chain_test_state_with_shared_wallet_provider(
 include!("support_providers.rs");
 include!("support_runtime.rs");
 
+#[cfg(all(unix, feature = "prototype-agents"))]
+mod agent_host_wait;
+
 /// A consumed passkey step-up leaves a file under the auth root. Absent means unspent.
 fn step_up_was_spent(data_dir: &std::path::Path) -> bool {
     let root = crate::auth::auth_state_path(data_dir)
@@ -1195,9 +1194,11 @@ fn step_up_was_spent(data_dir: &std::path::Path) -> bool {
     root.is_dir() && std::fs::read_dir(root).unwrap().any(|entry| entry.is_ok())
 }
 
-#[cfg(feature = "prototype-agents")]
+#[cfg(all(unix, feature = "prototype-agents"))]
 mod agent_launch;
 mod agent_plan;
+#[cfg(all(unix, feature = "prototype-agents"))]
+mod agent_plane;
 mod agent_routes;
 #[cfg(all(unix, feature = "prototype-agents"))]
 mod agent_same_id;
@@ -1235,6 +1236,8 @@ mod remote_engine;
 mod remote_model;
 mod room;
 mod s5_fences;
+#[cfg(test)]
+pub(crate) mod seams;
 mod site_publication;
 mod wallet;
 
@@ -1287,4 +1290,11 @@ async fn inbox_kept_elsewhere_refusal_answers_403() {
         String::from_utf8_lossy(&body),
         "protected record is kept only on the Runtime this person signed in on"
     );
+}
+
+/// The mint counter starts at zero for a new Home, in every test build.
+#[test]
+fn a_new_home_has_minted_no_agent_launch_grant() {
+    let dir = tempfile::tempdir().unwrap();
+    assert_eq!(agent_launch_grants_minted_for_test(dir.path()), 0);
 }

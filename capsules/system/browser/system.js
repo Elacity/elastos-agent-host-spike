@@ -214,7 +214,9 @@ async function boot() {
     ...init,
     headers: shellHeaders(init.body ? { "content-type": "application/json" } : {}),
   }), (agent) => requestPasskeyStepUp("agent.start", { agent_id: agent.agent_id })).load;
-  if (document.querySelector('.settings-content[data-settings="agents"].active')) loadAgents();
+  // The sidebar starts hidden. This probe shows it when the build has agents
+  // and leaves it hidden on a default build. Boot does not wait for the list.
+  loadAgents();
   configureAppearanceEditor();
   configureAppearancePreferences();
   configureGuestAccess();
@@ -540,6 +542,10 @@ function configureSettingsSearch() {
 
 function settingsSectionMatches(section, query) {
   if (!section) {
+    return false;
+  }
+  const hidden = document.querySelector(`.settings-sidebar-item[data-settings="${section}"]`);
+  if (hidden && hidden.hidden) {
     return false;
   }
   if (!query) {

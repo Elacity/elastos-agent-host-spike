@@ -1,5 +1,13 @@
 # Agent-host spike
 
+This is a fork experiment. The upstream is unreviewed. This guest is a test
+capsule for a disposable Home, and it is not the installed architecture.
+Crash containment is not security isolation. The confined worker is the target.
+After it submits a plan it stays up and reads the owner's decision. The host
+parks that read for at most 30 seconds and the read spends no guest fuel. The
+plan expires 300 seconds after it was created. When the run ends, a pending
+plan is closed as `instance ended` and cannot be approved.
+
 One ElastOS Component guest. It folds a two-turn journal inside Wasmtime,
 compacts the tail, and exits. A read proposal with no grant stays `denied`
 and is not dispatched. Cancel before dispatch stays `cancelled` and does not

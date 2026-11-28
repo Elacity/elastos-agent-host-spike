@@ -268,6 +268,18 @@ fn rows() -> Vec<HeldRow> {
         mark("delegated", "agent start grant", "owner", "An agent start mints the short agent grant after passkey step-up"),
     ),
     row(
+        "elastos-server/src/api/gateway_home_token.rs",
+        "agent_stop_signer_context",
+        "HomeLaunchTokenContext::resolved",
+        1,
+        mark(
+            "delegated",
+            "signed agent stop without a live request token",
+            "signing admin",
+            "A failed-stop retry or a demoted-owner stop rebuilds the signing admin's launch context at the one home_token site",
+        ),
+    ),
+    row(
         "elastos-server/src/api/gateway_browser.rs",
         "browser_app_open",
         "require_runtime_wallet_authority",

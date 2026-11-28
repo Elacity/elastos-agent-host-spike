@@ -94,7 +94,7 @@ pub(crate) async fn start_gateway_server_with_ready(
     .await
 }
 
-async fn start_gateway_server_with_shutdown(
+pub(super) async fn start_gateway_server_with_shutdown(
     addr: &str,
     provider_registry: Option<Arc<ProviderRegistry>>,
     collaboration: GatewayCollaborationContext,
@@ -108,9 +108,12 @@ async fn start_gateway_server_with_shutdown(
         std::io::ErrorKind::Unsupported,
         "gateway child ownership and private local control are unsupported on Windows",
     ))?;
+    #[cfg(test)]
+    crate::agents::set_owner_demoted_hook(super::gateway_agents::schedule_demoted_owner_stop);
     crate::auth::verify_auth_audit_chain_ready(&data_dir)?;
     let listener = TcpListener::bind(addr).await?;
     let local_control_registry = provider_registry.clone();
+    let agent_providers = provider_registry.clone();
     let gateway_api_url = if addr.parse::<axum::http::uri::Authority>()?.port_u16() == Some(0) {
         trusted_gateway_api_url(&listener.local_addr()?.to_string())?
     } else {
@@ -141,12 +144,23 @@ async fn start_gateway_server_with_shutdown(
         eprintln!(
             "[gateway] another live gateway owns this data directory; left its plans unchanged"
         );
-    } else if let Err(error) =
-        super::gateway_inspect_actions::settle_agent_plans_lost_before_start(&data_dir)
-    {
-        browser_lifecycle_reconciler.cancel();
-        let _ = browser_lifecycle_reconciler.join().await;
-        return Err(error);
+    } else {
+        // A failed append is logged and the Home still starts. The next start
+        // reads the chain again and settles whatever is still open.
+        if let Err(error) =
+            super::gateway_inspect_actions::settle_agent_plans_lost_before_start(&data_dir)
+        {
+            eprintln!("[gateway] plan settle skipped: {error:#}");
+        }
+        if let Err(error) = super::gateway_inbox::settle_unminted_agent_grants(&data_dir).await {
+            eprintln!("[gateway] grant settle skipped: {error:#}");
+        }
+        if let Err(error) = crate::agent_record_audit::reconcile_owed_stops(&data_dir) {
+            eprintln!("[gateway] owed stop reconcile skipped: {error:#}");
+        }
+        if let Err(error) = super::gateway_agents::confirm_stopping_rows(&data_dir).await {
+            eprintln!("[gateway] stopping confirm skipped: {error:#}");
+        }
     }
     let home_url = format!("{gateway_api_url}/home/");
     let app = gateway_router_with_api_url(state, gateway_api_url);
@@ -171,6 +185,16 @@ async fn start_gateway_server_with_shutdown(
         }
         None => None,
     };
+    // The agent Runtime starts only when this build has agents and the owner
+    // has already allowed them. Allow brings it up later, without a second
+    // Home start. Off takes it down.
+    if crate::agents::build_allows() && crate::agents::home_enabled(&data_dir) {
+        if let Err(error) =
+            crate::api::agent_plane::ensure_running(&data_dir, agent_providers).await
+        {
+            tracing::info!(%error, "agent runtime stayed down");
+        }
+    }
     // Every Home start, local or public and whoever launched it, publishes its
     // coordinates here. Cleanup then proves this Home ready before removing files.
     let backup_cleanup = gateway_local_control.as_ref().map(|_| {
@@ -215,6 +239,7 @@ async fn start_gateway_server_with_shutdown(
             (&mut server).await
         }
     };
+    super::gateway_agents::finish_gateway_stop(&data_dir).await;
     if let Some(task) = backup_cleanup {
         task.abort();
     }
@@ -1146,7 +1171,7 @@ mod trusted_gateway_tests {
         let _ = held.wait();
         assert!(listened, "gateway did not listen");
         assert_eq!(
-            status, "unknown",
+            status, "unresolved",
             "a locked restart left the stranded plan {status}"
         );
     }
@@ -1168,7 +1193,7 @@ mod trusted_gateway_tests {
         let _ = held.kill();
         let _ = held.wait();
         assert!(listened, "gateway did not listen");
-        assert_eq!(status, "unknown", "a bare pid kept the plan {status}");
+        assert_eq!(status, "unresolved", "a bare pid kept the plan {status}");
     }
 
     /// Another process holds the data directory host lock. Its plan stays
@@ -1299,7 +1324,7 @@ mod trusted_gateway_tests {
                     value["status"].as_str().unwrap().to_string()
                 })
                 .collect();
-            if statuses == ["unknown", "unknown", "pending"]
+            if statuses == ["unresolved", "unresolved", "instance ended"]
                 || server.is_finished()
                 || tokio::time::Instant::now() >= read_deadline
             {
@@ -1352,14 +1377,14 @@ mod trusted_gateway_tests {
         };
         assert!(
             listened
-                && statuses == ["unknown", "unknown", "pending"]
+                && statuses == ["unresolved", "unresolved", "instance ended"]
                 && result.as_ref().is_ok_and(|value| {
-                    value["status"] == "unknown"
+                    value["status"] == "unresolved"
                         && value["dispatch_result"]["reason"]
                             == "a dispatch cannot survive a restart"
                 })
                 && dispatch_text.contains("not approved")
-                && after == "unknown",
+                && after == "unresolved",
             "stranded plans stayed {statuses:?}; result {result_text}; dispatch {dispatch_text}; after {after}; listened {listened}; server {joined:?}"
         );
     }

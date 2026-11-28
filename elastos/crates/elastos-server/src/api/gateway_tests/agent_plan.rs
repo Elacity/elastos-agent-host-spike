@@ -979,10 +979,11 @@ async fn a15r_shared_resource_requires_admin_grant() {
         let (state, calls) = agent_plan_dispatch_state(dir.path()).await;
         let app = gateway_router(state);
         let admin = passkey_authority(dir.path());
-        let owner = passkey_authority_with_name_role(
+        let owner = passkey_authority_with_name_role_credential(
             dir.path(),
             Some("Agent owner"),
-            crate::auth::RuntimePrincipalRole::Guest,
+            crate::auth::RuntimePrincipalRole::Admin,
+            "r11-plan-owner",
         );
         let agent_id = crate::agents::tests::plant_for_dispatch(
             dir.path(),
@@ -1737,6 +1738,167 @@ async fn a15r_real_restart_zero() {
     assert!(case.calls.lock().await.is_empty() && after_calls.lock().await.is_empty());
 }
 
+fn planted_plan(now: u64) -> (tempfile::TempDir, String, String) {
+    let dir = tempfile::tempdir().unwrap();
+    let owner = passkey_authority(dir.path());
+    let agent_id = crate::agents::tests::plant_for_dispatch(
+        dir.path(),
+        &owner.principal_id,
+        &owner.principal_id,
+    );
+    let created = submit(dir.path(), &owner.principal_id, &agent_id, read_plan(), now);
+    let request_id = created["request_id"].as_str().unwrap().to_string();
+    (dir, owner.principal_id, request_id)
+}
+
+fn plan_status(dir: &Path, request_id: &str) -> String {
+    read_record(dir, request_id)["status"]
+        .as_str()
+        .unwrap()
+        .to_string()
+}
+
+fn chain_has(dir: &Path, event_type: &str, result: &str) -> bool {
+    crate::auth::load_auth_state(dir)
+        .unwrap()
+        .audit
+        .iter()
+        .any(|event| event.event_type == event_type && event.result == result)
+}
+
+#[tokio::test]
+async fn a_denied_plan_is_closed_and_cannot_be_approved() {
+    let (dir, owner, request_id) = planted_plan(10);
+    super::super::gateway_inspect_actions::deny_agent_plan_request(dir.path(), &owner, &request_id)
+        .unwrap();
+    assert_eq!(plan_status(dir.path(), &request_id), "denied");
+    let block = crate::api::gateway::agent_plan_approval_block(dir.path(), &request_id).unwrap();
+    assert!(block.contains("denied"), "{block}");
+    assert!(block.contains("cannot be approved"), "{block}");
+    assert!(chain_has(dir.path(), "agent.plan.closed", "denied"));
+}
+
+#[tokio::test]
+async fn stop_closes_the_pending_plan_as_instance_ended() {
+    let (dir, _owner, request_id) = planted_plan(11);
+    crate::api::gateway::close_instance_plans(dir.path(), "capsule:agent-host", "instance ended")
+        .unwrap();
+    assert_eq!(plan_status(dir.path(), &request_id), "instance ended");
+    let block = crate::api::gateway::agent_plan_approval_block(dir.path(), &request_id).unwrap();
+    assert!(block.contains("instance ended"), "{block}");
+    assert!(chain_has(dir.path(), "agent.plan.closed", "instance ended"));
+}
+
+#[tokio::test]
+async fn retire_closes_the_pending_plan_as_instance_ended() {
+    let (dir, _owner, request_id) = planted_plan(12);
+    let agent_id = read_record(dir.path(), &request_id)["requester_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    crate::api::gateway::close_agent_plans(dir.path(), &agent_id, "instance ended").unwrap();
+    assert_eq!(plan_status(dir.path(), &request_id), "instance ended");
+    assert!(chain_has(dir.path(), "agent.plan.closed", "instance ended"));
+}
+
+#[tokio::test]
+async fn agents_off_closes_a_pending_plan() {
+    let (dir, _owner, request_id) = planted_plan(14);
+    crate::api::gateway::close_home_plans(dir.path(), "agents off").unwrap();
+    assert_eq!(plan_status(dir.path(), &request_id), "agents off");
+    let block = crate::api::gateway::agent_plan_approval_block(dir.path(), &request_id).unwrap();
+    assert!(block.contains("agents off"), "{block}");
+    assert!(chain_has(dir.path(), "agent.plan.closed", "agents off"));
+}
+
+#[tokio::test]
+async fn agent_off_closes_that_agents_pending_plan() {
+    let (dir, _owner, request_id) = planted_plan(15);
+    let agent_id = read_record(dir.path(), &request_id)["requester_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    crate::api::gateway::close_agent_plans(dir.path(), &agent_id, "agent off").unwrap();
+    assert_eq!(plan_status(dir.path(), &request_id), "agent off");
+    assert!(chain_has(dir.path(), "agent.plan.closed", "agent off"));
+}
+
+#[tokio::test]
+async fn a_plan_expires_from_its_created_time() {
+    let (dir, _owner, request_id) = planted_plan(1);
+    crate::api::gateway::expire_pending_agent_plans(dir.path()).unwrap();
+    assert_eq!(plan_status(dir.path(), &request_id), "expired");
+    let block = crate::api::gateway::agent_plan_approval_block(dir.path(), &request_id).unwrap();
+    assert!(block.contains("expired"), "{block}");
+    assert!(chain_has(dir.path(), "agent.plan.closed", "expired"));
+}
+
+#[tokio::test]
+async fn a_lost_receipt_is_unresolved_and_a_named_step_is_reconciled() {
+    let (dir, _owner, request_id) = planted_plan(16);
+    let mut record = read_record(dir.path(), &request_id);
+    record["status"] = json!("started");
+    write_record(dir.path(), &request_id, &record);
+    crate::api::gateway::reconcile_lost_plan_receipts(dir.path()).unwrap();
+    assert_eq!(plan_status(dir.path(), &request_id), "unresolved");
+    assert_eq!(
+        read_record(dir.path(), &request_id)["audit_recorded"],
+        json!(true)
+    );
+    assert!(chain_has(
+        dir.path(),
+        "agent_plan.dispatch.unresolved",
+        "unresolved"
+    ));
+    let again = crate::api::gateway::reconcile_lost_plan_receipts(dir.path()).unwrap();
+    assert_eq!(again, 0, "an unresolved step is not dispatched again");
+
+    let (dir, _owner, request_id) = planted_plan(17);
+    let mut record = read_record(dir.path(), &request_id);
+    record["status"] = json!("started");
+    write_record(dir.path(), &request_id, &record);
+    super::super::gateway_inspect_actions::note_test_provider_step(&request_id, "completed");
+    crate::api::gateway::reconcile_lost_plan_receipts(dir.path()).unwrap();
+    assert_eq!(plan_status(dir.path(), &request_id), "completed");
+    assert!(chain_has(
+        dir.path(),
+        "agent_plan.dispatch.completed",
+        "completed"
+    ));
+    assert_eq!(
+        read_record(dir.path(), &request_id)["audit_recorded"],
+        json!(true)
+    );
+}
+
+#[tokio::test]
+async fn a_pending_plan_whose_instance_is_not_running_ends_at_start() {
+    let (dir, _owner, request_id) = planted_plan(18);
+    assert_eq!(plan_status(dir.path(), &request_id), "pending");
+    let _settle = super::super::gateway_inspect_actions::settle_plan_through_dispatch_for_test;
+    let closed = |path: &Path| {
+        crate::auth::load_auth_state(path)
+            .unwrap()
+            .audit
+            .into_iter()
+            .filter(|event| {
+                event.event_type == "agent.plan.closed" && event.result == "instance ended"
+            })
+            .count()
+    };
+    super::super::gateway_inspect_actions::settle_agent_plans_lost_before_start(dir.path())
+        .unwrap();
+    assert_eq!(plan_status(dir.path(), &request_id), "instance ended");
+    assert_eq!(closed(dir.path()), 1);
+    assert_eq!(
+        read_record(dir.path(), &request_id)["audit_recorded"],
+        json!(true)
+    );
+    super::super::gateway_inspect_actions::settle_agent_plans_lost_before_start(dir.path())
+        .unwrap();
+    assert_eq!(closed(dir.path()), 1, "the closed row is written once");
+}
+
 /// Where an approved step is held, and how the instance ends while it is held.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum PlanRowEnd {
@@ -1782,6 +1944,57 @@ impl elastos_compute::ComputeProvider for IdleCompute {
 
     fn supports(&self, _: &elastos_common::CapsuleType) -> bool {
         false
+    }
+}
+
+/// A MicroVM provider whose `stop` fails. A launcher row registers one of
+/// these handles, so the failed stop is that provider's own result.
+struct LauncherStopFails;
+
+#[async_trait::async_trait]
+impl elastos_compute::ComputeProvider for LauncherStopFails {
+    async fn load(
+        &self,
+        _: &std::path::Path,
+        _: elastos_common::CapsuleManifest,
+    ) -> elastos_common::Result<elastos_compute::CapsuleHandle> {
+        Err(elastos_common::ElastosError::Compute(
+            "launcher provider stop failed".into(),
+        ))
+    }
+
+    async fn start(&self, _: &elastos_compute::CapsuleHandle) -> elastos_common::Result<()> {
+        Err(elastos_common::ElastosError::Compute(
+            "launcher provider stop failed".into(),
+        ))
+    }
+
+    async fn stop(&self, _: &elastos_compute::CapsuleHandle) -> elastos_common::Result<()> {
+        Err(elastos_common::ElastosError::Compute(
+            "launcher provider stop failed".into(),
+        ))
+    }
+
+    async fn status(
+        &self,
+        _: &elastos_compute::CapsuleHandle,
+    ) -> elastos_common::Result<elastos_common::CapsuleStatus> {
+        Err(elastos_common::ElastosError::Compute(
+            "launcher provider stop failed".into(),
+        ))
+    }
+
+    async fn info(
+        &self,
+        _: &elastos_compute::CapsuleHandle,
+    ) -> elastos_common::Result<elastos_compute::CapsuleInfo> {
+        Err(elastos_common::ElastosError::Compute(
+            "launcher provider stop failed".into(),
+        ))
+    }
+
+    fn supports(&self, capsule_type: &elastos_common::CapsuleType) -> bool {
+        matches!(capsule_type, elastos_common::CapsuleType::MicroVM)
     }
 }
 
@@ -1841,6 +2054,19 @@ async fn an_approved_step_does_not_write_after_the_instance_ends() {
             plan_inflight_row(point, end, n).await;
         }
     }
+}
+
+/// Stop while the write is held. The record is `dispatching`, the effect is
+/// in flight, and the step's bytes are not in the file yet.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_stop_while_the_effect_is_held() {
+    plan_inflight_row(
+        crate::resource_bridge::PlanDispatchPoint::InEffect,
+        PlanRowEnd::Stop,
+        4242,
+    )
+    .await;
 }
 
 async fn plan_inflight_row(
@@ -1997,6 +2223,12 @@ async fn plan_inflight_row(
             b"before",
             "{point:?} {end:?} wrote before Stop answered"
         );
+        let held = read_record(dir.path(), &id);
+        assert_eq!(held["status"], "dispatching", "{held}");
+        assert!(
+            runtime.plan_effect_inflight(&session),
+            "Stop answered after the effect had left"
+        );
     } else {
         match end {
             PlanRowEnd::Stop => {
@@ -2013,7 +2245,7 @@ async fn plan_inflight_row(
                     crate::api::handlers::settle::settle_and_revoke(
                         &store,
                         &manager,
-                        dir.path(),
+                        Some(dir.path()),
                         &session,
                         "stopped: owner",
                     )
@@ -2028,7 +2260,7 @@ async fn plan_inflight_row(
                     crate::api::handlers::settle::settle_and_revoke(
                         &store,
                         &manager,
-                        dir.path(),
+                        Some(dir.path()),
                         &session,
                         "completed",
                     )
@@ -2176,7 +2408,7 @@ async fn bare_runtime(dir: &std::path::Path) -> Arc<crate::runtime::Runtime> {
                 .await
                 .unwrap(),
         ),
-        vec![Arc::new(IdleCompute)],
+        vec![Arc::new(IdleCompute), Arc::new(LauncherStopFails)],
         Some(Arc::new(
             elastos_compute::providers::ComponentProvider::new(),
         )),
@@ -2549,35 +2781,44 @@ async fn stop_capsule_says_stopping_while_an_effect_is_in_flight() {
     assert!(crate::runtime::Runtime::try_enter_plan_effect(&book, session, agent, "").is_err());
 }
 
-/// A nested submit is an effect. Closing the instance in the admit hold writes
-/// no second plan and raises no approval card.
+/// A plan step cannot submit another plan. The refusal is the step itself,
+/// before any record exists. A nested submit therefore writes no second
+/// plan file: there is no plan file at all.
 #[cfg(unix)]
 #[tokio::test]
-async fn a_nested_submit_after_the_end_writes_no_plan() {
-    let plant = plant_approved(1, true, |_, _| {
-        json!({"steps": [{"scheme": "inspect", "operation": "submit_agent_plan", "request": {
-            "steps": [{"scheme": "availability", "operation": "status", "request": {}}]
-        }}]})
-    })
-    .await;
-    crate::runtime::arm_plan_decision_hook(&plant.session, {
-        let session = plant.session.clone();
-        move |book| book.close_for_test(&session)
-    });
-    dispatch_planted(&plant).await.unwrap();
-    crate::runtime::disarm_plan_decision_hook(&plant.session);
-    let record = read_record(plant.dir.path(), &plant.id);
-    assert_eq!(record["status"], "refused", "{record}");
-    assert_eq!(record["result"]["code"], "instance ended", "{record}");
-    let files: Vec<_> = std::fs::read_dir(plant.dir.path().join("inspect-actions"))
-        .unwrap()
-        .map(|entry| entry.unwrap().file_name())
-        .collect();
-    assert_eq!(
-        files,
-        vec![std::ffi::OsString::from(format!("{}.json", plant.id))],
-        "a nested submit wrote a plan after the end: {files:?}"
+async fn a_plan_step_cannot_submit_agent_plan() {
+    let dir = tempfile::tempdir().unwrap();
+    let error = crate::api::gateway::submit_pending_agent_plan(
+        dir.path(),
+        "person:owner",
+        "agent-1",
+        "capsule-1",
+        "session-1",
+        &json!({
+            "steps": [{
+                "scheme": "inspect",
+                "operation": "submit_agent_plan",
+                "request": {}
+            }]
+        }),
+        1,
+    )
+    .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("a plan step cannot submit_agent_plan"),
+        "{error}"
     );
+    let actions = dir.path().join("inspect-actions");
+    let written = std::fs::read_dir(&actions)
+        .map(|entries| entries.filter_map(|entry| entry.ok()).count())
+        .unwrap_or(0);
+    assert_eq!(
+        written, 0,
+        "no second plan file is written: the refusal is before any record"
+    );
+    assert!(!actions.exists(), "no second plan file is written");
 }
 
 /// A refusal after the one-use token is registered revokes it and leaves no
@@ -3312,25 +3553,83 @@ async fn a_missing_stop_leaves_the_run_able_to_dispatch() {
     assert_the_run_can_still_dispatch(&plant).await;
 }
 
-/// A stop that fails before the row ends does not close the instance.
+/// A launcher row has no stop ticket. Its provider's stop fails, and that
+/// failure marks the row stopping and refuses a later dispatch.
 #[cfg(unix)]
 #[tokio::test]
-async fn a_failed_stop_leaves_the_run_able_to_dispatch() {
+async fn a_failed_stop_without_a_ticket_marks_stopping_and_refuses_dispatch() {
     let plant = plant_approved(45, false, |_, target| {
         json!({"steps": [{"scheme": "localhost", "operation": "write", "request": {
             "path": target, "content": [112, 108, 97, 110]
         }}]})
     })
     .await;
-    plant.runtime.arm_failing_capsule_stop(&plant.session);
+    let manifest: elastos_common::CapsuleManifest = serde_json::from_str(
+        r#"{
+            "schema": "elastos.capsule/v1",
+            "version": "0.1.0",
+            "name": "launcher-stop",
+            "role": "app",
+            "type": "microvm",
+            "entrypoint": "rootfs.ext4"
+        }"#,
+    )
+    .unwrap();
+    let handle = elastos_compute::CapsuleHandle {
+        id: elastos_common::CapsuleId(plant.session.clone()),
+        manifest,
+        args: Vec::new(),
+    };
+    plant
+        .runtime
+        .register_capsule(crate::runtime::RunningCapsuleInfo {
+            id: plant.session.clone(),
+            name: "launcher".to_string(),
+            status: crate::runtime::CAPSULE_RUNNING.to_string(),
+            capsule_type: elastos_common::CapsuleType::MicroVM,
+            handle: Some(handle),
+            session_id: plant.session.clone(),
+            principal: Some(plant.agent.clone()),
+            cause: None,
+            ended_at: None,
+        })
+        .await;
+    assert!(
+        plant
+            .runtime
+            .activation_stop_flag_for_test(&plant.session)
+            .is_none(),
+        "the launcher row held a stop ticket"
+    );
     let (status, body) = stop_plan_agent(plant.runtime.clone(), &plant.agent).await;
     assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{body}");
-    assert!(crate::runtime::Runtime::plan_instance_is_open(
-        &plant.runtime.plan_book(),
-        &plant.session,
-        &plant.agent
-    ));
-    assert_the_run_can_still_dispatch(&plant).await;
+    assert!(
+        body.to_string().contains("launcher provider stop failed"),
+        "the provider's own stop error did not come back: {body}"
+    );
+    assert!(
+        plant.runtime.provider_stop_count_for_test() >= 1,
+        "the provider stop was not called"
+    );
+    assert!(
+        !crate::runtime::Runtime::plan_instance_is_open(
+            &plant.runtime.plan_book(),
+            &plant.session,
+            &plant.agent
+        ),
+        "a failed stop left the plan instance open"
+    );
+    let answer = dispatch_planted(&plant)
+        .await
+        .expect("a closed instance still answers");
+    assert!(
+        answer.contains("refused"),
+        "a failed stop left the run able to dispatch: {answer}"
+    );
+    let record = read_record(plant.dir.path(), &plant.id);
+    assert_eq!(record["status"], "refused", "{record}");
+    assert_eq!(record["result"]["code"], "instance ended", "{record}");
+    assert_eq!(std::fs::read(&plant.path).unwrap(), plant.before);
 }
 
 /// Dropping the Stop request before it ends the row leaves the run able to dispatch.
@@ -3492,7 +3791,7 @@ async fn a_failed_settle_write_matches_the_stored_record() {
         }}]})
     })
     .await;
-    super::gateway_inspect_actions::arm_plan_settle_fault(&audit.id, "audit");
+    super::gateway_inspect_actions::arm_plan_settle_fault(audit.dir.path(), &audit.id, "audit");
     let answer = dispatch_planted(&audit)
         .await
         .expect("a failed audit still answers with the stored outcome");
@@ -3510,7 +3809,7 @@ async fn a_failed_settle_write_matches_the_stored_record() {
         }}]})
     })
     .await;
-    super::gateway_inspect_actions::arm_plan_settle_fault(&missed.id, "record");
+    super::gateway_inspect_actions::arm_plan_settle_fault(missed.dir.path(), &missed.id, "record");
     let answer = dispatch_planted(&missed)
         .await
         .expect("one record fault is retried");
@@ -3528,7 +3827,12 @@ async fn a_failed_settle_write_matches_the_stored_record() {
         }}]})
     })
     .await;
-    super::gateway_inspect_actions::arm_plan_settle_faults(&stuck.id, "record", 3);
+    super::gateway_inspect_actions::arm_plan_settle_faults(
+        stuck.dir.path(),
+        &stuck.id,
+        "record",
+        3,
+    );
     let refused = dispatch_planted(&stuck).await;
     assert!(
         refused.is_err(),
@@ -3739,7 +4043,8 @@ async fn unknown_steps_are_capped_and_stay_with_their_agent() {
     assert_eq!(plant.runtime.unknown_count_for_test(&plant.agent), 32);
 }
 
-/// A provider stop that fails, on a detached run, leaves the run able to act.
+/// A detached run holds a stop ticket. A provider stop that fails withdraws
+/// that ticket and leaves the run able to act.
 #[cfg(unix)]
 #[tokio::test]
 async fn a_failed_provider_stop_leaves_the_detached_run_able_to_dispatch() {
@@ -3773,6 +4078,13 @@ async fn a_failed_provider_stop_leaves_the_detached_run_able_to_dispatch() {
         })
         .await;
     plant.runtime.plant_activation_stop_for_test(&plant.session);
+    assert!(
+        plant
+            .runtime
+            .activation_stop_flag_for_test(&plant.session)
+            .is_some(),
+        "the watcher branch had no stop ticket"
+    );
     plant.runtime.arm_failing_capsule_stop(&plant.session);
     let (status, body) = stop_plan_agent(plant.runtime.clone(), &plant.agent).await;
     assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{body}");
@@ -3932,7 +4244,7 @@ async fn three_hundred_spent_grants_still_let_stop_settle() {
     let settled = crate::api::handlers::settle::settle_and_revoke(
         &plant.store,
         &plant.manager,
-        plant.dir.path(),
+        Some(plant.dir.path()),
         &plant.session,
         "owner",
     )
@@ -4017,6 +4329,379 @@ async fn a_dropped_dispatch_future_resolves_the_flight() {
             .is_some_and(|steps| steps.iter().any(|step| step["request_id"] == plant.id)),
         "{body}"
     );
+}
+
+fn closed_rows(dir: &Path, request_id: &str, event_type: &str) -> usize {
+    crate::auth::load_auth_state(dir)
+        .unwrap()
+        .audit
+        .iter()
+        .filter(|event| {
+            event.event_type == event_type && event.challenge_id.as_deref() == Some(request_id)
+        })
+        .count()
+}
+
+fn settle(dir: &Path) {
+    super::super::gateway_inspect_actions::settle_agent_plans_lost_before_start(dir).unwrap();
+}
+
+#[tokio::test]
+async fn an_audit_failure_on_a_plan_decision_names_the_refusal() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = gateway_router(routed_agent_plan_state(dir.path()).await);
+    let owner = passkey_authority(dir.path());
+    let token = app_token_for_authority(dir.path(), INBOX_CAPSULE_ID, &owner);
+    let created = submit(
+        dir.path(),
+        &owner.principal_id,
+        "agent:v2:plan-requester",
+        read_plan(),
+        71,
+    );
+    let request_id = created["request_id"].as_str().unwrap();
+    let card = owner_card(&app, &token, request_id).await;
+    let fresh = step_up_token_for_app_context(
+        dir.path(),
+        INBOX_CAPSULE_ID,
+        &token,
+        "agent_plan.approve",
+        &json!({ "request_id": request_id }),
+    );
+    super::seams::arm_grant_fault(dir.path(), false);
+    let (status, body) = post_action(
+        &app,
+        &token,
+        approve_body(request_id, &card["request_binding"], Some(&fresh)),
+    )
+    .await;
+    assert_ne!(status, StatusCode::OK, "{body}");
+    assert_eq!(body, "Nothing ran. A fresh passkey is needed.");
+    assert!(!body.contains(dir.path().to_str().unwrap_or("")));
+    assert!(!body.contains("auth-state"), "{body}");
+    assert_eq!(read_record(dir.path(), request_id)["status"], "pending");
+}
+
+#[tokio::test]
+async fn a_terminal_plan_is_signed_once_after_a_crash_and_after_rolloff() {
+    let (dir, _owner, request_id) = planted_plan(80);
+    super::seams::arm_grant_fault(dir.path(), false);
+    let error = crate::api::gateway::close_instance_plans(
+        dir.path(),
+        "capsule:agent-host",
+        "instance ended",
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("auth-state"), "{error}");
+    assert_eq!(plan_status(dir.path(), &request_id), "instance ended");
+    assert_ne!(
+        read_record(dir.path(), &request_id)["audit_recorded"],
+        json!(true)
+    );
+    assert_eq!(closed_rows(dir.path(), &request_id, "agent.plan.closed"), 0);
+    settle(dir.path());
+    assert_eq!(closed_rows(dir.path(), &request_id, "agent.plan.closed"), 1);
+    assert_eq!(
+        read_record(dir.path(), &request_id)["audit_recorded"],
+        json!(true)
+    );
+    settle(dir.path());
+    assert_eq!(closed_rows(dir.path(), &request_id, "agent.plan.closed"), 1);
+
+    let (dir, _owner, request_id) = planted_plan(81);
+    crate::api::gateway::close_instance_plans(dir.path(), "capsule:agent-host", "instance ended")
+        .unwrap();
+    assert_eq!(closed_rows(dir.path(), &request_id, "agent.plan.closed"), 1);
+    assert_eq!(
+        read_record(dir.path(), &request_id)["audit_recorded"],
+        json!(true)
+    );
+    let mut record = read_record(dir.path(), &request_id);
+    record["audit_recorded"] = json!(false);
+    write_record(dir.path(), &request_id, &record);
+    settle(dir.path());
+    assert_eq!(closed_rows(dir.path(), &request_id, "agent.plan.closed"), 1);
+    assert_eq!(
+        read_record(dir.path(), &request_id)["audit_recorded"],
+        json!(true)
+    );
+
+    let (dir, owner, request_id) = planted_plan(82);
+    crate::api::gateway::close_instance_plans(dir.path(), "capsule:agent-host", "instance ended")
+        .unwrap();
+    let before = closed_rows(dir.path(), &request_id, "agent.plan.closed");
+    for index in 0..513 {
+        crate::auth::append_audit_event(
+            dir.path(),
+            elastos_runtime::auth::RuntimeAuditEventV1 {
+                schema: elastos_runtime::auth::RuntimeAuditEventV1::SCHEMA.to_string(),
+                event_id: format!("audit:pad:{index}"),
+                event_type: "audit.pad".to_string(),
+                principal_id: Some(owner.clone()),
+                proof_binding_id: None,
+                session_id: None,
+                challenge_id: None,
+                capsule_id: None,
+                result: "ok".to_string(),
+                reason: "pad".to_string(),
+                occurred_at: index as u64,
+                signer_did: None,
+                signature: None,
+            },
+        )
+        .unwrap();
+    }
+    let rolled = closed_rows(dir.path(), &request_id, "agent.plan.closed");
+    settle(dir.path());
+    assert_eq!(
+        closed_rows(dir.path(), &request_id, "agent.plan.closed"),
+        rolled
+    );
+    assert!(rolled <= before);
+    assert_eq!(
+        read_record(dir.path(), &request_id)["audit_recorded"],
+        json!(true)
+    );
+
+    for (status, event_type) in [
+        ("denied", "agent.plan.closed"),
+        ("completed", "agent_plan.dispatch.completed"),
+    ] {
+        let (dir, owner_id, request_id) = planted_plan(90);
+        let mut record = read_record(dir.path(), &request_id);
+        record["status"] = json!(status);
+        record["audit_recorded"] = json!(false);
+        write_record(dir.path(), &request_id, &record);
+        settle(dir.path());
+        assert_eq!(
+            closed_rows(dir.path(), &request_id, event_type),
+            1,
+            "{status}"
+        );
+        assert_eq!(
+            read_record(dir.path(), &request_id)["audit_recorded"],
+            json!(true)
+        );
+        settle(dir.path());
+        assert_eq!(
+            closed_rows(dir.path(), &request_id, event_type),
+            1,
+            "{status}"
+        );
+        let _ = owner_id;
+    }
+}
+
+#[tokio::test]
+async fn a_failed_plan_denial_names_the_next_start() {
+    let (dir, owner, request_id) = planted_plan(91);
+    super::seams::arm_grant_fault(dir.path(), false);
+    let error = super::super::gateway_inspect_actions::deny_agent_plan_request(
+        dir.path(),
+        &owner,
+        &request_id,
+    )
+    .unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "Nothing ran. This denial is signed the next time Home starts."
+    );
+    assert!(!error
+        .to_string()
+        .contains(&dir.path().display().to_string()));
+    assert_eq!(plan_status(dir.path(), &request_id), "denied");
+    assert_ne!(
+        read_record(dir.path(), &request_id)["audit_recorded"],
+        json!(true)
+    );
+}
+
+#[tokio::test]
+async fn a_failed_started_row_says_the_step_was_not_sent() {
+    let dir = tempfile::tempdir().unwrap();
+    let (state, _calls) = agent_plan_dispatch_state(dir.path()).await;
+    let owner = passkey_authority(dir.path());
+    let agent_id = crate::agents::tests::plant_for_dispatch(
+        dir.path(),
+        &owner.principal_id,
+        &owner.principal_id,
+    );
+    let created = submit(dir.path(), &owner.principal_id, &agent_id, read_plan(), 92);
+    let id = created["request_id"].as_str().unwrap();
+    set_approved(dir.path(), id);
+    super::seams::arm_grant_kind(dir.path(), "started");
+    let error = super::gateway_inspect_actions::dispatch_approved_agent_plan(
+        &state,
+        &dispatch_context(&owner.principal_id),
+        id,
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.to_string(), "Nothing ran. This step was not sent.");
+    assert!(!error
+        .to_string()
+        .contains(&dir.path().display().to_string()));
+    assert_eq!(plan_status(dir.path(), id), "not_sent");
+}
+
+#[cfg(feature = "prototype-agents")]
+#[tokio::test]
+async fn a_guest_submit_stops_at_the_open_plan_cap_and_keeps_older_rows() {
+    let Some((home, ctx, requester, owner)) =
+        crate::resource_bridge::tests::open_submit_agent_plan().await
+    else {
+        return;
+    };
+    let plan = read_plan();
+    let mut ids = Vec::new();
+    let mut step = serde_json::Value::Null;
+    for n in 1..=8u64 {
+        let response = crate::resource_bridge::tests::submit_with_write(&ctx, n, &plan).await;
+        assert_eq!(
+            response["response"]["type"], "resource_result",
+            "{response}"
+        );
+        step = response["response"]["result"]["data"]["request"].clone();
+        ids.push(
+            response["response"]["result"]["data"]["request_id"]
+                .as_str()
+                .unwrap()
+                .to_string(),
+        );
+    }
+    // The ninth call below is the refusal. This authority is not an open plan.
+    crate::resource_bridge::retain_agent_plan_dispatch_authority(
+        "closed-plan",
+        &owner,
+        &ctx,
+        &step,
+    )
+    .unwrap();
+    assert!(crate::resource_bridge::agent_plan_authority_is_held(
+        "closed-plan"
+    ));
+    let before = std::fs::read_dir(home.path().join("inspect-actions"))
+        .unwrap()
+        .count();
+    let refused = crate::resource_bridge::tests::submit_with_write(&ctx, 9, &plan).await;
+    assert_eq!(
+        refused["response"]["code"], "submit_agent_plan_refused",
+        "{refused}"
+    );
+    let message = refused["response"]["message"].as_str().unwrap_or("");
+    assert!(
+        message.contains("submit_agent_plan refused") && message.contains("8"),
+        "{refused}"
+    );
+    assert!(!crate::resource_bridge::agent_plan_authority_is_held(
+        "closed-plan"
+    ));
+    let after = std::fs::read_dir(home.path().join("inspect-actions"))
+        .unwrap()
+        .count();
+    assert_eq!(after, before, "a refused submit writes nothing");
+    for id in &ids {
+        assert_eq!(plan_status(home.path(), id), "pending", "{id}");
+    }
+    for n in 0..24u64 {
+        crate::api::gateway::submit_pending_agent_plan(
+            home.path(),
+            &owner,
+            &requester,
+            "capsule:extra",
+            &format!("session:extra-{n}"),
+            &plan,
+            9_000 + n,
+        )
+        .unwrap();
+    }
+    let home_full = crate::api::gateway::submit_pending_agent_plan(
+        home.path(),
+        &owner,
+        &requester,
+        "capsule:extra",
+        "session:extra-full",
+        &plan,
+        9_100,
+    )
+    .unwrap_err();
+    assert!(
+        home_full.to_string().contains("submit_agent_plan refused")
+            && home_full.to_string().contains("32"),
+        "{home_full}"
+    );
+    assert_eq!(plan_status(home.path(), &ids[0]), "pending");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn demotion_leaves_dispatching_for_one_stop_settle() {
+    let (dir, owner, pending_id) = planted_plan(90);
+    let agent = read_record(dir.path(), &pending_id)["requester_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let flying = submit(
+        dir.path(),
+        &owner,
+        &agent,
+        json!({"steps": [{"scheme": "availability", "operation": "status", "request": {}}]}),
+        91,
+    );
+    let flying_id = flying["request_id"].as_str().unwrap().to_string();
+    let mut record = read_record(dir.path(), &flying_id);
+    record["status"] = json!("dispatching");
+    write_record(dir.path(), &flying_id, &record);
+    crate::api::gateway::close_owner_open_plans(dir.path(), &agent, "owner demoted").unwrap();
+    assert_eq!(plan_status(dir.path(), &pending_id), "owner demoted");
+    assert_eq!(plan_status(dir.path(), &flying_id), "dispatching");
+    let kept = super::gateway_inspect_actions::settle_plan_through_dispatch_for_test(
+        dir.path(),
+        &flying_id,
+        "unknown",
+        json!({"status": "unknown", "code": "dispatch_lost"}),
+    )
+    .unwrap();
+    assert!(kept.contains("unknown"), "{kept}");
+    assert_eq!(plan_status(dir.path(), &flying_id), "unknown");
+    let late =
+        super::gateway_inspect_actions::resettle_plan_for_test(dir.path(), &flying_id, "completed")
+            .unwrap();
+    assert!(late.contains("unknown"), "{late}");
+    assert_eq!(plan_status(dir.path(), &flying_id), "unknown");
+    assert_eq!(
+        closed_rows(dir.path(), &flying_id, "agent_plan.dispatch.unknown"),
+        1
+    );
+    assert_eq!(
+        closed_rows(dir.path(), &flying_id, "agent_plan.dispatch.completed"),
+        0
+    );
+}
+
+#[tokio::test]
+async fn a_parked_guest_reads_owner_demoted_and_passkey_revoked_by_name() {
+    for status in ["owner demoted", "passkey revoked"] {
+        let (dir, owner, request_id) = planted_plan(92);
+        let record = read_record(dir.path(), &request_id);
+        let agent = record["requester_id"].as_str().unwrap().to_string();
+        let capsule = record["id"].as_str().unwrap().to_string();
+        let session = record["session_id"].as_str().unwrap().to_string();
+        let mut closed = record;
+        closed["status"] = json!(status);
+        write_record(dir.path(), &request_id, &closed);
+        let receipt = super::gateway_inspect_actions::agent_plan_result_for_requester(
+            dir.path(),
+            &request_id,
+            &owner,
+            &agent,
+            &capsule,
+            &session,
+        )
+        .expect(status);
+        assert_eq!(receipt["status"], status, "{receipt}");
+        assert_ne!(receipt["status"], "pending");
+    }
 }
 
 async fn register_component_handle(runtime: &crate::runtime::Runtime, agent: &str, session: &str) {
@@ -4328,6 +5013,7 @@ async fn a_failed_stop_lets_start_say_already_running() {
                 host_cid: "cid",
                 launch_id: "launch:r5-after-fail",
                 expires_at: expires,
+                data_dir: dir.path(),
             },
         )
         .await
@@ -4945,6 +5631,7 @@ async fn a_stop_dropped_while_waiting_leaves_start_stopping() {
                 host_cid: "cid",
                 launch_id: "launch:r6-while-stopping",
                 expires_at: expires,
+                data_dir: dir.path(),
             },
         )
         .await

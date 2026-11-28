@@ -34,10 +34,13 @@
 //!   A file that fails any rule makes agents unavailable, with a named
 //!   reason; it is never rewritten or deleted, and the owner's own sign-in
 //!   file is read exactly as before.
-//! - A write holds the agent lock, raises `sequence` by exactly one, and
-//!   replaces the file in one step at mode 0600. It then appends one audit
-//!   event. A heal of the signed spend floor does not: that total is already
-//!   a signed spend event.
+//! - A write holds the agent lock and raises `sequence` by exactly one. It
+//!   stores the file at mode 0600 with the confirmation clear, appends one
+//!   audit event of that write, then stores the same sequence again with the
+//!   confirmation set. The second store does not raise the sequence. A charge
+//!   appends its signed spend event before the file, and names the spent
+//!   total. A heal of the signed spend floor does not append: that total is
+//!   already a signed spend event.
 //! - A root-key change takes the writer before it loads the stored
 //!   protection, decides under that writer, and holds it until the key is
 //!   stored. An agent created in between waits, and then wraps under the
@@ -135,6 +138,14 @@ pub(crate) fn build_allows() -> bool {
     cfg!(feature = "prototype-agents")
 }
 
+/// Whether the owner has allowed agents on this Home. A missing or unreadable
+/// file is off. This reads the record; it does not start the agent Runtime.
+pub(crate) fn home_enabled(data_dir: &Path) -> bool {
+    open(data_dir, false)
+        .map(|opened| opened.file.enabled.is_some())
+        .unwrap_or(false)
+}
+
 fn build_allows_for_home(data_dir: &Path) -> bool {
     build_allows() || {
         #[cfg(all(test, unix))]
@@ -210,6 +221,28 @@ pub(crate) struct AgentRecordsFile {
     /// Who turned agents on for this Home, and when. Null while they are off.
     enabled: Option<Enabled>,
     agents: Vec<StoredAgent>,
+    /// The operation this sequence wrote, and whether its audit row landed.
+    /// Absent on a file written before this field. A lost append repairs this
+    /// operation once; it does not pick another agent.
+    /// This field is one-way: an older build refuses a file that carries it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    last_audit: Option<LastAudit>,
+    /// Signed `stopping` and `failed` stop rows not yet settled, one per run.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    owed_stops: Vec<RuntimeAuditEventV1>,
+}
+
+/// The audit row a sequence promised. `confirmed` stays false until that row
+/// is in the chain, including after the chain has dropped older rows.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct LastAudit {
+    pub(crate) sequence: u64,
+    pub(crate) operation: String,
+    pub(crate) subject: String,
+    pub(crate) proof_binding_id: String,
+    pub(crate) session_id: String,
+    pub(crate) at: u64,
+    pub(crate) confirmed: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -253,6 +286,8 @@ impl AgentRecordsFile {
             sequence: 0,
             enabled: None,
             agents: Vec::new(),
+            last_audit: None,
+            owed_stops: Vec::new(),
         }
     }
 }
@@ -265,7 +300,7 @@ pub(crate) fn agent_file_path(data_dir: &Path) -> anyhow::Result<PathBuf> {
 #[derive(Debug)]
 enum AgentFile {
     Missing,
-    Loaded(AgentRecordsFile),
+    Loaded(Box<AgentRecordsFile>),
     Unavailable(&'static str),
 }
 
@@ -279,7 +314,7 @@ fn load(data_dir: &Path, owner_file: &[PrincipalRecord]) -> anyhow::Result<Agent
     };
     Ok(
         match parse_strict(&bytes).and_then(|file| check(&file, owner_file).map(|()| file)) {
-            Ok(file) => AgentFile::Loaded(file),
+            Ok(file) => AgentFile::Loaded(Box::new(file)),
             Err(reason) => AgentFile::Unavailable(reason),
         },
     )
@@ -820,13 +855,16 @@ impl Operation {
 /// - retire: one agent's `retired_at`, set once, and its `updated_at`;
 /// - set active: one agent's `active`, and its `updated_at`;
 /// - charge: one active agent's `model_tokens_spent`, raised by one block;
-/// - heal: any non-retired agent's `model_tokens_spent`, raised, nothing else.
+/// - heal: any non-retired agent's `model_tokens_spent`, raised, or else `owed_stops` alone.
 fn permits(operation: Operation, before: &AgentRecordsFile, after: &AgentRecordsFile) -> bool {
     if after.schema != before.schema || before.sequence.checked_add(1) != Some(after.sequence) {
         return false;
     }
     let same_agents = after.agents == before.agents;
     let same_enabled = after.enabled == before.enabled;
+    if after.owed_stops != before.owed_stops {
+        return operation == Operation::Heal && same_agents && same_enabled;
+    }
     match operation {
         Operation::Enable => same_agents && before.enabled.is_none() && after.enabled.is_some(),
         Operation::Disable => same_agents && before.enabled.is_some() && after.enabled.is_none(),
@@ -921,6 +959,7 @@ fn sets_active(old: &StoredAgent, new: &StoredAgent) -> bool {
 }
 
 /// Who asked for a write: a stored person, on their proof-bound session.
+#[derive(Default)]
 pub(crate) struct Caller<'a> {
     pub(crate) principal_id: &'a str,
     pub(crate) proof_binding_id: &'a str,
@@ -939,6 +978,8 @@ struct Opened {
 
 /// Loads both files, under the agent lock when the operation will write.
 /// Refuses when the agent file fails a rule.
+/// Test seam: the next write of this Home stores the bytes and returns before
+/// the audit row. The following open under the agent lock appends that row.
 fn open(data_dir: &Path, for_write: bool) -> anyhow::Result<Opened> {
     open_for(data_dir, for_write, None)
 }
@@ -959,11 +1000,30 @@ fn open_for(data_dir: &Path, for_write: bool, wait: Option<Duration>) -> anyhow:
                 && record.proof_binding.kind != ProofBindingKind::AgentAdmission
         })
         .collect();
-    let file = match load(data_dir, &owner_file)? {
+    let mut file = match load(data_dir, &owner_file)? {
         AgentFile::Missing => AgentRecordsFile::unwritten(),
-        AgentFile::Loaded(file) => file,
+        AgentFile::Loaded(file) => *file,
         AgentFile::Unavailable(reason) => return Err(Named(reason).into()),
     };
+    if for_write {
+        if let Some(pending) = file.last_audit.clone().filter(|audit| {
+            !audit.confirmed && audit.sequence == file.sequence && audit.sequence != 0
+        }) {
+            let held = owner_file
+                .iter()
+                .any(|record| record.proof_binding_id == pending.proof_binding_id);
+            if !held {
+                anyhow::bail!("retired agent's owner is not in the sign-in file");
+            }
+            let bytes = std::fs::read(agent_file_path(data_dir)?)?;
+            crate::agent_record_audit::repair_recorded_audit(data_dir, &pending, &bytes)?;
+            if let Some(audit) = file.last_audit.as_mut() {
+                audit.confirmed = true;
+            }
+            let updated = serde_json::to_vec_pretty(&file)?;
+            crate::auth::atomic_write(&agent_file_path(data_dir)?, &updated)?;
+        }
+    }
     Ok(Opened {
         lock,
         owner_file,
@@ -1255,50 +1315,42 @@ fn write(
     if let Err(reason) = check(after, &opened.owner_file) {
         anyhow::bail!("agent file change refused: {reason}");
     }
-    let bytes = serde_json::to_vec_pretty(after)?;
     if operation == Operation::Heal {
         #[cfg(all(test, unix))]
         if tests::spend_file_write_fails() {
             return Err(Named(CANNOT_WRITE).into());
         }
+        let bytes = serde_json::to_vec_pretty(after)?;
         crate::auth::atomic_write(&agent_file_path(data_dir)?, &bytes)?;
         return Ok(());
     }
-    let digest = hex::encode(Sha256::digest(&bytes));
-    // Spend names the agent. append_audit_event needs no proof binding.
-    // The owner is only `owner=` in the reason. A charge appends that
-    // signed event, then writes the agent file.
-    let spend = operation == Operation::Charge;
-    let reason = if spend {
+    if operation == Operation::Charge {
+        let bytes = serde_json::to_vec_pretty(after)?;
+        let digest = hex::encode(Sha256::digest(&bytes));
         let total = after
             .agents
             .iter()
             .find(|agent| agent.record.principal_id == subject)
             .map(|agent| agent.model_tokens_spent)
             .unwrap_or(0);
-        format!(
-            "owner={} seq={} spent={total} sha256={digest}",
-            caller.principal_id, after.sequence
-        )
-    } else {
-        format!("seq={} sha256={digest}", after.sequence)
-    };
-    let event = RuntimeAuditEventV1 {
-        schema: RuntimeAuditEventV1::SCHEMA.to_string(),
-        event_id: format!("audit:agent-records:{}:{}", after.sequence, &digest[..16]),
-        event_type: operation.event_type().to_string(),
-        principal_id: Some(subject.to_string()),
-        proof_binding_id: (!spend).then(|| caller.proof_binding_id.to_string()),
-        session_id: (!spend).then(|| caller.session_id.to_string()),
-        challenge_id: None,
-        capsule_id: None,
-        result: "ok".to_string(),
-        reason,
-        occurred_at: now,
-        signer_did: None,
-        signature: None,
-    };
-    if spend {
+        let event = RuntimeAuditEventV1 {
+            schema: RuntimeAuditEventV1::SCHEMA.to_string(),
+            event_id: format!("audit:agent-records:{}:{}", after.sequence, &digest[..16]),
+            event_type: operation.event_type().to_string(),
+            principal_id: Some(subject.to_string()),
+            proof_binding_id: None,
+            session_id: None,
+            challenge_id: None,
+            capsule_id: None,
+            result: "ok".to_string(),
+            reason: format!(
+                "owner={} seq={} spent={total} sha256={digest}",
+                caller.principal_id, after.sequence
+            ),
+            occurred_at: now,
+            signer_did: None,
+            signature: None,
+        };
         #[cfg(all(test, unix))]
         if tests::spend_append_fails() {
             anyhow::bail!("spend event was not appended");
@@ -1315,8 +1367,90 @@ fn write(
         crate::auth::atomic_write(&agent_file_path(data_dir)?, &bytes)?;
         return Ok(());
     }
+    let mut recorded = after.clone();
+    recorded.last_audit = Some(LastAudit {
+        sequence: after.sequence,
+        operation: operation.event_type().to_string(),
+        subject: subject.to_string(),
+        proof_binding_id: caller.proof_binding_id.to_string(),
+        session_id: caller.session_id.to_string(),
+        at: now,
+        confirmed: false,
+    });
+    let bytes = serde_json::to_vec_pretty(&recorded)?;
     crate::auth::atomic_write(&agent_file_path(data_dir)?, &bytes)?;
-    crate::auth::append_audit_event(data_dir, event)
+    #[cfg(test)]
+    if crate::api::gateway::seams::take_record_audit(data_dir) {
+        anyhow::bail!("injected agent record audit failure");
+    }
+    let digest = hex::encode(Sha256::digest(&bytes));
+    crate::auth::append_audit_event(
+        data_dir,
+        RuntimeAuditEventV1 {
+            schema: RuntimeAuditEventV1::SCHEMA.to_string(),
+            event_id: format!("audit:agent-records:{}:{}", after.sequence, &digest[..16]),
+            event_type: operation.event_type().to_string(),
+            principal_id: Some(subject.to_string()),
+            proof_binding_id: Some(caller.proof_binding_id.to_string()),
+            session_id: Some(caller.session_id.to_string()),
+            challenge_id: None,
+            capsule_id: None,
+            result: "ok".to_string(),
+            reason: format!("seq={} sha256={digest}", after.sequence),
+            occurred_at: now,
+            signer_did: None,
+            signature: None,
+        },
+    )?;
+    if let Some(audit) = recorded.last_audit.as_mut() {
+        audit.confirmed = true;
+    }
+    // Same sequence as the audited write. The hash in the row is the first file.
+    let confirmed = serde_json::to_vec_pretty(&recorded)?;
+    crate::auth::atomic_write(&agent_file_path(data_dir)?, &confirmed)?;
+    Ok(())
+}
+
+/// An agent that is off, retired, or on a Home with agents off cannot ask,
+/// be granted, or use its storage. A principal that is not an agent is left
+/// alone, so a person's capsule is unchanged. A data directory with no agent
+/// file is that case: opening it would refuse the ask when the Home's sign-in
+/// file is absent, and a person's capsule would change.
+pub(crate) fn refuse_inactive_agent(data_dir: &Path, principal_id: &str) -> anyhow::Result<()> {
+    if principal_id.is_empty()
+        || !build_allows_for_home(data_dir)
+        || crate::auth::validate_agent_id(principal_id).is_err()
+    {
+        return Ok(());
+    }
+    let path = match agent_file_path(data_dir) {
+        Ok(path) => path,
+        Err(_) => return Ok(()),
+    };
+    match read_agent_file(data_dir, &path) {
+        Ok(None) => return Ok(()),
+        Ok(Some(_)) => {}
+        Err(reason) => return refused(format!("agents are unavailable: {reason}")),
+    }
+    let opened = open(data_dir, false)?;
+    let Some(agent) = opened
+        .file
+        .agents
+        .iter()
+        .find(|agent| agent.record.principal_id == principal_id)
+    else {
+        return Ok(());
+    };
+    if opened.file.enabled.is_none() {
+        return refused(NOT_ENABLED);
+    }
+    if agent.record.retired_at.is_some() {
+        return refused(ALREADY_RETIRED);
+    }
+    if !agent.active {
+        return refused(NOT_ACTIVE);
+    }
+    Ok(())
 }
 
 /// Wraps an agent's data key under the key `auth` derived for it. The nonce
@@ -1394,6 +1528,8 @@ pub(crate) const NOT_ENABLED: &str = "agents are not turned on for this Home";
 pub(crate) const NOT_A_PERSON: &str = "only a stored person may use agents";
 /// The refusal for a person who may not turn agents on or off.
 pub(crate) const NOT_AN_ADMIN: &str = "only an admin of this Home turns agents on or off";
+/// The refusal when the agent's owner is a Guest, or their last passkey is revoked.
+pub(crate) const OWNER_NOT_ADMIN: &str = "the agent's owner is not an admin";
 
 /// Refuses by name in a build without the feature. Every operation below
 /// starts here.
@@ -2126,8 +2262,9 @@ pub(crate) fn set_active(
 
 /// One stored agent of `owner_id`, for a launch. Every gate applies before a
 /// record leaves this module: the build, the Home's stored choice, a stored
-/// person as the owner, the agent's own owner, its retirement, and whether
-/// its owner has turned this agent on.
+/// person as the owner, that the owner is an admin with a live passkey now,
+/// the agent's own owner, its retirement, and whether its owner has turned
+/// this agent on.
 pub(crate) fn stored_agent(
     data_dir: &Path,
     owner_id: &str,
@@ -2155,6 +2292,9 @@ pub(crate) fn stored_agent(
     else {
         return refused(NO_SUCH_AGENT);
     };
+    if !owner_is_admin_now(data_dir, owner_id)? {
+        return refused(OWNER_NOT_ADMIN);
+    }
     if agent.record.retired_at.is_some() {
         return refused(NO_SUCH_AGENT);
     }
@@ -2162,6 +2302,178 @@ pub(crate) fn stored_agent(
         return refused(NOT_ACTIVE);
     }
     Ok(agent.clone())
+}
+
+/// One Home whose next owner-role read fails. A failed read is not "not an admin".
+#[cfg(test)]
+static OWNER_ADMIN_READ_FAILS: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashSet<std::path::PathBuf>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashSet::new()));
+
+/// The next `owner_is_admin_now` for this Home fails closed.
+#[cfg(all(test, unix))]
+pub(crate) fn fail_owner_admin_read(data_dir: &Path) {
+    OWNER_ADMIN_READ_FAILS
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+        .insert(data_dir.to_path_buf());
+}
+
+/// The owner is an admin now: Admin role, and a live passkey when they have one.
+/// A Guest, and an admin whose every passkey is revoked, is not. A failed read
+/// is an error. It is not a Guest.
+pub(crate) fn owner_is_admin_now(data_dir: &Path, owner_id: &str) -> anyhow::Result<bool> {
+    #[cfg(test)]
+    if OWNER_ADMIN_READ_FAILS
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+        .remove(data_dir)
+    {
+        anyhow::bail!("the owner's role could not be read");
+    }
+    let records = match crate::auth::load_owner_principals(data_dir) {
+        Ok(records) => records,
+        Err(error) => {
+            tracing::warn!("owner admin check was not read: {error:#}");
+            anyhow::bail!("the owner's role could not be read");
+        }
+    };
+    let mut admin = false;
+    let mut passkey = false;
+    let mut live_passkey = false;
+    for record in &records {
+        if record.principal_id != owner_id || !is_person(record) {
+            continue;
+        }
+        admin |= crate::auth::is_admin(record);
+        if let Some(key) = record.proof_binding.passkey.as_ref() {
+            passkey = true;
+            live_passkey |= key.revoked_at.is_none();
+        }
+    }
+    Ok(admin && (!passkey || live_passkey))
+}
+
+#[cfg(test)]
+type OwnerDemotedHook = fn(&Path, &str);
+#[cfg(test)]
+static OWNER_DEMOTED_HOOK: std::sync::LazyLock<std::sync::Mutex<Option<OwnerDemotedHook>>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(None));
+
+/// The gateway registers the stop that a direct demote runs.
+#[cfg(test)]
+pub(crate) fn set_owner_demoted_hook(hook: fn(&Path, &str)) {
+    *OWNER_DEMOTED_HOOK
+        .lock()
+        .unwrap_or_else(|err| err.into_inner()) = Some(hook);
+}
+
+/// After a direct demote outside the HTTP route, run the registered stop.
+#[cfg(test)]
+pub(crate) fn notify_owner_demoted(data_dir: &Path, owner_id: &str) {
+    if ids_owned_by(data_dir, owner_id).is_empty() {
+        return;
+    }
+    let hook = OWNER_DEMOTED_HOOK
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+        .as_ref()
+        .copied();
+    if let Some(hook) = hook {
+        hook(data_dir, owner_id);
+    }
+}
+
+/// Agent ids this person owns, retired records included, so their open plans close.
+pub(crate) fn ids_owned_by(data_dir: &Path, owner_id: &str) -> Vec<String> {
+    let Ok(opened) = open(data_dir, false) else {
+        return Vec::new();
+    };
+    opened
+        .file
+        .agents
+        .into_iter()
+        .filter(|agent| agent.record.owner.as_deref() == Some(owner_id))
+        .map(|agent| agent.record.principal_id)
+        .collect()
+}
+
+/// The stored owner of one agent, when the file holds that id.
+pub(crate) fn owner_of(data_dir: &Path, agent_id: &str) -> Option<String> {
+    let opened = open(data_dir, false).ok()?;
+    opened
+        .file
+        .agents
+        .into_iter()
+        .find(|agent| agent.record.principal_id == agent_id)
+        .and_then(|agent| agent.record.owner)
+}
+
+fn row_agent(event: &RuntimeAuditEventV1) -> Option<String> {
+    let reason: serde_json::Value = serde_json::from_str(&event.reason).ok()?;
+    reason.get("agent_id")?.as_str().map(str::to_string)
+}
+
+fn is_stop_row(event: &RuntimeAuditEventV1) -> bool {
+    event.event_type == "agent.stopped"
+        || (event.event_type == "agent.start.completed" && event.result == "ok")
+}
+
+/// A row settles the owed row of its session, and of its agent if failed.
+fn fold_stop_row(owed: &mut Vec<RuntimeAuditEventV1>, event: &RuntimeAuditEventV1) {
+    if !is_stop_row(event) {
+        return;
+    }
+    let (agent, session) = (row_agent(event), event.session_id.as_deref());
+    owed.retain(|owed| {
+        let run = owed.session_id.is_some() && owed.session_id.as_deref() == session;
+        !run && (owed.result != "failed" || agent.is_none() || row_agent(owed) != agent)
+    });
+    let owes = event.event_type == "agent.stopped"
+        && matches!(event.result.as_str(), "stopping" | "failed");
+    if owes && (session.is_some() || agent.is_some()) {
+        owed.push(event.clone());
+    }
+}
+
+/// Folds `rows`, in order, over the owed stops under the agent lock.
+pub(crate) fn note_stop_rows(data_dir: &Path, rows: &[RuntimeAuditEventV1]) -> anyhow::Result<()> {
+    if !rows.iter().any(is_stop_row) {
+        return Ok(());
+    }
+    let opened = open(data_dir, true)?;
+    let mut after = opened.file.clone();
+    for row in rows {
+        fold_stop_row(&mut after.owed_stops, row);
+    }
+    if after.owed_stops == opened.file.owed_stops {
+        return Ok(());
+    }
+    after.sequence += 1;
+    let caller = Caller::default();
+    write(data_dir, &opened, Operation::Heal, &after, &caller, "", 0)
+}
+
+pub(crate) fn owed_stop_rows(data_dir: &Path) -> Vec<RuntimeAuditEventV1> {
+    open(data_dir, false).map_or(vec![], |f| f.file.owed_stops)
+}
+
+/// The stored agent, without the owner check. Stop uses this after it has
+/// already allowed another admin to end an agent whose owner is not an admin.
+pub(crate) fn agent_record(data_dir: &Path, agent_id: &str) -> anyhow::Result<StoredAgent> {
+    if !build_allows_for_home(data_dir) {
+        return refused(FEATURE_OFF);
+    }
+    let opened = open(data_dir, false)?;
+    match opened
+        .file
+        .agents
+        .into_iter()
+        .find(|agent| agent.record.principal_id == agent_id)
+    {
+        Some(agent) => Ok(agent),
+        None => refused(NO_SUCH_AGENT),
+    }
 }
 
 /// One stored agent of `owner_id`, for a Stop. The owner must own the record.
@@ -2197,7 +2509,10 @@ pub(crate) fn stored_agent_for_stop(
 
 /// The agent file's record for one principal and root, while agents are on for
 /// this Home. `None` in a build without the feature, while they are off, and
-/// for any id or root the file does not hold.
+/// for any id or root the file does not hold. Production asks go through
+/// `stored_agent_for_protection` and `refuse_inactive_agent`. This lookup is
+/// what the tests hold the filtered rule against.
+#[cfg(test)]
 pub(crate) fn stored_agent_for_root(
     data_dir: &Path,
     principal_id: &str,
@@ -2217,20 +2532,42 @@ pub(crate) fn stored_agent_for_root(
         .find(|agent| {
             agent.record.principal_id == principal_id
                 && agent.record.localhost_root == localhost_root
+                && agent.active
+                && agent.record.retired_at.is_none()
         })
         .cloned())
 }
 
+/// The agent file's record for one principal and root, including an agent
+/// that is off or retired and a Home that has turned agents off. The key
+/// stays with the record, so a write does not fall through to plaintext.
+/// A grant still uses [`stored_agent_for_root`], which returns none unless
+/// the agent is on.
+fn stored_agent_for_protection(
+    data_dir: &Path,
+    principal_id: &str,
+    localhost_root: &str,
+) -> anyhow::Result<Option<StoredAgent>> {
+    if !build_allows_for_home(data_dir) {
+        return Ok(None);
+    }
+    let opened = open(data_dir, false)?;
+    Ok(opened.file.agents.into_iter().find(|agent| {
+        agent.record.principal_id == principal_id && agent.record.localhost_root == localhost_root
+    }))
+}
+
 /// The agent file's stored protection for one principal and root, or `None`.
 /// The sign-in file holds none for an agent, so this is where the bridge's
-/// protection reader finds one.
+/// protection reader finds one. An agent that is off still has its key: the
+/// bytes stay sealed, and the ask is refused separately.
 pub(crate) fn stored_protection(
     data_dir: &Path,
     principal_id: &str,
     localhost_root: &str,
 ) -> anyhow::Result<Option<PrincipalRootProtectionV1>> {
     Ok(
-        stored_agent_for_root(data_dir, principal_id, localhost_root)?
+        stored_agent_for_protection(data_dir, principal_id, localhost_root)?
             .map(|agent| agent.protection),
     )
 }

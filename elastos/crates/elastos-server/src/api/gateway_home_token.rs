@@ -463,6 +463,23 @@ pub(in crate::api) fn local_home_launch_token_context(
     ))
 }
 
+/// Launch context for a signed agent stop that has no live request token: a
+/// failed-stop retry at start, or another admin signing a demoted owner's stop.
+/// One site holds both callers so the launch-context census stays tree-wide.
+pub(in crate::api) fn agent_stop_signer_context(
+    root: crate::auth::ResolvedPrincipalRoot,
+    principal_id: &str,
+    proof_binding_id: Option<String>,
+    kind: &str,
+) -> HomeLaunchTokenContext {
+    HomeLaunchTokenContext::resolved(
+        root,
+        format!("session:{kind}:{principal_id}"),
+        proof_binding_id,
+        format!("grant:{kind}:{principal_id}"),
+    )
+}
+
 pub(crate) fn uuid_like_token() -> String {
     let mut bytes = [0u8; 16];
     rand::thread_rng().fill_bytes(&mut bytes);
@@ -641,7 +658,6 @@ fn note_agent_launch_grant_minted(data_dir: &std::path::Path) {
 }
 
 #[cfg(test)]
-#[allow(dead_code)]
 pub(in crate::api) fn agent_launch_grants_minted_for_test(data_dir: &std::path::Path) -> u64 {
     AGENT_LAUNCH_GRANTS_MINTED
         .lock()

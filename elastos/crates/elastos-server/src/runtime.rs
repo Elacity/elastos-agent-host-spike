@@ -2,6 +2,8 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+#[cfg(test)]
+use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex as StdMutex, RwLock as StdRwLock};
 use tokio::sync::RwLock;
@@ -26,6 +28,49 @@ use elastos_runtime::primitives::audit::AuditEvent;
 use elastos_runtime::primitives::SecureTimestamp;
 use elastos_runtime::provider::ProviderRegistry;
 use elastos_runtime::signature::{hash_content, SignatureVerifier};
+
+/// Test only: the next component host call panics inside the guest's call.
+#[cfg(test)]
+static PLANT_HOST_PANIC: AtomicBool = AtomicBool::new(false);
+#[cfg(test)]
+static HOST_PANIC_HOLD: AtomicBool = AtomicBool::new(false);
+#[cfg(test)]
+static HOST_PANIC_RELEASE: AtomicBool = AtomicBool::new(false);
+
+/// Plant one panic in the next host call a guest makes. The flag is consumed
+/// by that call. Release builds do not carry this.
+#[cfg(test)]
+pub(crate) fn plant_host_panic() {
+    PLANT_HOST_PANIC.store(true, Ordering::Release);
+}
+
+/// Keep that panic inside the host call until [`release_planted_host_panic`].
+/// The wait is the host thread, at most 20 seconds, and it is not guest fuel.
+#[cfg(test)]
+pub(crate) fn hold_planted_host_panic() {
+    HOST_PANIC_RELEASE.store(false, Ordering::Release);
+    HOST_PANIC_HOLD.store(true, Ordering::Release);
+}
+
+#[cfg(test)]
+pub(crate) fn release_planted_host_panic() {
+    HOST_PANIC_RELEASE.store(true, Ordering::Release);
+}
+
+#[cfg(test)]
+fn take_planted_host_panic() -> bool {
+    let planted = PLANT_HOST_PANIC.swap(false, Ordering::AcqRel);
+    if planted && HOST_PANIC_HOLD.load(Ordering::Acquire) {
+        let started = std::time::Instant::now();
+        while !HOST_PANIC_RELEASE.load(Ordering::Acquire)
+            && started.elapsed() < std::time::Duration::from_secs(20)
+        {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        HOST_PANIC_HOLD.store(false, Ordering::Release);
+    }
+    planted
+}
 
 /// The status of an activation that answered `starting` and whose worker has
 /// not yet reported that the guest entered `run`.
@@ -459,19 +504,35 @@ fn new_plan_book() -> Arc<StdMutex<PlanBook>> {
     }))
 }
 
+type PlanHomeSlot = std::sync::Weak<StdMutex<PlanBook>>;
+
+fn plan_homes() -> &'static StdMutex<HashMap<PathBuf, PlanHomeSlot>> {
+    static HOMES: std::sync::OnceLock<StdMutex<HashMap<PathBuf, PlanHomeSlot>>> =
+        std::sync::OnceLock::new();
+    HOMES.get_or_init(|| StdMutex::new(HashMap::new()))
+}
+
+fn plan_home_key(home: &Path) -> PathBuf {
+    std::fs::canonicalize(home).unwrap_or_else(|_| home.to_path_buf())
+}
+
+/// The plan book already wired for this Home, when that book is still alive.
+/// The agent plane is the only caller, and that plane listens on Unix.
+#[cfg(unix)]
+pub(crate) fn wired_plan_book(home: &Path) -> Option<Arc<StdMutex<PlanBook>>> {
+    let homes = plan_homes().lock().unwrap_or_else(|err| err.into_inner());
+    homes
+        .get(&plan_home_key(home))
+        .and_then(PlanHomeSlot::upgrade)
+}
+
 /// Within one process, one Home has one plan book for dispatch and Stop.
 /// A second live book fails.
 /// The installed two-process path runs no agent today and its proof comes with the package.
 pub(crate) fn wire_home_runtime(home: &Path, book: &Arc<StdMutex<PlanBook>>) {
-    type Slot = std::sync::Weak<StdMutex<PlanBook>>;
-    static HOMES: std::sync::OnceLock<StdMutex<HashMap<PathBuf, Slot>>> =
-        std::sync::OnceLock::new();
-    let key = std::fs::canonicalize(home).unwrap_or_else(|_| home.to_path_buf());
-    let mut homes = HOMES
-        .get_or_init(|| StdMutex::new(HashMap::new()))
-        .lock()
-        .unwrap_or_else(|err| err.into_inner());
-    let live = homes.get(&key).and_then(Slot::upgrade);
+    let key = plan_home_key(home);
+    let mut homes = plan_homes().lock().unwrap_or_else(|err| err.into_inner());
+    let live = homes.get(&key).and_then(PlanHomeSlot::upgrade);
     if let Some(found) = live.as_ref() {
         if !Arc::ptr_eq(found, book) {
             panic!("one Home runs plan dispatch and Stop on two Runtimes within one process");
@@ -779,6 +840,8 @@ pub(crate) struct AgentStartFacts<'a> {
     pub(crate) host_cid: &'a str,
     pub(crate) launch_id: &'a str,
     pub(crate) expires_at: u64,
+    /// The Home whose plan waits this Start counts against.
+    pub(crate) data_dir: &'a std::path::Path,
 }
 
 /// One agent session's audit tuple, stored at Start and taken at Stop.
@@ -838,6 +901,52 @@ struct InstanceAuthority {
     pending_store: Arc<elastos_runtime::capability::pending::PendingRequestStore>,
     capability_manager: Arc<elastos_runtime::capability::CapabilityManager>,
     data_dir: std::path::PathBuf,
+    /// Home writes `capability_store/pending_revocations`. The plane does not.
+    persist_revocations: bool,
+}
+
+impl InstanceAuthority {
+    /// `Some` for Home's runtime. `None` for the agent plane, whose
+    /// revocations stay in the memory store this authority already holds.
+    fn revocation_dir(&self) -> Option<&std::path::Path> {
+        self.persist_revocations.then_some(self.data_dir.as_path())
+    }
+}
+
+/// Settle one instance. `None` revokes nothing and reports success. `Some`
+/// closes that instance's pending plans, revokes its one-use plan token, and
+/// revokes the grants in its store. `guests` hears each revoked grant.
+async fn settle_instance_authority(
+    authority: Option<&InstanceAuthority>,
+    capsule_id: &str,
+    cause: &str,
+    guests: Option<&elastos_compute::providers::ComponentProvider>,
+) -> std::result::Result<(), String> {
+    match authority {
+        Some(authority) => {
+            let _ = crate::api::gateway::close_instance_plans(
+                &authority.data_dir,
+                capsule_id,
+                "instance ended",
+            );
+            crate::resource_bridge::revoke_plan_one_use_tokens(
+                &authority.capability_manager,
+                &authority.data_dir,
+                capsule_id,
+            )
+            .await;
+            crate::api::handlers::settle::settle_and_revoke_guests(
+                &authority.pending_store,
+                &authority.capability_manager,
+                authority.revocation_dir(),
+                capsule_id,
+                cause,
+                guests,
+            )
+            .await
+        }
+        None => Ok(()),
+    }
 }
 
 /// The cause an activation records when the task watching it went away before
@@ -884,16 +993,20 @@ impl ActivationStop {
 
     /// The first commit writes the cause. A later commit keeps that cause.
     fn finish(&self, id: u64, reason: &str) {
-        let mut calls = self.calls.lock().unwrap_or_else(|err| err.into_inner());
-        if !calls.open.remove(&id) {
-            return;
-        }
-        calls
-            .cause
-            .get_or_insert_with(|| format!("{CAPSULE_STOPPED}: {reason}"));
-        calls.committed = calls.committed.saturating_add(1);
-        self.flag.requested.store(true, Ordering::Release);
-        if calls.open.is_empty() {
+        let quiet = {
+            let mut calls = self.calls.lock().unwrap_or_else(|err| err.into_inner());
+            if !calls.open.remove(&id) {
+                return;
+            }
+            calls
+                .cause
+                .get_or_insert_with(|| format!("{CAPSULE_STOPPED}: {reason}"));
+            calls.committed = calls.committed.saturating_add(1);
+            self.flag.requested.store(true, Ordering::Release);
+            calls.open.is_empty()
+        };
+        crate::resource_bridge::notify_plan_waiters();
+        if quiet {
             self.settled.notify_one();
         }
     }
@@ -1634,7 +1747,12 @@ impl ActivationContextHeld {
     /// The stop request is not this method's: the entry's end takes it away
     /// after the write, so a racing stop still finds it.
     async fn release(&mut self) {
-        crate::resource_bridge::forget_agent_plan_dispatch_authority(&self.id.0);
+        crate::resource_bridge::forget_agent_plan_dispatch_authority(
+            self.authority
+                .as_ref()
+                .map(|authority| authority.data_dir.as_path()),
+            &self.id.0,
+        );
         self.component.forget_instance(&self.id).await;
         if let Ok(mut bounds) = self.manifest_capabilities.write() {
             bounds.remove(&self.id.0);
@@ -1693,23 +1811,21 @@ impl ActivationContextHeld {
         let (status, cause) = match self.settled.clone() {
             Some(settled) => settled,
             None => {
+                // The instance has ended. Raise the stop flag before any
+                // revoke, so a dispatch that has not minted its one-use token
+                // sees this end and does not mint. The recorded cause stays
+                // the one this end was given: the flag is not that cause.
+                self.stop.flag.requested.store(true, Ordering::Release);
                 // An activation that already ended has no entry to stop; an
                 // ending one keeps it until its worker sees the stop flag.
                 let _ = self.component.stop(&self.handle).await;
-                let settled = match &self.authority {
-                    Some(authority) => {
-                        crate::api::handlers::settle::settle_and_revoke_guests(
-                            &authority.pending_store,
-                            &authority.capability_manager,
-                            &authority.data_dir,
-                            &self.id.0,
-                            cause,
-                            Some(self.component.as_ref()),
-                        )
-                        .await
-                    }
-                    None => Ok(()),
-                };
+                let settled = settle_instance_authority(
+                    self.authority.as_ref(),
+                    &self.id.0,
+                    cause,
+                    Some(self.component.as_ref()),
+                )
+                .await;
                 let ended = match settled {
                     Ok(()) => (status.to_string(), cause.to_string()),
                     Err(error) => (
@@ -2210,6 +2326,32 @@ impl Runtime {
     ///
     /// Also configures the component hostcall so component capsules can
     /// communicate with providers through Runtime-controlled authority.
+    /// The plane's grants live in its memory store. An end does not write
+    /// Home's pending revocation list. The plane's listener is Unix-only, so
+    /// this setter is too.
+    #[cfg(unix)]
+    pub(crate) fn keep_revocations_in_memory(&self) {
+        if let Some(authority) = self
+            .instance_authority
+            .write()
+            .unwrap_or_else(|err| err.into_inner())
+            .as_mut()
+        {
+            authority.persist_revocations = false;
+        }
+    }
+
+    /// The model answer from the registry this Runtime stored. `None` when
+    /// this Runtime has no registry.
+    #[cfg(all(test, unix))]
+    pub(crate) async fn served_model_answer(
+        &self,
+        body: &serde_json::Value,
+    ) -> Option<serde_json::Value> {
+        let registry = self.provider_registry.read().await.clone()?;
+        registry.send_raw("model", body).await.ok()
+    }
+
     pub async fn set_provider_registry(
         &self,
         registry: Arc<ProviderRegistry>,
@@ -2230,6 +2372,7 @@ impl Runtime {
             pending_store: pending_store.clone(),
             capability_manager: capability_manager.clone(),
             data_dir: data_dir.clone(),
+            persist_revocations: true,
         });
         if let Some(ref component) = self.component_provider {
             let tables = ComponentBridgeTables {
@@ -2271,6 +2414,10 @@ impl Runtime {
             // v1 stays on the caller thread. The leg is Caller, so this does
             // not start a thread. v2 awaits `bridge_call` and never comes here.
             component.set_bus_hostcall(Arc::new(move |line, capsule_id, principal_id| {
+                #[cfg(test)]
+                if take_planted_host_panic() {
+                    panic!("planted host panic");
+                }
                 Self::block_on_component_bridge(
                     &host_handle,
                     component_bridge_leg(),
@@ -2520,7 +2667,7 @@ impl Runtime {
     /// beside [`Self::start_local_admitted`] because it is the call the launch
     /// route's F-sync falsifier restores, and the agent rows that assert a
     /// whole run use it.
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(all(test, unix))]
     pub(crate) async fn run_local_admitted(
         &self,
         path: &Path,
@@ -2556,6 +2703,11 @@ impl Runtime {
         admission: crate::agent_admission::AdmissionContext,
         facts: AgentStartFacts<'_>,
     ) -> Result<(CapsuleHandle, Signer)> {
+        if crate::resource_bridge::plan_waits_block_another_start(facts.data_dir) {
+            return Err(ElastosError::InvalidManifest(
+                crate::resource_bridge::PLAN_WAIT_FULL.into(),
+            ));
+        }
         let capsules = &self.running_capsules;
         let turn = self.launch_turn(facts.agent_id);
         let _turn = turn.lock().await;
@@ -2842,6 +2994,10 @@ impl Runtime {
             .any(|flight| flight.session_id == session_id)
     }
 
+    pub(crate) fn any_plan_effect_inflight(&self) -> bool {
+        !plan_book(&self.plan_book).inflight.is_empty()
+    }
+
     // A flight whose session has ended or is stopping. A live run's own
     // step is not this, so Start says already running. Routes, Start, and
     // the System list all ask this.
@@ -2918,6 +3074,48 @@ impl Runtime {
             agent_id: agent_id.to_string(),
             token,
         })
+    }
+
+    /// Revoke this agent's grants on this Runtime's own store. The guest is
+    /// still running after this returns; the caller that turns the agent off
+    /// stops it next. `None` authority revokes nothing.
+    pub(crate) async fn revoke_live_agent_grants(&self, agent_id: &str, cause: &str) {
+        let sessions: Vec<String> = {
+            let capsules = self.running_capsules.read().await;
+            capsules
+                .values()
+                .filter(|info| {
+                    info.ended_at.is_none() && info.principal.as_deref() == Some(agent_id)
+                })
+                .map(|info| info.id.clone())
+                .collect()
+        };
+        let authority = self
+            .instance_authority
+            .read()
+            .unwrap_or_else(|err| err.into_inner())
+            .clone();
+        let Some(authority) = authority else {
+            return;
+        };
+        let guests = self.component_guests();
+        for session in sessions {
+            let _ = crate::api::handlers::settle::settle_and_revoke_guests(
+                &authority.pending_store,
+                &authority.capability_manager,
+                authority.revocation_dir(),
+                &session,
+                cause,
+                guests.as_deref(),
+            )
+            .await;
+            crate::resource_bridge::revoke_plan_one_use_tokens(
+                &authority.capability_manager,
+                &authority.data_dir,
+                &session,
+            )
+            .await;
+        }
     }
 
     /// Live session ids whose principal is `agent_id`. The capsule name is
@@ -3064,11 +3262,7 @@ impl Runtime {
     }
 
     /// Test only: plant a start record the launch route did not write.
-    ///
-    /// The caller lives in the agents build's launch tests. This allow keeps
-    /// the helper when that build is off, where those tests are not compiled.
     #[cfg(test)]
-    #[allow(dead_code)]
     pub(crate) async fn insert_agent_session_for_test(&self, record: AgentSessionRecord) {
         let session_id = record.session_id.clone();
         self.agent_launches
@@ -3205,7 +3399,7 @@ impl Runtime {
         true
     }
 
-    /// The next stop of this session fails before the row ends.
+    /// The next provider stop of this session is reported as a failure.
     #[cfg(all(test, unix))]
     pub(crate) fn arm_failing_capsule_stop(&self, session_id: &str) {
         FAIL_CAPSULE_STOP
@@ -3446,6 +3640,18 @@ impl Runtime {
 
     #[cfg(test)]
     pub(crate) async fn plant_open_agent_stop_for_test(&self, agent_id: &str, session_id: &str) {
+        self.plant_open_agent_row_for_test(agent_id, session_id)
+            .await;
+        self.bind_plan_instance(session_id, agent_id);
+        self.note_planted_live_run(agent_id, session_id);
+    }
+
+    /// A resident row that does not hold this agent's live-run token. A Start
+    /// is still admitted. The settle-stop row uses this so the Start under
+    /// test can launch beside an earlier row and the stop names only the
+    /// session that Start made.
+    #[cfg(test)]
+    pub(crate) async fn plant_open_agent_row_for_test(&self, agent_id: &str, session_id: &str) {
         self.register_capsule(RunningCapsuleInfo {
             id: session_id.to_string(),
             name: "planted".to_string(),
@@ -3470,8 +3676,6 @@ impl Runtime {
             .write()
             .unwrap_or_else(|err| err.into_inner())
             .insert(session_id.to_string(), Arc::new(ActivationStop::new()));
-        self.bind_plan_instance(session_id, agent_id);
-        self.note_planted_live_run(agent_id, session_id);
     }
 
     /// The planted row and the live-run token are one fact. Ending the row
@@ -5021,6 +5225,39 @@ impl Runtime {
         }
     }
 
+    /// Whether this Runtime was given an instance authority. `None` revokes
+    /// nothing and still reports success from the instance end.
+    #[cfg(test)]
+    pub(crate) fn instance_authority_is_set(&self) -> bool {
+        self.instance_authority
+            .read()
+            .unwrap_or_else(|err| err.into_inner())
+            .is_some()
+    }
+
+    /// The plane's own pending store and capability manager, when the
+    /// authority was installed. Startup uses this to see whether a sent
+    /// grant is still live.
+    pub(crate) fn instance_authority_plane(
+        &self,
+    ) -> Option<(
+        Arc<elastos_runtime::capability::pending::PendingRequestStore>,
+        Arc<elastos_runtime::capability::CapabilityManager>,
+        std::path::PathBuf,
+    )> {
+        self.instance_authority
+            .read()
+            .unwrap_or_else(|err| err.into_inner())
+            .as_ref()
+            .map(|authority| {
+                (
+                    Arc::clone(&authority.pending_store),
+                    Arc::clone(&authority.capability_manager),
+                    authority.data_dir.clone(),
+                )
+            })
+    }
+
     /// List all registered capsules, sorted by id. An entry that ended more
     /// than [`ENDED_CAPSULE_RETENTION`] ago leaves the listing here.
     pub async fn list_capsules(&self) -> Vec<RunningCapsuleInfo> {
@@ -5050,6 +5287,15 @@ impl Runtime {
         };
         self.purge_unknown_sessions(&removed);
         listed
+    }
+
+    /// Whether `id` is still running. A lock that is busy counts as running,
+    /// so a startup pass does not close that instance's plan.
+    pub(crate) fn capsule_is_running(&self, id: &str) -> bool {
+        match self.running_capsules.try_read() {
+            Ok(capsules) => capsules.get(id).is_some_and(|info| info.ended_at.is_none()),
+            Err(_) => true,
+        }
     }
 
     /// Get a specific capsule by ID
@@ -5157,15 +5403,24 @@ impl Runtime {
 
         let Some(stop) = stop else {
             // No watcher holds this activation: stop it through its provider
-            // and take its entry away, as before. A provider error leaves the
-            // row up, so the plan end is not decided.
-            #[cfg(test)]
-            if self.take_failing_capsule_stop(id) {
-                return Err(ElastosError::Compute("capsule stop failed".into()));
-            }
+            // and take its entry away, as before. A stop that fails still
+            // closes the plan instance: the owner asked to stop, so a later
+            // dispatch cannot run under that failed stop.
             if let Some((handle, provider)) = provider {
                 tracing::info!("Stopping capsule '{}' ({})", info.name, id);
-                provider.stop(handle).await?;
+                #[cfg(test)]
+                self.note_provider_stop_call();
+                let stopped = provider.stop(handle).await;
+                #[cfg(test)]
+                let stopped = if stopped.is_ok() && self.take_failing_capsule_stop(id) {
+                    Err(ElastosError::Compute("provider stop failed".into()))
+                } else {
+                    stopped
+                };
+                if let Err(error) = stopped {
+                    plan_book(&self.plan_book).mark_stopping(id);
+                    return Err(error);
+                }
             }
             // This call removes the row. The end is decided here, for this session.
             plan_book(&self.plan_book).mark_stopping(id);
@@ -5361,6 +5616,90 @@ pub(crate) mod tests {
         Component, ComponentImportSection, ComponentTypeRef as EncodedComponentTypeRef,
         ComponentTypeSection, InstanceType,
     };
+
+    #[test]
+    fn the_host_panic_plant_starts_clear() {
+        assert!(!PLANT_HOST_PANIC.load(Ordering::Acquire));
+        #[cfg(unix)]
+        {
+            let _served = Runtime::served_model_answer;
+            let _ = _served;
+        }
+        assert!(!HOST_PANIC_HOLD.load(Ordering::Acquire));
+        assert!(!HOST_PANIC_RELEASE.load(Ordering::Acquire));
+        // The planters stay distinct and uncalled. Calling one here would arm
+        // a guest that shares this process. A default test build still names
+        // them, so they are not dead code when the agents feature is off.
+        assert!(!std::ptr::fn_addr_eq(
+            plant_host_panic as fn(),
+            hold_planted_host_panic as fn()
+        ));
+        assert!(!std::ptr::fn_addr_eq(
+            hold_planted_host_panic as fn(),
+            release_planted_host_panic as fn()
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_new_runtime_has_no_instance_authority() {
+        let (runtime, _dir) = test_runtime().await;
+        assert!(!runtime.instance_authority_is_set());
+        assert!(runtime.instance_authority_plane().is_none());
+    }
+
+    #[tokio::test]
+    async fn an_unset_instance_authority_revokes_nothing_and_succeeds() {
+        let audit = std::sync::Arc::new(elastos_runtime::primitives::audit::AuditLog::new());
+        let store = std::sync::Arc::new(elastos_runtime::capability::CapabilityStore::new());
+        let manager = std::sync::Arc::new(elastos_runtime::capability::CapabilityManager::new(
+            store,
+            audit.clone(),
+            std::sync::Arc::new(elastos_runtime::primitives::metrics::MetricsManager::new()),
+        ));
+        let pending = std::sync::Arc::new(
+            elastos_runtime::capability::pending::PendingRequestStore::new(audit),
+        );
+        let session = "capsule:none";
+        let resource =
+            elastos_runtime::capability::ResourceId::new("localhost://UsersAI/notes/journal");
+        let request = pending
+            .create_request_with_reason(
+                elastos_runtime::session::SessionId::from_string(session),
+                resource.clone(),
+                elastos_runtime::capability::Action::Write,
+                "store a note".to_string(),
+            )
+            .await;
+        let token = manager.grant(
+            session,
+            resource,
+            elastos_runtime::capability::Action::Write,
+            elastos_runtime::capability::TokenConstraints::default(),
+            None,
+        );
+        pending
+            .grant_request(
+                request.id.as_str(),
+                token.clone(),
+                elastos_runtime::capability::pending::GrantDuration::Session,
+            )
+            .await
+            .unwrap();
+        let unset = super::settle_instance_authority(None, session, "stopped", None).await;
+        assert!(unset.is_ok(), "{unset:?}");
+        assert!(manager.can_still_validate(&token).await);
+        let dir = tempfile::tempdir().unwrap();
+        let authority = super::InstanceAuthority {
+            pending_store: pending,
+            capability_manager: std::sync::Arc::clone(&manager),
+            data_dir: dir.path().to_path_buf(),
+            persist_revocations: true,
+        };
+        let set =
+            super::settle_instance_authority(Some(&authority), session, "stopped", None).await;
+        assert!(set.is_ok(), "{set:?}");
+        assert!(!manager.can_still_validate(&token).await);
+    }
 
     static LAUNCH_RELEASE_PLANT: StdMutex<Option<String>> = StdMutex::new(None);
 
@@ -5669,6 +6008,45 @@ pub(crate) mod tests {
             if let Ok(mut guard) = self.bridge_manifest_capabilities.write() {
                 guard.insert(planted_id.to_string(), bounds);
             }
+        }
+
+        /// What a spend by `other_principal` does on the model account this
+        /// session holds. No account is `UnknownAgent`. An account whose key
+        /// is a different agent is `RunForOtherAgent`. The caller is a Unix
+        /// launch test.
+        #[cfg(unix)]
+        pub(crate) fn other_agent_model_spend(
+            &self,
+            session_id: &str,
+            other_principal: &str,
+        ) -> std::result::Result<(), crate::model_budget::Refusal> {
+            use crate::model_budget::{Refusal, RunKey};
+            use elastos_model_contract::RuntimeCreateBinding;
+            let held = self
+                .bridge_model_token_ceilings
+                .read()
+                .unwrap_or_else(|err| err.into_inner())
+                .get(session_id)
+                .cloned();
+            let Some(admission) = held else {
+                return Err(Refusal::UnknownAgent);
+            };
+            let binding = RuntimeCreateBinding {
+                schema: elastos_model_contract::RUNTIME_CREATE_BINDING_SCHEMA.to_string(),
+                principal_id: other_principal.to_string(),
+                session_id: session_id.to_string(),
+                capsule_id: "capsule:probe".to_string(),
+                grant_id: "grant:cross".to_string(),
+                request_id: format!("request:{other_principal}"),
+                offer_id: "offer:fixture".to_string(),
+                operation: "text.generate".to_string(),
+                input_hash: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+                    .to_string(),
+            };
+            let run = RunKey::of(&binding, "rev-test");
+            self.model_budget
+                .reserve(&admission.key, &run, 1)
+                .map(|_| ())
         }
 
         /// The account [`Self::model_dispatch_budget`] would hand this capsule.

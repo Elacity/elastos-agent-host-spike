@@ -65,6 +65,122 @@ fn protected_owner(data_dir: &std::path::Path) -> TestPasskeyAuthority {
 mod off {
     use super::*;
 
+    /// A default build leaves agents off. Start returns the feature refusal
+    /// before it binds or writes, so this process gains no listener and the
+    /// data folder gains no coordinates file and no attach secret.
+    #[tokio::test]
+    async fn a_default_build_starts_no_agent_listener_secret_or_coordinates() {
+        let source = include_str!("../agent_plane.rs");
+        let start = source.find("pub(crate) async fn start(").expect("start");
+        let end = source[start..]
+            .find("\npub(crate) fn ")
+            .map(|at| start + at)
+            .unwrap_or(source.len());
+        let body = &source[start..end];
+        let gate = body.find("build_allows()").expect("the build gate");
+        let owned = body
+            .find("start_owned(")
+            .expect("start reaches the owned runtime");
+        assert!(
+            gate < owned,
+            "the build gate runs after the owned runtime can bind"
+        );
+
+        let temp = tempfile::tempdir().unwrap();
+        let data = temp.path().join("data");
+        std::fs::create_dir_all(&data).unwrap();
+        let _lock =
+            crate::host_lock::acquire_host_process_lock(&data, "gateway", "127.0.0.1:0").unwrap();
+        let before = tcp_listeners();
+        let result = crate::api::agent_plane::start(&data, None).await;
+        let after = tcp_listeners();
+        let coords = crate::api::agent_plane::coords_path(&data);
+        let refused = result
+            .as_ref()
+            .err()
+            .is_some_and(|error| error.to_string().contains(crate::agents::FEATURE_OFF));
+        assert!(
+            refused && !coords.exists() && before == after,
+            "a default build started the agent runtime: refused={refused} coords={} before={before:?} after={after:?} result={result:?}",
+            coords.exists()
+        );
+        if let Ok(plane) = result {
+            plane.shutdown().await;
+        }
+    }
+
+    fn tcp_listeners() -> Vec<String> {
+        if let Some(rows) = linux_listening_sockets() {
+            return rows;
+        }
+        let output = std::process::Command::new("lsof")
+            .args([
+                "-nP",
+                "-a",
+                "-p",
+                &std::process::id().to_string(),
+                "-iTCP",
+                "-sTCP:LISTEN",
+            ])
+            .output()
+            .expect("lsof");
+        let mut rows: Vec<String> = String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .skip(1)
+            .map(str::to_string)
+            .collect();
+        rows.sort();
+        rows
+    }
+
+    /// Linux has no fixed path for `lsof`. The process's own listening
+    /// sockets are in `/proc/net/tcp`. Other systems use `lsof` on `PATH`.
+    fn linux_listening_sockets() -> Option<Vec<String>> {
+        #[cfg(not(target_os = "linux"))]
+        {
+            None
+        }
+        #[cfg(target_os = "linux")]
+        {
+            let mut by_inode = std::collections::HashMap::<String, String>::new();
+            for path in ["/proc/net/tcp", "/proc/net/tcp6"] {
+                let Ok(text) = std::fs::read_to_string(path) else {
+                    continue;
+                };
+                for line in text.lines().skip(1) {
+                    let cols: Vec<&str> = line.split_whitespace().collect();
+                    if cols.len() > 9 && cols[3] == "0A" {
+                        by_inode.insert(cols[9].to_string(), cols[1].to_string());
+                    }
+                }
+            }
+            if by_inode.is_empty() && std::fs::read_to_string("/proc/net/tcp").is_err() {
+                return None;
+            }
+            let mut rows = Vec::new();
+            let Ok(fds) = std::fs::read_dir("/proc/self/fd") else {
+                return None;
+            };
+            for entry in fds.flatten() {
+                let Ok(link) = std::fs::read_link(entry.path()) else {
+                    continue;
+                };
+                let text = link.to_string_lossy();
+                let Some(inode) = text
+                    .strip_prefix("socket:[")
+                    .and_then(|rest| rest.strip_suffix(']'))
+                else {
+                    continue;
+                };
+                if let Some(address) = by_inode.get(inode) {
+                    rows.push(address.clone());
+                }
+            }
+            rows.sort();
+            Some(rows)
+        }
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn feature_off_has_no_agent_surface() {
@@ -101,6 +217,7 @@ mod off {
                 Some(json!({ "agent_id": &agent_id, "step_up_token": "step-up" })),
             ),
             (STOP, Some(json!({ "agent_id": &agent_id }))),
+            (STOP, Some(json!({ "agent_id": "agent-host" }))),
         ];
         for (path, body) in routes {
             assert_eq!(
@@ -676,6 +793,44 @@ mod off {
         );
         assert_eq!(std::fs::read(agent_file(dir.path())).unwrap(), b"{");
     }
+
+    /// A default build with an agent file: demote and revoke answer as they
+    /// did before agents, and the chain gains no stop row.
+    #[tokio::test]
+    async fn admin_loss_in_a_default_build_answers_success_and_signs_no_stop() {
+        for route in ["demote-guest", "revoke"] {
+            let dir = tempfile::tempdir().unwrap();
+            let app = gateway_router(test_state(dir.path()));
+            let owner = passkey_authority_with_name_role_credential(
+                dir.path(),
+                Some("Owner"),
+                crate::auth::RuntimePrincipalRole::Admin,
+                &format!("r15-off-{route}-owner"),
+            );
+            crate::auth::store_test_principal_root_protection(dir.path(), &owner.principal_id);
+            let other = passkey_authority_with_name_role_credential(
+                dir.path(),
+                Some("Other"),
+                crate::auth::RuntimePrincipalRole::Admin,
+                &format!("r15-off-{route}-other"),
+            );
+            crate::agents::tests::plant_enabled_home_with_one_agent(
+                dir.path(),
+                &owner.principal_id,
+                &owner.proof_binding_id,
+            );
+            let path = format!("/api/auth/passkeys/{}/{route}", owner.proof_binding_id);
+            let (status, body) = call(&app, &path, &other.system_token, Some(json!({}))).await;
+            assert_eq!(status, StatusCode::OK, "{route}: {body}");
+            let stops: Vec<_> = crate::auth::load_auth_state(dir.path())
+                .unwrap()
+                .audit
+                .into_iter()
+                .filter(|event| event.event_type.starts_with("agent.stop"))
+                .collect();
+            assert!(stops.is_empty(), "{route}: {stops:?}");
+        }
+    }
 }
 
 #[cfg(feature = "prototype-agents")]
@@ -827,12 +982,9 @@ mod on {
         let installed = installed_home();
         let agent_id = create_agent(&installed, "u3-agent-caller-setup").await;
         let data = &installed.home.data;
-        let root = crate::auth::principal_kind_localhost_root(
-            &agent_id,
-            crate::auth::PrincipalKind::Agent,
-        );
-        let binding = crate::agents::stored_agent_for_root(data, &agent_id, &root)
-            .unwrap()
+        // A new agent is off. The on-only lookup returns none, so the binding
+        // comes from the stored record.
+        let binding = crate::agents::agent_record(data, &agent_id)
             .unwrap()
             .record
             .proof_binding_id;
@@ -1147,6 +1299,12 @@ mod on {
             body(json!({"agent_id": "a", "display_name": "Helper 2"})),
         );
         assert_eq!(answer(renamed.await).await, not_the_home);
+        let stopped = agents_stop(
+            state(),
+            headers.clone(),
+            body(json!({"agent_id": "agent-host"})),
+        );
+        assert_eq!(answer(stopped.await).await, not_the_home);
         assert_eq!(std::fs::read(agent_file(&home.data)).unwrap(), written);
     }
 
@@ -1373,12 +1531,9 @@ mod on {
         let installed = installed_home();
         let agent_id = create_agent(&installed, "self-1").await;
         let data = &installed.home.data;
-        let root = crate::auth::principal_kind_localhost_root(
-            &agent_id,
-            crate::auth::PrincipalKind::Agent,
-        );
-        let binding = crate::agents::stored_agent_for_root(data, &agent_id, &root)
-            .unwrap()
+        // A new agent is off. The on-only lookup returns none, so the binding
+        // comes from the stored record.
+        let binding = crate::agents::agent_record(data, &agent_id)
             .unwrap()
             .record
             .proof_binding_id;

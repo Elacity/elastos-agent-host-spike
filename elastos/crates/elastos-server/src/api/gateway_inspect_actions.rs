@@ -253,7 +253,11 @@ pub(super) fn pending_inspect_action_requests(
     data_dir: &FsPath,
     principal_id: &str,
 ) -> anyhow::Result<Vec<serde_json::Value>> {
-    store::pending_inspect_action_requests(data_dir, principal_id)
+    let mut rows = store::pending_inspect_action_requests(data_dir, principal_id)?;
+    if crate::agents::owner_is_admin_now(data_dir, principal_id).ok() != Some(true) {
+        rows.retain(|row| row.get("kind").and_then(|kind| kind.as_str()) != Some(AGENT_PLAN_KIND));
+    }
+    Ok(rows)
 }
 
 pub(super) async fn approve_inspect_action_request(
@@ -410,6 +414,12 @@ pub(super) fn approve_agent_plan_request(
     card_binding: &serde_json::Value,
     step_up_token: Option<&str>,
 ) -> anyhow::Result<String> {
+    if plan_owner_lost_admin(&state.data_dir, request_id, context.principal_id())? {
+        anyhow::bail!(crate::agents::OWNER_NOT_ADMIN);
+    }
+    if let Some(block) = agent_plan_approval_block(&state.data_dir, request_id) {
+        anyhow::bail!(block);
+    }
     store::claim_pending_agent_plan_for_owner(
         &state.data_dir,
         request_id,
@@ -417,7 +427,7 @@ pub(super) fn approve_agent_plan_request(
         context.root().kind() == Some(crate::auth::PrincipalKind::Human),
         card_binding,
         now_ts(),
-        |record| {
+        |record, audit_first| {
             let token = step_up_token.ok_or_else(|| {
                 anyhow::anyhow!("fresh passkey is required to approve an agent plan")
             })?;
@@ -428,14 +438,264 @@ pub(super) fn approve_agent_plan_request(
                 180,
                 "agent_plan.approve",
                 &serde_json::json!({ "request_id": record.request_id }),
-            )
+            )?;
+            if audit_first {
+                append_agent_plan_decision_audit(
+                    &state.data_dir,
+                    record,
+                    "agent.plan.approved",
+                    "approved",
+                )
+                .map_err(|error| super::inbox_audit_refusal(error, "A fresh passkey is needed."))?;
+            }
+            Ok(())
         },
     )?;
+    crate::resource_bridge::notify_plan_waiters();
     Ok("Approved agent plan. The step is ready for Runtime dispatch.".to_string())
 }
 
 pub(super) fn settle_agent_plans_lost_before_start(data_dir: &FsPath) -> anyhow::Result<()> {
     store::settle_agent_plans_lost_before_start(data_dir, now_ts())
+}
+
+/// A pending plan lives this long from `created_at`, the same bound as a
+/// pending ask. The guest repeats the 30s host park until this life ends.
+pub(crate) const PLAN_DECISION_SECS: u64 = 300;
+
+/// The caller owns this plan and is not an admin now. Nothing is written.
+fn plan_owner_lost_admin(
+    data_dir: &FsPath,
+    request_id: &str,
+    caller: &str,
+) -> anyhow::Result<bool> {
+    let person = crate::auth::stored_principal_record(data_dir, caller)
+        .ok()
+        .flatten()
+        .is_some_and(|record| record.kind == crate::auth::PrincipalKind::Human);
+    if !person {
+        return Ok(false);
+    }
+    Ok(!crate::agents::owner_is_admin_now(data_dir, caller)?
+        && read_inspect_action_record(data_dir, request_id)
+            .is_ok_and(|record| record.kind == AGENT_PLAN_KIND && record.principal_id == caller))
+}
+
+/// Why this plan cannot be approved, or nothing when it is still pending.
+pub(crate) fn agent_plan_approval_block(data_dir: &FsPath, request_id: &str) -> Option<String> {
+    let current = read_inspect_action_record(data_dir, request_id).ok()?;
+    const CLOSED: &[&str] = &[
+        "instance ended",
+        "denied",
+        "expired",
+        "agents off",
+        "agent off",
+        "stopped",
+        "unresolved",
+        "not_sent",
+        "stale",
+        "owner demoted",
+        "passkey revoked",
+    ];
+    if current.kind == AGENT_PLAN_KIND && CLOSED.contains(&current.status.as_str()) {
+        Some(format!(
+            "agent plan is {} and cannot be approved",
+            current.status
+        ))
+    } else {
+        None
+    }
+}
+
+fn append_agent_plan_decision_audit(
+    data_dir: &FsPath,
+    record: &InspectActionRequestRecord,
+    event_type: &str,
+    result: &str,
+) -> anyhow::Result<()> {
+    #[cfg(test)]
+    if super::gateway_tests::seams::take_grant_fault(data_dir, false) {
+        anyhow::bail!(
+            "failed to write {}/auth-state.json: injected agent plan approval audit failure",
+            data_dir.display()
+        );
+    }
+    append_provider_effect_audit(
+        data_dir,
+        ProviderEffectAuditInput {
+            capsule_id: &record.id,
+            event_type,
+            principal_id: &record.principal_id,
+            session_id: &record.session_id,
+            request_id: &record.request_id,
+            result,
+            reason: result,
+        },
+    )
+}
+
+fn finish_closed_plans(
+    records: Vec<InspectActionRequestRecord>,
+    data_dir: &FsPath,
+) -> anyhow::Result<()> {
+    for record in &records {
+        crate::resource_bridge::forget_one_agent_plan_authority(&record.request_id);
+    }
+    if !records.is_empty() {
+        crate::resource_bridge::notify_plan_waiters();
+    }
+    let mut failed = None;
+    for record in &records {
+        if let Err(error) =
+            append_agent_plan_decision_audit(data_dir, record, "agent.plan.closed", &record.status)
+        {
+            failed.get_or_insert(error);
+            continue;
+        }
+        if let Err(error) = store::mark_plan_audit_recorded(data_dir, &record.request_id) {
+            failed.get_or_insert(error);
+        }
+    }
+    match failed {
+        Some(error) => Err(error),
+        None => Ok(()),
+    }
+}
+
+/// Close this instance's pending plans as `outcome` in the same step that
+/// settles its asks. An `instance ended` plan cannot be approved.
+pub(crate) fn close_instance_plans(
+    data_dir: &FsPath,
+    capsule_id: &str,
+    outcome: &str,
+) -> anyhow::Result<usize> {
+    let closed = store::close_pending_agent_plans(data_dir, outcome, now_ts(), false, |record| {
+        record.id == capsule_id
+    })?;
+    let count = closed.len();
+    finish_closed_plans(closed, data_dir)?;
+    Ok(count)
+}
+
+pub(crate) fn close_agent_plans(
+    data_dir: &FsPath,
+    agent_id: &str,
+    outcome: &str,
+) -> anyhow::Result<usize> {
+    let closed = store::close_pending_agent_plans(data_dir, outcome, now_ts(), false, |record| {
+        record.requester_id.as_deref() == Some(agent_id)
+    })?;
+    let count = closed.len();
+    finish_closed_plans(closed, data_dir)?;
+    Ok(count)
+}
+
+/// Close this owner's pending and in-flight plans as `outcome`.
+pub(crate) fn close_owner_open_plans(
+    data_dir: &FsPath,
+    agent_id: &str,
+    outcome: &str,
+) -> anyhow::Result<usize> {
+    let closed = store::close_pending_agent_plans(data_dir, outcome, now_ts(), true, |record| {
+        record.requester_id.as_deref() == Some(agent_id)
+    })?;
+    let count = closed.len();
+    finish_closed_plans(closed, data_dir)?;
+    Ok(count)
+}
+
+pub(crate) fn close_home_plans(data_dir: &FsPath, outcome: &str) -> anyhow::Result<usize> {
+    let closed = store::close_pending_agent_plans(data_dir, outcome, now_ts(), false, |_| true)?;
+    let count = closed.len();
+    finish_closed_plans(closed, data_dir)?;
+    Ok(count)
+}
+
+pub(crate) fn deny_agent_plan_request(
+    data_dir: &FsPath,
+    owner_id: &str,
+    request_id: &str,
+) -> anyhow::Result<String> {
+    if plan_owner_lost_admin(data_dir, request_id, owner_id)? {
+        anyhow::bail!(crate::agents::OWNER_NOT_ADMIN);
+    }
+    let closed = store::close_pending_agent_plans(data_dir, "denied", now_ts(), false, |record| {
+        record.request_id == request_id && record.principal_id == owner_id
+    })?;
+    if closed.is_empty() {
+        anyhow::bail!("agent plan is not pending");
+    }
+    finish_closed_plans(closed, data_dir).map_err(|error| {
+        super::inbox_audit_refusal(error, "This denial is signed the next time Home starts.")
+    })?;
+    Ok("Denied agent plan.".to_string())
+}
+
+/// Pending plans older than [`PLAN_DECISION_SECS`] close as `expired`.
+pub(crate) fn expire_pending_agent_plans(data_dir: &FsPath) -> anyhow::Result<usize> {
+    let now = now_ts();
+    let closed = store::close_pending_agent_plans(data_dir, "expired", now, false, |record| {
+        now.saturating_sub(record.created_at) >= PLAN_DECISION_SECS
+    })?;
+    let count = closed.len();
+    finish_closed_plans(closed, data_dir)?;
+    Ok(count)
+}
+
+/// A dispatch that started, and whose confirmation never arrived, is settled
+/// from the test provider when that provider can name the step. No product
+/// provider can answer "did this step happen" today, so a step the test
+/// provider does not name is `unresolved` and is not dispatched again.
+pub(crate) fn reconcile_lost_plan_receipts(data_dir: &FsPath) -> anyhow::Result<usize> {
+    expire_pending_agent_plans(data_dir)?;
+    let records = store::load_agent_plan_records(data_dir)?;
+    let mut settled = 0;
+    for record in records {
+        if record.status != "started" {
+            continue;
+        }
+        let outcome = test_provider_step_outcome(&record.request_id)
+            .unwrap_or_else(|| "unresolved".to_string());
+        let mut updated =
+            store::set_agent_plan_status(data_dir, &record.request_id, &outcome, now_ts())?;
+        crate::resource_bridge::forget_one_agent_plan_authority(&record.request_id);
+        append_agent_plan_dispatch_audit(data_dir, &updated, &outcome)?;
+        updated.audit_recorded = true;
+        store::write_inspect_action_record(data_dir, &updated)?;
+        crate::resource_bridge::notify_plan_waiters();
+        settled += 1;
+    }
+    Ok(settled)
+}
+
+#[cfg(test)]
+static TEST_PROVIDER_STEPS: std::sync::Mutex<Option<std::collections::HashMap<String, String>>> =
+    std::sync::Mutex::new(None);
+
+#[cfg(test)]
+pub(crate) fn note_test_provider_step(step_id: &str, outcome: &str) {
+    let mut steps = TEST_PROVIDER_STEPS
+        .lock()
+        .unwrap_or_else(|err| err.into_inner());
+    steps
+        .get_or_insert_with(std::collections::HashMap::new)
+        .insert(step_id.to_string(), outcome.to_string());
+}
+
+fn test_provider_step_outcome(step_id: &str) -> Option<String> {
+    #[cfg(test)]
+    {
+        TEST_PROVIDER_STEPS
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .as_ref()
+            .and_then(|steps| steps.get(step_id).cloned())
+    }
+    #[cfg(not(test))]
+    {
+        let _ = step_id;
+        None
+    }
 }
 
 /// The spawned dispatch owns this. `finish` is called once a settlement was
@@ -465,12 +725,14 @@ impl Drop for UnsettledDispatch {
         drop(crate::resource_bridge::take_parked_plan_guard(
             &self.request_id,
         ));
+        let record = self.record.clone();
+        // This guard drops first when the task panics, and its row is the one
+        // terminal row, so it names the panic.
         let code = if std::thread::panicking() {
             "dispatch_panic"
         } else {
             "dispatch_lost"
         };
-        let record = self.record.clone();
         let _ = settle_agent_plan_dispatch(
             &self.data_dir,
             record,
@@ -527,13 +789,18 @@ pub(in crate::api) async fn dispatch_approved_agent_plan(
     };
     let data_dir = state.data_dir.clone();
     if let Err(err) = append_agent_plan_dispatch_audit(&data_dir, &record, "started") {
-        settle_agent_plan_dispatch(
+        let settled = settle_agent_plan_dispatch(
             &data_dir,
             record,
             "not_sent",
             serde_json::json!({"status": "not_sent", "code": "claim_audit_error"}),
-        )?;
-        return Err(err);
+        );
+        let next = if settled.is_ok() {
+            "This step was not sent."
+        } else {
+            "This approval is settled the next time Home starts."
+        };
+        return Err(super::inbox_audit_refusal(err, next));
     }
     let record_if_lost = record.clone();
     let data_dir_if_lost = data_dir.clone();
@@ -805,11 +1072,13 @@ async fn wait_plan_task_gate(request_id: &str) {
 
 #[cfg(all(test, unix))]
 struct PlanSettleFault {
+    data_dir: std::path::PathBuf,
     request_id: String,
     which: &'static str,
 }
 
-/// Faults for one request. Another request's settle does not take them.
+/// Faults for one Home and one request. Another Home's settle, and another
+/// request's settle, do not take them.
 #[cfg(all(test, unix))]
 fn plan_settle_faults() -> &'static std::sync::Mutex<Vec<PlanSettleFault>> {
     static FAULTS: std::sync::OnceLock<std::sync::Mutex<Vec<PlanSettleFault>>> =
@@ -817,41 +1086,48 @@ fn plan_settle_faults() -> &'static std::sync::Mutex<Vec<PlanSettleFault>> {
     FAULTS.get_or_init(|| std::sync::Mutex::new(Vec::new()))
 }
 
-/// The next settle of `request_id` fails at `which`: `"record"` or `"audit"`.
+/// The next settle of `request_id` in this Home fails at `which`: `"record"` or `"audit"`.
 #[cfg(all(test, unix))]
-pub(crate) fn arm_plan_settle_fault(request_id: &str, which: &'static str) {
-    arm_plan_settle_faults(request_id, which, 1);
+pub(crate) fn arm_plan_settle_fault(data_dir: &FsPath, request_id: &str, which: &'static str) {
+    arm_plan_settle_faults(data_dir, request_id, which, 1);
 }
 
-/// `count` failures of `which` for `request_id`, consumed one per attempt.
+/// `count` failures of `which` for `request_id` in this Home, consumed one per attempt.
 #[cfg(all(test, unix))]
-pub(crate) fn arm_plan_settle_faults(request_id: &str, which: &'static str, count: usize) {
+pub(crate) fn arm_plan_settle_faults(
+    data_dir: &FsPath,
+    request_id: &str,
+    which: &'static str,
+    count: usize,
+) {
     let mut faults = plan_settle_faults()
         .lock()
         .unwrap_or_else(|err| err.into_inner());
     for _ in 0..count {
         faults.push(PlanSettleFault {
+            data_dir: data_dir.to_path_buf(),
             request_id: request_id.to_string(),
             which,
         });
     }
 }
 
-fn take_plan_settle_fault(request_id: &str, which: &str) -> bool {
+fn take_plan_settle_fault(data_dir: &FsPath, request_id: &str, which: &str) -> bool {
     #[cfg(all(test, unix))]
     {
         let mut faults = plan_settle_faults()
             .lock()
             .unwrap_or_else(|err| err.into_inner());
-        if let Some(pos) = faults
-            .iter()
-            .rposition(|fault| fault.request_id == request_id && fault.which == which)
-        {
+        if let Some(pos) = faults.iter().rposition(|fault| {
+            fault.data_dir.as_path() == data_dir
+                && fault.request_id == request_id
+                && fault.which == which
+        }) {
             faults.swap_remove(pos);
             return true;
         }
     }
-    let _ = (request_id, which);
+    let _ = (data_dir, request_id, which);
     false
 }
 
@@ -861,11 +1137,14 @@ fn settle_agent_plan_dispatch(
     status: &str,
     result: serde_json::Value,
 ) -> anyhow::Result<String> {
-    // A late landing does not become a new action. The stored unknown stays
-    // unknown: nothing here calls it done, completed, or refused.
+    // The first terminal row stays; a late landing does not overwrite it.
+    // An unknown record stays unknown, including when the new status is unknown.
     if let Ok(stored) = read_inspect_action_record(data_dir, &record.request_id) {
-        if stored.status == "unknown" {
-            return Ok("Agent plan dispatch unknown.".to_string());
+        if !matches!(
+            stored.status.as_str(),
+            "pending" | "approved" | "dispatching" | "started"
+        ) {
+            return Ok(format!("Agent plan dispatch {}.", stored.status));
         }
     }
     // The stored record is the answer. A failed record write returns Err and
@@ -875,12 +1154,13 @@ fn settle_agent_plan_dispatch(
     record.status = status.to_string();
     record.result = Some(result);
     record.updated_at = now_ts();
+    record.audit_recorded = false;
     // Three attempts. A fault or a write error spends one. When none land,
     // the stored record stays as it was (still `dispatching` when the claim
     // is the last write) and the caller resolves the flight as unknown.
     let mut wrote = false;
     for _ in 0..3 {
-        if take_plan_settle_fault(&record.request_id, "record") {
+        if take_plan_settle_fault(data_dir, &record.request_id, "record") {
             continue;
         }
         if write_inspect_action_record(data_dir, &record).is_ok() {
@@ -891,14 +1171,33 @@ fn settle_agent_plan_dispatch(
     if !wrote {
         anyhow::bail!("plan record write failed");
     }
-    if take_plan_settle_fault(&record.request_id, "audit") {
+    crate::resource_bridge::notify_plan_waiters();
+    if take_plan_settle_fault(data_dir, &record.request_id, "audit") {
         tracing::warn!(
             "agent plan dispatch audit was not stored: injected plan audit write failure"
         );
     } else if let Err(err) = append_agent_plan_dispatch_audit(data_dir, &record, status) {
         tracing::warn!("agent plan dispatch audit was not stored: {err}");
+    } else {
+        record.audit_recorded = true;
+        let _ = write_inspect_action_record(data_dir, &record);
+    }
+    if !matches!(status, "pending" | "approved" | "dispatching" | "started") {
+        crate::resource_bridge::forget_one_agent_plan_authority(&record.request_id);
     }
     Ok(format!("Agent plan dispatch {status}."))
+}
+
+/// Settle one plan through the dispatch writer, which notifies the park.
+#[cfg(all(test, unix))]
+pub(crate) fn settle_plan_through_dispatch_for_test(
+    data_dir: &FsPath,
+    request_id: &str,
+    status: &str,
+    result: serde_json::Value,
+) -> anyhow::Result<String> {
+    let record = read_inspect_action_record(data_dir, request_id)?;
+    settle_agent_plan_dispatch(data_dir, record, status, result)
 }
 
 /// A second settlement after unknown. The stored record stays unknown.
@@ -922,6 +1221,10 @@ fn append_agent_plan_dispatch_audit(
     record: &InspectActionRequestRecord,
     status: &str,
 ) -> anyhow::Result<()> {
+    #[cfg(test)]
+    if status == "started" && super::gateway_tests::seams::take_grant_kind(data_dir, "started") {
+        anyhow::bail!("injected agent plan dispatch audit failure");
+    }
     let event_type = match status {
         "started" => "agent_plan.dispatch.started",
         "completed" => "agent_plan.dispatch.completed",
@@ -929,6 +1232,7 @@ fn append_agent_plan_dispatch_audit(
         "refused" => "agent_plan.dispatch.refused",
         "not_sent" => "agent_plan.dispatch.not_sent",
         "stale" => "agent_plan.dispatch.stale",
+        "unresolved" => "agent_plan.dispatch.unresolved",
         _ => "agent_plan.dispatch.unknown",
     };
     append_provider_effect_audit(
@@ -979,7 +1283,21 @@ pub(crate) fn agent_plan_result_for_requester(
     }
     if !matches!(
         record.status.as_str(),
-        "completed" | "failed" | "refused" | "unknown"
+        "completed"
+            | "failed"
+            | "refused"
+            | "unknown"
+            | "unresolved"
+            | "not_sent"
+            | "stale"
+            | "instance ended"
+            | "denied"
+            | "expired"
+            | "agents off"
+            | "stopped"
+            | "agent off"
+            | "owner demoted"
+            | "passkey revoked"
     ) {
         anyhow::bail!("agent plan has no settled result");
     }
@@ -1284,6 +1602,7 @@ async fn create_inspect_action_request(
         updated_at: now,
         result: None,
         error: None,
+        audit_recorded: false,
     };
     write_inspect_action_record(&state.data_dir, &record)?;
     append_provider_effect_audit(

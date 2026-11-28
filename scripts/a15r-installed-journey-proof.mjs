@@ -267,17 +267,135 @@ export function judgeCreatingOwner(input) {
   return { ok: true, reason: "" };
 }
 
-// The launch route is the agents-in-gateway change only when it no longer
-// asks the runtime to start the agent.
-export function agentsInGatewayChange(gatewaySource, launchSource) {
+// Comments are not calls. A call is a name followed by `(`.
+function sourceCode(text) {
+  return String(text || "").replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "");
+}
+
+function calls(text, name) {
+  const needle = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`(?:^|[^\\w])${needle}\\s*\\(`).test(sourceCode(text));
+}
+
+// The body of one function, skipping braces that sit inside quotes.
+function functionBody(source, name) {
+  const start = source.search(new RegExp(`(?:async\\s+)?fn\\s+${name}\\s*\\(`));
+  if (start < 0) return "";
+  const open = source.indexOf("{", start);
+  if (open < 0) return "";
+  let depth = 0;
+  let quote = "";
+  for (let i = open; i < source.length; i++) {
+    const ch = source[i];
+    if (quote) {
+      if (ch === "\\" && quote !== "`") {
+        i += 1;
+        continue;
+      }
+      if (ch === quote) quote = "";
+      continue;
+    }
+    if (ch === "\"" || ch === "'" || ch === "`") {
+      quote = ch;
+      continue;
+    }
+    if (ch === "{") depth += 1;
+    else if (ch === "}") {
+      depth -= 1;
+      if (depth === 0) return source.slice(open, i + 1);
+    }
+  }
+  return "";
+}
+
+// The launch route is the agents-in-gateway change when the gateway starts
+// the guest through the in-process agent plane. The home runtime must call
+// the plane's live coordinates and define a launch function with a body.
+// The gateway source must call the approved-plan dispatch.
+export function agentsInGatewayChange(gatewaySource, launchSource, homeRuntimeSource) {
   const route = "/api/apps/system/agents/launch";
-  const registered = String(gatewaySource || "").includes(`"${route}"`);
-  const asksRuntime = String(launchSource || "").includes("launch_runtime_agent");
-  const ok = registered && !asksRuntime;
+  const gateway = sourceCode(gatewaySource);
+  const registered = new RegExp(
+    `(?:^|[^\\w])route\\(\\s*["']${route}["']\\s*,\\s*post\\(\\s*agents_launch\\s*\\)\\s*\\)`,
+  ).test(gateway);
+  const dispatch = calls(gateway, "dispatch_approved_agent_plan");
+  const text = sourceCode(launchSource);
+  const asksPlane = calls(text, "launch_runtime_agent")
+    && /agent_plane::[A-Za-z0-9_]+\s*\(/.test(text);
+  const home = sourceCode(homeRuntimeSource);
+  const launchBody = functionBody(home, "launch_runtime_agent");
+  let liveScope = launchBody;
+  if (calls(launchBody, "live_agent_coords")) {
+    liveScope += functionBody(home, "live_agent_coords");
+  }
+  const liveCoords = calls(liveScope, "agent_plane::live_coords");
+  const emptyLaunch = /async fn launch_runtime_agent\s*\([^)]*\)\s*\{\s*\}/.test(home);
+  const hop = /async fn launch_runtime_agent\s*\(/.test(home) && !emptyLaunch;
+  const ok = registered && dispatch && asksPlane && liveCoords && hop;
   let reason = "";
   if (!registered) reason = "the launch route is not registered";
-  else if (asksRuntime) reason = "the launch route asks the runtime to start the agent";
+  else if (!dispatch) reason = "the gateway does not dispatch the approved plan";
+  else if (!asksPlane) reason = "the launch route does not start the agent on the in-process plane";
+  else if (emptyLaunch) reason = "launch_runtime_agent is empty";
+  else if (!liveCoords) reason = "the launch does not call the plane's live coordinates";
+  else if (!hop) reason = "gateway_home_runtime.rs does not define launch_runtime_agent";
   return { ok, route, reason };
+}
+
+// The gateway process owns the port named in agent-runtime-coords.json.
+// macOS asks lsof. Linux reads /proc. The arguments are fixed. No shell.
+export function gatewayOwnsListener(pid, port) {
+  const id = Number(pid);
+  const listen = Number(port);
+  if (!Number.isInteger(id) || id <= 0 || !Number.isInteger(listen) || listen <= 0 || listen > 65535) {
+    return false;
+  }
+  if (process.platform === "darwin") {
+    const result = spawnSync("lsof", [
+      "-nP", "-a", "-p", String(id), `-iTCP:${listen}`, "-sTCP:LISTEN",
+    ], { encoding: "utf8" });
+    return result.status === 0;
+  }
+  if (process.platform === "linux") return linuxOwnsListener(id, listen);
+  return false;
+}
+
+function linuxOwnsListener(pid, port) {
+  const portHex = port.toString(16).toUpperCase().padStart(4, "0");
+  const inodes = new Set();
+  for (const name of ["tcp", "tcp6"]) {
+    let text = "";
+    try {
+      text = fs.readFileSync(`/proc/net/${name}`, "utf8");
+    } catch {
+      continue;
+    }
+    for (const line of text.split("\n").slice(1)) {
+      const parts = line.trim().split(/\s+/);
+      if (parts.length < 10 || parts[3] !== "0A") continue;
+      const hexPort = (parts[1] || "").split(":")[1] || "";
+      if (hexPort.toUpperCase() !== portHex) continue;
+      inodes.add(parts[9]);
+    }
+  }
+  if (inodes.size === 0) return false;
+  let fds = [];
+  try {
+    fds = fs.readdirSync(`/proc/${pid}/fd`);
+  } catch {
+    return false;
+  }
+  for (const fd of fds) {
+    let link = "";
+    try {
+      link = fs.readlinkSync(`/proc/${pid}/fd/${fd}`);
+    } catch {
+      continue;
+    }
+    const match = /^socket:\[(\d+)\]$/.exec(link);
+    if (match && inodes.has(match[1])) return true;
+  }
+  return false;
 }
 
 export const FULL_MODE_NOTICE = "Full mode needs the agents-in-gateway change. It is not proof of anything until that change is in the gateway.";

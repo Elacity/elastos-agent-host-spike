@@ -379,6 +379,10 @@ These limits are part of the property:
   makes existing agent data unopenable on this Home. The row covers an active
   agent and a retired agent.
 - A replaced, rolled-back or deleted agent file is not detected on load yet.
+- An agent-file write raises the sequence by one. The audit hash is that
+  write, with the confirmation mark clear. The same sequence is written
+  again once the row has landed, with the mark set. The sequence does not
+  rise for the second write.
 - The sealed file holds none of the object's content in plaintext. This
   protection makes no claim against a process of the same operating-system
   user outside the agent's sandbox.
@@ -413,13 +417,85 @@ the bytes that effect had already begun. That store is the same effect, not a
 new action, and the record is not changed to done or refused. A journal write
 still has to pass its revision check.
 
-Stop says stopped only when that session has ended and nothing of it is still landing. A refusal (409) stays a refusal when an earlier step is unknown, and a session that is stopping is not also listed as stopped. A Start during a landing effect answers "this agent is stopping", and that mark stays until the effect is settled or its record is unknown. The plan instance is bound before the guest runs. Unknown steps are capped at 32 per agent. A name has no purge time while its session is live or any flight of that session is still in progress, so a row sweep does not start the limit. Its one capsule retention starts when that session's last flight is gone, and then the name is dropped. A provider stop that fails leaves the run able to act. Unknown steps are carried through the Runtime hop to the owner. A one-use grant is counted only after the plan admit. A one-use grant the effect spent is settled in the pending store, so a later Stop can still save that session's revocations. A settlement record write is retried a bounded number of times; if it still fails, the flight resolves as unknown and the stored record is not updated to a stronger status. Within one process, one Home has one plan book for dispatch and Stop. The installed two-process path runs no agent today and its proof comes with the package.
+Stop says stopped only when that session has ended and nothing of it is still
+landing. A refusal (409) stays a refusal when an earlier step is unknown, and
+a session that is stopping is not also listed as stopped. A Start during a
+landing effect answers "this agent is stopping", and that mark stays until the
+effect is settled or its record is unknown. The plan instance is bound before
+the guest runs. Unknown steps are capped at 32 per agent. A name has no purge
+time while its session is live or any flight of that session is still in
+progress, so a row sweep does not start the limit. Its one capsule retention
+starts when that session's last flight is gone, and then the name is dropped.
+The serve command registers a MicroVM row and stores no stop ticket. A
+provider stop that fails on that launcher branch marks the plan row stopping
+and refuses a later dispatch. A watcher stores a stop ticket for the session
+it watches. A provider stop that fails on that ticket branch withdraws the
+uncommitted ticket and leaves the run able to act. Unknown steps are
+carried through the Runtime hop to the owner. A one-use grant is counted only
+after the plan admit. A one-use grant the effect spent is settled in the
+pending store, so a later Stop can still save that session's revocations. A
+settlement record write is retried a bounded number of times; if it still
+fails, the flight resolves as unknown and the stored record is not updated to
+a stronger status. Within one process, one Home has one plan book for dispatch
+and Stop. The installed two-process path runs no agent today and its proof
+comes with the package. The agent plane runs inside the gateway process. An
+approved step is admitted and dispatched in that same process.
 
 This document does not freeze the exact path layout below `Users/...` or
 `UsersAI/...`. Those paths require their own versioned object contract before
 applications may depend on them.
 
 ## Current implementation status
+
+### Prototype inside Home
+
+This is a fork experiment. The upstream is unreviewed. The agent host here is a
+test capsule on a disposable Home, and it is not the installed architecture.
+Crash containment is not security isolation. The confined worker is the target.
+
+For this prototype, an agent runs inside Home's main program. The guest runs in
+the Wasm sandbox the Runtime already uses for a component capsule. A default
+build leaves this off: Home does not open the agent listener, does not create
+an attach secret, and does not write the agent coordinates file. A build with
+the prototype feature still leaves the listener down until the owner allows
+agents on this Home. Allow starts that listener on loopback, on the Home data
+folder, without a second Home start. Off stops it. It serves only a stored agent.
+
+A15-R needs the owner to approve the exact plan an agent proposes, and the Runtime — not the agent — to decide which plan it is. The first clause rests on the plan card: the owner approves or denies that card, and the approval is bound to the agent, the running instance, and the exact step. The second clause rests on the Runtime choosing the stored plan by its request id and refusing a plan the agent names for itself.
+
+The plane writes two things in the Home data folder: `agent-runtime-coords.json`, and an empty `agent-runtime-storage/` folder. It writes nothing else of Home's. Its grants, asks, and revocations stay in memory. Home's own writer still appends the signed history and still writes the agent file.
+
+When a run ends, its asks are settled, its grants are revoked on the agent
+Runtime's own store, its plan admission is dropped, and each pending plan is
+closed as `instance ended`. That plan cannot be approved. The owner's pending
+approval does not survive the run.
+
+The guest stays up after it submits a plan. It reads the decision through the
+existing status read. The host parks that read for at most 30 seconds, on a
+condition variable, until the row changes, Stop, retire, agents off, or the
+plan expires. The park is inside a Bus call. Time inside a Bus call is not
+guest fuel and is not the 10 second compute deadline. The guest repeats the
+read at most 10 times. The plan itself expires 300 seconds after it was
+created. Two guests on one Home may wait at once. A third Start on that Home
+is refused while those two waits are held. Another Home counts its own waits.
+
+No product provider can say whether a step that already started did finish.
+When the confirmation is lost, the step is `unresolved` and is not run again.
+A test provider may name the step. Stop and revocation prevent a new effect.
+An effect already under way is tracked to its outcome.
+
+The named next step is a confined worker that runs the agent without Home's
+keys.
+
+Two standing conditions are named here so later work can close them:
+
+- Home's signed history holds start requested and completed, every grant and
+  plan approval and denial, and stop requested and stopped, when that append
+  lands. A dispatch outcome (`completed`, `refused`, `unresolved`) is the
+  stored plan record. Its signed row is written when the append lands.
+  The rows are written by the existing audit writer.
+- Condition 7 is this section: the interim above, and the confined worker as
+  the named next step. A later slice does not owe this statement again.
 
 The repository already establishes several parts of this model:
 

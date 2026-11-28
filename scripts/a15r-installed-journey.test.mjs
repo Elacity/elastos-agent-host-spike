@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import crypto from "node:crypto";
 import fs from "node:fs";
+import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
@@ -21,11 +22,18 @@ import {
   LIVE_SESSION_COORDS,
   gatewayHealthOk,
   grantWaitSatisfied,
+  rootsStayWithTheirAgent,
+  coordsCurrent,
+  ownerStopDenial,
+  planeSameProcess,
+  processElapsedMs,
+  restartHistory,
   journalFileInRoot,
   ownerDocumentUnchanged,
   ownerNoteRelative,
   refusalIncludes,
   runtimeHealthOk,
+  names,
   shellFailStatuses,
   signedAgentStarts,
   signedStartAudit,
@@ -45,6 +53,7 @@ import {
 import {
   agentsInGatewayChange,
   bindsPort,
+  gatewayOwnsListener,
   carrierConfigOk,
   elastosSubcommand,
   executableInsideHome,
@@ -194,6 +203,84 @@ test("grant wait ignores the route row's marker files", () => {
   ]), true);
 });
 
+test("a plane is the gateway process and its coordinates stay owner-only", () => {
+  assert.equal(planeSameProcess(4, 4, true, true, 0o600, true), true);
+  assert.equal(planeSameProcess(4, 5, true, true, 0o600, true), false);
+  assert.equal(planeSameProcess(4, 4, true, false, 0o600, true), false);
+  assert.equal(planeSameProcess(4, 4, true, true, 0o644, true), false);
+  assert.equal(planeSameProcess(4, 4, true, true, 0o600, false), false);
+  assert.equal(coordsCurrent(12_000, 10_000), true);
+  assert.equal(coordsCurrent(1_000, 10_000), false);
+  assert.equal(processElapsedMs("01:02"), 62_000);
+  assert.equal(processElapsedMs("01:02:03"), 3_723_000);
+  assert.equal(processElapsedMs("1-01:02:03"), 90_123_000);
+  assert.equal(processElapsedMs("stale"), null);
+});
+
+test("an owner denial names the targeted agent after the attempt", () => {
+  const row = {
+    event_type: "agent.stop.denied",
+    result: "denied",
+    signature: "ab",
+    occurred_at: 50,
+    reason: JSON.stringify({ agent_id: "agent:v2:aa", cause: "not the owner" }),
+  };
+  assert.equal(ownerStopDenial([row], "agent:v2:aa", 50), true);
+  assert.equal(ownerStopDenial([row], "agent:v2:bb", 50), false);
+  assert.equal(ownerStopDenial([row], "agent:v2:aa", 51), false);
+  assert.equal(ownerStopDenial([{ ...row, signature: "" }], "agent:v2:aa", 50), false);
+  assert.equal(ownerStopDenial([{ ...row, occurred_at: 10 }], "agent:v2:aa", 50), false);
+});
+
+test("the restart row needs a held pending step of a live run, closed once by the restart", () => {
+  const requested = { event_type: "agent.start.requested", result: "ok", session_id: "" };
+  const closed = { event_type: "agent.plan.closed", result: "instance ended", challenge_id: "r2" };
+  const pending = { request_id: "r2", status: "pending" };
+  const ended = { request_id: "r2", status: "instance ended" };
+  const before = { chain: [requested], records: [pending] };
+  assert.equal(restartHistory(before, { chain: [requested, closed], records: [ended] }, "r2", "s1").closed, true);
+  assert.equal(restartHistory(
+    { chain: [requested], records: [{ request_id: "r1", status: "completed" }] },
+    { chain: [requested], records: [{ request_id: "r1", status: "completed" }] },
+    "",
+    "",
+  ).closed, false, "nothing held is not a restart proof");
+  const stopped = { event_type: "agent.stopped", result: "ok", session_id: "s1" };
+  const early = restartHistory({ chain: [stopped], records: [pending] }, { chain: [stopped, closed], records: [ended] }, "r2", "s1");
+  assert.equal(early.step.open, false, "a run stopped before the restart was not held");
+  const twice = restartHistory(before, { chain: [closed, closed], records: [ended] }, "r2", "s1");
+  assert.equal(twice.step.closed, false, "two close rows are not one");
+  const approved = restartHistory({ chain: [requested], records: [{ request_id: "r2", status: "approved" }] }, { chain: [closed], records: [ended] }, "r2", "s1");
+  assert.equal(approved.step.open, false, "only a pending step is held");
+  const denied = restartHistory(before, { chain: [{ ...closed, result: "denied" }], records: [{ request_id: "r2", status: "denied" }] }, "r2", "s1");
+  assert.equal(denied.step.closed, false, "the restart closes the step as instance ended");
+  const unsigned = restartHistory(before, { chain: [requested], records: [ended] }, "r2", "s1");
+  assert.equal(unsigned.step.closed, false, "the closed step has its signed row");
+});
+
+test("each root stays in its own grant, including the planted cross-read", () => {
+  const grants = [
+    { status: 200, resource: `${rootA}/journal` },
+    { status: 200, resource: `${rootB}/journal` },
+  ];
+  const plants = {
+    own: { resource: `${rootA}/Documents/own-marker.txt`, status: 403, body: "refused" },
+    other: { resource: `${rootB}/Documents/cross-read.txt`, status: 403, body: "refused" },
+  };
+  assert.equal(rootsStayWithTheirAgent(rootA, rootB, grants, plants), true);
+  assert.equal(rootsStayWithTheirAgent(rootA, rootB, grants, {
+    own: plants.own,
+    other: { resource: `${rootB}/Documents/cross-read.txt`, status: 404, body: "missing" },
+  }), false);
+  assert.equal(rootsStayWithTheirAgent(rootA, rootB, [
+    { status: 200, resource: `${rootA}/${rootB}` },
+  ], plants), false);
+  assert.equal(rootsStayWithTheirAgent(rootA, rootB, grants, {
+    own: plants.own,
+    other: { resource: `${rootB}/Documents/cross-read.txt`, status: 200 },
+  }), false);
+});
+
 test("journal row requires the file under the agent root", () => {
   const journal = "UsersAI/aaaaaaaaaaaa/.AppData/Agents/agent-host/tasks/demo/journal";
   assert.equal(journalFileInRoot([{ path: journal }], rootA), true);
@@ -225,6 +312,7 @@ test("user-area route row requires both reads refused", () => {
   const marker = "secret-marker";
   const refused = (root, file) => ({
     called: true,
+    runtime: LIVE_SESSION_COORDS,
     session: "session-a",
     root,
     resource: `${root}/Documents/${file}`,
@@ -242,6 +330,18 @@ test("user-area route row requires both reads refused", () => {
   assert.equal(userAreaRouteRefused({ own: pair.own, other: { ...pair.other, session: "session-b" } }), false);
   assert.equal(userAreaRouteRefused({ own: pair.own, other: { ...pair.other, root: rootA, resource: `${rootA}/Documents/other.txt` } }), false);
   assert.equal(userAreaRouteRefused({ grants: [`${rootA}/journal`, `${rootB}/journal`] }), false);
+  assert.equal(userAreaRouteRefused({
+    own: { ...pair.own, status: 404, body: "" },
+    other: { ...pair.other, status: 404, body: "" },
+  }), false);
+  assert.equal(userAreaRouteRefused({
+    own: { ...pair.own, status: 403, body: "" },
+    other: pair.other,
+  }), false);
+  assert.equal(userAreaRouteRefused({
+    own: { ...pair.own, runtime: "home-runtime-coords.json" },
+    other: pair.other,
+  }), false);
   const routes = fs.readFileSync(new URL("../elastos/crates/elastos-server/src/api/routes.rs", import.meta.url), "utf8");
   for (const line of U4_ISOLATION_NOT_COVERED) {
     assert.equal(line.includes("routes.rs:"), false);
@@ -262,18 +362,7 @@ test("created agent stores the creating owner", () => {
 
 test("a shell failure does not pass a row the node did not check", () => {
   const later = shellFailStatuses("u3_agent_started");
-  const byName = (statusList, name) => statusList[[
-    "release_signed", "signing_key_deleted", "installed_identity_recorded",
-    "gateway_started", "owner_passkey_created", "home_runtime_ensured", "runtime_started",
-    "u3_agents_enabled", "u3_owner_field_refused", "u3_agent_created",
-    "u3_unknown_id_refused", "u3_guest_refused", "u3_agent_activated",
-    "u3_agent_started", "u4_second_agent_created", "u4_both_running",
-    "u4_distinct_roots", "u4_route_refuses_user_area", "journal_in_agent_root",
-    "plan_card_captured", "one_pending_record", "approve_without_step_up_refused",
-    "step_up_approve", "one_authorised_write", "owner_document_unchanged",
-    "one_result_and_receipt", "signed_start_audit", "signed_completion_audit",
-    "card_removed", "replay_zero", "restart_zero",
-  ].indexOf(name)];
+  const byName = (statusList, name) => statusList[names.indexOf(name)];
   assert.equal(byName(later, "u3_agent_started"), "fail");
   assert.equal(byName(later, "gateway_started"), "not reached");
   assert.equal(byName(later, "runtime_started"), "not reached");
@@ -487,16 +576,72 @@ test("a skipped owner check is not a pass", () => {
 
 test("full mode notice names the missing agents-in-gateway route", () => {
   assert.match(FULL_MODE_NOTICE, /not proof of anything until/);
-  const gateway = fs.readFileSync(new URL("../elastos/crates/elastos-server/src/api/gateway.rs", import.meta.url), "utf8");
-  const launch = fs.readFileSync(new URL("../elastos/crates/elastos-server/src/api/gateway_agents.rs", import.meta.url), "utf8");
-  const detected = agentsInGatewayChange(gateway, launch);
-  assert.equal(detected.ok, false);
+  const read = (rel) => fs.readFileSync(new URL(`../elastos/crates/elastos-server/src/api/${rel}`, import.meta.url), "utf8");
+  const gateway = `${read("gateway.rs")}\n${read("gateway_inbox.rs")}`;
+  const launch = read("gateway_agents.rs");
+  const homeRuntime = read("gateway_home_runtime.rs");
+  const detected = agentsInGatewayChange(gateway, launch, homeRuntime);
+  assert.equal(detected.ok, true, detected.reason);
   assert.equal(detected.route, "/api/apps/system/agents/launch");
-  const ready = agentsInGatewayChange(
+  const child = agentsInGatewayChange(
     'route("/api/apps/system/agents/launch", post(agents_launch))',
-    "async fn start_agent() { start_in_gateway(); }",
+    "launch_runtime_agent();",
+    "async fn launch_runtime_agent",
   );
-  assert.equal(ready.ok, true);
+  assert.equal(child.ok, false);
+  const ready = agentsInGatewayChange(
+    'route("/api/apps/system/agents/launch", post(agents_launch))\ndispatch_approved_agent_plan()',
+    "agent_plane::ensure_running(); launch_runtime_agent();",
+    "agent_plane::live_coords(data)\nasync fn launch_runtime_agent() {}",
+  );
+  assert.equal(ready.ok, false);
+  assert.match(ready.reason, /empty/);
+  const filled = agentsInGatewayChange(
+    'route("/api/apps/system/agents/launch", post(agents_launch))\ndispatch_approved_agent_plan()',
+    "agent_plane::ensure_running(); launch_runtime_agent();",
+    "async fn launch_runtime_agent() {\n  agent_plane::live_coords(data);\n  return;\n}",
+  );
+  assert.equal(filled.ok, true, filled.reason);
+  const outside = agentsInGatewayChange(
+    'route("/api/apps/system/agents/launch", post(agents_launch))\ndispatch_approved_agent_plan()',
+    "agent_plane::ensure_running(); launch_runtime_agent();",
+    "agent_plane::live_coords(data)\nasync fn launch_runtime_agent() {\n  return;\n}",
+  );
+  assert.equal(outside.ok, false);
+  assert.match(outside.reason, /live coordinates/);
+  const followed = agentsInGatewayChange(
+    'route("/api/apps/system/agents/launch", post(agents_launch))\ndispatch_approved_agent_plan()',
+    "agent_plane::ensure_running(); launch_runtime_agent();",
+    "async fn live_agent_coords() {\n  agent_plane::live_coords(data);\n}\nasync fn launch_runtime_agent() {\n  live_agent_coords();\n}",
+  );
+  assert.equal(followed.ok, true, followed.reason);
+  const noHop = agentsInGatewayChange(
+    'route("/api/apps/system/agents/launch", post(agents_launch))',
+    "agent_plane::ensure_running(); launch_runtime_agent();",
+    "fn something_else() {}",
+  );
+  assert.equal(noHop.ok, false);
+  const commented = agentsInGatewayChange(
+    '// route("/api/apps/system/agents/launch", post(agents_launch))\n// dispatch_approved_agent_plan()',
+    "// agent_plane::ensure_running(); launch_runtime_agent();",
+    "// agent_plane::live_coords(data)\n// async fn launch_runtime_agent() { return; }",
+  );
+  assert.equal(commented.ok, false);
+  const sentence = "Nothing ran. A fresh passkey is needed.";
+  const blocked = /\b(runtime mirror|projection|schema|derived facts?|capsules?|providers?|capabilit(?:y|ies)|affordances?|authority boundary|provider boundary|gate preview|runtime-owned|launch token|hostcall|request failed|failed to fetch|unauthorized|forbidden|[45]\d\d)\b|engine_[a-z_]+/i;
+  assert.equal(blocked.test(sentence), false);
+  const inbox = fs.readFileSync(new URL("../capsules/inbox/browser/inbox.js", import.meta.url), "utf8");
+  assert.match(inbox, /text\.startsWith\("Nothing ran\."\)/);
+});
+
+test("the gateway pid owns the listening port", async () => {
+  const server = net.createServer();
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const { port } = server.address();
+  assert.equal(gatewayOwnsListener(process.pid, port), true);
+  assert.equal(gatewayOwnsListener(1, port), false);
+  assert.equal(gatewayOwnsListener(process.pid, 0), false);
+  await new Promise((resolve) => server.close(resolve));
 });
 
 test("playwright pin is the version in test-behaviour.sh", () => {

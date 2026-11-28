@@ -2,7 +2,8 @@
 //! Each running instance gets fresh, limited access to its agent's storage,
 //! which ends when the instance stops. A step whose dispatch hasn't reached
 //! its effect is refused; an effect already begun is tracked, and Stop says
-//! stopping until it ends. A plan step still pending at the end is refused.
+//! stopping until it ends. A plan step still pending at the end is closed
+//! as `instance ended` and is refused.
 //!
 //! The rows below use the route-level probe (`ProbeLaunch`, the launch route,
 //! and the bridge). A journal write that succeeded is the storage grant. The
@@ -17,10 +18,11 @@
 //! and this token. After the instance has ended, that warning ends in
 //! `individually_revoked`. A replay from another run ends in `wrong_capsule`,
 //! the session check. A retained plan step is outside the pending store. The
-//! instance end drops that admission while the plan is still pending. The
-//! owner's later approval is then refused `admission_missing`, and the step's
-//! file is unchanged. That row calls `dispatch_agent_plan_step`. It does not
-//! call the approve route or the dispatch route.
+//! instance end drops that admission and closes the plan as `instance ended`,
+//! so it cannot be approved. A later write of `approved` on that file is still
+//! refused `admission_missing`, and the step's file is unchanged. An effect
+//! already begun is tracked. That row calls `dispatch_agent_plan_step`. It
+//! does not call the approve route or the dispatch route.
 //!
 //! This module compiles only with `prototype-agents`. A build without that
 //! feature does not contain these rows.
@@ -666,31 +668,30 @@ fn plan_record_path(dir: &std::path::Path, request_id: &str) -> std::path::PathB
         .join(format!("{request_id}.json"))
 }
 
-/// The owner's approval is the stored move from `pending` to `approved`.
-/// The approve route writes that status. This row then calls
+/// The instance end closes the plan as `instance ended`. This row then writes
+/// `approved` over that close, the move an approval would have made, and calls
 /// `dispatch_agent_plan_step`, not the approve route and not the dispatch
-/// route.
+/// route. The dispatch is still refused.
 fn owner_approves_pending_plan(dir: &std::path::Path, request_id: &str) {
     let path = plan_record_path(dir, request_id);
     let mut record: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&path).expect("the plan record is on disk"))
             .expect("the plan record is json");
     assert_eq!(
-        record["status"], "pending",
-        "the plan is still pending when the instance has ended"
+        record["status"], "instance ended",
+        "the plan is closed as instance ended when the instance has ended"
     );
     record["status"] = serde_json::json!("approved");
     std::fs::write(&path, serde_json::to_vec_pretty(&record).unwrap()).unwrap();
 }
 
-/// Today's rule for a plan step still pending at the end. A plan step is
-/// retained for the live instance. The instance then ends, by the stop route
-/// or by the guest completing, while that plan is still pending. Ending the
-/// instance drops the retained admission. The owner then approves. This row
-/// calls `dispatch_agent_plan_step`, which is refused `admission_missing`, and
-/// the step's file is unchanged. An effect already begun is tracked, and Stop
-/// says stopping until it ends. This row ends before the dispatch, so the
-/// admission is already gone.
+/// A plan step is retained for the live instance. The instance then ends, by
+/// the stop route or by the guest completing. Ending the instance drops the
+/// retained admission and closes the plan as `instance ended`. The owner then
+/// writes `approved`. This row calls `dispatch_agent_plan_step`, which is
+/// refused `admission_missing`, and the step's file is unchanged. An effect
+/// already begun is tracked, and Stop says stopping until it ends. This row
+/// ends before the dispatch, so the admission is already gone.
 ///
 /// The admission is dropped for a pending plan as well as any other. A change
 /// that keeps a pending plan's admission after the guest ends would let this

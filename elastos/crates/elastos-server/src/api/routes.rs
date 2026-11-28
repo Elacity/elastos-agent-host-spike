@@ -202,10 +202,16 @@ pub struct LaunchResponse {
     session_id: String,
 }
 
+/// Set by the router that serves [`launch_capsule`]. The agent plane's
+/// router sets it. A Home router leaves it clear.
+#[derive(Clone, Copy)]
+pub struct AgentsOnly(pub bool);
+
 pub async fn launch_capsule(
     Extension(runtime): Extension<Arc<Runtime>>,
     Extension(audit_log): Extension<Arc<AuditLog>>,
     Extension(data_dir): Extension<Option<std::path::PathBuf>>,
+    agents_only: Option<Extension<AgentsOnly>>,
     Json(req): Json<LaunchRequest>,
 ) -> Result<Json<LaunchResponse>, (StatusCode, String)> {
     if let Some(agent_id) = req.agent_id.as_deref() {
@@ -218,8 +224,15 @@ pub async fn launch_capsule(
     }
     let path = std::path::Path::new(&req.path);
     reject_raw_launch_principal_id(req.principal_id.as_deref())?;
+    let agents_only = agents_only.is_some_and(|Extension(AgentsOnly(enabled))| enabled);
     let (launcher, admission, grant_name, agent_audit) = match req.agent_id.as_deref() {
         None => {
+            if agents_only {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    "this runtime launches a stored agent".to_string(),
+                ));
+            }
             let (launcher, grant_name) = principal_from_launch_request(
                 data_dir.as_deref(),
                 path,
@@ -283,6 +296,9 @@ pub async fn launch_capsule(
                         host_cid,
                         launch_id,
                         expires_at: *expires_at,
+                        data_dir: data_dir
+                            .as_deref()
+                            .expect("an admitted agent launch has this Home's data directory"),
                     },
                 )
                 .await
@@ -336,7 +352,8 @@ pub async fn launch_capsule(
         }
         Err(elastos_common::ElastosError::InvalidManifest(message))
             if message == crate::runtime::Runtime::AGENT_STOPPING
-                || message == crate::runtime::Runtime::AGENT_ALREADY_RUNNING =>
+                || message == crate::runtime::Runtime::AGENT_ALREADY_RUNNING
+                || message == crate::resource_bridge::PLAN_WAIT_FULL =>
         {
             Err((StatusCode::CONFLICT, message))
         }
@@ -566,19 +583,26 @@ pub async fn stop_capsule(
     }
 }
 
-/// Body of `POST /api/capsules/stop-agent`. The only selector is the agent
-/// id, which is the principal on the Runtime row. A capsule name is not a
-/// field: an unknown field is refused and nothing is stopped.
+/// Body of `POST /api/capsules/stop-agent`. The agent id is the principal
+/// on the Runtime rows. A settle path that must end only the session its
+/// own Start made also names that `session_id`; without it every live row
+/// of the agent is stopped. A capsule name is not a field: an unknown field
+/// is refused and nothing is stopped.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct StopAgentRequest {
     agent_id: String,
+    #[serde(default)]
+    session_id: Option<String>,
 }
 
 #[derive(Serialize)]
 struct StoppedAgentBody {
     session_id: String,
     status: String,
+    /// Whether this stop left `ended_at` set. The gateway's signed row says
+    /// `ok` only when this is true and `status` is an ended status.
+    ended: bool,
 }
 
 #[derive(Serialize)]
@@ -668,6 +692,7 @@ fn stopped_rows_for_unknown(unknown: &[UnknownPlanStepBody]) -> Vec<StoppedAgent
         .map(|session_id| StoppedAgentBody {
             session_id,
             status: "stopped".to_string(),
+            ended: true,
         })
         .collect()
 }
@@ -700,6 +725,10 @@ pub async fn stop_agent_session(
             .into_response();
     }
     // This Stop's guard clears only its own token, including cancellation and panic.
+    // Lock order, shared with retire and one live run: `begin_agent_stop`
+    // takes `agent_launches`, then `stop_marks`. The live-run mutex is not
+    // taken here. A Start admits `live_runs` only while it already holds
+    // `agent_launches`.
     let _stop = runtime.begin_agent_stop(&agent_id).await;
     #[cfg(test)]
     {
@@ -708,7 +737,7 @@ pub async fn stop_agent_session(
             panic!("stop panicked after its mark");
         }
     }
-    stop_collected_agent_rows(&runtime, &agent_id).await
+    stop_collected_agent_rows(&runtime, &agent_id, request.session_id.as_deref()).await
 }
 
 /// `stopping` (202) while a plan effect of this agent can still land.
@@ -749,6 +778,7 @@ fn plan_write_still_open(runtime: &Runtime, agent_id: &str) -> Option<axum::resp
                     .map(|session_id| StoppedAgentBody {
                         session_id,
                         status: "stopping".to_string(),
+                        ended: false,
                     })
                     .collect(),
                 unknown,
@@ -760,8 +790,20 @@ fn plan_write_still_open(runtime: &Runtime, agent_id: &str) -> Option<axum::resp
 }
 
 /// Reads and stops rows after the per-agent stopping flag is set.
-async fn stop_collected_agent_rows(runtime: &Runtime, agent_id: &str) -> axum::response::Response {
-    let ids = runtime.live_sessions_for_agent(agent_id).await;
+/// `only_session` is the settle path of a Start: keep only that row, so an
+/// earlier session of the same agent, which already has its own completion
+/// row, stays up. `None` stops every live row of the agent.
+async fn stop_collected_agent_rows(
+    runtime: &Runtime,
+    agent_id: &str,
+    only_session: Option<&str>,
+) -> axum::response::Response {
+    let mut ids = runtime.live_sessions_for_agent(agent_id).await;
+    if let Some(session_id) = only_session {
+        ids.retain(|id| id == session_id);
+    }
+    #[cfg(test)]
+    runtime.pause_before_stop_rows(agent_id).await;
     if ids.is_empty() {
         if let Some(response) = plan_write_still_open(runtime, agent_id) {
             return response;
@@ -823,6 +865,7 @@ async fn stop_collected_agent_rows(runtime: &Runtime, agent_id: &str) -> axum::r
                 stopped.push(StoppedAgentBody {
                     session_id: info.session_id,
                     status: info.status,
+                    ended: info.ended_at.is_some(),
                 });
             }
             continue;
@@ -845,11 +888,13 @@ async fn stop_collected_agent_rows(runtime: &Runtime, agent_id: &str) -> axum::r
             stopping.push(StoppedAgentBody {
                 session_id: info.session_id,
                 status: "stopping".to_string(),
+                ended: false,
             });
         } else {
             stopped.push(StoppedAgentBody {
                 session_id: info.session_id,
                 status: info.status,
+                ended: true,
             });
         }
     }
@@ -866,6 +911,7 @@ async fn stop_collected_agent_rows(runtime: &Runtime, agent_id: &str) -> axum::r
         stopping.push(StoppedAgentBody {
             session_id,
             status: "stopping".to_string(),
+            ended: false,
         });
     }
     // A session named in stopping is not also named in stopped.
@@ -1098,6 +1144,7 @@ pub(crate) mod tests {
             Extension(std::sync::Arc::new(runtime)),
             Extension(audit_log.clone()),
             Extension(None::<std::path::PathBuf>),
+            None,
             Json(LaunchRequest {
                 path: capsule_dir.to_string_lossy().into_owned(),
                 principal_id: None,
@@ -1154,6 +1201,7 @@ pub(crate) mod tests {
             Extension(runtime),
             Extension(audit_log.clone()),
             Extension(None::<std::path::PathBuf>),
+            None,
             Json(LaunchRequest {
                 path: capsule_dir.to_string_lossy().into_owned(),
                 principal_id: None,
@@ -2276,6 +2324,7 @@ pub(crate) mod tests {
                     Extension(runtime),
                     Extension(audit_log),
                     Extension(data_dir),
+                    None,
                     Json(LaunchRequest {
                         path,
                         principal_id: None,
@@ -2838,6 +2887,60 @@ pub(crate) mod tests {
         assert_eq!(a_now.principal.as_deref(), Some(a.as_str()));
         assert_eq!(b_now.principal.as_deref(), Some(b.as_str()));
         assert_ne!(a_now.principal, b_now.principal, "two principals");
+        let grant_a = gateway::issue_home_agent_launch_token_with_context(
+            &home.data_dir,
+            a,
+            PROBE_HOST,
+            &home.context,
+        )
+        .expect("A's launch grant");
+        let grant_b = gateway::issue_home_agent_launch_token_with_context(
+            &home.data_dir,
+            b,
+            PROBE_HOST,
+            &home.context,
+        )
+        .expect("B's launch grant");
+        assert_ne!(grant_a, grant_b, "one host mints two launch grants");
+        assert!(
+            agent_launch_grant(&home.data_dir, PROBE_HOST, b, Some(grant_a.clone())).is_err(),
+            "A's grant is refused as B's launch"
+        );
+        assert!(
+            agent_launch_grant(&home.data_dir, PROBE_HOST, a, Some(grant_b.clone())).is_err(),
+            "B's grant is refused as A's launch"
+        );
+        assert!(agent_launch_grant(&home.data_dir, PROBE_HOST, a, Some(grant_a)).is_ok());
+        assert!(
+            crate::agents::stored_agent_for_root(&home.data_dir, a, &home.root(b))
+                .unwrap()
+                .is_none(),
+            "A is refused on B's storage"
+        );
+        assert!(
+            crate::agents::stored_agent_for_root(&home.data_dir, b, &home.root(a))
+                .unwrap()
+                .is_none(),
+            "B is refused on A's storage"
+        );
+        let spent_on_a = home.runtime.other_agent_model_spend(&a_launch.id, b);
+        let spent_on_b = home.runtime.other_agent_model_spend(&b_launch.id, a);
+        assert!(
+            matches!(
+                spent_on_a,
+                Err(crate::model_budget::Refusal::UnknownAgent)
+                    | Err(crate::model_budget::Refusal::RunForOtherAgent)
+            ),
+            "B is refused on A's model account: {spent_on_a:?}"
+        );
+        assert!(
+            matches!(
+                spent_on_b,
+                Err(crate::model_budget::Refusal::UnknownAgent)
+                    | Err(crate::model_budget::Refusal::RunForOtherAgent)
+            ),
+            "A is refused on B's model account: {spent_on_b:?}"
+        );
 
         // Release both guests: each is granted its own call, and both run to
         // an end with a cause.
@@ -3032,6 +3135,7 @@ pub(crate) mod tests {
             Extension(home.runtime.clone()),
             Extension(home.audit_log.clone()),
             Extension(Some(home.data_dir.clone())),
+            None,
             Json(LaunchRequest {
                 path: dir.to_string_lossy().into_owned(),
                 principal_id: None,
@@ -7039,6 +7143,7 @@ pub(crate) mod tests {
             Extension(runtime),
             Extension(audit_log.clone()),
             Extension(Some(data_dir.clone())),
+            None,
             Json(LaunchRequest {
                 path: forged_dir.to_string_lossy().into_owned(),
                 principal_id: None,
@@ -7092,6 +7197,7 @@ pub(crate) mod tests {
             Extension(home.runtime.clone()),
             Extension(home.audit_log.clone()),
             Extension(Some(home.data_dir.clone())),
+            None,
             Json(LaunchRequest {
                 path: home.capsule_dir.to_string_lossy().into_owned(),
                 principal_id: None,
@@ -7247,6 +7353,7 @@ pub(crate) mod tests {
                 Extension(runtime.clone()),
                 Extension(audit_log.clone()),
                 Extension(Some(data_dir.clone())),
+                None,
                 Json(LaunchRequest {
                     path: folder.to_string_lossy().into_owned(),
                     principal_id: None,
@@ -7494,6 +7601,7 @@ pub(crate) mod tests {
                 Extension(home.runtime.clone()),
                 Extension(home.audit_log.clone()),
                 Extension(Some(home.data_dir.clone())),
+                None,
                 Json(LaunchRequest {
                     path: home.capsule_dir.to_string_lossy().into_owned(),
                     principal_id: None,
@@ -8847,6 +8955,7 @@ pub(crate) mod tests {
                     host_cid: "cid",
                     launch_id: &launch_id,
                     expires_at: verified_exp,
+                    data_dir: &home.data_dir,
                 },
             )
             .await
@@ -9245,6 +9354,7 @@ pub(crate) mod tests {
             Extension(runtime.clone()),
             Extension(Arc::new(AuditLog::new())),
             Extension(Some(std::path::PathBuf::from("unused-home"))),
+            None,
             Json(LaunchRequest {
                 path: "unused".to_string(),
                 principal_id: None,
@@ -9346,7 +9456,12 @@ pub(crate) mod tests {
     /// What `start_agent_once` answers. The launch route returns this sentence
     /// once admission has passed, and System paints Running or Stopping from it.
     #[cfg(unix)]
-    async fn start_sentence(runtime: &Arc<Runtime>, agent: &str, launch_id: &str) -> String {
+    async fn start_sentence(
+        runtime: &Arc<Runtime>,
+        data_dir: &std::path::Path,
+        agent: &str,
+        launch_id: &str,
+    ) -> String {
         let expires = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
@@ -9362,6 +9477,7 @@ pub(crate) mod tests {
                     host_cid: "cid",
                     launch_id,
                     expires_at: expires,
+                    data_dir,
                 },
             )
             .await
@@ -9381,6 +9497,7 @@ pub(crate) mod tests {
             Extension(runtime.clone()),
             Extension(Arc::new(AuditLog::new())),
             Extension(Some(std::path::PathBuf::from("unused-home"))),
+            None,
             Json(LaunchRequest {
                 path: "unused".to_string(),
                 principal_id: None,
@@ -9400,7 +9517,7 @@ pub(crate) mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn a_live_run_with_a_held_step_says_already_running() {
-        let (runtime, _dir) = crate::runtime::tests::test_runtime().await;
+        let (runtime, dir) = crate::runtime::tests::test_runtime().await;
         let runtime = Arc::new(runtime);
         let agent = "agent:r10-live";
         let session = "session-r10-live";
@@ -9413,7 +9530,7 @@ pub(crate) mod tests {
             "a live step made the agent stopping"
         );
         assert_eq!(
-            start_sentence(&runtime, agent, "launch:r10-live").await,
+            start_sentence(&runtime, dir.path(), agent, "launch:r10-live").await,
             Runtime::AGENT_ALREADY_RUNNING
         );
         let (status, body) = launch_route_body(&runtime, agent).await;
@@ -9429,7 +9546,7 @@ pub(crate) mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn a_stopped_run_with_a_landing_step_says_stopping() {
-        let (runtime, _dir) = crate::runtime::tests::test_runtime().await;
+        let (runtime, dir) = crate::runtime::tests::test_runtime().await;
         let runtime = Arc::new(runtime);
         let agent = "agent:r10-land";
         let session = "session-r10-land";
@@ -9440,7 +9557,7 @@ pub(crate) mod tests {
         runtime.note_plan_instance_ended(session);
         assert!(runtime.agent_is_stopping(agent).await);
         assert_eq!(
-            start_sentence(&runtime, agent, "launch:r10-land").await,
+            start_sentence(&runtime, dir.path(), agent, "launch:r10-land").await,
             Runtime::AGENT_STOPPING
         );
         let (status, body) = launch_route_body(&runtime, agent).await;
@@ -9630,6 +9747,7 @@ pub(crate) mod tests {
             Extension(home.runtime.clone()),
             Extension(home.audit_log.clone()),
             Extension(Some(home.data_dir.clone())),
+            None,
             Json(LaunchRequest {
                 path: dir.to_string_lossy().into_owned(),
                 principal_id: None,

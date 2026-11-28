@@ -63,6 +63,20 @@ export function bindAgents(doc, request, confirmStepUp) {
 
   function paint() {
     const banner = failure || (pendingId === "create" || pendingId === "allow" ? pendingLabel : "");
+    // Hidden until this Home's list says agents are on or waiting to be
+    // allowed. A default build stays hidden, including the first paint.
+    for (const node of doc.querySelectorAll('[data-settings="agents"]')) {
+      node.hidden = gate === "wait" || gate === "missing";
+    }
+    if (gate === "missing") {
+      const account = doc.querySelector('.settings-sidebar-item[data-settings="account"]');
+      if (account) {
+        for (const item of doc.querySelectorAll(".settings-sidebar-item, .settings-content")) {
+          const on = item.dataset && item.dataset.settings === "account";
+          if (item.classList) item.classList.toggle("active", on);
+        }
+      }
+    }
     statusNode.textContent = banner || (gate === "missing" ? "Agents are not built into this Runtime" : gate === "off" ? HOME_OFF : "");
     formNode.hidden = gate !== "ready";
     allowButton.hidden = gate !== "off";
@@ -148,8 +162,11 @@ export function bindAgents(doc, request, confirmStepUp) {
     agents = body.agents;
     gate = "ready";
     // The list is this Home's agent file. It does not read the Runtime's
-    // stopping mark, so a reload shows the stored on/off state.
-    stopping.clear(); running.clear(); unknownNotes.clear();
+    // stopping mark, so a reload shows the stored on/off state, and Start is
+    // offered again.
+    stopping.clear();
+    running.clear();
+    unknownNotes.clear();
   }
 
   function post(id, label, path, body, accept) {
