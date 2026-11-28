@@ -1,7 +1,7 @@
 //! Secret auth-state files and the lock files beside them.
 
 use std::fs::File;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 #[cfg(unix)]
 use std::fs::OpenOptions;
@@ -15,8 +15,6 @@ use serde::Serialize;
 
 #[cfg(test)]
 use std::collections::HashMap;
-#[cfg(test)]
-use std::path::PathBuf;
 #[cfg(test)]
 use std::sync::{Mutex, OnceLock};
 
@@ -319,6 +317,56 @@ fn before_lock_file_mode(path: &Path) {
 #[cfg(all(test, unix))]
 fn clear_lock_file_mode_hook() {
     BEFORE_LOCK_FILE_MODE.with(|hook| hook.set(None));
+}
+
+std::thread_local! {
+    static AUDIT_ACTIVATION_LOCK_MARKS: std::cell::RefCell<Vec<PathBuf>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Remembers that this thread already holds the audit lock for one data
+/// directory. `build_for` holds that lock across root resolution and the
+/// protection read, and both of those call this function again.
+struct AuditActivationLockMark(PathBuf);
+
+impl AuditActivationLockMark {
+    fn enter(key: PathBuf) -> Self {
+        AUDIT_ACTIVATION_LOCK_MARKS.with(|held| held.borrow_mut().push(key.clone()));
+        Self(key)
+    }
+}
+
+impl Drop for AuditActivationLockMark {
+    fn drop(&mut self) {
+        AUDIT_ACTIVATION_LOCK_MARKS.with(|held| {
+            let mut held = held.borrow_mut();
+            if let Some(index) = held.iter().rposition(|path| path == &self.0) {
+                held.remove(index);
+            }
+        });
+    }
+}
+
+pub(crate) fn with_audit_chain_activation_lock<T>(
+    data_dir: &Path,
+    operation: impl FnOnce() -> anyhow::Result<T>,
+) -> anyhow::Result<T> {
+    let key = crate::auth::auth_state_cache_key(data_dir);
+    let reentered =
+        AUDIT_ACTIVATION_LOCK_MARKS.with(|held| held.borrow().iter().any(|path| path == &key));
+    if reentered {
+        return operation();
+    }
+    let _mark = AuditActivationLockMark::enter(key);
+    let _guard = crate::auth::audit_chain_activation_mutex(data_dir)
+        .lock()
+        .map_err(|_| anyhow!("audit activation lock poisoned"))?;
+    let lock = crate::auth::lock_auth_state_file(crate::auth::open_audit_chain_activation_lock(
+        data_dir,
+    )?)?;
+    let value = operation()?;
+    crate::auth::unlock_auth_state_file(lock)?;
+    Ok(value)
 }
 
 #[cfg(all(test, unix))]

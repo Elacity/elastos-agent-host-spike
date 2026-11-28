@@ -1067,6 +1067,108 @@ fn gateway_object_reply_calls_fill_fenced_library_fields() {
     );
 }
 
+fn mask_rust_comments(source: &str) -> String {
+    let bytes = source.as_bytes();
+    let mut out = bytes.to_vec();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'"' {
+            i += 1;
+            while i < bytes.len() {
+                if bytes[i] == b'\\' {
+                    i = i.saturating_add(2);
+                    continue;
+                }
+                if bytes[i] == b'"' {
+                    i += 1;
+                    break;
+                }
+                i += 1;
+            }
+            continue;
+        }
+        if bytes[i] == b'/' && i + 1 < bytes.len() && bytes[i + 1] == b'/' {
+            while i < bytes.len() && bytes[i] != b'\n' {
+                out[i] = b' ';
+                i += 1;
+            }
+            continue;
+        }
+        if bytes[i] == b'/' && i + 1 < bytes.len() && bytes[i + 1] == b'*' {
+            let mut depth = 1;
+            out[i] = b' ';
+            out[i + 1] = b' ';
+            i += 2;
+            while i < bytes.len() && depth > 0 {
+                if bytes[i] == b'\n' {
+                    i += 1;
+                    continue;
+                }
+                if bytes[i] == b'/' && i + 1 < bytes.len() && bytes[i + 1] == b'*' {
+                    depth += 1;
+                    out[i] = b' ';
+                    out[i + 1] = b' ';
+                    i += 2;
+                    continue;
+                }
+                if bytes[i] == b'*' && i + 1 < bytes.len() && bytes[i + 1] == b'/' {
+                    depth -= 1;
+                    out[i] = b' ';
+                    out[i + 1] = b' ';
+                    i += 2;
+                    continue;
+                }
+                out[i] = b' ';
+                i += 1;
+            }
+            continue;
+        }
+        i += 1;
+    }
+    String::from_utf8(out).expect("masked source stays utf-8")
+}
+
+fn function_body(text: &str, signature_at: usize) -> Option<&str> {
+    let bytes = text.as_bytes();
+    let mut i = signature_at;
+    while i < bytes.len() && bytes[i] != b'{' {
+        i += 1;
+    }
+    if i >= bytes.len() {
+        return None;
+    }
+    let start = i;
+    let mut depth = 0i32;
+    while i < bytes.len() {
+        if bytes[i] == b'"' {
+            i += 1;
+            while i < bytes.len() {
+                if bytes[i] == b'\\' {
+                    i = i.saturating_add(2);
+                    continue;
+                }
+                if bytes[i] == b'"' {
+                    i += 1;
+                    break;
+                }
+                i += 1;
+            }
+            continue;
+        }
+        if bytes[i] == b'{' {
+            depth += 1;
+        }
+        if bytes[i] == b'}' {
+            depth -= 1;
+            if depth == 0 {
+                return text.get(start..=i);
+            }
+        }
+        i += 1;
+    }
+    None
+}
+
 fn scan_object_sends(dir: &std::path::Path, misses: &mut Vec<String>) {
     for entry in std::fs::read_dir(dir).unwrap() {
         let path = entry.unwrap().path();
@@ -1077,7 +1179,7 @@ fn scan_object_sends(dir: &std::path::Path, misses: &mut Vec<String>) {
         if path.extension().is_none_or(|ext| ext != "rs") {
             continue;
         }
-        let text = std::fs::read_to_string(&path).unwrap();
+        let text = mask_rust_comments(&std::fs::read_to_string(&path).unwrap());
         let mut from = 0;
         while let Some(at) = text[from..].find("send_raw(") {
             let start = from + at;
@@ -1110,10 +1212,34 @@ fn argument_is_object(head: &str) -> bool {
 fn every_object_dispatch_path_carries_the_envelope() {
     let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
     let mut misses = Vec::new();
-    scan_object_authority(&root, &mut misses);
+    let mut checked = 0usize;
+    scan_object_authority(&root, &mut misses, &mut checked);
     assert!(
         misses.is_empty(),
         "object send without an authority envelope: {misses:?}"
+    );
+    assert!(checked > 0, "the envelope scan found no object send");
+    let authority =
+        mask_rust_comments(&std::fs::read_to_string(root.join("object_authority.rs")).unwrap());
+    let dispatch_at = authority
+        .find("async fn dispatch(")
+        .expect("AuthorityAttachingProvider::dispatch");
+    let dispatch = function_body(&authority, dispatch_at).expect("dispatch body");
+    assert!(
+        dispatch.contains("AttachedRequest::new"),
+        "dispatch does not build an attached request"
+    );
+    let impl_at = authority
+        .find("impl AttachedRequest")
+        .expect("AttachedRequest");
+    let new_at = authority[impl_at..]
+        .find("fn new(")
+        .map(|at| impl_at + at)
+        .expect("AttachedRequest::new");
+    let new_body = function_body(&authority, new_at).expect("AttachedRequest::new body");
+    assert!(
+        new_body.contains("ObjectAuthorityV1::attach"),
+        "AttachedRequest::new does not attach the runtime envelope"
     );
     let registration = std::fs::read_to_string(root.join("server_infra.rs")).unwrap();
     assert!(
@@ -1122,17 +1248,17 @@ fn every_object_dispatch_path_carries_the_envelope() {
     );
 }
 
-fn scan_object_authority(dir: &std::path::Path, misses: &mut Vec<String>) {
+fn scan_object_authority(dir: &std::path::Path, misses: &mut Vec<String>, checked: &mut usize) {
     for entry in std::fs::read_dir(dir).unwrap() {
         let path = entry.unwrap().path();
         if path.is_dir() {
-            scan_object_authority(&path, misses);
+            scan_object_authority(&path, misses, checked);
             continue;
         }
         if path.extension().is_none_or(|ext| ext != "rs") {
             continue;
         }
-        let text = std::fs::read_to_string(&path).unwrap();
+        let text = mask_rust_comments(&std::fs::read_to_string(&path).unwrap());
         let marker = concat!("send_raw", "(");
         let mut from = 0;
         while let Some(at) = text[from..].find(marker) {
@@ -1143,16 +1269,18 @@ fn scan_object_authority(dir: &std::path::Path, misses: &mut Vec<String>) {
             let literal = argument_is_object(head);
             let scheme = head.contains("&scheme") || head.contains("&dispatch.scheme");
             let object_scheme = scheme && window.contains("== \"object\"");
-            let back = text.floor_char_boundary(start.saturating_sub(2500));
-            // A provider-registry send reaches AuthorityAttachingProvider,
-            // which inserts the Runtime envelope. Removing that registration
-            // fails the assertion in `every_object_dispatch_path_carries_the_envelope`.
-            if (literal || object_scheme)
-                && !registry_object_send(&text[..start])
-                && !carries_object_authority(&text[back..start])
-            {
-                let line = text[..start].lines().count();
-                misses.push(format!("{}:{line}", path.display()));
+            if literal || object_scheme {
+                *checked += 1;
+                let back = text.floor_char_boundary(start.saturating_sub(2500));
+                // A provider-registry send reaches AuthorityAttachingProvider,
+                // which inserts the Runtime envelope. The dispatch body must
+                // call AttachedRequest::new, and that constructor must attach.
+                if !registry_object_send(&text[..start])
+                    && !carries_object_authority(&text[back..start])
+                {
+                    let line = text[..start].lines().count();
+                    misses.push(format!("{}:{line}", path.display()));
+                }
             }
             from = start + marker.len();
         }
