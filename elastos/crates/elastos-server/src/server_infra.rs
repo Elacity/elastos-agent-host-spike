@@ -2839,10 +2839,10 @@ mod tests {
         hold_localhost_migration_lock, localhost_bringup, localhost_file_key,
         localhost_provider_bridge_config, rewrite_temp_path, set_localhost_migration_before_rename,
         set_localhost_migration_before_replace, set_localhost_migration_before_walk,
-        set_localhost_migration_create_error, set_localhost_migration_during_walk,
-        set_localhost_migration_progress_clock, set_localhost_migration_write_budget,
-        set_localhost_migration_write_error, take_localhost_migration_bytes_read,
-        take_localhost_migration_opens, LocalhostBringup,
+        set_localhost_migration_create_error, set_localhost_migration_during_pass_two,
+        set_localhost_migration_during_walk, set_localhost_migration_progress_clock,
+        set_localhost_migration_write_budget, set_localhost_migration_write_error,
+        take_localhost_migration_bytes_read, take_localhost_migration_opens, LocalhostBringup,
     };
     #[cfg(unix)]
     use std::ffi::CString;
@@ -6264,11 +6264,19 @@ fn main() {
             original
         );
         assert_eq!(fs::read(root.join("did/nickname.enc")).unwrap(), original);
-        assert_eq!(fs::read(root.join("Public/page.bin")).unwrap(), original);
-        assert_eq!(
-            fs::read(root.join("MyWebSite/index.bin")).unwrap(),
-            original
-        );
+        for rel in ["Public/page.bin", "MyWebSite/index.bin"] {
+            let migrated = fs::read(root.join(rel)).unwrap();
+            assert_ne!(migrated, original, "{rel}");
+            assert_eq!(
+                localhost_provider::decrypt_bytes(&file_key, &migrated).unwrap(),
+                plaintext,
+                "{rel}"
+            );
+            assert!(
+                localhost_provider::decrypt_bytes(&device_key, &migrated).is_err(),
+                "{rel}"
+            );
+        }
         assert_current_marker(root, &device_key);
         assert_no_localhost_rewrite_temps(root);
 
@@ -10735,6 +10743,136 @@ fn main() {
         }
         assert_eq!(fs::read(&note).unwrap(), planted);
         assert!(!root.path().join("identity/localhost-file-key-v1").exists());
+    }
+
+    /// An update that starts while pass two replaces files either waits or
+    /// leaves every v1 file in place.
+    #[test]
+    fn an_update_that_starts_during_pass_two_does_not_replace_a_v1_file() {
+        let _guard = LocalAppsGuard::lock();
+        struct ClearHooks;
+        impl Drop for ClearHooks {
+            fn drop(&mut self) {
+                set_localhost_migration_during_pass_two(None);
+            }
+        }
+        let _clear = ClearHooks;
+        let device_key = [0x41; 32];
+        let file_key = expected_localhost_file_key(&device_key);
+        let root = TempDir::new().unwrap();
+        let note = root.path().join("Users/note.bin");
+        let planted = plant_device_envelope(&note, &device_key, b"kept");
+        let data = root.path().to_path_buf();
+        let saw = Arc::new(Mutex::new(false));
+        let began = Arc::new(Mutex::new(false));
+        let saw_hook = saw.clone();
+        let began_hook = began.clone();
+        set_localhost_migration_during_pass_two(Some(Box::new(move || {
+            *saw_hook.lock().unwrap() = true;
+            let claimed = elastos_server::update_controller::try_claim_file_move(&data)
+                .unwrap()
+                .is_some();
+            *began_hook.lock().unwrap() = claimed;
+        })));
+        match localhost_bringup(root.path(), &device_key) {
+            LocalhostBringup::Start(_) => {}
+            LocalhostBringup::Refuse(got) => panic!("pass two refused: {got}"),
+        }
+        let bytes = fs::read(&note).unwrap();
+        let saw = *saw.lock().unwrap();
+        let began = *began.lock().unwrap();
+        assert!(saw, "pass two did not pause");
+        assert!(
+            !began || bytes == planted,
+            "an update started during pass two and a v1 file was replaced"
+        );
+        assert!(!began, "the update-start lock was free during pass two");
+        assert_ne!(bytes, planted);
+        assert_envelope_opens_with_exactly_one_key(&note, b"kept", &device_key, &file_key);
+    }
+
+    /// A `localhost://Public` or `localhost://MyWebSite` write on the old key
+    /// is an envelope. Bare files on those roots stay plaintext.
+    #[test]
+    fn a_uri_write_on_the_old_format_is_migrated_and_readable() {
+        let _guard = LocalAppsGuard::lock();
+        let device_key = [0x42; 32];
+        let file_key = expected_localhost_file_key(&device_key);
+        let root = TempDir::new().unwrap();
+        let body = b"from-uri";
+        for uri in [
+            "localhost://Public/note.txt",
+            "localhost://MyWebSite/index.txt",
+        ] {
+            let trimmed = uri.trim_start_matches('/');
+            assert!(
+                elastos_common::localhost::parse_localhost_path(trimmed).is_none(),
+                "{uri} was a bare plaintext path"
+            );
+            let (name, rest) = elastos_common::localhost::parse_localhost_uri(uri).unwrap();
+            assert!(elastos_common::localhost::is_plaintext_root(name), "{uri}");
+            let path = root.path().join(name).join(rest);
+            let sealed = localhost_provider::encrypt_bytes(&device_key, body).unwrap();
+            assert!(localhost_provider::header_is_device_key_envelope(&sealed));
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(&path, &sealed).unwrap();
+        }
+        fs::write(root.path().join("Public/plain.txt"), b"bare public").unwrap();
+        fs::write(root.path().join("MyWebSite/plain.txt"), b"bare site").unwrap();
+        localhost_provider_bridge_config(root.path(), &device_key).unwrap();
+        for rel in ["Public/note.txt", "MyWebSite/index.txt"] {
+            let path = root.path().join(rel);
+            let bytes = fs::read(&path).unwrap();
+            assert!(
+                localhost_provider::decrypt_bytes(&device_key, &bytes).is_err(),
+                "{rel} still opens with the old key"
+            );
+            assert_eq!(
+                localhost_provider::decrypt_bytes(&file_key, &bytes).unwrap(),
+                body
+            );
+            assert_eq!(
+                localhost_provider::read_sealed_localhost_file(&file_key, &path, rel).unwrap(),
+                body
+            );
+        }
+        assert_eq!(
+            fs::read(root.path().join("Public/plain.txt")).unwrap(),
+            b"bare public"
+        );
+        assert_eq!(
+            fs::read(root.path().join("MyWebSite/plain.txt")).unwrap(),
+            b"bare site"
+        );
+    }
+
+    /// Two Linux names that differ only in a non-UTF-8 byte both move.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn two_raw_byte_names_that_differ_only_in_invalid_utf8_both_migrate() {
+        let _guard = LocalAppsGuard::lock();
+        let device_key = [0x43; 32];
+        let file_key = expected_localhost_file_key(&device_key);
+        let root = TempDir::new().unwrap();
+        let users = root.path().join("Users");
+        fs::create_dir_all(&users).unwrap();
+        let left = users.join(std::ffi::OsStr::from_bytes(b"note-\x80.bin"));
+        let right = users.join(std::ffi::OsStr::from_bytes(b"note-\x81.bin"));
+        plant_device_envelope(&left, &device_key, b"alpha");
+        plant_device_envelope(&right, &device_key, b"beta");
+        localhost_provider_bridge_config(root.path(), &device_key).unwrap();
+        for (path, plain) in [(&left, &b"alpha"[..]), (&right, &b"beta"[..])] {
+            let bytes = fs::read(path).unwrap();
+            assert!(
+                localhost_provider::decrypt_bytes(&device_key, &bytes).is_err(),
+                "{}",
+                path.display()
+            );
+            assert_eq!(
+                localhost_provider::decrypt_bytes(&file_key, &bytes).unwrap(),
+                plain
+            );
+        }
     }
 
     #[tokio::test]

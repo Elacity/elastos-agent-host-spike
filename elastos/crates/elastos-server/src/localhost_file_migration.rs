@@ -3,8 +3,9 @@
 //! A migration problem does not stop Home (`api/routes.rs` `health`,
 //! `api/server.rs` `ServeDir`). The localhost helper and `/api/localhost`
 //! routes stay off with one sentence: the relative path, the cause, and what
-//! to do (move the named file out of its folder, then restart). `MyWebSite`
-//! and `Public` are plaintext and are not in the encrypted walk. Nothing
+//! to do (move the named file out of its folder, then restart). A bare
+//! `MyWebSite` or `Public` file stays plaintext. An old device-key envelope
+//! on those roots, sealed by a `localhost://` write, is rekeyed. Nothing
 //! starts unfenced.
 //!
 //! `identity/localhost-file-key-v1` is format `1` plus
@@ -44,10 +45,14 @@
 //! attaches to a running runtime and does not walk. `elastos run`, `elastos open`,
 //! and a host can therefore overlap.
 //! After the migration lock is held, again after pass 1, and again immediately
-//! before the done marker, the walk reads `update_can_roll_back`. An update
-//! that began while the walk waited for the lock, or while pass 1 read, defers
-//! with the pending-update sentence, including when pass 1 held no old file.
-//! No file is rewritten and no marker is written. The background check does
+//! before the done marker, the walk reads `update_can_roll_back`. Pass two
+//! holds the update-start lock for the rewrite and the marker. The update
+//! controller takes that lock before it starts and waits while pass two holds
+//! it. Under the lock, pass two reads `update_can_roll_back` again before a
+//! file is replaced. An update that began while the walk waited for the
+//! migration lock, or while pass 1 read, defers with the pending-update
+//! sentence, including when pass 1 held no old file. No file is rewritten and
+//! no marker is written. The background check does
 //! not keep the device key while it waits. The next tick reads
 //! `identity/device.key` again.
 //! They cannot mix keys: on Unix the file key is HKDF-SHA256 of the device key
@@ -67,6 +72,8 @@
 //! stays, with its target, and any other name stays.
 
 use std::path::Path;
+#[cfg(unix)]
+use std::path::PathBuf;
 
 #[cfg(unix)]
 use anyhow::Context as _;
@@ -87,10 +94,12 @@ const LOCALHOST_REWRITE_SUFFIX: &str = ".elastos-localhost-file-key-v1.tmp";
 const ENVELOPE_HEADER: usize = 64;
 #[cfg(unix)]
 const FINGERPRINT_DOMAIN: &[u8] = b"elastos-localhost-file-key-fingerprint-v1\0";
-/// Local-app roots whose files are sealed. `MyWebSite` and `Public` stay
-/// plaintext. `identity/` and `did/` are not in this list.
+/// Local-app roots whose files are sealed. `identity/` and `did/` are not here.
 #[cfg(unix)]
 const LOCALHOST_ENCRYPTED_ROOTS: &[&str] = &["AppCapsules", "ElastOS", "Local", "Users", "UsersAI"];
+/// Bare files stay plaintext. An old device-key envelope was a `localhost://` write.
+#[cfg(unix)]
+const LOCALHOST_URI_SEALED_ROOTS: &[&str] = &["MyWebSite", "Public"];
 
 #[cfg(all(unix, test))]
 type MigrationReplaceHook = Box<dyn Fn(&Path)>;
@@ -109,6 +118,8 @@ thread_local! {
         std::cell::RefCell::new(None);
     #[cfg(test)]
     static DURING_WALK: std::cell::RefCell<Option<Box<dyn Fn()>>> =
+        std::cell::RefCell::new(None);
+    static DURING_PASS_TWO: std::cell::RefCell<Option<Box<dyn Fn()>>> =
         std::cell::RefCell::new(None);
     static PROGRESS_CLOCK: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
     static BYTES_READ: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
@@ -164,6 +175,12 @@ pub(crate) fn set_localhost_migration_before_walk(hook: Option<Box<dyn Fn()>>) {
 #[cfg(all(unix, test))]
 pub(crate) fn set_localhost_migration_during_walk(hook: Option<Box<dyn Fn()>>) {
     DURING_WALK.with(|slot| *slot.borrow_mut() = hook);
+}
+
+/// Pauses at the start of pass two, after the update-start lock is held.
+#[cfg(all(unix, test))]
+pub(crate) fn set_localhost_migration_during_pass_two(hook: Option<Box<dyn Fn()>>) {
+    DURING_PASS_TWO.with(|slot| *slot.borrow_mut() = hook);
 }
 
 /// Sets the progress clock. `None` uses the wall clock. A test moves this
@@ -281,6 +298,15 @@ fn run_during_walk() {
 }
 
 #[cfg(all(unix, test))]
+fn run_during_pass_two() {
+    let hook = DURING_PASS_TWO.with(|slot| slot.borrow_mut().take());
+    if let Some(hook) = hook {
+        hook();
+        DURING_PASS_TWO.with(|slot| *slot.borrow_mut() = Some(hook));
+    }
+}
+
+#[cfg(all(unix, test))]
 fn note_migration_lock_wait() {
     if let Ok(path) = std::env::var("ELASTOS_LOCALHOST_MIGRATION_WAIT_PROBE") {
         let _ = std::fs::write(path, b"waiting");
@@ -337,22 +363,43 @@ fn set_migration_root(root: &Path) {
 }
 
 #[cfg(unix)]
-fn relative_path(path: &Path) -> String {
+fn relative_os_path(path: &Path) -> PathBuf {
     MIGRATION_ROOT.with(|root| {
         let root = root.borrow();
-        let shown = if path == root.as_path() {
-            root.file_name().unwrap_or(path.as_os_str())
+        if path == root.as_path() {
+            PathBuf::from(root.file_name().unwrap_or(path.as_os_str()))
         } else {
             path.strip_prefix(root.as_path())
                 .unwrap_or(path)
-                .as_os_str()
-        };
-        std::path::Path::new(shown)
-            .components()
-            .map(|c| c.as_os_str().to_string_lossy().into_owned())
-            .collect::<Vec<_>>()
-            .join("/")
+                .to_path_buf()
+        }
     })
+}
+
+#[cfg(unix)]
+fn display_os(os: &std::ffi::OsStr) -> String {
+    use std::os::unix::ffi::OsStrExt;
+    if let Some(text) = os.to_str() {
+        return text.to_string();
+    }
+    let mut out = String::new();
+    for byte in os.as_bytes() {
+        if byte.is_ascii_graphic() || *byte == b' ' {
+            out.push(char::from(*byte));
+        } else {
+            out.push_str(&format!("\\x{byte:02x}"));
+        }
+    }
+    out
+}
+
+#[cfg(unix)]
+fn relative_path(path: &Path) -> String {
+    relative_os_path(path)
+        .components()
+        .map(|component| display_os(component.as_os_str()))
+        .collect::<Vec<_>>()
+        .join("/")
 }
 
 #[cfg(unix)]
@@ -542,12 +589,13 @@ fn is_owned_rewrite_temp(name: &std::ffi::OsStr) -> bool {
 #[cfg(unix)]
 pub(crate) fn rewrite_temp_path(path: &Path) -> std::io::Result<std::path::PathBuf> {
     use sha2::Digest;
+    use std::os::unix::ffi::OsStrExt;
 
     let parent = path
         .parent()
         .ok_or_else(|| std::io::Error::other("localhost file has no directory"))?;
     let mut hasher = sha2::Sha256::new();
-    hasher.update(relative_path(path).as_bytes());
+    hasher.update(relative_os_path(path).as_os_str().as_bytes());
     let digest: [u8; 32] = hasher.finalize().into();
     let mut name = std::ffi::OsString::from(".");
     name.push(hex::encode(digest));
@@ -926,11 +974,117 @@ fn sweep_rewrite_temps(dir: &Path) -> anyhow::Result<()> {
 }
 
 #[cfg(unix)]
+fn keep_migrated(
+    path: &Path,
+    rel: PathBuf,
+    outcome: MigratedFile,
+    done: &mut std::collections::HashSet<PathBuf>,
+    over_hard: &mut Vec<String>,
+) {
+    match outcome {
+        MigratedFile::Settled | MigratedFile::Written => {
+            done.insert(rel);
+        }
+        MigratedFile::Held => {}
+        MigratedFile::OverHard => {
+            over_hard.push(relative_path(path));
+            done.insert(rel);
+        }
+    }
+}
+
+#[cfg(unix)]
+fn old_device_envelope(path: &Path) -> anyhow::Result<bool> {
+    use std::io::Read;
+    use std::os::unix::fs::OpenOptionsExt;
+
+    let mut file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)
+        .map_err(|err| {
+            if err.raw_os_error() == Some(libc::ELOOP) {
+                localhost_refused(path, "is a link")
+            } else {
+                localhost_refused(path, "cannot be read")
+            }
+        })?;
+    let mut header = [0u8; ENVELOPE_HEADER];
+    let read = file
+        .read(&mut header)
+        .with_context(|| localhost_refused(path, "cannot be read"))?;
+    Ok(localhost_provider::header_is_device_key_envelope(
+        &header[..read],
+    ))
+}
+
+#[cfg(unix)]
+fn migrate_uri_sealed_tree(
+    dir: &Path,
+    device_key: &[u8; 32],
+    file_key: &[u8; 32],
+    done: &mut std::collections::HashSet<PathBuf>,
+    over_hard: &mut Vec<String>,
+) -> anyhow::Result<()> {
+    use std::os::unix::fs::FileTypeExt;
+
+    sweep_rewrite_temps(dir)?;
+    for name in directory_names(dir)? {
+        let path = dir.join(&name);
+        let meta = std::fs::symlink_metadata(&path)
+            .with_context(|| localhost_refused(&path, "cannot be read"))?;
+        let file_type = meta.file_type();
+        if file_type.is_symlink() || file_type.is_fifo() || file_type.is_socket() {
+            continue;
+        }
+        if file_type.is_dir() {
+            migrate_uri_sealed_tree(&path, device_key, file_key, done, over_hard)?;
+            continue;
+        }
+        if !file_type.is_file() || !old_device_envelope(&path)? {
+            continue;
+        }
+        let rel = relative_os_path(&path);
+        if PASS_TWO.with(|slot| slot.get()) && done.contains(&rel) {
+            continue;
+        }
+        let outcome = migrate_localhost_envelope(&path, device_key, file_key)?;
+        keep_migrated(&path, rel, outcome, done, over_hard);
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn migrate_uri_sealed_roots(
+    data_dir: &Path,
+    device_key: &[u8; 32],
+    file_key: &[u8; 32],
+    done: &mut std::collections::HashSet<PathBuf>,
+    over_hard: &mut Vec<String>,
+) -> anyhow::Result<()> {
+    for root in LOCALHOST_URI_SEALED_ROOTS {
+        let path = data_dir.join(root);
+        let meta = match std::fs::symlink_metadata(&path) {
+            Ok(meta) => meta,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(err) => {
+                return Err(err).with_context(|| localhost_refused(&path, "cannot be read"));
+            }
+        };
+        if meta.file_type().is_symlink() || !meta.is_dir() {
+            continue;
+        }
+        migrate_uri_sealed_tree(&path, device_key, file_key, done, over_hard)?;
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
 fn migrate_localhost_tree(
     dir: &Path,
     device_key: &[u8; 32],
     file_key: &[u8; 32],
-    done: &mut std::collections::HashSet<String>,
+    done: &mut std::collections::HashSet<PathBuf>,
     over_hard: &mut Vec<String>,
 ) -> anyhow::Result<()> {
     use std::os::unix::fs::{FileTypeExt, MetadataExt};
@@ -972,20 +1126,12 @@ fn migrate_localhost_tree(
             if meta.nlink() > 1 {
                 return Err(localhost_refused(&path, "is linked from another path"));
             }
-            let rel = relative_path(&path);
+            let rel = relative_os_path(&path);
             if PASS_TWO.with(|slot| slot.get()) && done.contains(&rel) {
                 continue;
             }
-            match migrate_localhost_envelope(&path, device_key, file_key)? {
-                MigratedFile::Settled | MigratedFile::Written => {
-                    done.insert(rel);
-                }
-                MigratedFile::Held => {}
-                MigratedFile::OverHard => {
-                    over_hard.push(rel.clone());
-                    done.insert(rel);
-                }
-            }
+            let outcome = migrate_localhost_envelope(&path, device_key, file_key)?;
+            keep_migrated(&path, rel, outcome, done, over_hard);
         }
         if names == directory_names(dir)? {
             return Ok(());
@@ -1302,6 +1448,7 @@ fn migrate_localhost_files_to_file_key(
                 }
             }
         }
+        migrate_uri_sealed_roots(data_dir, device_key, &file_key, &mut done, &mut over_hard)?;
         if !over_hard.is_empty() {
             return Err(anyhow::anyhow!(over_hard_sentence(&over_hard)));
         }
@@ -1311,8 +1458,22 @@ fn migrate_localhost_files_to_file_key(
     if elastos_server::update_controller::update_can_roll_back(data_dir) {
         return Err(anyhow::anyhow!(LOCALHOST_FILES_PENDING_UPDATE));
     }
-    if HELD.with(|slot| slot.get()) {
+    let rewriting = HELD.with(|slot| slot.get());
+    let _move_guard = if rewriting {
+        match elastos_server::update_controller::try_claim_file_move(data_dir)? {
+            None => return Err(anyhow::anyhow!(LOCALHOST_FILES_PENDING_UPDATE)),
+            Some(guard) => Some(guard),
+        }
+    } else {
+        None
+    };
+    if rewriting && elastos_server::update_controller::update_can_roll_back(data_dir) {
+        return Err(anyhow::anyhow!(LOCALHOST_FILES_PENDING_UPDATE));
+    }
+    if rewriting {
         PASS_TWO.with(|slot| slot.set(true));
+        #[cfg(test)]
+        run_during_pass_two();
         walk()?;
     }
     if matches!(plan, MarkerPlan::Write) {
@@ -1326,8 +1487,9 @@ fn migrate_localhost_files_to_file_key(
 
 /// Localhost-provider init config.
 ///
-/// On Unix, files under the five encrypted roots are rewritten onto the HKDF
-/// file key before this returns. The encryption field is that file key.
+/// On Unix, files under the five encrypted roots, and an old device-key
+/// envelope under MyWebSite or Public, are rewritten onto the HKDF file key
+/// before this returns. The encryption field is that file key.
 /// On Windows, files are not rewritten, the field is the device key, and `extra.file_key` is false.
 /// The "never the device key" claim is the Unix field only.
 ///
@@ -1464,9 +1626,23 @@ mod windows_header {
 #[cfg(all(test, unix))]
 mod tests {
     use super::{
-        localhost_provider_bridge_config, take_localhost_migration_bytes_read,
-        take_localhost_migration_opens,
+        localhost_provider_bridge_config, relative_os_path, relative_path, set_migration_root,
+        take_localhost_migration_bytes_read, take_localhost_migration_opens,
     };
+
+    #[test]
+    fn two_invalid_utf8_names_stay_distinct_os_paths() {
+        use std::os::unix::ffi::OsStrExt;
+        let root = std::env::temp_dir();
+        set_migration_root(&root);
+        let left = root.join(std::ffi::OsStr::from_bytes(b"Users/note-\x80.bin"));
+        let right = root.join(std::ffi::OsStr::from_bytes(b"Users/note-\x81.bin"));
+        assert_ne!(relative_os_path(&left), relative_os_path(&right));
+        assert_ne!(relative_path(&left), relative_path(&right));
+        let mut done = std::collections::HashSet::new();
+        done.insert(relative_os_path(&left));
+        assert!(!done.contains(&relative_os_path(&right)));
+    }
 
     fn peak_resident_bytes() -> i64 {
         let mut usage: libc::rusage = unsafe { std::mem::zeroed() };

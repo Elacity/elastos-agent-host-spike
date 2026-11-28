@@ -1177,6 +1177,46 @@ mod tests {
     }
 
     #[test]
+    fn a_uri_path_on_the_old_key_seals_public_and_my_website() {
+        let dir = setup_test_dir();
+        let key = [0x21u8; 32];
+        let old = provider_from_config(&dir, &key, false);
+        for uri in [
+            "localhost://Public/note.txt",
+            "localhost://MyWebSite/index.txt",
+        ] {
+            old.write_file(uri, "token", b"from-uri", false).unwrap();
+            assert_eq!(
+                old.read_file(uri, "token", None, None).unwrap(),
+                b"from-uri"
+            );
+        }
+        old.write_file("Public/plain.txt", "token", b"bare", false)
+            .unwrap();
+        old.write_file("MyWebSite/plain.txt", "token", b"bare", false)
+            .unwrap();
+        for rel in ["Public/note.txt", "MyWebSite/index.txt"] {
+            let bytes = fs::read(dir.path().join(rel)).unwrap();
+            assert!(
+                localhost_provider::header_is_device_key_envelope(&bytes),
+                "{rel}"
+            );
+            assert_eq!(
+                localhost_provider::decrypt_bytes(&key, &bytes).unwrap(),
+                b"from-uri"
+            );
+        }
+        assert_eq!(
+            fs::read(dir.path().join("Public/plain.txt")).unwrap(),
+            b"bare"
+        );
+        assert_eq!(
+            fs::read(dir.path().join("MyWebSite/plain.txt")).unwrap(),
+            b"bare"
+        );
+    }
+
+    #[test]
     fn a_device_key_writes_the_old_header_and_a_file_key_writes_the_new_one() {
         let dir = setup_test_dir();
         let device = [1u8; 32];

@@ -52,6 +52,8 @@ const MAX_REFUSED: usize = 8;
 #[cfg(unix)]
 const LEASE_ENV: &str = "ELASTOS_UPDATE_CONTROLLER_LEASE";
 const HOST_ENV: &str = "ELASTOS_UPDATE_CONTROLLER_HOST";
+#[cfg(unix)]
+const FILE_MOVE_LOCK: &str = "localhost-file-move.lock";
 const MAX_PRIVATE_JSON: u64 = 256 * 1024;
 // Every Home start shares runtime_control::RUNTIME_READY_TIMEOUT. One update is
 // bounded by a candidate start plus one rollback start.
@@ -1316,8 +1318,14 @@ impl Controller {
                     !path_present(&self.directory.join(ACTIVE_REQUEST))?,
                     "An earlier update requires recovery."
                 );
+                // Pass two holds this lock across every file it replaces.
+                let Some(move_guard) = try_claim_file_move(&self.receipt.data_dir)? else {
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    continue;
+                };
                 fs::rename(&path, self.directory.join(ACTIVE_REQUEST))?;
                 File::open(&self.directory)?.sync_all()?;
+                drop(move_guard);
                 self.request = Some(request);
                 self.publish("staging", "Checking the signed update.")?;
                 let result = self.apply().await;
@@ -1913,6 +1921,56 @@ fn prepare_controller(
         Ok(()) => Ok(true),
         Err(error) if controller_space_error(&error) => Ok(false),
         Err(error) => Err(error),
+    }
+}
+
+/// Held while pass two replaces localhost files. `None` means that pass holds it.
+pub struct FileMoveGuard {
+    #[cfg(unix)]
+    _lock: FileLock,
+}
+
+/// Takes the lock pass two holds. `Ok(None)` means pass two holds it now.
+pub fn try_claim_file_move(data_dir: &Path) -> Result<Option<FileMoveGuard>> {
+    #[cfg(unix)]
+    {
+        claim_file_move_unix(data_dir)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = data_dir;
+        Ok(Some(FileMoveGuard {}))
+    }
+}
+
+#[cfg(unix)]
+fn claim_file_move_unix(data_dir: &Path) -> Result<Option<FileMoveGuard>> {
+    let data_dir = fs::canonicalize(data_dir)?;
+    let identity = data_dir.join("identity");
+    match fs::symlink_metadata(&identity) {
+        Ok(meta) if meta.is_dir() && !meta.file_type().is_symlink() => {}
+        Ok(_) => anyhow::bail!("identity is not a directory"),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            fs::DirBuilder::new().mode(0o700).create(&identity)?;
+        }
+        Err(err) => return Err(err.into()),
+    }
+    let path = identity.join(FILE_MOVE_LOCK);
+    if fs::symlink_metadata(&path).is_ok_and(|meta| meta.file_type().is_symlink()) {
+        anyhow::bail!("localhost file-move lock is a link");
+    }
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(&path)?;
+    match FileLock::try_exclusive(file) {
+        Ok(lock) => Ok(Some(FileMoveGuard { _lock: lock })),
+        Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => Ok(None),
+        Err(err) => Err(err.into()),
     }
 }
 
