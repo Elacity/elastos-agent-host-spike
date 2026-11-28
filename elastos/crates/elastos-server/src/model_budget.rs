@@ -291,7 +291,9 @@ impl ModelBudget {
 
     pub(crate) fn bind_home(&self, data_dir: PathBuf) {
         // The managed runtime's copy of this call writes nothing.
-        let _ = crate::agents::raise_spend_file_to_signed_floor(&data_dir);
+        if !crate::local_apps::refusal_leaves_elastos_unmade(&data_dir) {
+            let _ = crate::agents::raise_spend_file_to_signed_floor(&data_dir);
+        }
         *self.home.lock().unwrap_or_else(PoisonError::into_inner) = Some(data_dir);
     }
 
@@ -1894,13 +1896,18 @@ mod tests {
         );
 
         let held =
-            crate::host_lock::start_host_for_agents(dir.path(), "gateway", "127.0.0.1:9").unwrap();
+            crate::host_lock::start_host_for_agents(dir.path(), "gateway", "127.0.0.1:9", |_| {
+                Ok(())
+            })
+            .unwrap();
         crate::agents::tests::plant_stored_total(dir.path(), &agent, 0, false);
-        let blocked = crate::host_lock::start_host_for_agents(dir.path(), "serve", "127.0.0.1:9");
+        let blocked =
+            crate::host_lock::start_host_for_agents(dir.path(), "serve", "127.0.0.1:9", |_| Ok(()));
         assert!(blocked.is_err(), "a second host start took the lock");
         assert_eq!(file_spent(dir.path(), &agent), 0, "the blocked start wrote");
         drop(held);
-        crate::host_lock::start_host_for_agents(dir.path(), "serve", "127.0.0.1:9").unwrap();
+        crate::host_lock::start_host_for_agents(dir.path(), "serve", "127.0.0.1:9", |_| Ok(()))
+            .unwrap();
         assert_eq!(file_spent(dir.path(), &agent), floor);
         assert!(!stored_active(dir.path(), &agent));
         assert_eq!(
@@ -1934,7 +1941,8 @@ mod tests {
         assert_eq!(file_spent(dir.path(), &other), 30);
         assert_eq!(file_spent(dir.path(), &retired), 0);
         for role in ["gateway", "serve", "gateway-public"] {
-            crate::host_lock::start_host_for_agents(dir.path(), role, "127.0.0.1:9").unwrap();
+            crate::host_lock::start_host_for_agents(dir.path(), role, "127.0.0.1:9", |_| Ok(()))
+                .unwrap();
             assert_eq!(file_spent(dir.path(), &agent), floor, "{role}");
             assert_eq!(file_spent(dir.path(), &other), 30, "{role}");
             assert_eq!(spend_rows(dir.path(), &agent), 0, "{role}");
@@ -1985,5 +1993,26 @@ mod tests {
         file["decisions"][0]["requested_by_proof"] = serde_json::Value::Null;
         crate::auth::atomic_write(&path, &serde_json::to_vec_pretty(&file).unwrap()).unwrap();
         assert!(approved());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_refused_prepare_keeps_bind_home_from_making_elastos() {
+        let dir = tempfile::tempdir().unwrap();
+        struct Guard;
+        impl Drop for Guard {
+            fn drop(&mut self) {
+                crate::local_apps::end_local_apps_guard();
+            }
+        }
+        crate::local_apps::begin_local_apps_guard();
+        let _guard = Guard;
+        crate::local_apps::set_local_apps_refusal(dir.path(), Some("refused".into()));
+        crate::agents::tests::allow_dispatch_spend(dir.path());
+        ModelBudget::new().bind_home(dir.path().to_path_buf());
+        assert!(
+            !dir.path().join("ElastOS").exists(),
+            "bind_home opened the spend heal"
+        );
     }
 }

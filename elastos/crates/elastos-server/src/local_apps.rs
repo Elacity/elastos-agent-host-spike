@@ -1,0 +1,299 @@
+//! Local apps stay off with one sentence. This provider has no key and no process.
+//!
+//! The sentence is stored for one data folder. A bad file in one Home does not
+//! turn off another Home in the same process. A route reads the folder on that
+//! Home's own state. The registry's heap address is not a key.
+
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::sync::{LazyLock, Mutex};
+use std::time::Duration;
+
+use elastos_runtime::provider::{Provider, ProviderError, ResourceRequest, ResourceResponse};
+
+/// The provider error starts with this mark and a newline, then the sentence.
+pub const LOCAL_APPS_REFUSAL_MARK: &str = "local-apps-off\n";
+
+/// Set while the background file check has not finished. Not a final refusal.
+pub const LOCAL_APPS_CHECKING: &str = "checking local app files";
+
+pub fn marked_local_apps_refusal(sentence: &str) -> String {
+    format!("{LOCAL_APPS_REFUSAL_MARK}{sentence}")
+}
+
+pub fn sentence_from_local_apps_provider_error(message: &str) -> Option<&str> {
+    message.strip_prefix(LOCAL_APPS_REFUSAL_MARK)
+}
+
+static LOCAL_APPS_REFUSAL: LazyLock<Mutex<HashMap<PathBuf, String>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+fn refusal_key(data_dir: &Path) -> PathBuf {
+    std::fs::canonicalize(data_dir).unwrap_or_else(|_| data_dir.to_path_buf())
+}
+
+fn test_override() -> Option<String> {
+    #[cfg(test)]
+    {
+        TEST_REFUSAL.with(|slot| slot.borrow().clone())
+    }
+    #[cfg(not(test))]
+    {
+        None
+    }
+}
+
+pub fn local_apps_health_line(sentence: &str) -> String {
+    format!("  Local apps are off. {sentence}")
+}
+
+/// What a caller who is not the owner's shell is told. The file name stays out.
+pub const LOCAL_APPS_OFF_TO_OTHERS: &str = "Local apps are off.";
+
+pub fn local_apps_refusal_body(sentence: &str, owner_shell: bool) -> String {
+    if owner_shell {
+        sentence.to_string()
+    } else {
+        LOCAL_APPS_OFF_TO_OTHERS.to_string()
+    }
+}
+
+pub fn set_local_apps_refusal(data_dir: &Path, sentence: Option<String>) {
+    let mut refusals = LOCAL_APPS_REFUSAL.lock().expect("local apps refusal");
+    let key = refusal_key(data_dir);
+    #[cfg(test)]
+    note_guard_key(&key);
+    match sentence {
+        Some(sentence) => {
+            refusals.insert(key, sentence);
+        }
+        None => {
+            refusals.remove(&key);
+        }
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    static GUARD_DEPTH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+    static GUARD_KEYS: std::cell::RefCell<Vec<PathBuf>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+#[cfg(test)]
+fn note_guard_key(key: &Path) {
+    if GUARD_DEPTH.with(|depth| depth.get()) > 0 {
+        GUARD_KEYS.with(|slot| slot.borrow_mut().push(key.to_path_buf()));
+    }
+}
+
+/// Remember keys set while this guard is held. Drop clears those keys only.
+#[cfg(test)]
+pub fn begin_local_apps_guard() {
+    GUARD_DEPTH.with(|depth| depth.set(depth.get() + 1));
+}
+
+#[cfg(test)]
+pub fn end_local_apps_guard() {
+    let done = GUARD_DEPTH.with(|depth| {
+        let next = depth.get().saturating_sub(1);
+        depth.set(next);
+        next == 0
+    });
+    if !done {
+        return;
+    }
+    let keys = GUARD_KEYS.with(|slot| std::mem::take(&mut *slot.borrow_mut()));
+    for key in keys {
+        set_local_apps_refusal(&key, None);
+    }
+}
+
+pub fn clear_local_apps_refusals() {
+    LOCAL_APPS_REFUSAL
+        .lock()
+        .expect("local apps refusal")
+        .clear();
+}
+
+/// A refused prepare has not made `ElastOS`. Startup must not make it.
+pub fn refusal_leaves_elastos_unmade(data_dir: &Path) -> bool {
+    LOCAL_APPS_REFUSAL
+        .lock()
+        .expect("local apps refusal")
+        .contains_key(&refusal_key(data_dir))
+        && std::fs::symlink_metadata(data_dir.join("ElastOS")).is_err()
+}
+
+pub fn local_apps_refusal(data_dir: &Path) -> Option<String> {
+    if let Some(sentence) = test_override() {
+        return Some(sentence);
+    }
+    LOCAL_APPS_REFUSAL
+        .lock()
+        .expect("local apps refusal")
+        .get(&refusal_key(data_dir))
+        .cloned()
+}
+
+/// Wait out [`LOCAL_APPS_CHECKING`] with no time limit. `None` means local apps are on.
+/// Any other sentence, such as files moving, returns at once.
+pub async fn await_local_apps_decision(data_dir: &Path) -> Option<String> {
+    loop {
+        match local_apps_refusal(data_dir) {
+            None => return None,
+            Some(s) if s != LOCAL_APPS_CHECKING => return Some(s),
+            Some(_) => tokio::time::sleep(Duration::from_millis(50)).await,
+        }
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    static TEST_REFUSAL: std::cell::RefCell<Option<String>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+pub(crate) fn set_local_apps_refusal_for_test(sentence: Option<String>) {
+    TEST_REFUSAL.with(|slot| *slot.borrow_mut() = sentence);
+}
+
+pub struct RefusingLocalhostProvider {
+    sentence: String,
+}
+
+impl RefusingLocalhostProvider {
+    pub fn new(sentence: String) -> Self {
+        Self { sentence }
+    }
+}
+
+#[async_trait::async_trait]
+impl Provider for RefusingLocalhostProvider {
+    async fn handle(&self, _request: ResourceRequest) -> Result<ResourceResponse, ProviderError> {
+        Err(ProviderError::Provider(marked_local_apps_refusal(
+            &self.sentence,
+        )))
+    }
+
+    fn schemes(&self) -> Vec<&'static str> {
+        vec!["localhost"]
+    }
+
+    fn name(&self) -> &'static str {
+        "localhost"
+    }
+
+    async fn send_raw(
+        &self,
+        _request: &serde_json::Value,
+    ) -> Result<serde_json::Value, ProviderError> {
+        Err(ProviderError::Provider(marked_local_apps_refusal(
+            &self.sentence,
+        )))
+    }
+}
+
+#[cfg(test)]
+pub(crate) struct LocalAppsTestGuard(std::sync::MutexGuard<'static, ()>);
+
+#[cfg(test)]
+impl Drop for LocalAppsTestGuard {
+    fn drop(&mut self) {
+        let _kept = &self.0;
+        end_local_apps_guard();
+        set_local_apps_refusal_for_test(None);
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn lock_local_apps_for_test() -> LocalAppsTestGuard {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let guard = LocalAppsTestGuard(LOCK.lock().unwrap_or_else(|err| err.into_inner()));
+    begin_local_apps_guard();
+    guard
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use elastos_runtime::provider::ProviderRegistry;
+
+    #[test]
+    fn a_guard_drop_removes_only_the_keys_it_saw() {
+        let kept = tempfile::tempdir().unwrap();
+        set_local_apps_refusal(kept.path(), Some("kept".into()));
+        {
+            let _guard = lock_local_apps_for_test();
+            let other = tempfile::tempdir().unwrap();
+            set_local_apps_refusal(other.path(), Some("other".into()));
+            assert_eq!(local_apps_refusal(other.path()).as_deref(), Some("other"));
+        }
+        assert_eq!(local_apps_refusal(kept.path()).as_deref(), Some("kept"));
+        set_local_apps_refusal(kept.path(), None);
+    }
+
+    #[test]
+    fn refusal_is_keyed_by_the_data_folder() {
+        let _guard = lock_local_apps_for_test();
+        let first = tempfile::tempdir().unwrap();
+        let second = tempfile::tempdir().unwrap();
+        set_local_apps_refusal(
+            first.path(),
+            Some("Users/secret.bin is not readable.".into()),
+        );
+        set_local_apps_refusal(second.path(), None);
+        assert_eq!(
+            local_apps_refusal(first.path()).as_deref(),
+            Some("Users/secret.bin is not readable.")
+        );
+        assert_eq!(local_apps_refusal(second.path()), None);
+        set_local_apps_refusal(second.path(), Some("other".into()));
+        assert_eq!(
+            local_apps_refusal(first.path()).as_deref(),
+            Some("Users/secret.bin is not readable.")
+        );
+        assert_eq!(local_apps_refusal(second.path()).as_deref(), Some("other"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_long_check_never_times_out_and_a_move_is_said_at_once() {
+        let _guard = lock_local_apps_for_test();
+        let home = tempfile::tempdir().unwrap();
+        let moving = "Local app files are moving to the new key.";
+        set_local_apps_refusal(home.path(), Some(LOCAL_APPS_CHECKING.into()));
+        let dir = home.path().to_path_buf();
+        let wait = tokio::spawn(async move { await_local_apps_decision(&dir).await });
+        tokio::time::sleep(Duration::from_secs(300)).await;
+        assert!(!wait.is_finished(), "the wait gave up while checking");
+        set_local_apps_refusal(home.path(), Some(moving.into()));
+        assert_eq!(wait.await.unwrap().as_deref(), Some(moving));
+    }
+
+    #[test]
+    fn a_dropped_registry_does_not_hand_its_refusal_to_the_next() {
+        let _guard = lock_local_apps_for_test();
+        let old_home = tempfile::tempdir().unwrap();
+        let sentence = "Users/secret.bin is not readable.";
+        set_local_apps_refusal(old_home.path(), Some(sentence.into()));
+        let old = Box::new(ProviderRegistry::new());
+        let old_addr = std::ptr::from_ref(old.as_ref()) as usize;
+        drop(old);
+        let new_home = tempfile::tempdir().unwrap();
+        let new = Box::new(ProviderRegistry::new());
+        let new_addr = std::ptr::from_ref(new.as_ref()) as usize;
+        assert!(local_apps_refusal(new_home.path()).is_none());
+        assert_eq!(
+            local_apps_refusal(old_home.path()).as_deref(),
+            Some(sentence)
+        );
+        if old_addr == new_addr {
+            assert!(local_apps_refusal(new_home.path()).is_none());
+        }
+        drop(new);
+        assert_eq!(
+            local_apps_refusal(old_home.path()).as_deref(),
+            Some(sentence)
+        );
+    }
+}

@@ -35,6 +35,8 @@ pub struct ProviderStorageState {
     pub capability_manager: Option<Arc<CapabilityManager>>,
     /// Per-capsule storage quota in MB. 0 means unlimited.
     pub storage_quota_mb: u32,
+    /// This Home's data folder. The local-apps refusal is stored for this path.
+    pub data_dir: std::path::PathBuf,
 }
 
 /// Storage API errors
@@ -44,6 +46,7 @@ pub enum StorageApiError {
     PermissionDenied(String),
     InvalidPath(String),
     QuotaExceeded(String),
+    LocalApps(String),
     Internal(String),
 }
 
@@ -63,6 +66,7 @@ impl IntoResponse for StorageApiError {
                 StatusCode::INSUFFICIENT_STORAGE,
                 format!("Storage quota exceeded: {}", msg),
             ),
+            StorageApiError::LocalApps(sentence) => (StatusCode::SERVICE_UNAVAILABLE, sentence),
             StorageApiError::Internal(msg) => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 format!("Storage error: {}", msg),
@@ -82,7 +86,15 @@ impl From<ProviderError> for StorageApiError {
             ProviderError::NoProvider(m) => {
                 StorageApiError::Internal(format!("No provider: {}", m))
             }
-            ProviderError::Provider(m) => StorageApiError::Internal(m),
+            ProviderError::Provider(m) => {
+                match crate::local_apps::sentence_from_local_apps_provider_error(&m) {
+                    // No caller is known here, so the file name stays in the map.
+                    Some(_) => StorageApiError::LocalApps(
+                        crate::local_apps::LOCAL_APPS_OFF_TO_OTHERS.to_string(),
+                    ),
+                    None => StorageApiError::Internal(m),
+                }
+            }
             ProviderError::Unavailable(m) => {
                 StorageApiError::Internal(format!("Peer unavailable: {}", m))
             }
@@ -98,16 +110,39 @@ impl From<ProviderError> for StorageApiError {
 ///
 /// Read a file from a file-backed localhost root.
 /// Returns the file contents with appropriate content-type.
+fn owner_shell(session: &Session, headers: &HeaderMap) -> bool {
+    session.is_shell() && !headers.contains_key("X-Elastos-Capsule-Id")
+}
+
+/// Principal and capability checks run first for every caller. An ungranted
+/// caller is refused at once and learns nothing about the file check. The
+/// owner's shell then sees the file sentence; everyone else sees one plain line.
+async fn refuse_local_apps(
+    state: &ProviderStorageState,
+    session: &Session,
+    headers: &HeaderMap,
+    path: &str,
+    op: &str,
+) -> Result<String, StorageApiError> {
+    let path = normalize_path(path);
+    reject_principal_root_storage_path(&path)?;
+    enforce_capability(state, session, headers, &path, row_right(op)?).await?;
+    let Some(sentence) = crate::local_apps::await_local_apps_decision(&state.data_dir).await else {
+        return Ok(path);
+    };
+    Err(StorageApiError::LocalApps(
+        crate::local_apps::local_apps_refusal_body(&sentence, owner_shell(session, headers)),
+    ))
+}
+
 pub async fn read_file(
     State(state): State<ProviderStorageState>,
     Extension(session): Extension<Session>,
     headers: HeaderMap,
     Path(path): Path<String>,
 ) -> Result<Response, StorageApiError> {
+    let path = refuse_local_apps(&state, &session, &headers, &path, "read").await?;
     let user_id = session_user_id(&session);
-    let path = normalize_path(&path);
-    reject_principal_root_storage_path(&path)?;
-    enforce_capability(&state, &session, &headers, &path, row_right("read")?).await?;
     let uri = canonical_local_uri(&path)?;
 
     let result = state
@@ -139,10 +174,8 @@ pub async fn write_file(
     Path(path): Path<String>,
     body: Bytes,
 ) -> Result<Json<WriteOutput>, StorageApiError> {
+    let path = refuse_local_apps(&state, &session, &headers, &path, "write").await?;
     let user_id = session_user_id(&session);
-    let path = normalize_path(&path);
-    reject_principal_root_storage_path(&path)?;
-    enforce_capability(&state, &session, &headers, &path, row_right("write")?).await?;
 
     // Enforce storage quota (0 = unlimited)
     if state.storage_quota_mb > 0 {
@@ -202,10 +235,8 @@ pub async fn delete_path(
     Path(path): Path<String>,
     Query(query): Query<DeleteQuery>,
 ) -> Result<Json<DeleteOutput>, StorageApiError> {
+    let path = refuse_local_apps(&state, &session, &headers, &path, "delete").await?;
     let user_id = session_user_id(&session);
-    let path = normalize_path(&path);
-    reject_principal_root_storage_path(&path)?;
-    enforce_capability(&state, &session, &headers, &path, row_right("delete")?).await?;
     let uri = canonical_local_uri(&path)?;
     let recursive = query.recursive.unwrap_or(false);
 
@@ -254,10 +285,8 @@ pub async fn list_dir(
     headers: HeaderMap,
     Path(path): Path<String>,
 ) -> Result<Json<ListOutput>, StorageApiError> {
+    let path = refuse_local_apps(&state, &session, &headers, &path, "list").await?;
     let user_id = session_user_id(&session);
-    let path = normalize_path(&path);
-    reject_principal_root_storage_path(&path)?;
-    enforce_capability(&state, &session, &headers, &path, row_right("list")?).await?;
     let uri = canonical_local_uri(&path)?;
 
     let result = state
@@ -336,10 +365,8 @@ pub async fn stat_path(
     headers: HeaderMap,
     Path(path): Path<String>,
 ) -> Result<Response, StorageApiError> {
+    let path = refuse_local_apps(&state, &session, &headers, &path, "stat").await?;
     let user_id = session_user_id(&session);
-    let path = normalize_path(&path);
-    reject_principal_root_storage_path(&path)?;
-    enforce_capability(&state, &session, &headers, &path, row_right("stat")?).await?;
     let uri = canonical_local_uri(&path)?;
 
     let result = state
@@ -385,10 +412,8 @@ pub async fn mkdir(
     headers: HeaderMap,
     Path(path): Path<String>,
 ) -> Result<Json<MkdirOutput>, StorageApiError> {
+    let path = refuse_local_apps(&state, &session, &headers, &path, "mkdir").await?;
     let user_id = session_user_id(&session);
-    let path = normalize_path(&path);
-    reject_principal_root_storage_path(&path)?;
-    enforce_capability(&state, &session, &headers, &path, row_right("mkdir")?).await?;
     let uri = canonical_local_uri(&path)?;
 
     let result = state
@@ -563,16 +588,21 @@ pub async fn handle_get_root(
     headers: HeaderMap,
     Query(query): Query<StorageQuery>,
 ) -> Result<Response, StorageApiError> {
-    let path = Path(String::new());
-    if query.list.unwrap_or(false) {
-        list_dir(state, session, headers, path)
-            .await
-            .map(|j| j.into_response())
-    } else {
-        Err(StorageApiError::InvalidPath(
+    if !query.list.unwrap_or(false) {
+        if owner_shell(&session, &headers) {
+            if let Some(sentence) =
+                crate::local_apps::await_local_apps_decision(&state.data_dir).await
+            {
+                return Err(StorageApiError::LocalApps(sentence));
+            }
+        }
+        return Err(StorageApiError::InvalidPath(
             "Cannot read root as file".to_string(),
-        ))
+        ));
     }
+    list_dir(state, session, headers, Path(String::new()))
+        .await
+        .map(|j| j.into_response())
 }
 
 /// Combined handler that routes based on query params and method.
@@ -729,6 +759,7 @@ mod tests {
         let app = crate::api::server::storage_router()
             .layer(Extension(make_session(SessionType::Shell)))
             .with_state(ProviderStorageState {
+                data_dir: std::path::PathBuf::new(),
                 registry,
                 audit_log: None,
                 capability_manager: None,
@@ -818,6 +849,7 @@ mod tests {
 
     fn make_state(cap_mgr: Option<Arc<CapabilityManager>>) -> ProviderStorageState {
         ProviderStorageState {
+            data_dir: std::path::PathBuf::new(),
             registry: Arc::new(ProviderRegistry::new()),
             audit_log: None,
             capability_manager: cap_mgr,
@@ -1128,5 +1160,474 @@ mod tests {
             reject_principal_root_storage_path("Public/../Users/a.md"),
             Err(StorageApiError::InvalidPath(_))
         ));
+    }
+
+    async fn refusal_body(err: StorageApiError) -> (StatusCode, String) {
+        let response = err.into_response();
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        (status, String::from_utf8(bytes.to_vec()).unwrap())
+    }
+
+    #[test]
+    fn a_provider_error_is_local_apps_only_with_the_refusal_mark() {
+        let sentence = "Users/note.bin is not readable. Make it readable or move it out of the folder, then restart.";
+        let marked = elastos_runtime::provider::ProviderError::Provider(
+            crate::local_apps::marked_local_apps_refusal(sentence),
+        );
+        match StorageApiError::from(marked) {
+            StorageApiError::LocalApps(got) => {
+                assert_eq!(got, crate::local_apps::LOCAL_APPS_OFF_TO_OTHERS);
+                assert!(!got.contains("note.bin"), "{got}");
+            }
+            other => panic!("{other:?}"),
+        }
+        let foreign = elastos_runtime::provider::ProviderError::Provider(
+            "Make it readable or move it out of the folder, then restart.".into(),
+        );
+        assert!(
+            matches!(StorageApiError::from(foreign), StorageApiError::Internal(_)),
+            "a recovery substring is not the refusal"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn local_app_routes_refuse_with_the_migration_sentence() {
+        let _guard = crate::local_apps::lock_local_apps_for_test();
+        let sentence = "MyWebSite/index.html is not readable. Make it readable or move it out of the folder, then restart.";
+        crate::local_apps::set_local_apps_refusal_for_test(Some(sentence.to_string()));
+        let state = || State(make_state(None));
+        let session = || Extension(make_session(SessionType::Shell));
+        let headers = || HeaderMap::new();
+        let path = || -> Path<String> { Path("MyWebSite/index.html".to_string()) };
+        let mut errors = Vec::new();
+        errors.push(
+            read_file(state(), session(), headers(), path())
+                .await
+                .unwrap_err(),
+        );
+        errors.push(
+            write_file(
+                state(),
+                session(),
+                headers(),
+                path(),
+                Bytes::from_static(b"no"),
+            )
+            .await
+            .unwrap_err(),
+        );
+        errors.push(
+            delete_path(
+                state(),
+                session(),
+                headers(),
+                path(),
+                Query(DeleteQuery { recursive: None }),
+            )
+            .await
+            .unwrap_err(),
+        );
+        errors.push(
+            list_dir(state(), session(), headers(), path())
+                .await
+                .unwrap_err(),
+        );
+        errors.push(
+            stat_path(state(), session(), headers(), path())
+                .await
+                .unwrap_err(),
+        );
+        errors.push(
+            mkdir(state(), session(), headers(), path())
+                .await
+                .unwrap_err(),
+        );
+        errors.push(
+            handle_get(
+                state(),
+                session(),
+                headers(),
+                path(),
+                Query(StorageQuery {
+                    list: Some(true),
+                    mkdir: None,
+                }),
+            )
+            .await
+            .unwrap_err(),
+        );
+        errors.push(
+            handle_post(
+                state(),
+                session(),
+                headers(),
+                path(),
+                Query(StorageQuery {
+                    list: None,
+                    mkdir: Some(true),
+                }),
+                Bytes::from_static(b"no"),
+            )
+            .await
+            .unwrap_err(),
+        );
+        errors.push(
+            handle_get_root(
+                state(),
+                session(),
+                headers(),
+                Query(StorageQuery {
+                    list: None,
+                    mkdir: None,
+                }),
+            )
+            .await
+            .unwrap_err(),
+        );
+        for err in errors {
+            let (status, body) = refusal_body(err).await;
+            assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+            assert_eq!(body, sentence);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_private_file_name_is_only_for_the_owner_shell() {
+        let _guard = crate::local_apps::lock_local_apps_for_test();
+        let home = tempfile::tempdir().unwrap();
+        let sentence = "Users/secret.bin is not readable. Make it readable, then restart.";
+        crate::local_apps::set_local_apps_refusal(home.path(), Some(sentence.to_string()));
+        let cap = make_capability_manager();
+        let mut state = make_state(Some(cap.clone()));
+        state.data_dir = home.path().to_path_buf();
+        let path = "MyWebSite/index.html".to_string();
+
+        let shell = make_session(SessionType::Shell);
+        let (status, body) = refusal_body(
+            read_file(
+                State(state.clone()),
+                Extension(shell.clone()),
+                HeaderMap::new(),
+                Path(path.clone()),
+            )
+            .await
+            .unwrap_err(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body, sentence);
+        let (status, body) = refusal_body(
+            handle_get_root(
+                State(state.clone()),
+                Extension(shell),
+                HeaderMap::new(),
+                Query(StorageQuery {
+                    list: None,
+                    mkdir: None,
+                }),
+            )
+            .await
+            .unwrap_err(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body, sentence);
+
+        let capsule = make_session(SessionType::Capsule);
+        let (status, body) = refusal_body(
+            read_file(
+                State(state.clone()),
+                Extension(capsule.clone()),
+                HeaderMap::new(),
+                Path(path.clone()),
+            )
+            .await
+            .unwrap_err(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert!(body.contains("missing X-Capability-Token"), "{body}");
+        assert!(!body.contains("secret.bin"), "{body}");
+        assert_ne!(body, "Local apps are off.");
+        let (status, body) = refusal_body(
+            handle_get_root(
+                State(state.clone()),
+                Extension(capsule.clone()),
+                HeaderMap::new(),
+                Query(StorageQuery {
+                    list: None,
+                    mkdir: None,
+                }),
+            )
+            .await
+            .unwrap_err(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(body.contains("Cannot read root as file"), "{body}");
+        assert!(!body.contains("secret.bin"), "{body}");
+
+        let token = cap.grant(
+            capsule.id.as_str(),
+            ResourceId::new("localhost://MyWebSite/*"),
+            Action::Read,
+            TokenConstraints::default(),
+            None,
+        );
+        let mut granted = HeaderMap::new();
+        granted.insert(
+            "X-Capability-Token",
+            token.to_base64().unwrap().parse().unwrap(),
+        );
+        let (status, body) = refusal_body(
+            read_file(
+                State(state.clone()),
+                Extension(capsule),
+                granted,
+                Path(path.clone()),
+            )
+            .await
+            .unwrap_err(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body, "Local apps are off.");
+
+        let mut guest_headers = HeaderMap::new();
+        guest_headers.insert("X-Elastos-Capsule-Id", "guest-app".parse().unwrap());
+        let (status, body) = refusal_body(
+            read_file(
+                State(state),
+                Extension(make_session(SessionType::Shell)),
+                guest_headers,
+                Path(path),
+            )
+            .await
+            .unwrap_err(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body, "Local apps are off.");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_root_read_waits_out_the_local_apps_check() {
+        let _guard = crate::local_apps::lock_local_apps_for_test();
+        let home = tempfile::tempdir().unwrap();
+        crate::local_apps::set_local_apps_refusal(
+            home.path(),
+            Some(crate::local_apps::LOCAL_APPS_CHECKING.into()),
+        );
+        let mut state = make_state(None);
+        state.data_dir = home.path().to_path_buf();
+        let state = State(state);
+        let session = Extension(make_session(SessionType::Shell));
+        let wait = tokio::spawn(async move {
+            handle_get_root(
+                state,
+                session,
+                HeaderMap::new(),
+                Query(StorageQuery {
+                    list: None,
+                    mkdir: None,
+                }),
+            )
+            .await
+        });
+        tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+        assert!(
+            !wait.is_finished(),
+            "root returned while local apps were still checking"
+        );
+        crate::local_apps::set_local_apps_refusal(home.path(), None);
+        let err = wait.await.unwrap().unwrap_err();
+        let (status, body) = refusal_body(err).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(body.contains("Cannot read root as file"), "{body}");
+        assert!(!body.contains("checking"), "{body}");
+    }
+
+    struct CountingLocalhostProvider {
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl Provider for CountingLocalhostProvider {
+        async fn handle(
+            &self,
+            request: ResourceRequest,
+        ) -> Result<ResourceResponse, ProviderError> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(match request.action {
+                ResourceAction::Read => ResourceResponse::Data(b"note".to_vec()),
+                ResourceAction::Write => ResourceResponse::Written {
+                    bytes: request.content.as_ref().map(Vec::len).unwrap_or(0),
+                },
+                ResourceAction::Delete => ResourceResponse::Deleted,
+                ResourceAction::List => ResourceResponse::List(Vec::new()),
+                ResourceAction::Stat => ResourceResponse::Metadata {
+                    size: 4,
+                    entry_type: ProviderEntryType::File,
+                    modified: 1,
+                },
+                ResourceAction::Mkdir => ResourceResponse::Created,
+                ResourceAction::Exists => ResourceResponse::Exists(true),
+            })
+        }
+
+        fn schemes(&self) -> Vec<&'static str> {
+            vec!["localhost"]
+        }
+
+        fn name(&self) -> &'static str {
+            "counting-localhost"
+        }
+    }
+
+    fn capability_uses(audit: &AuditLog) -> usize {
+        audit
+            .recent_events(64)
+            .into_iter()
+            .filter(|event| {
+                matches!(
+                    event,
+                    elastos_runtime::primitives::audit::AuditEvent::CapabilityUse { .. }
+                )
+            })
+            .count()
+    }
+
+    fn single_use_headers(
+        cap_mgr: &CapabilityManager,
+        session: &Session,
+        action: Action,
+    ) -> HeaderMap {
+        let token = cap_mgr.grant(
+            session.id.as_str(),
+            ResourceId::new("localhost://MyWebSite/*"),
+            action,
+            TokenConstraints::new(0, false, None, Some(1)),
+            None,
+        );
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "X-Capability-Token",
+            token.to_base64().unwrap().parse().unwrap(),
+        );
+        headers
+    }
+
+    #[derive(Clone, Copy)]
+    enum OnceOp {
+        Read,
+        Write,
+        Delete,
+        List,
+        Stat,
+        Mkdir,
+    }
+
+    async fn dispatch_once(
+        state: ProviderStorageState,
+        session: Session,
+        headers: HeaderMap,
+        path: &str,
+        op: OnceOp,
+    ) -> Result<(), StorageApiError> {
+        let state = State(state);
+        let session = Extension(session);
+        let path = Path(path.to_string());
+        match op {
+            OnceOp::Read => read_file(state, session, headers, path).await.map(|_| ()),
+            OnceOp::Write => write_file(state, session, headers, path, Bytes::from_static(b"note"))
+                .await
+                .map(|_| ()),
+            OnceOp::Delete => delete_path(
+                state,
+                session,
+                headers,
+                path,
+                Query(DeleteQuery { recursive: None }),
+            )
+            .await
+            .map(|_| ()),
+            OnceOp::List => list_dir(state, session, headers, path).await.map(|_| ()),
+            OnceOp::Stat => stat_path(state, session, headers, path).await.map(|_| ()),
+            OnceOp::Mkdir => mkdir(state, session, headers, path).await.map(|_| ()),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_single_use_token_works_once_on_each_localhost_route() {
+        let _guard = crate::local_apps::lock_local_apps_for_test();
+        crate::local_apps::set_local_apps_refusal_for_test(None);
+        let home = tempfile::tempdir().unwrap();
+        let audit = Arc::new(AuditLog::new());
+        let cap_mgr = Arc::new(CapabilityManager::new(
+            Arc::new(CapabilityStore::new()),
+            audit.clone(),
+            Arc::new(MetricsManager::new()),
+        ));
+        let provider = Arc::new(CountingLocalhostProvider {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let registry = Arc::new(ProviderRegistry::new());
+        registry.register(provider.clone()).await;
+        let state = ProviderStorageState {
+            data_dir: home.path().to_path_buf(),
+            registry,
+            audit_log: Some(audit.clone()),
+            capability_manager: Some(cap_mgr.clone()),
+            storage_quota_mb: 0,
+        };
+        let session = make_session(SessionType::Capsule);
+        let ops = [
+            (Action::Read, OnceOp::Read, "MyWebSite/once-read.txt"),
+            (Action::Write, OnceOp::Write, "MyWebSite/once-write.txt"),
+            (Action::Delete, OnceOp::Delete, "MyWebSite/once-delete.txt"),
+            (Action::Read, OnceOp::List, "MyWebSite/once-list.txt"),
+            (Action::Read, OnceOp::Stat, "MyWebSite/once-stat.txt"),
+            (Action::Write, OnceOp::Mkdir, "MyWebSite/once-dir.txt"),
+        ];
+        for (action, op, path) in ops {
+            let uses_before = capability_uses(&audit);
+            let calls_before = provider.calls.load(std::sync::atomic::Ordering::SeqCst);
+            let headers = single_use_headers(&cap_mgr, &session, action);
+            dispatch_once(state.clone(), session.clone(), headers.clone(), path, op)
+                .await
+                .unwrap_or_else(|err| panic!("{path} first use failed: {err:?}"));
+            assert_eq!(
+                capability_uses(&audit),
+                uses_before + 1,
+                "{path} wrote more than one CapabilityUse"
+            );
+            assert_eq!(
+                provider.calls.load(std::sync::atomic::Ordering::SeqCst),
+                calls_before + 1,
+                "{path} reached the provider twice"
+            );
+            let err = dispatch_once(state.clone(), session.clone(), headers, path, op)
+                .await
+                .expect_err("second use was allowed");
+            match err {
+                StorageApiError::PermissionDenied(msg) => {
+                    assert!(msg.contains("use limit exceeded: 1 >= 1"), "{path}: {msg}");
+                }
+                other => panic!("{path} second use was not refused: {other:?}"),
+            }
+            assert_eq!(
+                capability_uses(&audit),
+                uses_before + 2,
+                "{path} refusal wrote extra CapabilityUse entries"
+            );
+            assert_eq!(
+                provider.calls.load(std::sync::atomic::Ordering::SeqCst),
+                calls_before + 1,
+                "{path} second use reached the provider"
+            );
+        }
     }
 }

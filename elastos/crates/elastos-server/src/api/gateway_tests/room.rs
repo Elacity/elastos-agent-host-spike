@@ -565,6 +565,7 @@ async fn room_bootstrap_reads_the_private_carrier_ticket() {
                     },
                 ))
                 .with_state(ProviderProxyState {
+                    data_dir: std::path::PathBuf::new(),
                     registry: managed_registry,
                     capability_manager: None,
                 }),

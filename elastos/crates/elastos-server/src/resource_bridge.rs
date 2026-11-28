@@ -2160,6 +2160,28 @@ async fn dispatch_admitted_effect(
         }
     }
 
+    // Like the HTTP routes, a granted localhost invoke waits out "checking"; it is not a refusal.
+    let localhost_home = (dispatch.scheme == "localhost")
+        .then_some(bridge_ctx.data_dir.as_deref())
+        .flatten();
+    if let Some(data_dir) = localhost_home {
+        if crate::local_apps::await_local_apps_decision(data_dir)
+            .await
+            .is_some()
+        {
+            return finish_component_invoke(
+                bridge_ctx,
+                audit_id,
+                &dispatch,
+                "error",
+                resource_error_response(
+                    "provider_error",
+                    crate::local_apps::LOCAL_APPS_OFF_TO_OTHERS,
+                ),
+            );
+        }
+    }
+
     match bridge_ctx
         .provider_registry
         .send_raw(&dispatch.scheme, &dispatch.request)
@@ -2185,18 +2207,35 @@ async fn dispatch_admitted_effect(
             )
         }
         Err(e) => {
-            tracing::warn!(
-                "Bridge resource_invoke failed for {}/{}: {}",
-                dispatch.scheme,
-                dispatch.operation,
-                e
+            let local_apps = matches!(
+                &e,
+                elastos_runtime::provider::ProviderError::Provider(message)
+                    if crate::local_apps::sentence_from_local_apps_provider_error(message).is_some()
             );
+            let message = if local_apps {
+                crate::local_apps::LOCAL_APPS_OFF_TO_OTHERS
+            } else {
+                "Provider operation failed"
+            };
+            if local_apps {
+                tracing::warn!(
+                    "Bridge resource_invoke failed for {}/{}: {message}",
+                    dispatch.scheme,
+                    dispatch.operation
+                );
+            } else {
+                tracing::warn!(
+                    "Bridge resource_invoke failed for {}/{}: {e}",
+                    dispatch.scheme,
+                    dispatch.operation
+                );
+            }
             finish_component_invoke(
                 bridge_ctx,
                 audit_id,
                 &dispatch,
                 "error",
-                resource_error_response("provider_error", "Provider operation failed"),
+                resource_error_response("provider_error", message),
             )
         }
     }
@@ -4264,6 +4303,120 @@ pub(crate) mod tests {
             stop: None,
             v2_guests: None,
             plan_book: None,
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_localhost_invoke_waits_out_the_file_check_like_http() {
+        let _guard = crate::local_apps::lock_local_apps_for_test();
+        let home = tempfile::tempdir().unwrap();
+        crate::local_apps::set_local_apps_refusal(
+            home.path(),
+            Some(crate::local_apps::LOCAL_APPS_CHECKING.to_string()),
+        );
+        let registry = Arc::new(elastos_runtime::provider::ProviderRegistry::new());
+        registry
+            .register(Arc::new(crate::local_apps::RefusingLocalhostProvider::new(
+                crate::local_apps::LOCAL_APPS_CHECKING.to_string(),
+            )))
+            .await;
+        let provider = Arc::new(CapturingProvider::default());
+        let mut ctx = bridge_context();
+        ctx.provider_registry = registry.clone();
+        ctx.data_dir = Some(home.path().to_path_buf());
+        let uri = "localhost://Local/SharedByLocalUsersAndBots/Home/a.md";
+        ctx.manifest_capabilities = any_action(vec![uri.to_string()]);
+        let token = bridge_token(&ctx, uri, Action::Read);
+        let data = home.path().to_path_buf();
+        let ready = provider.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+            registry.register(ready).await;
+            crate::local_apps::set_local_apps_refusal(&data, None);
+        });
+        let read = authorize_and_dispatch_resource_invoke(
+            &serde_json::json!({
+                "uri": uri,
+                "operation": "read",
+                "body": {"path": uri},
+                "token": token,
+            }),
+            &ctx,
+        )
+        .await;
+        assert_eq!(read["type"], "resource_result");
+        assert_eq!(read["result"]["status"], "ok");
+        assert_eq!(provider.requests().await.len(), 1);
+        assert!(!read
+            .to_string()
+            .contains(crate::local_apps::LOCAL_APPS_CHECKING));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_private_file_name_on_inspect_stays_off_the_capsule_and_the_agent() {
+        let _guard = crate::local_apps::lock_local_apps_for_test();
+        let home = tempfile::tempdir().unwrap();
+        let sentence = "Users/secret.bin is not readable. Make it readable, then restart.";
+        crate::local_apps::set_local_apps_refusal(home.path(), Some(sentence.to_string()));
+        let registry = Arc::new(elastos_runtime::provider::ProviderRegistry::new());
+        registry
+            .register(Arc::new(crate::local_apps::RefusingLocalhostProvider::new(
+                sentence.to_string(),
+            )))
+            .await;
+        let source: Arc<dyn crate::inspect_provider::InspectSource> =
+            Arc::new(crate::inspect_provider::RegistryInspectSource::new(
+                Arc::downgrade(&registry),
+                home.path().to_path_buf(),
+            ));
+        let inspect: Arc<dyn Provider> =
+            Arc::new(crate::inspect_provider::InspectProvider::with_registry(
+                source,
+                Arc::downgrade(&registry),
+            ));
+        registry.register(inspect.clone()).await;
+        registry
+            .register_sub_provider("inspect", inspect)
+            .await
+            .unwrap();
+        for agent in [false, true] {
+            let mut ctx = bridge_context();
+            ctx.provider_registry = registry.clone();
+            ctx.data_dir = Some(home.path().to_path_buf());
+            ctx.model_token_ceiling = agent.then_some(1);
+            ctx.manifest_capabilities = any_action(vec![
+                "elastos://inspect/capsules".to_string(),
+                "localhost://Local/shared.bin".to_string(),
+            ]);
+            let inspect_token = bridge_token(&ctx, "elastos://inspect/capsules", Action::Read);
+            let inspected = authorize_and_dispatch_resource_invoke(
+                &serde_json::json!({
+                    "uri": "elastos://inspect/capsules",
+                    "operation": "capsules",
+                    "token": inspect_token,
+                }),
+                &ctx,
+            )
+            .await;
+            let text = inspected.to_string();
+            assert!(text.contains("Local apps are off."), "agent={agent} {text}");
+            assert!(!text.contains("secret.bin"), "agent={agent} {text}");
+            let read_token = bridge_token(&ctx, "localhost://Local/shared.bin", Action::Read);
+            let read = authorize_and_dispatch_resource_invoke(
+                &serde_json::json!({
+                    "uri": "localhost://Local/shared.bin",
+                    "operation": "read",
+                    "body": {"path": "localhost://Local/shared.bin"},
+                    "token": read_token,
+                }),
+                &ctx,
+            )
+            .await;
+            let text = read.to_string();
+            assert!(text.contains("Local apps are off."), "agent={agent} {text}");
+            assert!(!text.contains("secret.bin"), "agent={agent} {text}");
         }
     }
 

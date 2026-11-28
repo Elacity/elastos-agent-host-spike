@@ -108,7 +108,7 @@ async fn start_gateway_server_with_shutdown(
         std::io::ErrorKind::Unsupported,
         "gateway child ownership and private local control are unsupported on Windows",
     ))?;
-    crate::auth::verify_auth_audit_chain_ready(&data_dir)?;
+    crate::gateway_cmd::verify_auth_audit_after_prepare(&data_dir)?;
     let listener = TcpListener::bind(addr).await?;
     let local_control_registry = provider_registry.clone();
     let gateway_api_url = if addr.parse::<axum::http::uri::Authority>()?.port_u16() == Some(0) {

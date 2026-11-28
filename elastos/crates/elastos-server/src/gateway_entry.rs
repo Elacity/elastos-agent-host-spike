@@ -10,6 +10,7 @@ pub async fn run_gateway(
         cache_dir,
         publish,
         setup_gateway_control_plane,
+        crate::localhost_file_migration::prepare_localhost_files,
     )
     .await
 }
@@ -29,6 +30,7 @@ pub async fn run_browser_home() -> anyhow::Result<()> {
         None,
         None,
         setup_control_plane,
+        crate::localhost_file_migration::prepare_localhost_files,
         Some(browser_home_ready),
     )
     .await

@@ -129,9 +129,11 @@ async fn inspect_test_state(dir: &std::path::Path) -> GatewayState {
             Arc::new(crate::inspect_provider::CatalogInspectSource::new(
                 dir.join("capsules"),
                 Arc::downgrade(&registry),
+                std::path::PathBuf::new(),
             )),
             Arc::new(crate::inspect_provider::RegistryInspectSource::new(
                 Arc::downgrade(&registry),
+                std::path::PathBuf::new(),
             )),
         ]));
     let provider: Arc<dyn Provider> = Arc::new(
@@ -1532,4 +1534,75 @@ async fn inspect_action_can_be_denied_without_dispatch() {
     assert_eq!(denial["result"]["request_id"], request_id);
     assert_eq!(denial["result"]["dispatch_result"], serde_json::Value::Null);
     assert!(calls.lock().await.is_empty());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_private_file_name_reaches_only_an_admin_system() {
+    let _guard = crate::local_apps::lock_local_apps_for_test();
+    let dir = tempfile::tempdir().unwrap();
+    let sentence = "Users/secret.bin is not readable. Make it readable, then restart.";
+    crate::local_apps::set_local_apps_refusal(dir.path(), Some(sentence.to_string()));
+    let registry = Arc::new(ProviderRegistry::new());
+    registry
+        .register(Arc::new(crate::local_apps::RefusingLocalhostProvider::new(
+            sentence.to_string(),
+        )))
+        .await;
+    let source: Arc<dyn crate::inspect_provider::InspectSource> =
+        Arc::new(crate::inspect_provider::RegistryInspectSource::new(
+            Arc::downgrade(&registry),
+            dir.path().to_path_buf(),
+        ));
+    let provider: Arc<dyn Provider> = Arc::new(
+        crate::inspect_provider::InspectProvider::with_registry(source, Arc::downgrade(&registry)),
+    );
+    registry.register(provider.clone()).await;
+    registry
+        .register_sub_provider("inspect", provider)
+        .await
+        .unwrap();
+    let app = gateway_router(GatewayState {
+        provider_registry: Some(registry),
+        collaboration_chat_product_port: None,
+        collaboration_presence_product_port: None,
+        carrier_endpoint: None,
+        collaboration_discovery_service: None,
+        browser_internet: Default::default(),
+        identity_manager: Arc::new(std::sync::OnceLock::new()),
+        cache_dir: dir.path().to_path_buf(),
+        data_dir: dir.path().to_path_buf(),
+    });
+    let admin = passkey_authority_with_name(dir.path(), Some("owner"));
+    let guest = passkey_authority_with_name_role(
+        dir.path(),
+        Some("guest"),
+        crate::auth::RuntimePrincipalRole::Guest,
+    );
+    let admin_body = inspect_capsules_body(app.clone(), admin.system_token).await;
+    assert!(admin_body.contains("secret.bin"), "{admin_body}");
+    let guest_body = inspect_capsules_body(app, guest.system_token).await;
+    assert!(guest_body.contains("Local apps are off."), "{guest_body}");
+    assert!(!guest_body.contains("secret.bin"), "{guest_body}");
+}
+
+#[cfg(unix)]
+async fn inspect_capsules_body(app: Router, token: String) -> String {
+    let response = app
+        .oneshot(
+            test_browser_request("localhost:61180", "null")
+                .method("POST")
+                .uri("/api/provider/inspect/capsules")
+                .header("x-elastos-home-token", token)
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from("{}"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    String::from_utf8(bytes.to_vec()).unwrap()
 }

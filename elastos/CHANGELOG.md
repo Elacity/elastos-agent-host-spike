@@ -6,6 +6,10 @@ release's Added, Changed, Fixed, Removed and Security bullets before you update;
 
 ## [Unreleased]
 
+### Changed
+
+- Home answers HTTP first; the local-app file check runs in the background. The first start moves local app files onto a file key. The move is one way. This release opens them. An older release cannot open them afterwards. Copy the data folder before you upgrade if you want to run the older release again. While files still need moving and an update can roll back, nothing moves and local apps stay off with "Local apps come back on when the update finishes." When the update finishes, the next check moves the files and turns local apps on, with no restart. A Home whose files already moved is never held by an update. Until the move is done, Home is up and local apps are off with a sentence that says the files are moving. A crash in the middle of that move is finished by the next start. An old file that is cut off or damaged turns local apps off, and the sentence names it and says to move it aside, then restart. Home stops with a plain sentence when identity/device.key cannot be read.
+
 ### Fixed
 
 - Home, `elastos identity show` and Chat say when the stored nickname cannot be

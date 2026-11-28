@@ -75,8 +75,8 @@ fn row(
 /// so a new open site cannot land by editing only the row's status.
 const OPEN_ROWS: &[(&str, &str, &str)] = &[
     (
-        "elastos-server/src/server_infra.rs",
-        "setup_server_infrastructure_impl",
+        "elastos-server/src/localhost_file_migration.rs",
+        "localhost_provider_bridge_config",
         "encryption_key: device_key_hex",
     ),
     (
@@ -86,11 +86,26 @@ const OPEN_ROWS: &[(&str, &str, &str)] = &[
     ),
 ];
 
-/// Localhost stays open until slice L. Home still passes the raw device key.
-const LOCALHOST_OPEN_REASON: &str = "Home still passes the raw device key to the localhost provider. The row stays open until slice L.";
+/// Unix is closed: the field is the file key and the fence keeps the device key file shut.
+/// The Windows field is still the device key, so that arm stays open.
+const LOCALHOST_OPEN_REASON: &str = concat!(
+    "On Unix the encryption field is the HKDF file key ",
+    "`elastos-localhost-file-v1`, not the raw device key, ",
+    "and the child starts only through spawn_path_allow, ",
+    "so it cannot open `identity/device.key`. ",
+    "`localhost_provider_config_omits_device_key` and ",
+    "`localhost_object_and_chain_cannot_open_device_key` prove that Unix close. ",
+    "On Windows the field is still the device key. ",
+    "The Windows start refuses before a process exists. ",
+    "That arm stays open until P2-11.",
+);
 
 /// The object helper's allowed root still contains the owner's recovery archive key.
-const OBJECT_ROOT_OPEN_REASON: &str = "The object helper's allowed root contains the folder where the owner's recovery archive key lives. The row closes when that key moves out of the helper's root or the key step (slice L) lands.";
+const OBJECT_ROOT_OPEN_REASON: &str = concat!(
+    "The object helper's allowed root contains the folder ",
+    "where the owner's recovery archive key lives. ",
+    "The row closes when that key moves out of the helper's root.",
+);
 
 fn rows() -> Vec<HeldRow> {
     vec![
@@ -1374,6 +1389,27 @@ fn rows() -> Vec<HeldRow> {
         mark("runtime-own", "capability signer", "Runtime", "Emergency control loads the Runtime capability signer"),
     ),
     row(
+        "elastos-server/src/localhost_file_migration.rs",
+        "localhost_provider_bridge_config",
+        "encryption_key: device_key_hex",
+        1,
+        mark("open", "device private key", "localhost provider", LOCALHOST_OPEN_REASON),
+    ),
+    row(
+        "elastos-server/src/localhost_file_migration.rs",
+        "prepare_localhost_files",
+        "load_or_create_device_key",
+        1,
+        mark("home-own", "device key", "Home", "Before startup creates the five roots, Home loads this device key and decides the localhost marker"),
+    ),
+    row(
+        "elastos-server/src/localhost_file_migration.rs",
+        "localhost_marker_mismatches",
+        "load_or_create_device_key",
+        1,
+        mark("home-own", "device key", "Home", "Home reads this device key to see whether a mismatched localhost marker must leave the five roots unmade"),
+    ),
+    row(
         "elastos-server/src/server_infra.rs",
         "register_chain_provider_plane",
         "load_or_create_device_key",
@@ -1395,21 +1431,21 @@ fn rows() -> Vec<HeldRow> {
     row(
         "elastos-server/src/server_infra.rs",
         "setup_server_infrastructure_impl",
-        "encryption_key: device_key_hex",
-        1,
-        mark(
-            "open",
-            "device private key",
-            "localhost provider",
-            LOCALHOST_OPEN_REASON,
-        ),
-    ),
-    row(
-        "elastos-server/src/server_infra.rs",
-        "setup_server_infrastructure_impl",
         "load_or_create_device_key",
         1,
         mark("home-own", "Carrier and issuer", "Home", "Home derives its Carrier identity and runtime issuer from the device key"),
+    ),
+    row(
+        "elastos-server/src/server_infra.rs",
+        "refuse_localhost",
+        "load_or_create_device_key",
+        1,
+        mark(
+            "home-own",
+            "device key",
+            "Home",
+            "A later file-move check reads identity/device.key again. The check does not keep the key while it sleeps.",
+        ),
     ),
     row(
         "elastos-server/src/server_infra.rs",
@@ -2039,9 +2075,10 @@ fn open_rows_are_an_explicit_list() {
 }
 
 /// Localhost, object, and chain start through the path allow-list. Home derives
-/// the chain issuer itself. The localhost device-key hand-off stays open.
-/// The object helper's allowed root stays open: that root contains the folder
-/// where the owner's recovery archive key lives.
+/// the chain issuer itself. On Unix the localhost field is the file key and the
+/// child cannot open the device key. The Windows field is still the device key,
+/// so that arm stays open. The object helper's allowed root stays open: that
+/// root contains the folder where the owner's recovery archive key lives.
 #[test]
 fn localhost_object_and_chain_start_on_the_path_allow_list() {
     let raw = sources()
@@ -2072,6 +2109,9 @@ fn localhost_object_and_chain_start_on_the_path_allow_list() {
     assert_eq!(plane.len(), 1);
     let mut keys = helper_component_keys(setup[0]);
     keys.extend(helper_component_keys(plane[0]));
+    let apply = function_raw_bodies(raw, "apply");
+    assert_eq!(apply.len(), 1, "localhost starts from apply");
+    keys.extend(helper_component_keys(apply[0]));
     keys.sort();
     assert_eq!(
         keys,
@@ -2108,9 +2148,10 @@ fn localhost_object_and_chain_start_on_the_path_allow_list() {
                 row.reason
             );
         }
-        if (row.function, row.mechanism)
+        if (row.file, row.function, row.mechanism)
             == (
-                "setup_server_infrastructure_impl",
+                "elastos-server/src/localhost_file_migration.rs",
+                "localhost_provider_bridge_config",
                 "encryption_key: device_key_hex",
             )
         {

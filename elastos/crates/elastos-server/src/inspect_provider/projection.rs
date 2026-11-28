@@ -166,3 +166,24 @@ pub(super) fn project(entry: &InspectEntry) -> Value {
         "processes": [{ "kind": entry.capsule_type, "status": entry.status }],
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_sentence_stays_the_state_text() {
+        let sentence = "Users/note.bin is not readable. Make it readable or move it out of the folder, then restart.";
+        let entry = InspectEntry {
+            id: "provider:localhost".into(),
+            name: "localhost".into(),
+            status: sentence.into(),
+            capsule_type: "provider".into(),
+            manifest: None,
+            cid: None,
+        };
+        let value = project(&entry);
+        assert_eq!(value["state"], sentence);
+        assert_eq!(value["processes"][0]["status"], sentence);
+    }
+}

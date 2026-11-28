@@ -11,6 +11,7 @@ mod gateway_entry;
 mod home_cmd;
 mod identity_cmd;
 mod init_cmd;
+mod localhost_file_migration;
 mod node_cmd;
 #[cfg(all(test, unix))]
 mod own_runtime_fixture;
@@ -2084,6 +2085,7 @@ async fn serve_web_capsule(
     } else if std::env::var("SSH_CLIENT").is_ok() || std::env::var("SSH_TTY").is_ok() {
         println!("  (remote session — use port forwarding or open on the device itself)");
     }
+    // Bind first; apply() prints the health or refusal line when the file check finishes.
     println!();
 
     if auto_open_browser {
@@ -2104,6 +2106,7 @@ async fn serve_web_capsule(
         addr: addr.to_string(),
         capsule_dir: Some(serve_dir),
         data_dir,
+        local_apps_dir: Some(elastos_server::sources::default_data_dir()),
         tls_config: None,
         supervisor: None,
         ready_tx: None,

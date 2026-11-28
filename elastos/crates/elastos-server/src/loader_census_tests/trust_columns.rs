@@ -1622,10 +1622,10 @@ fn trust_columns_cover_each_loader_and_bind_to_source() {
         ),
         (
             "elastos-server/src/server_infra.rs",
-            "setup_server_infrastructure_impl",
+            "apply",
             [
                 "spawn_allow_listed_provider(",
-                "\"localhost-provider\", &binary_path, &data_dir, config)",
+                "\"localhost-provider\", helper, data_dir, config)",
             ]
             .concat(),
             1,
@@ -1652,8 +1652,11 @@ fn trust_columns_cover_each_loader_and_bind_to_source() {
             "elastos-server/src/server_infra.rs",
             "setup_server_infrastructure_impl",
             [
-                "spawn_allow_listed_provider(",
-                "\"object-provider\", &path, &data_dir, object_config)",
+                "spawn_allow_listed_provider(\n",
+                "                        \"object-provider\",\n",
+                "                        &path,\n",
+                "                        &data_dir,\n",
+                "                        object_config,\n",
             ]
             .concat(),
             1,
@@ -1784,6 +1787,9 @@ fn trust_column_counts_and_chokepoint_queue() {
     // The fence rows stay: spawn_allow_listed_provider and restart_once are
     // class n/a, trust root release-signature, verified at-every-start, and
     // register_chain_provider_plane stays on that same pair.
+    // Localhost's direct spawn left apply. The child starts through
+    // spawn_allow_listed_provider, so that column is gone and the
+    // components-json root count is one lower.
     // S8 drops launch_internal's compute.load and compute.start. Both calls
     // sit on cfg(test) items, and each column was class n/a, trust root none,
     // verified never. Those two columns are not in this list.

@@ -698,7 +698,8 @@ fn rows() -> Vec<Row> {
         // Unix calls spawn_path_allow. Windows calls ProviderBridge::spawn.
         // The scanner labels both ProviderBridge::spawn, because
         // spawn_path_allow starts with that prefix. The start census already
-        // counts these two arms.
+        // counts these two arms. Localhost's file-key bringup calls this
+        // helper from apply, so apply has no spawn of its own.
         row(
             "elastos-server/src/server_infra.rs",
             "spawn_allow_listed_provider",

@@ -31,47 +31,80 @@ fn verify_principal_roots_ready_and_report(data_dir: &std::path::Path) -> anyhow
     Ok(())
 }
 
-pub async fn run_gateway_direct<F, Fut>(
+/// One read of a refused prepare, then both start checks. The server calls
+/// [`verify_auth_audit_after_prepare`] again because that entry also loads auth.
+pub fn verify_ready_after_prepare(data_dir: &std::path::Path) -> anyhow::Result<()> {
+    if crate::local_apps::refusal_leaves_elastos_unmade(data_dir) {
+        return Ok(());
+    }
+    crate::auth::verify_auth_audit_chain_ready(data_dir)?;
+    verify_principal_roots_ready_and_report(data_dir)
+}
+
+pub fn verify_auth_audit_after_prepare(data_dir: &std::path::Path) -> anyhow::Result<()> {
+    if !crate::local_apps::refusal_leaves_elastos_unmade(data_dir) {
+        crate::auth::verify_auth_audit_chain_ready(data_dir)?;
+    }
+    Ok(())
+}
+
+pub async fn run_gateway_direct<F, Fut, P>(
     addr: String,
     public: bool,
     cache_dir: Option<PathBuf>,
     publish: Option<PathBuf>,
     setup_control_plane: F,
+    prepare_files: P,
 ) -> anyhow::Result<()>
 where
     F: Fn() -> Fut + Copy + Send + Sync + 'static,
     Fut: Future<Output = anyhow::Result<GatewayControlPlane>> + Send,
+    P: FnOnce(&Path) -> anyhow::Result<()>,
 {
-    run_gateway_direct_with_ready(addr, public, cache_dir, publish, setup_control_plane, None).await
+    run_gateway_direct_with_ready(
+        addr,
+        public,
+        cache_dir,
+        publish,
+        setup_control_plane,
+        prepare_files,
+        None,
+    )
+    .await
 }
 
-pub async fn run_gateway_direct_with_ready<F, Fut>(
+pub async fn run_gateway_direct_with_ready<F, Fut, P>(
     addr: String,
     public: bool,
     cache_dir: Option<PathBuf>,
     publish: Option<PathBuf>,
     setup_control_plane: F,
+    prepare_files: P,
     on_ready: Option<fn(&str)>,
 ) -> anyhow::Result<()>
 where
     F: Fn() -> Fut + Copy + Send + Sync + 'static,
     Fut: Future<Output = anyhow::Result<GatewayControlPlane>> + Send,
+    P: FnOnce(&Path) -> anyhow::Result<()>,
 {
     if public {
         anyhow::ensure!(
             on_ready.is_none(),
             "Home browser launch requires a local gateway"
         );
-        return run_gateway_public(addr, cache_dir, publish, setup_control_plane).await;
+        return run_gateway_public(addr, cache_dir, publish, setup_control_plane, prepare_files)
+            .await;
     }
 
     eprintln!("[gateway] ElastOS {} starting on {}", ELASTOS_VERSION, addr);
 
     let data_dir = default_data_dir();
-    let _host_guard = crate::host_lock::start_host_for_agents(&data_dir, "gateway", &addr)?;
+    let _host_guard = crate::host_lock::start_host_for_agents(&data_dir, "gateway", &addr, |_| {
+        prepare_files(&data_dir)?;
+        Ok(())
+    })?;
     crate::host_lock::spawn_installed_binary_supersession_watch(&data_dir, "gateway");
-    crate::auth::verify_auth_audit_chain_ready(&data_dir)?;
-    verify_principal_roots_ready_and_report(&data_dir)?;
+    verify_ready_after_prepare(&data_dir)?;
     let cache_path = cache_dir.unwrap_or_else(|| data_dir.join("gateway-cache"));
     std::fs::create_dir_all(&cache_path)?;
     let GatewayControlPlane {
@@ -98,15 +131,17 @@ where
     .await
 }
 
-async fn run_gateway_public<F, Fut>(
+async fn run_gateway_public<F, Fut, P>(
     addr: String,
     cache_dir: Option<PathBuf>,
     publish: Option<PathBuf>,
     setup_control_plane: F,
+    prepare_files: P,
 ) -> anyhow::Result<()>
 where
     F: Fn() -> Fut + Copy + Send + Sync + 'static,
     Fut: Future<Output = anyhow::Result<GatewayControlPlane>> + Send,
+    P: FnOnce(&Path) -> anyhow::Result<()>,
 {
     eprintln!(
         "[gateway] ElastOS {} starting public gateway on {}",
@@ -114,10 +149,13 @@ where
     );
 
     let data_dir = default_data_dir();
-    let _host_guard = crate::host_lock::start_host_for_agents(&data_dir, "gateway-public", &addr)?;
+    let _host_guard =
+        crate::host_lock::start_host_for_agents(&data_dir, "gateway-public", &addr, |_| {
+            prepare_files(&data_dir)?;
+            Ok(())
+        })?;
     crate::host_lock::spawn_installed_binary_supersession_watch(&data_dir, "gateway-public");
-    crate::auth::verify_auth_audit_chain_ready(&data_dir)?;
-    verify_principal_roots_ready_and_report(&data_dir)?;
+    verify_ready_after_prepare(&data_dir)?;
     let components_path = data_dir.join("components.json");
     if !components_path.exists() {
         anyhow::bail!(
@@ -570,6 +608,7 @@ mod tests {
             None,
             None,
             forbidden_setup,
+            |_| panic!("prepare ran before the public-mode refusal"),
             Some(|_| {}),
         )
         .await

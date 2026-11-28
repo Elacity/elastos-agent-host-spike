@@ -1611,6 +1611,7 @@ pub(super) async fn gateway_provider_proxy(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
+    let scheme = crate::api::handlers::provider::inspect_name(scheme);
     let allowed_apps: &[&str] = match scheme.as_str() {
         "documents" => match op.as_str() {
             "summary" | "get" => &[DOCUMENTS_CAPSULE_ID, LIBRARY_CAPSULE_ID],
@@ -2065,6 +2066,11 @@ pub(super) async fn gateway_provider_proxy(
             }),
         }
     };
+    if scheme == "inspect" && launch_principal_is_admin(&state.data_dir, &context) {
+        if let Some(sentence) = crate::local_apps::local_apps_refusal(&state.data_dir) {
+            crate::inspect_provider::reveal_localhost_file_name(&mut response, &sentence);
+        }
+    }
     // The fenced object helper cannot read components.json, capsules, or
     // config.toml. The Runtime fills viewer, viewers, and protect from those
     // files. Other object fields stay the helper's.
@@ -4010,6 +4016,17 @@ pub(super) fn provider_proxy_runtime_metadata_field(request: &serde_json::Value)
 
 const HOSTED_RUN_ADMIN_ONLY: &str =
     "Hosted AI on this Home is for admins. Local models are still available.";
+
+fn launch_principal_is_admin(data_dir: &std::path::Path, context: &HomeLaunchTokenContext) -> bool {
+    context
+        .proof_binding_id()
+        .and_then(|proof| crate::auth::load_principal_for_proof_binding(data_dir, proof).ok())
+        .is_some_and(|principal| {
+            crate::auth::ensure_proof_binding_not_revoked(&principal).is_ok()
+                && principal.principal_id == context.principal_id()
+                && crate::auth::is_admin(&principal)
+        })
+}
 
 /// Bus code for an agent whose stored owner is not an admin with a current
 /// approval of this offer.

@@ -601,27 +601,38 @@ async fn an_updated_home_reads_existing_files_through_the_fence() {
 #[test]
 fn file_backed_roots_exist_before_the_first_helper_spawn() {
     let server = include_str!("server_infra.rs");
-    let roots = server
+    let setup = server
+        .find("async fn setup_server_infrastructure_impl(")
+        .expect("setup");
+    let body = &server[setup..];
+    let end = body[1..]
+        .find("\nasync fn ")
+        .map(|index| index + 1)
+        .expect("end of setup");
+    let body = &body[..end];
+    let roots = body
         .find("ensure_file_backed_roots(&data_dir)")
         .expect("roots");
-    let auth = server
-        .find("verify_auth_audit_chain_ready(&data_dir)")
+    let auth = body
+        .find("verify_auth_audit_after_prepare(&data_dir)")
         .expect("auth checkpoint");
-    let local = server
-        .find("spawn_allow_listed_provider(\"localhost-provider\"")
-        .expect("localhost");
-    let object = server[local..]
-        .find("spawn_allow_listed_provider(\"object-provider\"")
-        .map(|i| local + i)
+    let local = body.find("lc_check(").expect("localhost");
+    let object = body[local..]
+        .find("spawn_allow_listed_provider(\n                        \"object-provider\"")
+        .map(|index| local + index)
         .expect("object");
-    let chain = server[object..]
+    let chain = body[object..]
         .find("spawn_allow_listed_provider(\"chain-provider\"")
-        .map(|i| object + i)
+        .map(|index| object + index)
         .expect("chain");
     assert!(roots < auth && auth < local && local < object && object < chain);
+    assert!(
+        server.contains("\"localhost-provider\""),
+        "the localhost helper is still started by name"
+    );
     assert_eq!(
         server
-            .matches("spawn_allow_listed_provider(\"object-provider\"")
+            .matches("spawn_allow_listed_provider(\n                        \"object-provider\"")
             .count(),
         1,
         "Home starts the object helper once; it does not restart it when storage roots change"

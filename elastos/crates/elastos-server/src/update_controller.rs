@@ -1916,6 +1916,41 @@ fn prepare_controller(
     }
 }
 
+/// In progress only: a journal beside the installed binary, or an active request with the lease
+/// held. A damaged or copied receipt is not one, and this read does not hash the controller binary.
+pub fn update_can_roll_back(data_dir: &Path) -> bool {
+    let dir = data_dir.join(DIRECTORY);
+    let journal =
+        rollback_binary(data_dir).is_some_and(|bin| InstallTransaction::has_pending_recovery(&bin));
+    journal
+        || (fs::symlink_metadata(dir.join(ACTIVE_REQUEST)).is_ok() && controller_lease_held(&dir))
+}
+
+fn rollback_binary(data_dir: &Path) -> Option<PathBuf> {
+    if let Ok(receipt) = read_private_json::<Receipt>(&data_dir.join(DIRECTORY).join(RECEIPT)) {
+        if fs::canonicalize(data_dir).is_ok_and(|dir| dir == receipt.data_dir) {
+            return Some(receipt.binary);
+        }
+    }
+    crate::install_transaction::installed_binary(data_dir, None)
+        .ok()
+        .flatten()
+}
+
+#[cfg(unix)]
+fn controller_lease_held(directory: &Path) -> bool {
+    OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(directory.join("controller.lock"))
+        .is_ok_and(|file| FileLock::try_exclusive(file).is_err())
+}
+
+#[cfg(not(unix))]
+fn controller_lease_held(_: &Path) -> bool {
+    false
+}
+
 /// The retained receipt locates the writer lock even during an interrupted sources rename.
 pub(crate) fn installed_writer_binary(data_dir: &Path) -> Result<Option<PathBuf>> {
     let path = data_dir.join(DIRECTORY).join(RECEIPT);

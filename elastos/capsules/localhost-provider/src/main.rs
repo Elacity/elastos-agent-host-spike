@@ -4,10 +4,10 @@
 //! Storage operations require capability tokens and are scoped to allowed paths.
 //! When an encryption key is provided, files are encrypted at rest with AES-256-GCM.
 
-use aes_gcm::aead::{Aead, KeyInit};
-use aes_gcm::{Aes256Gcm, Nonce};
 use elastos_guest::prelude::*;
-use rand::RngCore;
+use localhost_provider::{
+    decrypt_bytes, encrypt_bytes, encrypt_file_key_bytes, read_sealed_localhost_file,
+};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::{self, BufRead, Read, Write};
@@ -127,6 +127,8 @@ pub struct ProviderConfig {
     /// Hex-encoded AES-256 encryption key (empty = no encryption)
     #[serde(default)]
     pub encryption_key: String,
+    #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
+    pub extra: serde_json::Value,
 }
 
 /// File metadata
@@ -152,74 +154,6 @@ pub struct DirEntry {
     pub size: u64,
 }
 
-/// On-disk encrypted envelope (same format as identity crate)
-#[derive(Serialize, Deserialize)]
-struct EncryptedEnvelope {
-    version: u8,
-    nonce: String,
-    ciphertext: String,
-}
-
-/// Encrypt raw bytes with AES-256-GCM, returning JSON envelope bytes.
-fn encrypt_bytes(key: &[u8; 32], plaintext: &[u8]) -> io::Result<Vec<u8>> {
-    let cipher = Aes256Gcm::new_from_slice(key)
-        .map_err(|e| io::Error::other(format!("AES key init: {}", e)))?;
-    let mut nonce_bytes = [0u8; 12];
-    rand::thread_rng().fill_bytes(&mut nonce_bytes);
-    // Keep the current aes-gcm API until the upstream generic-array 1.x
-    // migration is available through a compatible aes-gcm release.
-    #[allow(deprecated)]
-    let nonce = Nonce::from_slice(&nonce_bytes);
-
-    let ciphertext = cipher
-        .encrypt(nonce, plaintext)
-        .map_err(|e| io::Error::other(format!("encryption: {}", e)))?;
-
-    let envelope = EncryptedEnvelope {
-        version: 1,
-        nonce: hex::encode(nonce_bytes),
-        ciphertext: hex::encode(ciphertext),
-    };
-    serde_json::to_vec(&envelope)
-        .map_err(|e| io::Error::other(format!("envelope serialize: {}", e)))
-}
-
-/// Decrypt bytes from an EncryptedEnvelope.
-fn decrypt_bytes(key: &[u8; 32], data: &[u8]) -> io::Result<Vec<u8>> {
-    let envelope: EncryptedEnvelope = serde_json::from_slice(data).map_err(|e| {
-        io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("not an encrypted envelope: {}", e),
-        )
-    })?;
-
-    let nonce_bytes = hex::decode(&envelope.nonce)
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("bad nonce hex: {}", e)))?;
-    let ct = hex::decode(&envelope.ciphertext).map_err(|e| {
-        io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("bad ciphertext hex: {}", e),
-        )
-    })?;
-
-    if nonce_bytes.len() != 12 {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("invalid nonce length {}", nonce_bytes.len()),
-        ));
-    }
-
-    let cipher = Aes256Gcm::new_from_slice(key)
-        .map_err(|e| io::Error::other(format!("AES key init: {}", e)))?;
-    // See encrypt_bytes above for the aes-gcm/generic-array migration context.
-    #[allow(deprecated)]
-    let nonce = Nonce::from_slice(&nonce_bytes);
-
-    cipher
-        .decrypt(nonce, ct.as_ref())
-        .map_err(|e| io::Error::other(format!("decryption: {}", e)))
-}
-
 /// Local filesystem provider
 pub struct LocalProvider {
     config: ProviderConfig,
@@ -234,6 +168,30 @@ impl LocalProvider {
         parse_localhost_path(trimmed)
             .map(|(root, _)| is_plaintext_root(root))
             .unwrap_or(false)
+    }
+
+    /// A Public or MyWebSite address that is not a file-key envelope still
+    /// opens with the old reader. A plain file and a lookalike on those
+    /// roots fail that read. A sealed root, including a file migration left
+    /// plain, stays on the sealed reader. A file past the hard limit is
+    /// refused before its body is read.
+    fn address_uses_the_old_envelope(path: &str, full_path: &Path) -> io::Result<bool> {
+        if parse_localhost_uri(path).is_none() || !plain_root_path(path) {
+            return Ok(false);
+        }
+        let mut file = fs::File::open(full_path)?;
+        let len = file.metadata()?.len();
+        if len > localhost_provider::SEALED_READ_HARD_LIMIT {
+            return Err(io::Error::new(
+                io::ErrorKind::FileTooLarge,
+                format!("{path} is larger than this process can read. Move it out of the folder."),
+            ));
+        }
+        let mut header = [0u8; 64];
+        let read = file.read(&mut header)?;
+        Ok(!localhost_provider::header_is_file_key_envelope(
+            &header[..read],
+        ))
     }
 
     /// Create a new provider with configuration
@@ -465,7 +423,6 @@ impl LocalProvider {
             ));
         }
 
-        // With encryption: read entire file, decrypt, then apply offset/length
         if let Some(ref key) = self.encryption_key {
             if Self::is_plaintext_path(path) {
                 let mut file = fs::File::open(&full_path)?;
@@ -487,8 +444,22 @@ impl LocalProvider {
                 return Ok(buffer);
             }
 
-            let raw = fs::read(&full_path)?;
-            let plaintext = decrypt_bytes(key, &raw)?;
+            let plaintext = if Self::address_uses_the_old_envelope(path, &full_path)? {
+                let raw = fs::read(&full_path)?;
+                decrypt_bytes(key, &raw)?
+            } else {
+                if (offset.is_some() || length.is_some())
+                    && localhost_provider::is_plain_localhost_file(&full_path)?
+                {
+                    return localhost_provider::read_plain_localhost_range(
+                        &full_path,
+                        path,
+                        offset.unwrap_or(0),
+                        length,
+                    );
+                }
+                read_sealed_localhost_file(key, &full_path, path)?
+            };
 
             let off = offset.unwrap_or(0) as usize;
             if off >= plaintext.len() {
@@ -498,6 +469,9 @@ impl LocalProvider {
                 Some(len) => (off + len as usize).min(plaintext.len()),
                 None => plaintext.len(),
             };
+            if off == 0 && end == plaintext.len() {
+                return Ok(plaintext);
+            }
             return Ok(plaintext[off..end].to_vec());
         }
 
@@ -520,6 +494,20 @@ impl LocalProvider {
         buffer.truncate(bytes_read);
 
         Ok(buffer)
+    }
+
+    fn seal(&self, key: &[u8; 32], plain: &[u8]) -> io::Result<Vec<u8>> {
+        if self
+            .config
+            .extra
+            .get("file_key")
+            .and_then(serde_json::Value::as_bool)
+            == Some(true)
+        {
+            encrypt_file_key_bytes(key, plain)
+        } else {
+            encrypt_bytes(key, plain)
+        }
     }
 
     /// Write file contents
@@ -562,16 +550,19 @@ impl LocalProvider {
             }
 
             let plaintext = if append && full_path.exists() {
-                // Read-decrypt-append-re-encrypt
-                let raw = fs::read(&full_path)?;
-                let mut existing = decrypt_bytes(key, &raw)?;
+                let mut existing = if Self::address_uses_the_old_envelope(path, &full_path)? {
+                    let raw = fs::read(&full_path)?;
+                    decrypt_bytes(key, &raw)?
+                } else {
+                    read_sealed_localhost_file(key, &full_path, path)?
+                };
                 existing.extend_from_slice(content);
                 existing
             } else {
                 content.to_vec()
             };
 
-            let encrypted = encrypt_bytes(key, &plaintext)?;
+            let encrypted = self.seal(key, &plaintext)?;
             fs::write(&full_path, &encrypted)?;
             return Ok(content.len() as u64);
         }
@@ -1164,8 +1155,63 @@ mod tests {
             allowed_paths: vec!["*".to_string()],
             read_only: false,
             encryption_key: hex::encode(key),
+            extra: serde_json::json!({ "file_key": true }),
         })
         .unwrap()
+    }
+
+    fn provider_from_config(
+        dir: &tempfile::TempDir,
+        key: &[u8; 32],
+        file_key: bool,
+    ) -> LocalProvider {
+        let config: ProviderConfig = serde_json::from_value(serde_json::json!({
+            "base_path": dir.path().to_string_lossy(),
+            "allowed_paths": ["*"],
+            "read_only": false,
+            "encryption_key": hex::encode(key),
+            "extra": { "file_key": file_key }
+        }))
+        .unwrap();
+        LocalProvider::new(config).unwrap()
+    }
+
+    #[test]
+    fn a_device_key_writes_the_old_header_and_a_file_key_writes_the_new_one() {
+        let dir = setup_test_dir();
+        let device = [1u8; 32];
+        let file = [2u8; 32];
+        let old = provider_from_config(&dir, &device, false);
+        old.write_file("device.bin", "token", b"device-plain", false)
+            .unwrap();
+        let planted = fs::read(dir.path().join("device.bin")).unwrap();
+        assert!(localhost_provider::header_is_device_key_envelope(&planted));
+        assert!(!localhost_provider::header_is_file_key_envelope(&planted));
+        assert_eq!(
+            old.read_file("device.bin", "token", None, None).unwrap(),
+            b"device-plain"
+        );
+        let again = provider_from_config(&dir, &device, false);
+        assert_eq!(
+            again.read_file("device.bin", "token", None, None).unwrap(),
+            b"device-plain"
+        );
+
+        let new = provider_from_config(&dir, &file, true);
+        new.write_file("file.bin", "token", b"file-plain", false)
+            .unwrap();
+        let sealed = fs::read(dir.path().join("file.bin")).unwrap();
+        assert!(localhost_provider::header_is_file_key_envelope(&sealed));
+        assert!(!localhost_provider::header_is_device_key_envelope(&sealed));
+        assert_eq!(
+            new.read_file("file.bin", "token", None, None).unwrap(),
+            b"file-plain"
+        );
+        println!(
+            "SL_R19_DEVICE={}",
+            String::from_utf8_lossy(&planted[..localhost_provider::FILE_KEY_ENVELOPE_PREFIX.len()])
+        );
+        println!("SL_R19_FILE={}", String::from_utf8_lossy(&sealed[..22]));
     }
 
     #[test]
@@ -1176,6 +1222,7 @@ mod tests {
             allowed_paths: vec!["*".to_string()],
             read_only: false,
             encryption_key: String::new(),
+            extra: serde_json::Value::Null,
         };
         let mut provider = LocalProvider::new(config).unwrap();
 
@@ -1231,6 +1278,7 @@ mod tests {
             allowed_paths: vec!["*".to_string()],
             read_only: false,
             encryption_key: String::new(),
+            extra: serde_json::Value::Null,
         };
 
         let provider = LocalProvider::new(config).unwrap();
@@ -1246,6 +1294,7 @@ mod tests {
             allowed_paths: vec!["Users".to_string()],
             read_only: false,
             encryption_key: String::new(),
+            extra: serde_json::Value::Null,
         };
         fs::create_dir_all(dir.path().join("Users/self/Documents")).unwrap();
         fs::write(
@@ -1287,6 +1336,7 @@ mod tests {
             allowed_paths: elastos_common::localhost::file_backed_prefixes(),
             read_only: false,
             encryption_key: String::new(),
+            extra: serde_json::Value::Null,
         })
         .unwrap()
     }
@@ -1457,6 +1507,7 @@ mod tests {
             allowed_paths: vec!["*".to_string()],
             read_only: false,
             encryption_key: String::new(),
+            extra: serde_json::Value::Null,
         };
 
         let provider = LocalProvider::new(config).unwrap();
@@ -1474,6 +1525,7 @@ mod tests {
             allowed_paths: vec!["*".to_string()],
             read_only: false,
             encryption_key: String::new(),
+            extra: serde_json::Value::Null,
         };
 
         let provider = LocalProvider::new(config).unwrap();
@@ -1493,6 +1545,7 @@ mod tests {
             allowed_paths: vec!["*".to_string()],
             read_only: false,
             encryption_key: String::new(),
+            extra: serde_json::Value::Null,
         };
 
         let provider = LocalProvider::new(config).unwrap();
@@ -1512,6 +1565,7 @@ mod tests {
             allowed_paths: vec!["*".to_string()],
             read_only: true,
             encryption_key: String::new(),
+            extra: serde_json::Value::Null,
         };
 
         let provider = LocalProvider::new(config).unwrap();
@@ -1527,6 +1581,7 @@ mod tests {
             allowed_paths: vec!["*".to_string()],
             read_only: false,
             encryption_key: String::new(),
+            extra: serde_json::Value::Null,
         };
 
         let provider = LocalProvider::new(config).unwrap();
@@ -1546,6 +1601,7 @@ mod tests {
             allowed_paths: vec!["*".to_string()],
             read_only: false,
             encryption_key: String::new(),
+            extra: serde_json::Value::Null,
         };
 
         let provider = LocalProvider::new(config).unwrap();
@@ -1564,6 +1620,7 @@ mod tests {
             allowed_paths: vec!["*".to_string()],
             read_only: false,
             encryption_key: String::new(),
+            extra: serde_json::Value::Null,
         };
 
         let provider = LocalProvider::new(config).unwrap();
@@ -1580,6 +1637,7 @@ mod tests {
             allowed_paths: vec!["*".to_string()],
             read_only: false,
             encryption_key: String::new(),
+            extra: serde_json::Value::Null,
         };
 
         let provider = LocalProvider::new(config).unwrap();
@@ -1596,6 +1654,7 @@ mod tests {
             allowed_paths: vec!["*".to_string()],
             read_only: false,
             encryption_key: String::new(),
+            extra: serde_json::Value::Null,
         };
 
         let provider = LocalProvider::new(config).unwrap();
@@ -1611,6 +1670,7 @@ mod tests {
             allowed_paths: vec!["*".to_string()],
             read_only: false,
             encryption_key: String::new(),
+            extra: serde_json::Value::Null,
         };
 
         let provider = LocalProvider::new(config).unwrap();
@@ -1638,6 +1698,7 @@ mod tests {
             allowed_paths: vec!["*".to_string()],
             read_only: false,
             encryption_key: String::new(),
+            extra: serde_json::Value::Null,
         };
 
         let provider = LocalProvider::new(config).unwrap();
@@ -1667,6 +1728,7 @@ mod tests {
             allowed_paths: vec!["*".to_string()],
             read_only: false,
             encryption_key: String::new(),
+            extra: serde_json::Value::Null,
         };
 
         let provider = LocalProvider::new(config).unwrap();
@@ -1698,6 +1760,145 @@ mod tests {
             .read_file("secret.txt", "token", None, None)
             .unwrap();
         assert_eq!(content, b"sensitive data");
+    }
+
+    #[test]
+    fn an_over_cap_file_is_refused_by_name_and_a_small_file_still_reads() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir(dir.path().join("Users")).unwrap();
+        let provider = make_encrypted_provider(&dir);
+        provider
+            .write_file("Users/small.bin", "token", b"small", false)
+            .unwrap();
+
+        let video = dir.path().join("Users/video.bin");
+        fs::write(&video, b"ftyp").unwrap();
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&video)
+            .unwrap()
+            .set_len(32 * 1024 * 1024 + 1)
+            .unwrap();
+        let whole = provider
+            .read_file("Users/video.bin", "token", None, None)
+            .unwrap();
+        assert!(whole.starts_with(b"ftyp"));
+        assert_eq!(whole.len(), 32 * 1024 * 1024 + 1);
+        assert_eq!(
+            provider
+                .read_file("Users/small.bin", "token", None, None)
+                .unwrap(),
+            b"small"
+        );
+        let slice = provider
+            .read_file("Users/video.bin", "token", Some(0), Some(4))
+            .unwrap();
+        assert_eq!(slice, b"ftyp");
+    }
+
+    /// 40 MiB plain bytes, and plain JSON that starts with `{"`, through the
+    /// provider read the Home routes send.
+    ///
+    /// Whole: `GET /api/localhost/*` and a registry read (no offset).
+    /// Sliced: `POST /api/provider/localhost/read` and a bridge invoke, which
+    /// forward `offset` and `length`.
+    /// Streamed: those same reads, one window at a time, and
+    /// [`stream_plain_localhost_file`], which keeps one chunk.
+    #[test]
+    fn a_40_mib_plain_file_is_read_whole_sliced_and_streamed() {
+        const SIZE: u64 = 40 * 1024 * 1024;
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir(dir.path().join("Users")).unwrap();
+        let mut provider = make_encrypted_provider(&dir);
+        let video = dir.path().join("Users/video.bin");
+        fs::write(&video, b"ftyp").unwrap();
+        let marker_at = 20 * 1024 * 1024;
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&video)
+            .unwrap();
+        use std::io::{Seek, Write};
+        file.seek(std::io::SeekFrom::Start(marker_at)).unwrap();
+        file.write_all(b"MARK").unwrap();
+        file.set_len(SIZE).unwrap();
+        drop(file);
+
+        let mut digest = 0u64;
+        let mut widest = 0usize;
+        let streamed =
+            localhost_provider::stream_plain_localhost_file(&video, 64 * 1024, |chunk| {
+                widest = widest.max(chunk.len());
+                for byte in chunk {
+                    digest = digest.wrapping_add(*byte as u64);
+                }
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(streamed, SIZE);
+        assert_eq!(digest, 750, "the stream did not see ftyp and MARK");
+        assert!(widest <= 64 * 1024, "a stream chunk held {widest} bytes");
+
+        let _ = localhost_provider::take_sealed_read_bytes();
+        let slice = provider.handle_request(ProviderRequest::Read {
+            path: "Users/video.bin".into(),
+            token: Some("token".into()),
+            encoding: None,
+            offset: Some(marker_at),
+            length: Some(4),
+            check_revision: false,
+        });
+        let slice = match slice {
+            ProviderResponse::Ok { data: Some(data) } => data,
+            other => panic!("slice {other:?}"),
+        };
+        assert_eq!(
+            slice["content"],
+            serde_json::json!([b'M', b'A', b'R', b'K'])
+        );
+        assert_eq!(slice["size"], 4);
+        let ranged = localhost_provider::take_sealed_read_bytes();
+        assert_eq!(ranged, 4 + 64, "a range read loaded the file: {ranged}");
+        println!("SL_R18_UNDER_GIB={ranged}");
+
+        let whole = provider
+            .read_file("Users/video.bin", "token", None, None)
+            .unwrap();
+        assert_eq!(whole.len() as u64, SIZE);
+        assert!(whole.starts_with(b"ftyp"));
+        assert_eq!(&whole[marker_at as usize..marker_at as usize + 4], b"MARK");
+        assert!(
+            whole.capacity() <= SIZE as usize + 8,
+            "whole read held {} bytes",
+            whole.capacity()
+        );
+        drop(whole);
+
+        let json_path = dir.path().join("Users/note.json");
+        fs::write(&json_path, br#"{"note":"plain"#).unwrap();
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&json_path)
+            .unwrap()
+            .set_len(SIZE)
+            .unwrap();
+        let _ = localhost_provider::take_sealed_read_bytes();
+        let json_slice = provider
+            .read_file("Users/note.json", "token", Some(0), Some(7))
+            .unwrap();
+        assert_eq!(json_slice, br#"{"note""#);
+        assert!(json_slice.capacity() <= 16);
+        let json_ranged = localhost_provider::take_sealed_read_bytes();
+        assert_eq!(
+            json_ranged,
+            7 + 64,
+            "a json range read loaded the file: {json_ranged}"
+        );
+        let json_whole = provider
+            .read_file("Users/note.json", "token", None, None)
+            .unwrap();
+        assert_eq!(json_whole.len() as u64, SIZE);
+        assert!(json_whole.starts_with(br#"{"note":"plain"#));
+        assert!(json_whole.capacity() <= SIZE as usize + 8);
     }
 
     #[test]
@@ -1756,12 +1957,397 @@ mod tests {
         assert_eq!(content, b"<h1>Hello</h1>");
     }
 
+    fn plant_prefix(path: &std::path::Path, len: u64) {
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, localhost_provider::FILE_KEY_ENVELOPE_MARK).unwrap();
+        fs::OpenOptions::new()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_len(len)
+            .unwrap();
+    }
+
+    fn refusal(
+        provider: &LocalProvider,
+        path: &str,
+        offset: Option<u64>,
+        length: Option<u64>,
+    ) -> String {
+        provider
+            .read_file(path, "token", offset, length)
+            .unwrap_err()
+            .to_string()
+    }
+
+    #[test]
+    fn a_file_key_header_is_refused_when_cut_off_corrupt_or_over_the_limit() {
+        let dir = setup_test_dir();
+        fs::create_dir(dir.path().join("Users")).unwrap();
+        let provider = make_encrypted_provider(&dir);
+        let over = localhost_provider::ENVELOPE_BYTE_LIMIT + 1;
+        let huge = localhost_provider::SEALED_READ_HARD_LIMIT + 1;
+
+        let cut = dir.path().join("Users/cut.bin");
+        plant_prefix(&cut, over);
+        assert!(!localhost_provider::is_plain_localhost_file(&cut).unwrap());
+        assert_eq!(
+            refusal(&provider, "Users/cut.bin", None, None),
+            "Users/cut.bin is cut off. Move it aside, or remove it."
+        );
+        assert_eq!(
+            refusal(&provider, "Users/cut.bin", Some(0), Some(4)),
+            "Users/cut.bin is cut off. Move it aside, or remove it."
+        );
+        let before = fs::read(&cut).unwrap();
+        let err = provider
+            .write_file("Users/cut.bin", "token", b"more", true)
+            .unwrap_err()
+            .to_string();
+        assert_eq!(
+            err,
+            "Users/cut.bin is cut off. Move it aside, or remove it."
+        );
+        assert_eq!(fs::read(&cut).unwrap(), before);
+
+        let bad = dir.path().join("Users/bad.bin");
+        let mut file = fs::File::create(&bad).unwrap();
+        use std::io::Write;
+        file.write_all(localhost_provider::FILE_KEY_ENVELOPE_MARK)
+            .unwrap();
+        file.write_all(b"g").unwrap();
+        let chunk = [b'a'; 64 * 1024];
+        let mut left = over as usize - file.metadata().unwrap().len() as usize;
+        while left > 0 {
+            let n = left.min(chunk.len());
+            file.write_all(&chunk[..n]).unwrap();
+            left -= n;
+        }
+        file.write_all(br#""}"#).unwrap();
+        drop(file);
+        assert!(fs::metadata(&bad).unwrap().len() > localhost_provider::ENVELOPE_BYTE_LIMIT);
+        assert!(!localhost_provider::is_plain_localhost_file(&bad).unwrap());
+        assert_eq!(
+            refusal(&provider, "Users/bad.bin", None, None),
+            "Users/bad.bin is cut off. Move it aside, or remove it."
+        );
+        let bad_before = fs::metadata(&bad).unwrap().len();
+        let err = provider
+            .write_file("Users/bad.bin", "token", b"more", true)
+            .unwrap_err()
+            .to_string();
+        assert_eq!(
+            err,
+            "Users/bad.bin is cut off. Move it aside, or remove it."
+        );
+        assert_eq!(fs::metadata(&bad).unwrap().len(), bad_before);
+
+        let big = dir.path().join("Users/huge.bin");
+        plant_prefix(&big, huge);
+        assert!(!localhost_provider::is_plain_localhost_file(&big).unwrap());
+        let sliced = refusal(&provider, "Users/huge.bin", Some(0), Some(8));
+        assert!(
+            sliced.contains("Users/huge.bin is larger than this process can read"),
+            "{sliced}"
+        );
+        assert!(sliced.contains("Move it out of the folder."), "{sliced}");
+        let err = provider
+            .write_file("Users/huge.bin", "token", b"more", true)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("larger than this process can read"), "{err}");
+        assert_eq!(fs::metadata(&big).unwrap().len(), huge);
+        let mut head = [0u8; 64];
+        std::io::Read::read_exact(&mut fs::File::open(&big).unwrap(), &mut head).unwrap();
+        assert!(head.starts_with(localhost_provider::FILE_KEY_ENVELOPE_MARK));
+        assert!(localhost_provider::header_is_file_key_envelope(&head));
+        assert!(!localhost_provider::header_is_file_key_envelope(
+            &head[..localhost_provider::FILE_KEY_ENVELOPE_PREFIX.len()]
+        ));
+    }
+
+    fn old_sealed(dir: &std::path::Path, name: &str, len: u64) -> std::path::PathBuf {
+        let path = dir.join(name);
+        let sealed = localhost_provider::encrypt_bytes(&[9; 32], b"sealed").unwrap();
+        assert!(localhost_provider::header_is_device_key_envelope(&sealed));
+        fs::write(&path, &sealed).unwrap();
+        fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_len(len)
+            .unwrap();
+        path
+    }
+
+    #[test]
+    fn an_old_header_is_refused_when_cut_off_or_past_the_hard_limit() {
+        let dir = setup_test_dir();
+        fs::create_dir(dir.path().join("Users")).unwrap();
+        let provider = make_encrypted_provider(&dir);
+        let forty = 40 * 1024 * 1024;
+        let huge = localhost_provider::SEALED_READ_HARD_LIMIT + 1;
+        let cut = old_sealed(dir.path(), "Users/cut.bin", forty);
+        let before = fs::metadata(&cut).unwrap().len();
+        let mut head = [0u8; 63];
+        std::io::Read::read_exact(&mut fs::File::open(&cut).unwrap(), &mut head).unwrap();
+        assert_eq!(
+            refusal(&provider, "Users/cut.bin", None, None),
+            "Users/cut.bin is cut off. Move it aside, or remove it."
+        );
+        assert_eq!(
+            refusal(&provider, "Users/cut.bin", Some(0), Some(4)),
+            "Users/cut.bin is cut off. Move it aside, or remove it."
+        );
+        let err = provider
+            .write_file("Users/cut.bin", "token", b"more", true)
+            .unwrap_err()
+            .to_string();
+        assert_eq!(
+            err,
+            "Users/cut.bin is cut off. Move it aside, or remove it."
+        );
+        assert_eq!(fs::metadata(&cut).unwrap().len(), before);
+        let mut after = [0u8; 63];
+        std::io::Read::read_exact(&mut fs::File::open(&cut).unwrap(), &mut after).unwrap();
+        assert_eq!(after, head);
+
+        let big = old_sealed(dir.path(), "Users/huge.bin", huge);
+        let sliced = refusal(&provider, "Users/huge.bin", Some(0), Some(8));
+        assert!(
+            sliced.contains("Users/huge.bin is larger than this process can read"),
+            "{sliced}"
+        );
+        assert!(sliced.contains("Move it out of the folder."), "{sliced}");
+        let err = provider
+            .write_file("Users/huge.bin", "token", b"more", true)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("larger than this process can read"), "{err}");
+        assert_eq!(fs::metadata(&big).unwrap().len(), huge);
+        let mut big_head = [0u8; 63];
+        std::io::Read::read_exact(&mut fs::File::open(&big).unwrap(), &mut big_head).unwrap();
+        assert!(localhost_provider::header_is_device_key_envelope(&big_head));
+
+        let name = dir.path().join("Users/name.json");
+        let prefix = br#"{"version":1,"name":"ada""#;
+        fs::write(&name, prefix).unwrap();
+        fs::OpenOptions::new()
+            .write(true)
+            .open(&name)
+            .unwrap()
+            .set_len(localhost_provider::ENVELOPE_BYTE_LIMIT + 1)
+            .unwrap();
+        assert!(localhost_provider::is_plain_localhost_file(&name).unwrap());
+        assert_eq!(
+            provider
+                .read_file(
+                    "Users/name.json",
+                    "token",
+                    Some(0),
+                    Some(prefix.len() as u64)
+                )
+                .unwrap(),
+            prefix
+        );
+    }
+
+    #[test]
+    fn a_small_sealed_read_opens_the_file_once() {
+        let dir = setup_test_dir();
+        fs::create_dir(dir.path().join("Users")).unwrap();
+        let provider = make_encrypted_provider(&dir);
+        let key = test_key();
+        let path = dir.path().join("Users/once.bin");
+        let sealed = localhost_provider::encrypt_file_key_bytes(&key, b"hello").unwrap();
+        fs::write(&path, &sealed).unwrap();
+        let _ = localhost_provider::take_sealed_read_bytes();
+        assert_eq!(
+            provider
+                .read_file("Users/once.bin", "token", None, None)
+                .unwrap(),
+            b"hello"
+        );
+        assert_eq!(
+            localhost_provider::take_sealed_read_bytes(),
+            sealed.len() as u64
+        );
+    }
+
+    #[test]
+    fn a_cut_off_old_header_under_32_mib_uses_the_cut_off_sentence() {
+        let dir = setup_test_dir();
+        fs::create_dir(dir.path().join("Users")).unwrap();
+        let provider = make_encrypted_provider(&dir);
+        let sealed = localhost_provider::encrypt_bytes(&test_key(), b"sealed-old").unwrap();
+        assert!(localhost_provider::header_is_device_key_envelope(&sealed));
+        assert!(
+            sealed.len() > 80 && (sealed.len() as u64) <= localhost_provider::ENVELOPE_BYTE_LIMIT
+        );
+        let cut = &sealed[..80];
+        assert!(localhost_provider::header_is_device_key_envelope(cut));
+        fs::write(dir.path().join("Users/old-cut.bin"), cut).unwrap();
+        assert_eq!(
+            refusal(&provider, "Users/old-cut.bin", None, None),
+            "Users/old-cut.bin is cut off. Move it aside, or remove it."
+        );
+    }
+
+    #[test]
+    fn a_plain_file_past_the_hard_limit_is_sliced_without_loading_it() {
+        let dir = setup_test_dir();
+        fs::create_dir(dir.path().join("Users")).unwrap();
+        let provider = make_encrypted_provider(&dir);
+        let path = dir.path().join("Users/huge-plain.bin");
+        let mut file = fs::File::create(&path).unwrap();
+        use std::io::{Seek, Write};
+        file.write_all(b"{over").unwrap();
+        file.seek(std::io::SeekFrom::Start(100)).unwrap();
+        file.write_all(b"AT100").unwrap();
+        file.seek(std::io::SeekFrom::Start(4096)).unwrap();
+        file.write_all(b"PAGE").unwrap();
+        let huge = localhost_provider::SEALED_READ_HARD_LIMIT + 1;
+        file.set_len(huge).unwrap();
+        drop(file);
+        let name = "Users/huge-plain.bin";
+        let sentence =
+            format!("{name} is larger than this process can read. Move it out of the folder.");
+        let read = |offset, length| {
+            let _ = localhost_provider::take_sealed_read_bytes();
+            let out = provider.read_file(name, "token", offset, length);
+            (out, localhost_provider::take_sealed_read_bytes())
+        };
+        for (offset, length, expect) in [
+            (Some(0), Some(5), &b"{over"[..]),
+            (Some(100), Some(5), &b"AT100"[..]),
+            (Some(4096), Some(4), &b"PAGE"[..]),
+        ] {
+            let (out, n) = read(offset, length);
+            assert_eq!(out.unwrap(), expect, "{offset:?} {length:?}");
+            assert_eq!(n, 64 + length.unwrap(), "held more than the range: {n}");
+            println!("SL_R18_OFF={offset:?} LEN={length:?} READ={n}");
+        }
+        for offset in [None, Some(0), Some(100), Some(4096)] {
+            let (out, n) = read(offset, None);
+            assert_eq!(out.unwrap_err().to_string(), sentence, "{offset:?}");
+            assert!(n <= 128, "a no-length read held the file: {n}");
+            println!("SL_R18_NOLEN={offset:?} READ={n}");
+        }
+        for offset in [Some(huge), Some(huge + 100)] {
+            let (out, n) = read(offset, Some(8));
+            assert_eq!(out.unwrap(), b"", "{offset:?}");
+            assert!(n <= 64, "past the end held the file: {n}");
+        }
+        let (out, n) = read(Some(huge), None);
+        assert_eq!(out.unwrap(), b"");
+        assert!(n <= 64, "past the end with no length held the file: {n}");
+    }
+
+    fn reorder_envelope(sealed: &[u8]) -> Vec<u8> {
+        let value: serde_json::Value = serde_json::from_slice(sealed).unwrap();
+        format!(
+            "{{\"ciphertext\":{},\"nonce\":{},\"version\":{}}}",
+            value["ciphertext"], value["nonce"], value["version"]
+        )
+        .into_bytes()
+    }
+
+    #[test]
+    fn a_reordered_envelope_over_32_mib_opens_once_and_a_bad_tag_does_not_decrypt() {
+        let dir = setup_test_dir();
+        fs::create_dir(dir.path().join("Users")).unwrap();
+        let provider = make_encrypted_provider(&dir);
+        let key = test_key();
+        let plain = vec![0x11u8; 16 * 1024 * 1024];
+        let sealed = localhost_provider::encrypt_file_key_bytes(&key, &plain).unwrap();
+        let reordered = reorder_envelope(&sealed);
+        assert!(reordered.len() as u64 > localhost_provider::ENVELOPE_BYTE_LIMIT);
+        let path = dir.path().join("Users/reordered.bin");
+        fs::write(&path, &reordered).unwrap();
+        let _ = localhost_provider::take_sealed_read_bytes();
+        assert_eq!(
+            provider
+                .read_file("Users/reordered.bin", "token", None, None)
+                .unwrap(),
+            plain
+        );
+        let read = localhost_provider::take_sealed_read_bytes();
+        assert!(
+            read > reordered.len() as u64,
+            "the body was not scanned: {read}"
+        );
+        assert!(
+            read < reordered.len() as u64 * 5 / 2,
+            "the file was scanned more than once: {read}"
+        );
+
+        let mut bad = reordered;
+        let marker = br#""ciphertext":""#;
+        let at = bad
+            .windows(marker.len())
+            .position(|window| window == marker)
+            .unwrap()
+            + marker.len();
+        bad[at] = if bad[at] == b'0' { b'1' } else { b'0' };
+        fs::write(&path, &bad).unwrap();
+        let err = refusal(&provider, "Users/reordered.bin", None, None);
+        assert!(err.contains("does not decrypt"), "{err}");
+        assert!(err.contains("Move it aside, or remove it."), "{err}");
+        assert!(!err.contains("device.key"), "{err}");
+        assert!(!err.contains("restart"), "{err}");
+        assert!(!err.contains("larger than 32 MiB"), "{err}");
+        assert!(!err.contains("Remove it"), "{err}");
+    }
+
+    #[test]
+    fn a_bad_old_envelope_names_a_remedy_for_this_system() {
+        let dir = setup_test_dir();
+        fs::create_dir(dir.path().join("Users")).unwrap();
+        let provider = make_encrypted_provider(&dir);
+        let key = test_key();
+        let mut sealed = localhost_provider::encrypt_bytes(&key, b"old-secret").unwrap();
+        let marker = br#""ciphertext":""#;
+        let at = sealed
+            .windows(marker.len())
+            .position(|window| window == marker)
+            .unwrap()
+            + marker.len();
+        sealed[at] = if sealed[at] == b'0' { b'1' } else { b'0' };
+        fs::write(dir.path().join("Users/old.bin"), &sealed).unwrap();
+        let err = refusal(&provider, "Users/old.bin", None, None);
+        assert!(err.contains("does not decrypt"), "{err}");
+        #[cfg(unix)]
+        {
+            assert!(err.contains("Move the file aside, then restart."), "{err}");
+            assert!(!err.contains("device.key"), "{err}");
+        }
+        #[cfg(not(unix))]
+        {
+            assert!(
+                err.contains("Restore identity/device.key, or move the file aside, then restart."),
+                "{err}"
+            );
+        }
+        assert!(!err.contains("Move it aside, or remove it."), "{err}");
+    }
+
+    #[test]
+    fn a_long_header_does_not_panic_the_plain_scan() {
+        let header = vec![b'{'; 9000];
+        let mut rest = std::io::Cursor::new(Vec::<u8>::new());
+        let (plain, read) =
+            localhost_provider::reads_as_plain_bytes(&header, 40 * 1024 * 1024, &mut rest).unwrap();
+        assert!(plain, "a run of braces is not an envelope");
+        assert_eq!(read, 0);
+    }
+
     fn plain_provider(dir: &tempfile::TempDir) -> LocalProvider {
         LocalProvider::new(ProviderConfig {
             base_path: dir.path().to_string_lossy().to_string(),
             allowed_paths: vec!["*".to_string()],
             read_only: false,
             encryption_key: String::new(),
+            extra: serde_json::Value::Null,
         })
         .unwrap()
     }
@@ -2376,5 +2962,60 @@ mod tests {
         assert_eq!(v2_b64(&provider, path), want);
         assert_eq!(v2_b64(&provider, address), want);
         row("Public lookalike stays plain for v2");
+    }
+
+    #[test]
+    fn a_plain_users_address_is_read_and_appended() {
+        let dir = setup_test_dir();
+        fs::create_dir_all(dir.path().join("Users")).unwrap();
+        let plain = b"hello-plain";
+        fs::write(dir.path().join("Users/plain.txt"), plain).unwrap();
+        let provider = make_encrypted_provider(&dir);
+        let address = "localhost://Users/plain.txt";
+        assert_eq!(
+            provider.read_file(address, "token", None, None).unwrap(),
+            plain
+        );
+        assert_eq!(fs::read(dir.path().join("Users/plain.txt")).unwrap(), plain);
+        provider
+            .write_file(address, "token", b"-more", true)
+            .unwrap();
+        assert_eq!(
+            provider.read_file(address, "token", None, None).unwrap(),
+            b"hello-plain-more"
+        );
+    }
+
+    #[test]
+    fn a_huge_plain_address_is_refused_before_its_body_is_read() {
+        let dir = setup_test_dir();
+        let provider = make_encrypted_provider(&dir);
+        let sentence = "is larger than this process can read. Move it out of the folder.";
+        for (root, address) in [
+            ("Users", "localhost://Users/huge.bin"),
+            ("Public", "localhost://Public/huge.bin"),
+        ] {
+            let path = dir.path().join(root).join("huge.bin");
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(&path, b"not-loaded").unwrap();
+            fs::OpenOptions::new()
+                .write(true)
+                .open(&path)
+                .unwrap()
+                .set_len(localhost_provider::SEALED_READ_HARD_LIMIT + 1)
+                .unwrap();
+            let _ = localhost_provider::take_sealed_read_bytes();
+            let err = provider
+                .read_file(address, "token", None, None)
+                .unwrap_err();
+            let text = err.to_string();
+            assert_eq!(err.kind(), io::ErrorKind::FileTooLarge);
+            assert!(text.contains(address), "{text}");
+            assert!(text.contains(sentence), "{text}");
+            assert!(
+                localhost_provider::take_sealed_read_bytes() <= 64,
+                "{root} loaded the body"
+            );
+        }
     }
 }

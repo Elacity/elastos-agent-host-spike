@@ -19,7 +19,7 @@ pub(crate) fn dispatch_fixture_enabled(data_dir: &Path) -> bool {
 }
 
 /// Lets a file-format row charge on a Home the feature-off build would refuse.
-fn allow_dispatch_spend(data_dir: &Path) {
+pub(crate) fn allow_dispatch_spend(data_dir: &Path) {
     DISPATCH_FIXTURES
         .get_or_init(|| Mutex::new(std::collections::HashSet::new()))
         .lock()
@@ -3951,8 +3951,14 @@ fn host_starts_heal_after_the_lock_and_skip_no_agent() {
         "\npub fn acquire_host_process_lock",
     );
     let lock = start.find("acquire_host_process_lock(").unwrap();
+    let prepare = start.find("prepare_files(").unwrap();
+    let skip = start.find("refusal_leaves_elastos_unmade").unwrap();
     let heal = start.find("raise_spend_file_to_signed_floor(").unwrap();
-    assert!(lock < heal, "host lock, then the heal");
+    assert!(
+        lock < prepare && prepare < skip && skip < heal,
+        "host lock, then prepare, then skip a refused heal before it opens"
+    );
+    assert!(start.contains("agent spend heal skipped"));
     assert!(start.contains("tracing::warn!"));
     assert!(start.contains("agent spend heal did not run"));
     assert!(!start.contains(".map_err(anyhow::Error::msg)?"));
@@ -3964,11 +3970,31 @@ fn host_starts_heal_after_the_lock_and_skip_no_agent() {
     let call = serve.find("start_host_for_agents(").unwrap();
     assert!(branch < call, "the subordinate check comes first");
     assert!(serve[branch..call].contains("} else {"));
+    assert!(
+        serve[call..call + 280].contains("prepare_localhost_files"),
+        "serve prepares before the heal"
+    );
 
     let gateway = include_str!("../gateway_cmd.rs");
-    assert_eq!(gateway.matches("start_host_for_agents(").count(), 2);
-    assert!(gateway.contains("start_host_for_agents(&data_dir, \"gateway\", &addr)"));
-    assert!(gateway.contains("start_host_for_agents(&data_dir, \"gateway-public\", &addr)"));
+    let calls: Vec<usize> = gateway
+        .match_indices("start_host_for_agents(")
+        .map(|(at, _)| at)
+        .collect();
+    assert_eq!(calls.len(), 2);
+    for (at, role) in calls.iter().zip(["gateway", "gateway-public"]) {
+        let window = &gateway[*at..(*at + 360).min(gateway.len())];
+        assert!(
+            window.contains(&format!("\"{role}\"")),
+            "{role} is not this start: {window}"
+        );
+        assert!(
+            window.contains("prepare_files(&data_dir)?"),
+            "{role} does not prepare after the lock: {window}"
+        );
+        if role == "gateway" {
+            assert!(!window.contains("gateway-public"), "{window}");
+        }
+    }
 
     let browser = source_from(
         include_str!("../gateway_entry.rs"),
@@ -4014,7 +4040,7 @@ fn kept_bytes(dir: &Path) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
 fn assert_start_refuses(dir: &Path, owner: &str, agent: &str, reason: &'static str) {
     let before = kept_bytes(dir);
     for role in ["gateway", "gateway-public", "serve"] {
-        crate::host_lock::start_host_for_agents(dir, role, "127.0.0.1:9").unwrap();
+        crate::host_lock::start_host_for_agents(dir, role, "127.0.0.1:9", |_| Ok(())).unwrap();
         assert_eq!(
             kept_bytes(dir),
             before,
@@ -4053,7 +4079,8 @@ fn a_damaged_newer_unreadable_or_windows_agents_file_still_starts() {
 
     let before = kept_bytes(dir.path());
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
-    crate::host_lock::start_host_for_agents(dir.path(), "serve", "127.0.0.1:9").unwrap();
+    crate::host_lock::start_host_for_agents(dir.path(), "serve", "127.0.0.1:9", |_| Ok(()))
+        .unwrap();
     let err = charge_model_spend(dir.path(), &owner, &agent, (0, 0), 1, 64, None).unwrap_err();
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
     assert!(matches!(err, SpendRefusal::Name(NOT_REGULAR)), "{err:?}");
@@ -4225,7 +4252,8 @@ fn charge_then_restart_stays_above_the_floor(home: &Behind) {
     let charged = file_spent(home.dir.path(), &home.agent);
     assert!(charged > home.floor, "{charged} {}", home.floor);
     assert_eq!(file_spent(home.dir.path(), &home.other), home.other_floor);
-    crate::host_lock::start_host_for_agents(home.dir.path(), "serve", "127.0.0.1:9").unwrap();
+    crate::host_lock::start_host_for_agents(home.dir.path(), "serve", "127.0.0.1:9", |_| Ok(()))
+        .unwrap();
     assert_eq!(file_spent(home.dir.path(), &home.agent), charged);
     assert_eq!(file_spent(home.dir.path(), &home.other), home.other_floor);
     charge_model_spend(
@@ -4246,7 +4274,7 @@ fn charge_then_restart_stays_above_the_floor(home: &Behind) {
 fn warn_once_on_start(dir: &Path, reason: &str) -> String {
     let _ = crate::model_budget::take_spend_audit_loads();
     let log = capture_warns(|| {
-        crate::host_lock::start_host_for_agents(dir, "gateway", "127.0.0.1:9").unwrap();
+        crate::host_lock::start_host_for_agents(dir, "gateway", "127.0.0.1:9", |_| Ok(())).unwrap();
     });
     assert_eq!(
         crate::model_budget::take_spend_audit_loads(),
@@ -4255,6 +4283,24 @@ fn warn_once_on_start(dir: &Path, reason: &str) -> String {
     );
     assert_eq!(log.matches(reason).count(), 1, "{log}");
     log
+}
+
+/// A start with no refusal writes each stored total up to its signed floor
+/// and appends no spend event.
+#[test]
+fn a_normal_start_heals() {
+    let home = home_behind_its_floor();
+    let rows = spend_events(home.dir.path());
+    assert_eq!(file_spent(home.dir.path(), &home.agent), 0);
+    crate::host_lock::start_host_for_agents(home.dir.path(), "serve", "127.0.0.1:9", |_| Ok(()))
+        .unwrap();
+    assert_eq!(file_spent(home.dir.path(), &home.agent), home.floor);
+    assert_eq!(file_spent(home.dir.path(), &home.other), home.other_floor);
+    assert_eq!(
+        spend_events(home.dir.path()),
+        rows,
+        "the heal appended a spend"
+    );
 }
 
 /// A full disk is an injected write failure. Home starts, the charge is refused

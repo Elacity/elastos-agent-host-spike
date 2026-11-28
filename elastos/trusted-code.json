@@ -97,7 +97,9 @@
     "elastos/crates/elastos-server/src/api/auth_passkey_limits.rs",
     "elastos/crates/elastos-server/src/api/gateway_browser_remote.rs",
     "elastos/crates/elastos-server/src/api/gateway_browser_stream.rs",
-    "elastos/crates/elastos-server/src/api/gateway_browser_transport.rs"
+    "elastos/crates/elastos-server/src/api/gateway_browser_transport.rs",
+    "elastos/crates/elastos-server/src/local_apps.rs",
+    "elastos/crates/elastos-server/src/localhost_file_migration.rs"
   ],
   "absent_candidates": [],
   "libraries": [

@@ -83,6 +83,9 @@ pub struct ServerConfig {
     /// Optional admitted public data-capsule tree served at `/capsule-data/`.
     /// Runtime data roots stay private and are never mounted here.
     pub data_dir: Option<PathBuf>,
+    /// Home folder for the local-apps refusal. `data_dir` is the public tree
+    /// and is a different folder on `elastos run` and the MicroVM serve path.
+    pub local_apps_dir: Option<PathBuf>,
     pub tls_config: Option<axum_server::tls_rustls::RustlsConfig>,
     /// Capsule supervisor for VM-based capsule lifecycle (supervisor path only)
     pub supervisor: Option<Arc<crate::supervisor::Supervisor>>,
@@ -183,6 +186,7 @@ pub(crate) fn build_router(config: ServerConfig) -> anyhow::Result<Router> {
         addr,
         capsule_dir,
         data_dir,
+        local_apps_dir,
         tls_config,
         supervisor,
         ready_tx: _,
@@ -399,8 +403,10 @@ pub(crate) fn build_router(config: ServerConfig) -> anyhow::Result<Router> {
 
     // File-backed localhost routes (require valid session, optional - only if provider_registry is provided)
     // Public contract: rooted `localhost://...` paths.
+    let refusal_dir = local_apps_dir.or(data_dir.clone()).unwrap_or_default();
     let storage_routes = if let Some(registry) = provider_registry {
         let storage_state = handlers::storage::ProviderStorageState {
+            data_dir: refusal_dir.clone(),
             registry: registry.clone(),
             audit_log: audit_log.clone(),
             capability_manager: Some(capability_manager.clone()),
@@ -409,6 +415,7 @@ pub(crate) fn build_router(config: ServerConfig) -> anyhow::Result<Router> {
 
         // Generic provider proxy: POST /api/provider/:scheme/:op
         let proxy_state = handlers::provider::ProviderProxyState {
+            data_dir: refusal_dir,
             registry,
             capability_manager: Some(capability_manager.clone()),
         };
@@ -634,20 +641,45 @@ pub(crate) mod tests {
         pending_store: Arc<PendingRequestStore>,
         data_dir: Option<PathBuf>,
     ) -> Router {
-        build_router(ServerConfig {
+        build_test_router(TestRouterConfig {
             runtime,
             session_registry,
             capability_manager,
             capability_store,
             pending_store,
-            namespace_store: None,
+            local_apps_dir: data_dir.clone(),
+            data_dir,
             provider_registry: None,
+        })
+    }
+
+    struct TestRouterConfig {
+        runtime: Arc<Runtime>,
+        session_registry: Arc<SessionRegistry>,
+        capability_manager: Arc<CapabilityManager>,
+        capability_store: Arc<elastos_runtime::capability::CapabilityStore>,
+        pending_store: Arc<PendingRequestStore>,
+        local_apps_dir: Option<PathBuf>,
+        data_dir: Option<PathBuf>,
+        provider_registry: Option<Arc<ProviderRegistry>>,
+    }
+
+    fn build_test_router(config: TestRouterConfig) -> Router {
+        build_router(ServerConfig {
+            runtime: config.runtime,
+            session_registry: config.session_registry,
+            capability_manager: config.capability_manager,
+            capability_store: config.capability_store,
+            pending_store: config.pending_store,
+            namespace_store: None,
+            provider_registry: config.provider_registry,
             audit_log: None,
             identity_state: None,
             docs_dir: None,
             addr: "127.0.0.1:0".to_string(),
             capsule_dir: None,
-            data_dir,
+            local_apps_dir: config.local_apps_dir,
+            data_dir: config.data_dir,
             tls_config: None,
             supervisor: None,
             ready_tx: None,
@@ -696,6 +728,74 @@ pub(crate) mod tests {
             }
         }
         assert!(wrong.is_empty(), "{wrong:#?}");
+    }
+
+    #[tokio::test]
+    async fn the_local_apps_refusal_uses_the_home_before_the_public_tree() {
+        use axum::body::Body;
+        use axum::http::header::AUTHORIZATION;
+        use elastos_runtime::session::SessionType;
+        use elastos_storage::providers::LocalFSProvider;
+        use tower::ServiceExt;
+
+        let _guard = crate::local_apps::lock_local_apps_for_test();
+        let home = tempfile::tempdir().unwrap();
+        let public = tempfile::tempdir().unwrap();
+        let home_sentence =
+            "Users/home-secret.bin is not readable. Make it readable, then restart.";
+        let public_sentence =
+            "Users/public-secret.bin is not readable. Make it readable, then restart.";
+        crate::local_apps::set_local_apps_refusal(home.path(), Some(home_sentence.to_string()));
+        crate::local_apps::set_local_apps_refusal(public.path(), Some(public_sentence.to_string()));
+        let storage = Arc::new(
+            LocalFSProvider::new(home.path().join("storage"))
+                .await
+                .unwrap(),
+        );
+        let runtime = Runtime::with_providers_and_component(storage, Vec::new(), None);
+        let audit = Arc::new(AuditLog::new());
+        let sessions = Arc::new(SessionRegistry::new(audit.clone()));
+        let shell = sessions.create_session(SessionType::Shell, None).await;
+        let (store, metrics) = (
+            Arc::new(elastos_runtime::capability::CapabilityStore::new()),
+            Arc::new(elastos_runtime::primitives::metrics::MetricsManager::new()),
+        );
+        let manager = Arc::new(CapabilityManager::new(
+            store.clone(),
+            audit.clone(),
+            metrics,
+        ));
+        let pending = Arc::new(PendingRequestStore::new(audit));
+        let app = build_test_router(TestRouterConfig {
+            runtime: Arc::new(runtime),
+            session_registry: sessions,
+            capability_manager: manager,
+            capability_store: store,
+            pending_store: pending,
+            local_apps_dir: Some(home.path().to_path_buf()),
+            data_dir: Some(public.path().to_path_buf()),
+            provider_registry: Some(Arc::new(ProviderRegistry::new())),
+        });
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/localhost")
+                    .header(AUTHORIZATION, format!("Bearer {}", shell.token))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            axum::http::StatusCode::SERVICE_UNAVAILABLE
+        );
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let text = String::from_utf8(body.to_vec()).unwrap();
+        assert_eq!(text, home_sentence);
+        assert!(!text.contains("public-secret.bin"), "{text}");
     }
 
     #[tokio::test]

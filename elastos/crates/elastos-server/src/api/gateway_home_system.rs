@@ -11543,6 +11543,7 @@ mod services_private_ticket_tests {
                 },
             ))
             .with_state(ProviderProxyState {
+                data_dir: std::path::PathBuf::new(),
                 registry,
                 capability_manager: None,
             });

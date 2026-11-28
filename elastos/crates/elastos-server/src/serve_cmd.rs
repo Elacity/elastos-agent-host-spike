@@ -50,7 +50,10 @@ pub async fn run_serve(
         None
     } else {
         Some(elastos_server::host_lock::start_host_for_agents(
-            &data_dir, "serve", &addr,
+            &data_dir,
+            "serve",
+            &addr,
+            crate::localhost_file_migration::prepare_localhost_files,
         )?)
     };
     if !subordinate_host {
@@ -237,6 +240,7 @@ pub async fn run_serve(
                 let capability_store = infra.capability_store;
                 let host_helpers = infra.host_helpers;
 
+                let local_apps_dir = data_dir.clone();
                 let api_handle = tokio::spawn({
                     let runtime = runtime_arc.clone();
                     let session_registry = session_registry.clone();
@@ -265,6 +269,7 @@ pub async fn run_serve(
                                 addr: api_bind_addr,
                                 capsule_dir: None,
                                 data_dir: None,
+                                local_apps_dir: Some(local_apps_dir),
                                 tls_config,
                                 supervisor: None,
                                 ready_tx: None,
@@ -411,6 +416,9 @@ pub async fn run_serve(
         println!("  Capsule  shell           {}", cid);
     }
     println!("  API:     http://{}", addr);
+    // A piped stdout is block-buffered. Bind first; apply() prints the health
+    // or refusal line when the file check finishes.
+    let _ = std::io::Write::flush(&mut std::io::stdout());
 
     let components_path = data_dir.join("components.json");
     let sup = if components_path.exists() {
@@ -516,6 +524,7 @@ pub async fn run_serve(
             addr,
             capsule_dir: None,
             data_dir: Some(data_dir.clone()),
+            local_apps_dir: Some(data_dir.clone()),
             tls_config: None,
             supervisor: sup,
             ready_tx: None,

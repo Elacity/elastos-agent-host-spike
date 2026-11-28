@@ -1414,6 +1414,9 @@ pub(in crate::api) fn principal_root_recovery_readiness_for_verified_principal(
 pub fn verify_configured_principal_roots_ready(
     data_dir: &std::path::Path,
 ) -> anyhow::Result<Vec<String>> {
+    if crate::local_apps::refusal_leaves_elastos_unmade(data_dir) {
+        return Ok(Vec::new());
+    }
     let declarations = configured_principal_root_upgrade_declarations(data_dir)?;
     crate::auth::verify_declared_principal_roots_ready(data_dir, &declarations)
 }
