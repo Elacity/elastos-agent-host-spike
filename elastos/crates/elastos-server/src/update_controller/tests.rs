@@ -5925,3 +5925,91 @@ fn a_copied_or_damaged_receipt_is_not_an_update_and_the_check_does_not_hash() {
     assert!(!body.contains("validate_retained_receipt"), "{body}");
     assert!(!body.contains("installed_writer_binary"), "{body}");
 }
+
+#[test]
+fn file_move_claim_refuses_a_hard_linked_lock_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = fs::canonicalize(dir.path()).unwrap();
+    let identity = data.join("identity");
+    fs::create_dir(&identity).unwrap();
+    let lock = identity.join(FILE_MOVE_LOCK);
+    fs::write(&lock, b"lock").unwrap();
+    fs::hard_link(&lock, identity.join("alias.lock")).unwrap();
+    match try_claim_file_move(&data) {
+        Err(err) => assert!(
+            err.to_string()
+                .contains("localhost file-move lock is linked from another path"),
+            "{err}"
+        ),
+        Ok(_) => panic!("a hard-linked file-move lock was claimed"),
+    }
+}
+
+/// `Controller::serve` leaves `request.json` in place while the file-move claim
+/// is held, and renames it once that claim is released.
+#[tokio::test]
+async fn serve_does_not_rename_request_json_while_the_file_move_claim_is_held() {
+    let fixture = PrivateFixture::new();
+    publish_retained_receipt(&fixture);
+    let (_, request, _) = choice_fixture();
+    write_private(&fixture.directory.join(REQUEST), &request).unwrap();
+    let claim = try_claim_file_move(&fixture.data)
+        .unwrap()
+        .expect("this test holds the file-move claim");
+    let mut command = tokio::process::Command::new("/bin/sh");
+    command.args(["-c", "exec sleep 60"]);
+    let mut controller = Controller {
+        receipt: read_private_json(&fixture.directory.join(RECEIPT)).unwrap(),
+        directory: fixture.directory.clone(),
+        child: Some(child::OwnedChild::spawn(&mut command).unwrap()),
+        request: None,
+        previous_binary_sha256: String::new(),
+        previous_version: String::new(),
+        generation: "b".repeat(32),
+        host_ready: false,
+        carrier: None,
+        carrier_close: None,
+        test_readiness: None,
+    };
+    let request_path = fixture.directory.join(REQUEST);
+    let active_path = fixture.directory.join(ACTIVE_REQUEST);
+    struct AbortServe(tokio::task::JoinHandle<Result<()>>);
+    impl Drop for AbortServe {
+        fn drop(&mut self) {
+            self.0.abort();
+        }
+    }
+    let mut serve = AbortServe(tokio::spawn(async move { controller.serve().await }));
+    let deadline = tokio::time::Instant::now() + Duration::from_millis(500);
+    while tokio::time::Instant::now() < deadline {
+        assert!(
+            request_path.is_file(),
+            "request.json was renamed while the file-move claim was held"
+        );
+        assert!(
+            !active_path.exists(),
+            "active-request.json appeared while the file-move claim was held"
+        );
+        assert!(
+            !serve.0.is_finished(),
+            "serve stopped while the file-move claim was held"
+        );
+        tokio::time::sleep(Duration::from_millis(40)).await;
+    }
+    drop(claim);
+    let joined = tokio::time::timeout(Duration::from_secs(3), &mut serve.0).await;
+    assert!(
+        joined.is_ok(),
+        "serve did not finish after the file-move claim was released"
+    );
+    assert!(
+        !request_path.exists(),
+        "request.json remained after the file-move claim was released"
+    );
+    assert!(
+        active_path.is_file(),
+        "active-request.json was missing after the file-move claim was released"
+    );
+    let active: UpdateRequest = read_private_json(&active_path).unwrap();
+    assert_eq!(active.id, request.id);
+}

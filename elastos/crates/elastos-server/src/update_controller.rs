@@ -1318,7 +1318,7 @@ impl Controller {
                     !path_present(&self.directory.join(ACTIVE_REQUEST))?,
                     "An earlier update requires recovery."
                 );
-                // Pass two holds this lock across every file it replaces.
+                // The walk holds this lock across a file replace and the marker write.
                 let Some(move_guard) = try_claim_file_move(&self.receipt.data_dir)? else {
                     tokio::time::sleep(Duration::from_millis(100)).await;
                     continue;
@@ -1967,6 +1967,10 @@ fn claim_file_move_unix(data_dir: &Path) -> Result<Option<FileMoveGuard>> {
         .mode(0o600)
         .custom_flags(libc::O_NOFOLLOW)
         .open(&path)?;
+    let meta = file.metadata()?;
+    if !(meta.is_file() && meta.nlink() == 1) {
+        anyhow::bail!("localhost file-move lock is linked from another path");
+    }
     match FileLock::try_exclusive(file) {
         Ok(lock) => Ok(Some(FileMoveGuard { _lock: lock })),
         Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => Ok(None),

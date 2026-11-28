@@ -45,10 +45,11 @@
 //! attaches to a running runtime and does not walk. `elastos run`, `elastos open`,
 //! and a host can therefore overlap.
 //! After the migration lock is held, again after pass 1, and again immediately
-//! before the done marker, the walk reads `update_can_roll_back`. Pass two
-//! holds the update-start lock for the rewrite and the marker. The update
-//! controller takes that lock before it starts and waits while pass two holds
-//! it. Under the lock, pass two reads `update_can_roll_back` again before a
+//! before the done marker, the walk reads `update_can_roll_back`. The walk
+//! holds the file-move lock for a rewrite and for the marker write, including
+//! a marker write when pass 1 held no old file. The update controller takes
+//! that lock before it starts and waits while the walk holds it. Under the
+//! lock, pass two reads `update_can_roll_back` again before a
 //! file is replaced. An update that began while the walk waited for the
 //! migration lock, or while pass 1 read, defers with the pending-update
 //! sentence, including when pass 1 held no old file. No file is rewritten and
@@ -121,6 +122,10 @@ thread_local! {
         std::cell::RefCell::new(None);
     static DURING_PASS_TWO: std::cell::RefCell<Option<Box<dyn Fn()>>> =
         std::cell::RefCell::new(None);
+    static BEFORE_FILE_MOVE_CLAIM: std::cell::RefCell<Option<Box<dyn Fn()>>> =
+        std::cell::RefCell::new(None);
+    static BEFORE_MARKER: std::cell::RefCell<Option<Box<dyn Fn()>>> =
+        std::cell::RefCell::new(None);
     static PROGRESS_CLOCK: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
     static BYTES_READ: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
     static OPENS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
@@ -181,6 +186,18 @@ pub(crate) fn set_localhost_migration_during_walk(hook: Option<Box<dyn Fn()>>) {
 #[cfg(all(unix, test))]
 pub(crate) fn set_localhost_migration_during_pass_two(hook: Option<Box<dyn Fn()>>) {
     DURING_PASS_TWO.with(|slot| *slot.borrow_mut() = hook);
+}
+
+/// Runs after the unlocked pass-two rollback check and before the file-move claim.
+#[cfg(all(unix, test))]
+pub(crate) fn set_localhost_migration_before_file_move_claim(hook: Option<Box<dyn Fn()>>) {
+    BEFORE_FILE_MOVE_CLAIM.with(|slot| *slot.borrow_mut() = hook);
+}
+
+/// Runs after the marker's rollback check and before the marker is written.
+#[cfg(all(unix, test))]
+pub(crate) fn set_localhost_migration_before_marker(hook: Option<Box<dyn Fn()>>) {
+    BEFORE_MARKER.with(|slot| *slot.borrow_mut() = hook);
 }
 
 /// Sets the progress clock. `None` uses the wall clock. A test moves this
@@ -303,6 +320,24 @@ fn run_during_pass_two() {
     if let Some(hook) = hook {
         hook();
         DURING_PASS_TWO.with(|slot| *slot.borrow_mut() = Some(hook));
+    }
+}
+
+#[cfg(all(unix, test))]
+fn run_before_file_move_claim() {
+    let hook = BEFORE_FILE_MOVE_CLAIM.with(|slot| slot.borrow_mut().take());
+    if let Some(hook) = hook {
+        hook();
+        BEFORE_FILE_MOVE_CLAIM.with(|slot| *slot.borrow_mut() = Some(hook));
+    }
+}
+
+#[cfg(all(unix, test))]
+fn run_before_marker() {
+    let hook = BEFORE_MARKER.with(|slot| slot.borrow_mut().take());
+    if let Some(hook) = hook {
+        hook();
+        BEFORE_MARKER.with(|slot| *slot.borrow_mut() = Some(hook));
     }
 }
 
@@ -1458,9 +1493,15 @@ fn migrate_localhost_files_to_file_key(
     if elastos_server::update_controller::update_can_roll_back(data_dir) {
         return Err(anyhow::anyhow!(LOCALHOST_FILES_PENDING_UPDATE));
     }
+    #[cfg(test)]
+    run_before_file_move_claim();
     let rewriting = HELD.with(|slot| slot.get());
-    let _move_guard = if rewriting {
-        match elastos_server::update_controller::try_claim_file_move(data_dir)? {
+    // The claim covers a rewrite and a marker write, including a home with no old file.
+    let _move_guard = if rewriting || matches!(plan, MarkerPlan::Write) {
+        let move_lock = identity.join("localhost-file-move.lock");
+        let claimed = elastos_server::update_controller::try_claim_file_move(data_dir)
+            .map_err(|err| localhost_write_refused(&move_lock, &err.to_string()))?;
+        match claimed {
             None => return Err(anyhow::anyhow!(LOCALHOST_FILES_PENDING_UPDATE)),
             Some(guard) => Some(guard),
         }
@@ -1480,6 +1521,8 @@ fn migrate_localhost_files_to_file_key(
         if elastos_server::update_controller::update_can_roll_back(data_dir) {
             return Err(anyhow::anyhow!(LOCALHOST_FILES_PENDING_UPDATE));
         }
+        #[cfg(test)]
+        run_before_marker();
         write_localhost_marker(&marker, &localhost_marker_record(&file_key))?;
     }
     Ok(())

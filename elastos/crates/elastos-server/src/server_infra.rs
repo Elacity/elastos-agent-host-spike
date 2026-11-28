@@ -2837,12 +2837,14 @@ mod tests {
     use super::*;
     use crate::localhost_file_migration::{
         hold_localhost_migration_lock, localhost_bringup, localhost_file_key,
-        localhost_provider_bridge_config, rewrite_temp_path, set_localhost_migration_before_rename,
-        set_localhost_migration_before_replace, set_localhost_migration_before_walk,
-        set_localhost_migration_create_error, set_localhost_migration_during_pass_two,
-        set_localhost_migration_during_walk, set_localhost_migration_progress_clock,
-        set_localhost_migration_write_budget, set_localhost_migration_write_error,
-        take_localhost_migration_bytes_read, take_localhost_migration_opens, LocalhostBringup,
+        localhost_provider_bridge_config, rewrite_temp_path,
+        set_localhost_migration_before_file_move_claim, set_localhost_migration_before_marker,
+        set_localhost_migration_before_rename, set_localhost_migration_before_replace,
+        set_localhost_migration_before_walk, set_localhost_migration_create_error,
+        set_localhost_migration_during_pass_two, set_localhost_migration_during_walk,
+        set_localhost_migration_progress_clock, set_localhost_migration_write_budget,
+        set_localhost_migration_write_error, take_localhost_migration_bytes_read,
+        take_localhost_migration_opens, LocalhostBringup,
     };
     #[cfg(unix)]
     use std::ffi::CString;
@@ -6495,6 +6497,8 @@ fn main() {
             set_localhost_migration_before_replace(None);
             set_localhost_migration_before_rename(None);
             set_localhost_migration_before_walk(None);
+            set_localhost_migration_before_file_move_claim(None);
+            set_localhost_migration_before_marker(None);
             set_localhost_migration_progress_clock(None);
             crate::localhost_file_migration::set_localhost_migration_reserve_failure(false);
             let _ = take_localhost_migration_bytes_read();
@@ -10789,6 +10793,132 @@ fn main() {
         assert!(!began, "the update-start lock was free during pass two");
         assert_ne!(bytes, planted);
         assert_envelope_opens_with_exactly_one_key(&note, b"kept", &device_key, &file_key);
+    }
+
+    /// Pass two defers when the file-move claim is already held. Deleting the
+    /// `None` deferral lets this row replace the v1 file.
+    #[test]
+    fn pass_two_defers_while_the_file_move_claim_is_held() {
+        let _guard = LocalAppsGuard::lock();
+        let pending = crate::localhost_file_migration::LOCALHOST_FILES_PENDING_UPDATE;
+        let device_key = [0x51; 32];
+        let root = TempDir::new().unwrap();
+        let note = root.path().join("Users/note.bin");
+        let planted = plant_device_envelope(&note, &device_key, b"kept");
+        let claim = elastos_server::update_controller::try_claim_file_move(root.path())
+            .unwrap()
+            .expect("this test holds the file-move claim");
+        match localhost_bringup(root.path(), &device_key) {
+            LocalhostBringup::Refuse(got) => assert_eq!(got, pending),
+            LocalhostBringup::Start(_) => {
+                panic!("pass two replaced a file while the claim was held")
+            }
+        }
+        assert_eq!(fs::read(&note).unwrap(), planted);
+        assert!(!root.path().join("identity/localhost-file-key-v1").exists());
+        drop(claim);
+    }
+
+    /// An update that appears after the unlocked pass-two check, and before the
+    /// under-lock re-check, leaves the v1 file in place.
+    #[test]
+    fn an_update_planted_after_the_pass_two_check_does_not_replace_a_v1_file() {
+        let _guard = LocalAppsGuard::lock();
+        struct ClearHook;
+        impl Drop for ClearHook {
+            fn drop(&mut self) {
+                set_localhost_migration_before_file_move_claim(None);
+            }
+        }
+        let _clear = ClearHook;
+        let pending = crate::localhost_file_migration::LOCALHOST_FILES_PENDING_UPDATE;
+        let device_key = [0x52; 32];
+        let root = TempDir::new().unwrap();
+        let bin = TempDir::new().unwrap();
+        let note = root.path().join("Users/note.bin");
+        let planted = plant_device_envelope(&note, &device_key, b"kept");
+        let (data, bin_path) = (root.path().to_path_buf(), bin.path().to_path_buf());
+        assert!(!elastos_server::update_controller::update_can_roll_back(
+            &data
+        ));
+        set_localhost_migration_before_file_move_claim(Some(Box::new(move || {
+            plant_update_state(&data, &bin_path, "journal");
+        })));
+        match localhost_bringup(root.path(), &device_key) {
+            LocalhostBringup::Refuse(got) => assert_eq!(got, pending),
+            LocalhostBringup::Start(_) => {
+                panic!("pass two replaced a file after an update appeared under the lock")
+            }
+        }
+        assert!(elastos_server::update_controller::update_can_roll_back(
+            root.path()
+        ));
+        assert_eq!(fs::read(&note).unwrap(), planted);
+        assert!(!root.path().join("identity/localhost-file-key-v1").exists());
+    }
+
+    /// A marker write with no old file still holds the file-move claim.
+    #[test]
+    fn a_marker_write_holds_the_file_move_claim() {
+        let _guard = LocalAppsGuard::lock();
+        struct ClearHook;
+        impl Drop for ClearHook {
+            fn drop(&mut self) {
+                set_localhost_migration_before_marker(None);
+            }
+        }
+        let _clear = ClearHook;
+        let device_key = [0x53; 32];
+        let root = TempDir::new().unwrap();
+        let saw = Arc::new(Mutex::new(false));
+        let held = Arc::new(Mutex::new(false));
+        let saw_hook = saw.clone();
+        let held_hook = held.clone();
+        let data = root.path().to_path_buf();
+        set_localhost_migration_before_marker(Some(Box::new(move || {
+            *saw_hook.lock().unwrap() = true;
+            let claimed = elastos_server::update_controller::try_claim_file_move(&data)
+                .unwrap()
+                .is_some();
+            *held_hook.lock().unwrap() = !claimed;
+        })));
+        match localhost_bringup(root.path(), &device_key) {
+            LocalhostBringup::Start(_) => {}
+            LocalhostBringup::Refuse(got) => panic!("marker write refused: {got}"),
+        }
+        assert!(*saw.lock().unwrap(), "the marker write did not pause");
+        assert!(
+            *held.lock().unwrap(),
+            "the file-move claim was free during the marker write"
+        );
+        assert!(root.path().join("identity/localhost-file-key-v1").exists());
+    }
+
+    /// A hard-linked file-move lock refuses the rewrite and names the write.
+    #[test]
+    fn a_linked_file_move_lock_refuses_pass_two_and_keeps_the_v1_file() {
+        let _guard = LocalAppsGuard::lock();
+        let device_key = [0x54; 32];
+        let root = TempDir::new().unwrap();
+        let note = root.path().join("Users/note.bin");
+        let planted = plant_device_envelope(&note, &device_key, b"kept");
+        let identity = root.path().join("identity");
+        fs::create_dir(&identity).unwrap();
+        let lock = identity.join("localhost-file-move.lock");
+        fs::write(&lock, b"").unwrap();
+        fs::hard_link(&lock, identity.join("alias.lock")).unwrap();
+        match localhost_bringup(root.path(), &device_key) {
+            LocalhostBringup::Refuse(got) => {
+                assert!(
+                    got.contains("could not be written")
+                        && got.contains("localhost-file-move.lock"),
+                    "{got}"
+                );
+            }
+            LocalhostBringup::Start(_) => panic!("a linked lock let pass two replace a file"),
+        }
+        assert_eq!(fs::read(&note).unwrap(), planted);
+        assert!(!root.path().join("identity/localhost-file-key-v1").exists());
     }
 
     /// A `localhost://Public` or `localhost://MyWebSite` write on the old key
