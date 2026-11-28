@@ -125,9 +125,9 @@ def closer(vals, p):
 
 
 def predicate(vals, p):
-    """Evaluate cfg with test and the explicit test-hooks feature unset, other options unknown, in
-    three-valued logic: (True, False or None for unknown, next index). False means the item
-    requires a test build or the shared test-hooks support feature."""
+    """Evaluate the cfg predicate at vals[p] with test unset and every other option unknown, in
+    three-valued logic: (True, False or None for unknown, next index). False means it can hold only
+    in tests: no setting of the other options makes it true without test."""
     word = vals[p]
     if word in ("all", "any", "not") and vals[p + 1] == "(":
         end, q, parts = closer(vals, p + 1), p + 2, []
@@ -146,8 +146,7 @@ def predicate(vals, p):
             return decisive, end + 1
         return (None if None in parts else not decisive), end + 1
     if vals[p + 1] == "=":
-        test_hooks = word == "feature" and vals[p + 2] == '"test-hooks"'
-        return (False if test_hooks else None), p + 3
+        return None, p + 3
     if not re.fullmatch(r"\w+", word):
         raise Refusal(f"cannot read the cfg predicate at {word!r}")
     return (False if word == "test" else None), p + 1

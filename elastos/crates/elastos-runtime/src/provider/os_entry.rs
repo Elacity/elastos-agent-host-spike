@@ -32,7 +32,7 @@ pub(super) struct CheckedDirectory<'a> {
 /// The caller creates both pipes, passes the child ends to the launcher, and
 /// drops them after the call. The parent ends travel through this value so the
 /// launched handle carries the only remaining copies.
-pub(super) struct ChildStdio {
+pub struct ChildStdio {
     pub stdin: i32,
     pub stdout: i32,
     pub to_child: OwnedFd,
@@ -43,7 +43,7 @@ pub(super) struct ChildStdio {
 /// parent ends are the protocol pipes. The successful pid belongs to the
 /// caller, which owns its reap.
 #[derive(Debug)]
-pub(super) struct Launched {
+pub struct Launched {
     pub pid: libc::pid_t,
     pub to_child: OwnedFd,
     pub from_child: OwnedFd,
@@ -126,7 +126,7 @@ pub(crate) fn admit_path_allow(
 /// The data directory is not a storage root. `identity/device.key` stays
 /// outside the Seatbelt parameters and the Landlock rules. Admission is the
 /// same gate `start_provider` uses, and it runs before either OS arm.
-pub(crate) fn start_path_allow(
+pub fn start_path_allow(
     component_key: &str,
     authority: &ProviderAuthority,
     executable: &super::CheckedExecutable,

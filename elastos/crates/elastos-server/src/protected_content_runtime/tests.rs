@@ -36,7 +36,9 @@ use elastos_protected_content_runtime::{
     RuntimeRightsProvider, RuntimeSelectedProvider, RuntimeVerifiedPurchaseEffect,
     RuntimeViewerSession,
 };
-use elastos_runtime::provider::bridge::custody_test_support;
+#[cfg(test)]
+#[path = "../../../../../capsules/custody-provider/tests/support/provision.rs"]
+mod custody_test_support;
 use elastos_runtime::provider::{
     bridge::ProviderConfig, CapsuleProvider, Provider, ProviderBridge, ProviderCarrierInvoker,
     ProviderCarrierRoute, ProviderError, ProviderInvocation, ProviderInvocationTransport,

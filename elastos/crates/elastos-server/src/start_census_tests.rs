@@ -936,7 +936,7 @@ pub(super) fn without_test_items(text: &str) -> String {
     let mut out = String::new();
     let mut cursor = 0;
     while cursor < bytes.len() {
-        let Some((start, end)) = next_test_attribute(&code, text, cursor) else {
+        let Some((start, end)) = next_test_attribute(&code, cursor) else {
             out.push_str(&text[cursor..]);
             break;
         };
@@ -947,7 +947,7 @@ pub(super) fn without_test_items(text: &str) -> String {
 }
 
 /// The range of the next attribute that makes its item test-only.
-fn next_test_attribute(text: &str, raw: &str, from: usize) -> Option<(usize, usize)> {
+fn next_test_attribute(text: &str, from: usize) -> Option<(usize, usize)> {
     let bytes = text.as_bytes();
     let mut at = from;
     while let Some(found) = text[at..].find("#[cfg(") {
@@ -968,7 +968,7 @@ fn next_test_attribute(text: &str, raw: &str, from: usize) -> Option<(usize, usi
             }
             i += 1;
         }
-        if i < bytes.len() && bytes.get(i + 1) == Some(&b']') && test_only(&raw[open..i]) {
+        if i < bytes.len() && bytes.get(i + 1) == Some(&b']') && test_only(&text[open..i]) {
             return Some((start, i + 2));
         }
         at = start + 1;
@@ -978,7 +978,7 @@ fn next_test_attribute(text: &str, raw: &str, from: usize) -> Option<(usize, usi
 
 /// Whether a `cfg` predicate holds only in a test build.
 fn test_only(expr: &str) -> bool {
-    if expr == "test" || expr == "feature = \"test-hooks\"" {
+    if expr == "test" {
         return true;
     }
     let Some(inner) = expr
@@ -1088,6 +1088,8 @@ mod tests {
 }
 #[cfg(feature = "test-hooks")]
 mod fixture_support;
+#[cfg(all(unix, feature = "test-hooks"))]
+mod unix_fixture_support;
 fn production() { component.start_resident(&handle); }
 "##;
     let filtered = without_test_items(source);
@@ -1095,7 +1097,8 @@ fn production() { component.start_resident(&handle); }
     assert!(filtered.contains("fn production()"));
     assert!(!filtered.contains("test_count: usize"));
     assert!(!filtered.contains("fn hidden()"));
-    assert!(!filtered.contains("mod fixture_support"));
+    assert!(filtered.contains("mod fixture_support"));
+    assert!(filtered.contains("mod unix_fixture_support"));
     assert_eq!(sites("sample.rs", &filtered).len(), 1);
 
     let sources = production_sources();

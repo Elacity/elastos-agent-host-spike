@@ -75,4 +75,5 @@
 # parents, the Init base path, and the syscall and profile arms. Measured
 # 27 Nov 2026.
 # +85: custody provisioning shares the fenced launch, bounded output, and child reap.
-13695
+# +2: the raw fenced-entry export for custody protocol tests is counted as core code.
+13697

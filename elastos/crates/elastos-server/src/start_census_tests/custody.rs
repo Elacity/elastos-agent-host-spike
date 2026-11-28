@@ -135,7 +135,8 @@ pub(crate) fn assert_fenced() {
     for required in [
         "capsules/custody-provider/tests/process.rs",
         "elastos/crates/elastos-server/src/protected_content_runtime/tests.rs",
-        "elastos/crates/elastos-runtime/src/provider/custody_test_support.rs",
+        "capsules/custody-provider/tests/support/provision.rs",
+        "capsules/custody-provider/tests/support/process.rs",
     ] {
         assert!(
             sources.contains_key(required),

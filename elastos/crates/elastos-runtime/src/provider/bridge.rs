@@ -32,9 +32,10 @@ use super::registry::{
 };
 use super::CheckedExecutable;
 
+// Protocol fixtures own raw pipes; this export retains the product admission gate.
+// Feature-gated exports count as core code, including in production builds.
 #[cfg(feature = "test-hooks")]
-#[path = "custody_test_support.rs"]
-pub mod custody_test_support;
+pub use super::os_entry::{start_path_allow, ChildStdio, Launched};
 
 #[cfg(test)]
 thread_local! {

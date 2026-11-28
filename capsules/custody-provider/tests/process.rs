@@ -32,8 +32,14 @@ use elastos_protected_content_custody::{
 use elastos_protected_content_provider_contracts::{
     CustodyProviderRequestV1, CustodyProviderResponseStatusV1, CustodyProviderResponseV1,
 };
-use elastos_runtime::provider::bridge::custody_test_support::{self, CustodyTestProcess};
+#[cfg(test)]
+#[path = "support/provision.rs"]
+mod custody_test_support;
+#[cfg(test)]
+#[path = "support/process.rs"]
+mod process_support;
 use k256::ecdsa::SigningKey as WalletSigningKey;
+use process_support::CustodyTestProcess;
 use sha2::Digest as _;
 use sha3::Keccak256;
 use zeroize::Zeroizing;

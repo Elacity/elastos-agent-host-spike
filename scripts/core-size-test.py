@@ -65,18 +65,6 @@ class CountTest(unittest.TestCase):
         self.assertEqual(counts(source)["tests"], 6)
         self.assertEqual(counts(source.replace("test,", "feature = \"test\","))["tests"], 0)
 
-    def test_test_hooks_feature_keeps_shared_fixture_modules_in_tests(self):
-        files = {
-            "src/lib.rs": '#[cfg(feature = "test-hooks")]\nmod fixture;\nfn production() {}\n',
-            "src/fixture.rs": "pub fn shared_fixture() {}\n",
-        }
-        self.assertEqual(core_size.count(files)["code"], 1)
-        self.assertEqual(core_size.count(files)["tests"], 3)
-        for cfg in ('any(test, feature = "test-hooks")', 'all(unix, feature = "test-hooks")'):
-            self.assertEqual(counts(f"#[cfg({cfg})]\nfn fixture() {{}}\n")["code"], 0)
-        for cfg in ('any(unix, feature = "test-hooks")', 'not(feature = "test-hooks")'):
-            self.assertEqual(counts(f"#[cfg({cfg})]\nfn production() {{}}\n")["code"], 2)
-
     def test_every_cfg_spelling_that_holds_only_in_tests(self):
         for cfg in ("test,", "all(all(test), unix)", "any(test, all(test, unix),)", "not(not(test))",
                     "all(test, not(unix))", "all(\n    unix,\n    test\n)"):
