@@ -260,14 +260,25 @@ mod tests {
     #[test]
     fn unix_stdin_does_not_keep_the_line_in_a_buffered_reader() {
         let source = include_str!("main.rs");
-        let reader = source.find("fn read_fd_line(").expect("unix stdin reader");
+        // Split the needles so this test is not a match for itself.
+        let reader_name = format!("fn read_fd{}", "_line(");
+        let reader = source.find(&reader_name).expect("unix stdin reader");
+        let after = &source[reader + reader_name.len()..];
+        let end = after.find("\nfn main(").expect("main");
+        let body = &after[..end];
+        let read_name = format!("fn re{}", "ad(");
         assert!(
-            source[reader..].contains("fn read("),
+            body.contains(&read_name),
             "the unix reader does not call read"
         );
-        let until = source.find("read_until(").expect("windows fallback");
+        let until_name = format!("read_un{}", "til(");
+        let until = source.find(&until_name).expect("windows fallback");
+        let non_unix = format!("cfg(not({}", "unix))");
+        let cfg_at = source[..until]
+            .rfind(&non_unix)
+            .expect("non-unix cfg before read_until");
         assert!(
-            source[..until].rfind("cfg(not(unix))").is_some(),
+            !source[cfg_at..until].contains("cfg(unix)"),
             "read_until is not confined to the non-unix arm"
         );
     }
